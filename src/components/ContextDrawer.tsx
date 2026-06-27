@@ -12,6 +12,7 @@ import {
   Waypoints,
   CornerDownLeft,
   CornerUpRight,
+  History,
 } from "lucide-react";
 import { ipc, useMessageInjected, useSessionContext, useSnapshotCreated } from "../ipc";
 import type {
@@ -23,6 +24,8 @@ import type {
 } from "../ipc";
 import type { RoutingTarget } from "./RoutingPicker";
 import { timeHint } from "../lib/timeHint";
+import { Timeline } from "./Timeline";
+import { DeferredNote } from "./DeferredNote";
 
 // ---------------------------------------------------------------------------
 // Right-side Context drawer — shows the ACTIVE agent's configuration. The
@@ -72,15 +75,6 @@ function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5 flex items-center justify-between">
-      {children}
-    </div>
-  );
-}
-
-// Honest empty/deferred state — a muted line naming the milestone.
-function DeferredNote({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl ring-hair bg-white px-2.5 py-2 text-[11.5px] text-[#a1a1a6]">
       {children}
     </div>
   );
@@ -173,6 +167,9 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [snapshotError, setSnapshotError] = useState(false);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
+  // Full-screen memory-timeline overlay (M4.2). Local visibility flag; only
+  // openable when a real `session` exists (the button is gated below).
+  const [showTimeline, setShowTimeline] = useState(false);
   const snapSeq = useRef(0);
   const refetchSnapshots = useCallback(() => {
     if (!sessionId) {
@@ -248,13 +245,23 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   const showMeter = session != null && meterTokens != null && meterLimit != null && meterLimit > 0;
 
   return (
-    <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
+    <>
+      {showTimeline && session && (
+        <Timeline def={def} session={session} onClose={() => setShowTimeline(false)} />
+      )}
+      <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
       {/* Header */}
       <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
         <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight">Context</span>
         <button
           title="Hide Context"
-          onClick={() => setOpen(false)}
+          onClick={() => {
+            // Collapsing the drawer unmounts the Timeline overlay (it lives in
+            // this return); clear the flag too so reopening the drawer doesn't
+            // silently re-surface the overlay the user never re-requested.
+            setOpen(false);
+            setShowTimeline(false);
+          }}
           className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
         >
           <PanelRight className="w-[15px] h-[15px]" />
@@ -367,6 +374,14 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                     ))
                   )}
                 </div>
+                {/* Entry point to the full memory-timeline screen (M4.2). */}
+                <button
+                  onClick={() => setShowTimeline(true)}
+                  className="mt-1.5 text-[10.5px] font-medium text-[#6e6e73] hover:text-[#0a84ff] flex items-center gap-1"
+                >
+                  <History className="w-3 h-3" />
+                  Open timeline
+                </button>
               </div>
             )}
 
@@ -476,6 +491,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
           <div className="text-[10.5px] text-[#86868b] truncate">{status}</div>
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

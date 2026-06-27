@@ -102,8 +102,11 @@ export interface Commands {
     res: Snapshot[];
   };
   "snapshot.read": {
-    req: { snapshotId: string; mode: "read" | "fork" | "restore" };
-    res: void;
+    // By-id detail read (Timeline). Fork/Restore are NOT backend operations —
+    // they need persisted conversation history (deferred), so the Timeline
+    // renders them as honestly disabled rather than calling the backend.
+    req: { snapshotId: string };
+    res: Snapshot;
   };
   "fusion.run": {
     req: { orchestratorId: string; prompt: string };

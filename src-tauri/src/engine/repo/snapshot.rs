@@ -180,9 +180,8 @@ pub async fn list_for_session(
 
 /// Fetch a snapshot by its primary-key `id`, or `None` if no such snapshot.
 ///
-/// `#[allow(dead_code)]`: the by-id read path lands with Timeline Read/Fork/
-/// Restore in M4.2; covered by tests now so the contract is locked.
-#[allow(dead_code)]
+/// Production caller: `commands::snapshot::read` (the Timeline's by-id detail
+/// read, M4.2).
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SnapshotRow>> {
     QueryBuilder::<Sqlite>::table("snapshot")
         .select(COLS)

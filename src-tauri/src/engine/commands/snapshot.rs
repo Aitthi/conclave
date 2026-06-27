@@ -12,8 +12,10 @@
 //!   real provider token-usage telemetry yet (see `commands::instance`).
 //! - `summary` is a deterministic honest string; real LLM summarisation /
 //!   context carry-forward is out of scope (NULL `carried_forward` / `diff`).
-//! - `read` (Read/Fork/Restore) is deferred to M4.2 and returns
-//!   `NotImplemented` rather than a fabricated success.
+//! - `read` is the by-id detail read (M4.2 Timeline) — it returns the real
+//!   persisted `SnapshotRow`. Fork/Restore remain deferred because they need
+//!   persisted conversation history, which does not exist yet, so they are NOT
+//!   backend operations here (the Timeline renders them as honestly disabled).
 
 use crate::engine::{bus, repo, AppError, AppState};
 use repo::snapshot::{NewSnapshot, SnapshotRow};
@@ -44,14 +46,11 @@ struct ListReq {
     session_id: String,
 }
 
-/// Payload for `snapshot.read` — open a snapshot in a given mode (M4.2).
+/// Payload for `snapshot.read` — fetch one snapshot's real detail by id (M4.2).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReadReq {
-    #[allow(dead_code)]
     snapshot_id: String,
-    #[allow(dead_code)]
-    mode: String,
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -194,15 +193,20 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
 }
 
-/// Read / Fork / Restore a snapshot — deferred to M4.2 (Timeline). Returns an
-/// honest `NotImplemented` rather than a fabricated success.
-pub async fn read(_state: &AppState, payload: Value) -> Result<Value, AppError> {
-    // Deserialise to validate the shape, then refuse honestly.
-    let _req: ReadReq =
+/// Read one snapshot's real detail by id — the Timeline's by-id read (M4.2).
+/// Returns the persisted `SnapshotRow` as JSON, or `NotFound` for an unknown id.
+///
+/// Fork/Restore are NOT handled here: they need persisted conversation history,
+/// which does not exist yet, so the Timeline renders them as honestly disabled.
+pub async fn read(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: ReadReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
-    Err(AppError::NotImplemented(
-        "snapshot.read (Read/Fork/Restore) lands in M4.2".into(),
-    ))
+
+    let row = repo::snapshot::get(&state.db, &req.snapshot_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("snapshot id={} not found", req.snapshot_id)))?;
+
+    serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -313,14 +317,38 @@ mod tests {
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
-    /// read is honestly deferred to M4.2.
+    /// read by id returns the real persisted row; an unknown id → NotFound.
     #[tokio::test]
-    async fn read_is_not_implemented() {
+    async fn read_returns_row_and_not_found() {
         let state = AppState::for_tests().await;
-        let err = read(&state, json!({ "snapshotId": "x", "mode": "read" }))
+        let sid = fixture_session(&state).await;
+
+        let created = create(&state, json!({ "sessionId": sid, "type": "manual" }))
             .await
-            .expect_err("read must be NotImplemented in M4.1");
-        assert!(matches!(err, AppError::NotImplemented(_)));
+            .expect("snapshot.create failed");
+        let snap_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("created snapshot has an id")
+            .to_owned();
+
+        let got = read(&state, json!({ "snapshotId": snap_id }))
+            .await
+            .expect("read must return the row");
+        assert_eq!(
+            got.get("id").and_then(Value::as_str),
+            Some(snap_id.as_str())
+        );
+        assert_eq!(got.get("type").and_then(Value::as_str), Some("manual"));
+        assert_eq!(
+            got.get("sessionId").and_then(Value::as_str),
+            Some(sid.as_str())
+        );
+
+        let err = read(&state, json!({ "snapshotId": "no-such-id" }))
+            .await
+            .expect_err("read must fail for an unknown id");
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 
     /// create_auto chains prev_snapshot_id to the prior latest snapshot.
