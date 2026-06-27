@@ -2562,7 +2562,7 @@
           },
           {
             "title": "Port design tokens → tailwind.config (สี/typography/radii/shadow)",
-            "status": "todo",
+            "status": "doing",
             "priority": "normal"
           },
           {
