@@ -48,11 +48,11 @@ const MESSAGE_LOG_LIMIT = 6;
 function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
   switch (v) {
     case "all":
-      return "ทุก agent";
+      return "All agents";
     case "selected":
-      return "เฉพาะที่เลือก";
+      return "Selected only";
     case "none":
-      return "ปิดรับ";
+      return "None";
     default:
       return "—";
   }
@@ -129,7 +129,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
     return (
       <aside className="w-9 vibrancy border-l border-black/[0.06] flex flex-col items-center shrink-0">
         <button
-          title="แสดง Context"
+          title="Show Context"
           onClick={() => setOpen(true)}
           className="w-7 h-7 mt-2.5 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
         >
@@ -145,7 +145,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
       <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
         <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight">Context</span>
         <button
-          title="ซ่อน Context"
+          title="Hide Context"
           onClick={() => setOpen(false)}
           className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
         >
@@ -158,7 +158,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
           // Orchestrator (Fusion) config is M4 — no honest source yet.
           <div>
             <SectionLabel>Fusion</SectionLabel>
-            <DeferredNote>การตั้งค่า Fusion จะมาใน M4</DeferredNote>
+            <DeferredNote>Fusion settings coming in M4</DeferredNote>
           </div>
         ) : (
           <>
@@ -184,7 +184,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                     <CheckCircle2 className="w-4 h-4 text-[#30a14e] shrink-0" />
                   </div>
                 ) : (
-                  <DeferredNote>ยังไม่ได้ตั้งค่าโมเดล</DeferredNote>
+                  <DeferredNote>No model configured</DeferredNote>
                 )}
               </div>
             )}
@@ -197,7 +197,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
               <DeferredNote>
                 <span className="flex items-center gap-1.5">
                   <Wrench className="w-3.5 h-3.5" />
-                  ยังไม่ได้เชื่อมต่อ — จะมาใน M5
+                  Not connected yet — coming in M5
                 </span>
               </DeferredNote>
             </div>
@@ -208,7 +208,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
               <DeferredNote>
                 <span className="flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5" />
-                  ยังไม่ได้ตั้งค่า — จะมาใน M5
+                  Not configured yet — coming in M5
                 </span>
               </DeferredNote>
             </div>
@@ -223,7 +223,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                 <DeferredNote>
                   <span className="flex items-center gap-1.5">
                     <Camera className="w-3.5 h-3.5" />
-                    snapshot ของ session จะมาใน M4
+                    Session snapshots coming in M4
                   </span>
                 </DeferredNote>
               </div>
@@ -237,22 +237,22 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                 <div className="flex items-center justify-between">
                   <span className="text-[#6e6e73] flex items-center gap-1.5">
                     <Inbox className="w-3.5 h-3.5" />
-                    รับข้อความจาก
+                    Accepts from
                   </span>
                   <span className="font-medium">{allowedSendersLabel(def.allowedSenders)}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[#6e6e73] flex items-center gap-1.5">
                     <Send className="w-3.5 h-3.5" />
-                    ส่งอัตโนมัติเมื่อ inject
+                    Auto-submit on inject
                   </span>
-                  <span className="font-medium">{def.autoSubmitInjected ? "เปิด" : "ปิด"}</span>
+                  <span className="font-medium">{def.autoSubmitInjected ? "On" : "Off"}</span>
                 </div>
 
                 {/* Recent inbox/outbox — newest first. Honest empty state. */}
                 <div className="pt-1.5 mt-0.5 border-t border-black/[0.06] space-y-1">
                   {messages.length === 0 ? (
-                    <div className="text-[10.5px] text-[#a1a1a6] py-0.5">ยังไม่มีข้อความ</div>
+                    <div className="text-[10.5px] text-[#a1a1a6] py-0.5">No messages yet</div>
                   ) : (
                     messages.map((m) => {
                       const inbound = m.toInstanceId === instanceId;
@@ -271,7 +271,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                             {nameOf(counterpart)}
                           </span>
                           {m.status === "queued" && (
-                            <span className="text-[10px] text-[#ff9f0a] shrink-0">คิว</span>
+                            <span className="text-[10px] text-[#ff9f0a] shrink-0">queued</span>
                           )}
                           <span className="text-[10px] text-[#a1a1a6] shrink-0">
                             {timeHint(m.createdAt)}

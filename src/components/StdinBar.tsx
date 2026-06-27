@@ -83,7 +83,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
       if (mounted.current) setValue("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (mounted.current) setError(`ส่งไม่สำเร็จ: ${msg}`);
+      if (mounted.current) setError(`Send failed: ${msg}`);
     } finally {
       if (mounted.current) setSending(false);
     }
@@ -108,17 +108,17 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      if (mounted.current) setError(`ส่งให้ ${target.name} ไม่สำเร็จ: ${detail}`);
+      if (mounted.current) setError(`Failed to send to ${target.name}: ${detail}`);
     } finally {
       if (mounted.current) setSending(false);
     }
   }
 
   const placeholder = routingToOther
-    ? "พิมพ์เพื่อ inject เข้า session ปลายทาง…"
+    ? "Type to inject into the target session…"
     : sessionId === null
-      ? "ไม่มี session ที่กำลังทำงาน"
-      : "พิมพ์ข้อความถึง agent…";
+      ? "No running session"
+      : "Message the agent…";
 
   return (
     <div className="shrink-0 border-t border-black/[0.06] bg-white">
@@ -128,11 +128,11 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
       {outbox && (
         <div className="px-3 pt-1.5 text-[11px] flex items-center gap-1.5 text-[#6e6e73]">
           <CornerUpRight className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
-          <span className="font-medium text-[#1d1d1f]">→ ส่งให้ {outbox.toName}</span>
+          <span className="font-medium text-[#1d1d1f]">→ sent to {outbox.toName}</span>
           {outbox.status === "delivered" ? (
-            <span>· ส่งอัตโนมัติ</span>
+            <span>· auto-submit</span>
           ) : (
-            <span className="text-[#ff9f0a]">· agent ปลายทางยังไม่ทำงาน — คิวไว้แล้ว</span>
+            <span className="text-[#ff9f0a]">· target agent isn't running — queued</span>
           )}
         </div>
       )}

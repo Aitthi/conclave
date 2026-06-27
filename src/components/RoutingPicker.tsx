@@ -41,7 +41,7 @@ function typeHint(type: RoutingTarget["type"]): { label: string; Icon: typeof Te
     case "cli":
       return { label: "stdin", Icon: TerminalIcon };
     case "chat":
-      return { label: "แชท", Icon: MessageSquare };
+      return { label: "chat", Icon: MessageSquare };
     case "orchestrator":
       return { label: "fusion", Icon: Waypoints };
   }
@@ -83,7 +83,7 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        title="เลือกผู้รับ"
+        title="Send to…"
         className="flex items-center gap-1.5 px-2 py-1 rounded-full ring-1 ring-black/[0.08] bg-white text-[11.5px] text-[#6e6e73] hover:bg-black/[0.03] disabled:opacity-50 max-w-[180px]"
       >
         <CornerUpRight className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
@@ -95,13 +95,13 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
             />
             <span className="truncate font-medium text-[#1d1d1f]">{selected.name}</span>
             {isSelf ? (
-              <span className="text-[#a1a1a6]">· ตัวเอง</span>
+              <span className="text-[#a1a1a6]">· self</span>
             ) : hint ? (
               <span className="text-[#a1a1a6]">· {hint.label}</span>
             ) : null}
           </>
         ) : (
-          <span className="text-[#a1a1a6]">เลือกผู้รับ</span>
+          <span className="text-[#a1a1a6]">Send to…</span>
         )}
         <ChevronDown className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
       </button>
@@ -109,7 +109,7 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
       {open && (
         <div className="absolute bottom-full left-0 mb-1.5 w-[240px] rounded-xl ring-1 ring-black/[0.1] bg-white shadow-lg shadow-black/[0.08] p-1 z-20">
           <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase px-2 pt-1 pb-1">
-            ส่งไปยัง
+            Send to
           </div>
           {roster.map((t) => {
             const tHint = typeHint(t.type);
@@ -131,7 +131,7 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
                 />
                 <span className="truncate flex-1 min-w-0 font-medium">
                   {t.name}
-                  {self && <span className="text-[#a1a1a6] font-normal"> · ตัวเอง</span>}
+                  {self && <span className="text-[#a1a1a6] font-normal"> · self</span>}
                 </span>
                 <span className="flex items-center gap-1 text-[10.5px] text-[#a1a1a6] shrink-0">
                   <tHint.Icon className="w-3 h-3" />

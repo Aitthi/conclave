@@ -175,7 +175,7 @@ export function ChatView({
           if (last && last.role === "assistant") {
             const updated: ChatMsg = {
               ...last,
-              parts: [{ kind: "text", text: `⚠️ ส่งไม่สำเร็จ: ${msg}` }],
+              parts: [{ kind: "text", text: `⚠️ Send failed: ${msg}` }],
             };
             return [...prev.slice(0, -1), updated];
           }
@@ -228,7 +228,7 @@ export function ChatView({
           {
             id,
             role: "event",
-            parts: [{ kind: "text", text: `⚠️ ส่งให้ ${target.name} ไม่สำเร็จ: ${detail}` }],
+            parts: [{ kind: "text", text: `⚠️ Failed to send to ${target.name}: ${detail}` }],
           },
         ]);
       }
@@ -244,7 +244,7 @@ export function ChatView({
         <div className="max-w-[720px] mx-auto space-y-5">
           {messages.length === 0 ? (
             <div className="text-center text-[13px] text-[#a1a1a6] pt-10">
-              เริ่มแชทกับ agent ได้เลย
+              Start chatting with the agent
             </div>
           ) : (
             messages.map((msg, i) => {
@@ -276,7 +276,7 @@ export function ChatView({
               disabled={sending}
             />
             {targetId !== instanceId && (
-              <span className="text-[11px] text-[#a1a1a6]">ฉีดเข้า input ของ agent ปลายทาง · ส่งอัตโนมัติ</span>
+              <span className="text-[11px] text-[#a1a1a6]">injects into the target agent's input · auto-submit</span>
             )}
           </div>
           <div className="rounded-2xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-3 pt-2.5 pb-2">
@@ -292,7 +292,7 @@ export function ChatView({
                     void handleSend();
                   }
                 }}
-                placeholder="พิมพ์ข้อความ…  (Enter ส่ง · Shift+Enter ขึ้นบรรทัดใหม่)"
+                placeholder="Message…  (Enter to send · Shift+Enter for newline)"
                 className="flex-1 bg-transparent outline-none resize-none text-[13.5px] leading-relaxed placeholder:text-[#a1a1a6] py-1 max-h-40 disabled:opacity-50"
               />
               <button
@@ -337,8 +337,8 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
               >
                 <div className="flex items-center gap-1.5 text-[10.5px] font-medium mb-1" style={{ color: part.tint }}>
                   <CornerDownLeft className="w-3 h-3" />
-                  ฉีดเข้ามาจาก {part.fromName}
-                  {part.autoSubmitted ? " · ส่งอัตโนมัติ" : ""}
+                  injected from {part.fromName}
+                  {part.autoSubmitted ? " · auto-submit" : ""}
                 </div>
                 <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words text-[#1d1d1f]">
                   {part.text}
@@ -351,11 +351,11 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
               <div key={key} className="flex justify-center">
                 <div className="max-w-[90%] rounded-full bg-[#f2f2f4] px-3 py-1.5 text-[11.5px] text-[#6e6e73] flex items-center gap-1.5">
                   <CornerUpRight className="w-3 h-3 shrink-0" style={{ color: part.tint }} />
-                  <span className="font-medium text-[#1d1d1f]">→ ส่งให้ {part.toName}</span>
+                  <span className="font-medium text-[#1d1d1f]">→ sent to {part.toName}</span>
                   {part.status === "delivered" ? (
-                    <span>· ส่งอัตโนมัติ</span>
+                    <span>· auto-submit</span>
                   ) : (
-                    <span className="text-[#ff9f0a]">· agent ปลายทางยังไม่ทำงาน — คิวไว้แล้ว</span>
+                    <span className="text-[#ff9f0a]">· target agent isn't running — queued</span>
                   )}
                 </div>
               </div>

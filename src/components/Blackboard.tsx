@@ -146,7 +146,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
   async function handleCreate() {
     const key = newKey.trim();
     if (!key) {
-      setFormError("ต้องระบุ key");
+      setFormError("Key is required");
       return;
     }
     // Try JSON; if it doesn't parse, store the raw string (so users can type
@@ -252,14 +252,14 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
               <input
                 value={newKey}
                 onChange={(e) => setNewKey(e.target.value)}
-                placeholder="key (เช่น plan/tasks)"
+                placeholder="key (e.g. plan/tasks)"
                 className="flex-1 bg-white ring-hair rounded-lg px-2.5 h-8 text-[12px] font-mono outline-none placeholder:text-[#a1a1a6] focus:ring-[#0a84ff]/40"
               />
             </div>
             <textarea
               value={newValue}
               onChange={(e) => setNewValue(e.target.value)}
-              placeholder='value — JSON หรือ ข้อความธรรมดา (เช่น { "ci": "green" })'
+              placeholder='value — JSON or plain text (e.g. { "ci": "green" })'
               rows={3}
               className="w-full bg-white ring-hair rounded-lg px-2.5 py-2 text-[12px] font-mono outline-none placeholder:text-[#a1a1a6] focus:ring-[#0a84ff]/40 resize-y scroll-thin"
             />
@@ -271,7 +271,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                 className="text-[12px] font-semibold text-white bg-[#0a84ff] px-3 h-7 rounded-lg hover:brightness-105 disabled:opacity-40 flex items-center gap-1.5"
               >
                 <Plus className="w-3.5 h-3.5" />
-                {saving ? "กำลังบันทึก…" : "บันทึก"}
+                {saving ? "Saving…" : "Save"}
               </button>
               <button
                 onClick={() => {
@@ -280,10 +280,10 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                 }}
                 className="text-[12px] font-medium text-[#6e6e73] px-3 h-7 rounded-lg hover:bg-black/[0.05]"
               >
-                ยกเลิก
+                Cancel
               </button>
               <span className="text-[10.5px] text-[#a1a1a6]">
-                การเขียนจากผู้ใช้จะไม่ระบุ agent ผู้เขียน
+                User writes aren't attributed to an agent
               </span>
             </div>
           </div>
@@ -301,15 +301,15 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
 
           {loading ? (
             <div className="grid place-items-center py-16 text-[13px] text-[#a1a1a6]">
-              กำลังโหลด…
+              Loading…
             </div>
           ) : visibleEntries.length === 0 ? (
             <div className="grid place-items-center py-16 text-[13px] text-[#a1a1a6] px-6 text-center">
               {loadError
-                ? "โหลด blackboard ไม่สำเร็จ"
+                ? "Failed to load the blackboard"
                 : entries.length === 0
-                  ? "ยังไม่มี key ใน blackboard นี้"
-                  : "ไม่พบ key ที่ตรงกับการค้นหา"}
+                  ? "No keys in this blackboard yet"
+                  : "No keys match your search"}
             </div>
           ) : (
             <div className="divide-y divide-black/[0.05] text-[12.5px]">
@@ -345,7 +345,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                           </>
                         ) : (
                           <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.05] px-1.5 py-px rounded">
-                            ผู้ใช้
+                            You
                           </span>
                         )}
                       </span>
@@ -383,7 +383,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
             </div>
             {activity.length === 0 ? (
               <div className="rounded-xl ring-hair bg-white px-2.5 py-2 text-[11.5px] text-[#a1a1a6]">
-                ยังไม่มีกิจกรรม
+                No activity yet
               </div>
             ) : (
               <div className="space-y-2">
@@ -391,7 +391,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                   const who = agents.get(act.instanceId);
                   const key = keyByEntryId.get(act.entryId);
                   const verb =
-                    act.action === "write" ? "เขียน" : act.action === "read" ? "อ่าน" : act.action;
+                    act.action === "write" ? "wrote" : act.action === "read" ? "read" : act.action;
                   return (
                     <div key={act.id} className="flex items-start gap-2 text-[11.5px]">
                       <span
@@ -430,26 +430,26 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                   <Eye className="w-3.5 h-3.5" />
                   Readers
                 </span>
-                <span className="font-medium">ทุก agent</span>
+                <span className="font-medium">All agents</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-[#6e6e73] flex items-center gap-1.5">
                   <Pencil className="w-3.5 h-3.5" />
                   Writers
                 </span>
-                <span className="font-medium">ทุก agent</span>
+                <span className="font-medium">All agents</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-[#6e6e73] flex items-center gap-1.5">
                   <Lock className="w-3.5 h-3.5" />
                   Scope
                 </span>
-                <span className="font-medium">workspace นี้</span>
+                <span className="font-medium">This workspace</span>
               </div>
             </div>
             <div className="mt-1.5 text-[10.5px] text-[#86868b] leading-snug px-0.5">
-              blackboard นี้แชร์เฉพาะใน workspace{" "}
-              <span className="font-medium text-[#3a3a3c]">{wsLabel}</span> — workspace อื่นมีของตัวเอง
+              This blackboard is shared only within the{" "}
+              <span className="font-medium text-[#3a3a3c]">{wsLabel}</span> workspace — other workspaces have their own.
             </div>
           </div>
         </div>

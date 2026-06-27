@@ -132,7 +132,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
   // `active`/mounted flag. Under React 19 StrictMode the effect runs as
   // mount → cleanup → mount; an `active=false` cleanup would drop the FIRST
   // spawn's result while the SECOND invocation early-returns on the ref guard,
-  // leaving the session id never recorded (stuck on "กำลังเปิด session…").
+  // leaving the session id never recorded (stuck on "Opening session…").
   // setState on an unmounted component is a no-op in React 18+, so resolving
   // unconditionally is safe and avoids that StrictMode trap.
   useEffect(() => {
@@ -159,7 +159,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
     return (
       <main className="flex-1 flex flex-col min-w-0 bg-white">
         <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
-          กำลังโหลด…
+          Loading…
         </div>
       </main>
     );
@@ -171,8 +171,8 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
       <main className="flex-1 flex flex-col min-w-0 bg-white">
         <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6] px-6 text-center">
           {loadError
-            ? "โหลดรายชื่อ agent ไม่สำเร็จ"
-            : "ยังไม่มี agent ใน workspace นี้"}
+            ? "Failed to load agents"
+            : "No agents in this workspace yet"}
         </div>
       </main>
     );
@@ -228,13 +228,13 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
         {/* Active body — dispatched by the focused tab's agent type */}
         {activeTab === null ? (
           <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
-            เลือก agent
+            Select an agent
           </div>
         ) : activeTab.type === "cli" ? (
           // CLI → live terminal + stdin bar.
           activeError ? (
             <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#ff453a] px-6 text-center">
-              ไม่สามารถเปิด session: {activeError}
+              Couldn't open session: {activeError}
             </div>
           ) : activeSessionId ? (
             <>
@@ -248,7 +248,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
           ) : (
             <>
               <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#a1a1a6]">
-                กำลังเปิด session…
+                Opening session…
               </div>
               <StdinBar sessionId={null} instanceId={activeTab.instanceId} roster={roster} />
             </>
@@ -257,7 +257,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
           // Chat → custom chat UI.
           activeError ? (
             <div className="flex-1 grid place-items-center text-[13px] text-[#ff3b30] px-6 text-center">
-              ไม่สามารถเปิด session: {activeError}
+              Couldn't open session: {activeError}
             </div>
           ) : activeSessionId ? (
             <ChatView
@@ -270,13 +270,13 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
             />
           ) : (
             <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
-              กำลังเปิด session…
+              Opening session…
             </div>
           )
         ) : (
           // Orchestrator / unknown → placeholder.
           <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6] px-6 text-center">
-            Orchestrator · Fusion — มาใน M4
+            Orchestrator · Fusion — coming in M4
           </div>
         )}
       </main>

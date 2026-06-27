@@ -341,7 +341,7 @@ export function Roster({ selectedId, onSelect, onOpenBlackboard, blackboardOpen 
           </div>
           <div className="flex-1 text-left leading-tight">
             <div className="text-[12.5px] font-semibold">Blackboard</div>
-            <div className="text-[10.5px] text-[#86868b]">เปิดดู key/value ที่แชร์</div>
+            <div className="text-[10.5px] text-[#86868b]">Shared key/value store</div>
           </div>
         </button>
       </div>

@@ -122,7 +122,7 @@ export function AppShell() {
                 setSelectedId(id);
               }}
               // Blackboard needs a workspace to scope to — only toggle when one
-              // is active (else the view would fall through to "เลือก workspace").
+              // is active (else the view would fall through to "Select a workspace").
               onOpenBlackboard={
                 activeWorkspaceId ? () => setShowBlackboard((v) => !v) : undefined
               }
@@ -143,7 +143,7 @@ export function AppShell() {
             ) : (
               <main className="flex-1 flex flex-col min-w-0 bg-white">
                 <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
-                  เลือก workspace เพื่อเริ่ม
+                  Select a workspace to start
                 </div>
               </main>
             )}
