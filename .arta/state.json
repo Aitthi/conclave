@@ -2587,12 +2587,12 @@
           },
           {
             "title": "Link-folder flow: folder picker + create workspace + initial agents",
-            "status": "doing",
+            "status": "done",
             "priority": "normal"
           },
           {
             "title": "Agent Library screen: list definitions + 'in N workspaces' + instances drawer",
-            "status": "todo",
+            "status": "doing",
             "priority": "normal"
           },
           {

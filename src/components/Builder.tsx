@@ -8,6 +8,8 @@ import type { AgentDefinition } from "../ipc";
 export interface BuilderProps {
   onClose: () => void;
   onSaved?: (def: AgentDefinition) => void;
+  /** Pre-fill the form for editing an existing definition. */
+  initialDef?: AgentDefinition;
 }
 
 type AgentType = "cli" | "chat" | "orchestrator";
@@ -51,18 +53,24 @@ function Toggle({ on, onChange }: ToggleProps) {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export function Builder({ onClose, onSaved }: BuilderProps) {
-  // ── Form state ─────────────────────────────────────────────────────────────
-  const [name, setName] = useState("");
-  const [role, setRole] = useState("");
-  const [agentType, setAgentType] = useState<AgentType>("cli");
-  const [cliKind, setCliKind] = useState<CliKind>("claude-code");
-  const [color, setColor] = useState(COLOR_SWATCHES[0]);
-  const [model, setModel] = useState("");
-  const [harnessMode, setHarnessMode] = useState<HarnessMode>("own");
-  const [shareBlackboard, setShareBlackboard] = useState(false);
-  const [autoSubmitInjected, setAutoSubmitInjected] = useState(false);
-  const [allowedSenders, setAllowedSenders] = useState<AllowedSenders>("all");
+export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
+  const isEditing = Boolean(initialDef);
+
+  // ── Form state (lazy-initialised from initialDef when editing) ─────────────
+  const [name, setName] = useState(initialDef?.name ?? "");
+  const [role, setRole] = useState(initialDef?.role ?? "");
+  const [agentType, setAgentType] = useState<AgentType>(initialDef?.type ?? "cli");
+  const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
+  const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
+  const [model, setModel] = useState(initialDef?.model ?? "");
+  const [harnessMode, setHarnessMode] = useState<HarnessMode>(initialDef?.harnessMode ?? "own");
+  const [shareBlackboard, setShareBlackboard] = useState(initialDef?.shareBlackboard ?? false);
+  const [autoSubmitInjected, setAutoSubmitInjected] = useState(
+    initialDef?.autoSubmitInjected ?? false,
+  );
+  const [allowedSenders, setAllowedSenders] = useState<AllowedSenders>(
+    initialDef?.allowedSenders ?? "all",
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +87,8 @@ export function Builder({ onClose, onSaved }: BuilderProps) {
     setError(null);
     try {
       const def = await ipc.agentDef.save({
+        // Pass `id` when editing so the backend upserts rather than inserts.
+        id: initialDef?.id,
         name: name.trim(),
         type: agentType,
         role: role.trim() || undefined,
@@ -109,9 +119,11 @@ export function Builder({ onClose, onSaved }: BuilderProps) {
         <div className="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-[#0a84ff]" />
-            <span className="text-[13px] font-semibold tracking-tight">New agent</span>
+            <span className="text-[13px] font-semibold tracking-tight">
+              {isEditing ? "Edit agent" : "New agent"}
+            </span>
             <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md">
-              saved to Library
+              {isEditing ? "update definition" : "saved to Library"}
             </span>
           </div>
           <button
@@ -168,7 +180,8 @@ export function Builder({ onClose, onSaved }: BuilderProps) {
                   }`}
                   style={{
                     backgroundColor: swatch,
-                    ringColor: swatch,
+                    // Tailwind ring color lives in this custom property — not `ringColor`.
+                    "--tw-ring-color": swatch,
                   } as React.CSSProperties}
                   aria-label={`Color ${swatch}`}
                 />
@@ -371,7 +384,7 @@ export function Builder({ onClose, onSaved }: BuilderProps) {
             className="text-[12.5px] font-semibold text-white bg-[#0a84ff] px-4 py-1.5 rounded-lg hover:brightness-105 disabled:opacity-60 flex items-center gap-1.5"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            {saving ? "Saving..." : "Create agent"}
+            {saving ? "Saving…" : isEditing ? "Save changes" : "Create agent"}
           </button>
         </div>
       </div>

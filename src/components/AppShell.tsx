@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { ipc } from "../ipc";
-import type { Workspace } from "../ipc";
+import type { Workspace, AgentDefinition } from "../ipc";
 import { Rail } from "./Rail";
 import { Roster } from "./Roster";
 import { Builder } from "./Builder";
+import { Library } from "./Library";
 import { LinkFolder } from "./LinkFolder";
 
 // Minimal info needed for the placeholder main pane header
@@ -99,8 +100,17 @@ export function AppShell() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
 
+  // ── Library state ──────────────────────────────────────────────────────
+  const [showLibrary, setShowLibrary] = useState(false);
+  /** Incremented after Builder saves so Library re-fetches agentDef.list. */
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
+
   // ── Builder state ──────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder] = useState(false);
+  /** Set when opening Builder in edit mode from Library. */
+  const [builderInitialDef, setBuilderInitialDef] = useState<AgentDefinition | undefined>(
+    undefined,
+  );
 
   // ── LinkFolder state ───────────────────────────────────────────────────
   const [showLinkFolder, setShowLinkFolder] = useState(false);
@@ -147,81 +157,111 @@ export function AppShell() {
           workspaces={workspaces}
           activeWorkspaceId={activeWorkspaceId}
           onSelectWorkspace={handleSelectWorkspace}
-          onOpenBuilder={() => setShowBuilder(true)}
+          onOpenLibrary={() => setShowLibrary(true)}
           onOpenLinkFolder={() => setShowLinkFolder(true)}
         />
-        <Roster selectedId={selectedId} onSelect={setSelectedId} />
 
-        {/* ── Main content placeholder (M1 screens mount here) ───── */}
-        <main className="flex-1 flex flex-col min-w-0 bg-white">
-          {/* Mail.app-style column header, h-12, border-b */}
-          <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
-            {agent ? (
-              <>
-                <div className="flex items-center gap-2.5">
-                  {/* Agent avatar */}
-                  <div
-                    className="w-6 h-6 rounded-[7px] text-white grid place-items-center text-[12px] font-bold ring-hair shrink-0"
-                    style={{ backgroundColor: agent.color }}
-                  >
-                    {agent.letter}
-                  </div>
-                  <div className="text-[13px] font-semibold tracking-tight flex items-center gap-1.5">
-                    {agent.name}
-                    <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md">
-                      {AGENT_TYPE_LABEL[agent.type]}
-                    </span>
-                  </div>
-                  <span className="flex items-center gap-1 text-[11px] font-medium ml-1" style={{ color: STATUS_DOT_COLOR[agent.status] }}>
-                    <span
-                      className="w-1.5 h-1.5 rounded-full"
-                      style={{ backgroundColor: STATUS_DOT_COLOR[agent.status] }}
-                    />
-                    {STATUS_LABEL[agent.status]}
+        {showLibrary ? (
+          /* ── Library view: replaces Roster + main while open ─── */
+          <Library
+            onClose={() => setShowLibrary(false)}
+            onOpenBuilder={(def) => {
+              setBuilderInitialDef(def);
+              setShowBuilder(true);
+            }}
+            refreshKey={libraryRefreshKey}
+          />
+        ) : (
+          <>
+            <Roster selectedId={selectedId} onSelect={setSelectedId} />
+
+            {/* ── Main content placeholder (M1 screens mount here) ─── */}
+            <main className="flex-1 flex flex-col min-w-0 bg-white">
+              {/* Mail.app-style column header, h-12, border-b */}
+              <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
+                {agent ? (
+                  <>
+                    <div className="flex items-center gap-2.5">
+                      {/* Agent avatar */}
+                      <div
+                        className="w-6 h-6 rounded-[7px] text-white grid place-items-center text-[12px] font-bold ring-hair shrink-0"
+                        style={{ backgroundColor: agent.color }}
+                      >
+                        {agent.letter}
+                      </div>
+                      <div className="text-[13px] font-semibold tracking-tight flex items-center gap-1.5">
+                        {agent.name}
+                        <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md">
+                          {AGENT_TYPE_LABEL[agent.type]}
+                        </span>
+                      </div>
+                      <span className="flex items-center gap-1 text-[11px] font-medium ml-1" style={{ color: STATUS_DOT_COLOR[agent.status] }}>
+                        <span
+                          className="w-1.5 h-1.5 rounded-full"
+                          style={{ backgroundColor: STATUS_DOT_COLOR[agent.status] }}
+                        />
+                        {STATUS_LABEL[agent.status]}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <span className="text-[13px] text-[#a1a1a6] font-medium">
+                    Select an agent
                   </span>
-                </div>
-              </>
-            ) : (
-              <span className="text-[13px] text-[#a1a1a6] font-medium">
-                Select an agent
-              </span>
-            )}
-          </div>
+                )}
+              </div>
 
-          {/* Empty state / placeholder body */}
-          <div className="flex-1 flex flex-col items-center justify-center gap-2 text-[#a1a1a6]">
-            {agent ? (
-              <>
-                <div
-                  className="w-10 h-10 rounded-[12px] text-white grid place-items-center text-[18px] font-bold ring-hair"
-                  style={{ backgroundColor: agent.color }}
-                >
-                  {agent.letter}
-                </div>
-                <p className="text-[13px] font-semibold text-[#6e6e73]">{agent.name}</p>
-                <p className="text-[11px] text-[#a1a1a6]">
-                  {AGENT_TYPE_LABEL[agent.type]} · {STATUS_LABEL[agent.status]}
-                </p>
-                <p className="text-[11px] text-[#c7c7cc] mt-2">
-                  {/* M1 screen content mounts here */}
-                  Terminal / chat UI — coming in M1–M2
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="text-[14px] font-semibold text-[#6e6e73]">No agent selected</p>
-                <p className="text-[12px] text-[#a1a1a6]">
-                  Choose an agent from the roster
-                </p>
-              </>
-            )}
-          </div>
-        </main>
+              {/* Empty state / placeholder body */}
+              <div className="flex-1 flex flex-col items-center justify-center gap-2 text-[#a1a1a6]">
+                {agent ? (
+                  <>
+                    <div
+                      className="w-10 h-10 rounded-[12px] text-white grid place-items-center text-[18px] font-bold ring-hair"
+                      style={{ backgroundColor: agent.color }}
+                    >
+                      {agent.letter}
+                    </div>
+                    <p className="text-[13px] font-semibold text-[#6e6e73]">{agent.name}</p>
+                    <p className="text-[11px] text-[#a1a1a6]">
+                      {AGENT_TYPE_LABEL[agent.type]} · {STATUS_LABEL[agent.status]}
+                    </p>
+                    <p className="text-[11px] text-[#c7c7cc] mt-2">
+                      {/* M1 screen content mounts here */}
+                      Terminal / chat UI — coming in M1–M2
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[14px] font-semibold text-[#6e6e73]">No agent selected</p>
+                    <p className="text-[12px] text-[#a1a1a6]">
+                      Choose an agent from the roster
+                    </p>
+                  </>
+                )}
+              </div>
+            </main>
+          </>
+        )}
       </div>
 
       {/* ── Agent builder overlay ─────────────────────────────────────── */}
       {showBuilder && (
-        <Builder onClose={() => setShowBuilder(false)} />
+        <Builder
+          // Remount per def identity so the once-only useState prefill can't go
+          // stale if a different agent is edited while the Builder is open.
+          key={builderInitialDef?.id ?? "new"}
+          initialDef={builderInitialDef}
+          onClose={() => {
+            setShowBuilder(false);
+            setBuilderInitialDef(undefined);
+          }}
+          onSaved={() => {
+            setShowBuilder(false);
+            setBuilderInitialDef(undefined);
+            // Bump key so Library re-fetches agentDef.list after a save/edit.
+            setLibraryRefreshKey((k) => k + 1);
+          }}
+        />
       )}
 
       {/* ── Link-folder overlay ───────────────────────────────────────── */}
