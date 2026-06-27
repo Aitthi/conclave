@@ -2597,12 +2597,12 @@
           },
           {
             "title": "Agent builder: form → agentDef.save (identity/type/model/harness/tools/skills/messaging)",
-            "status": "doing",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "addToWorkspace: สร้าง instance + session แยกต่อ workspace",
-            "status": "todo",
+            "status": "doing",
             "priority": "high"
           }
         ]

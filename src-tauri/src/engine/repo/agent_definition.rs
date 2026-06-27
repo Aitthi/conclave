@@ -186,8 +186,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<AgentDefRow
 /// Return `true` if an agent definition with `id` exists.
 ///
 /// Delegates to `get()` (mirrors `workspace::exists`) — avoids a separate COUNT
-/// query and extra trait bounds. Used by M1.5 to validate `agentDefIds`.
-#[allow(dead_code)]
+/// query and extra trait bounds. Called by `agentDef.addToWorkspace` (M1.5).
 pub async fn exists(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     get(pool, id).await.map(|opt| opt.is_some())
 }
