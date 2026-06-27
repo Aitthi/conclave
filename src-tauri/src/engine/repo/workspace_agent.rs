@@ -137,9 +137,8 @@ pub async fn find(
 
 /// Return `true` if a workspace_agent with the given `id` exists.
 ///
-/// Used by M2 spawn handler to validate the target instance before spawning.
-// M2 spawn will call this; suppress the dead_code lint until then.
-#[allow(dead_code)] // called by M2 instance.spawn
+/// Validate an instance id exists. Called by `instance.spawn` (target check)
+/// and by `message.inject` (sender + target validation).
 pub async fn exists(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     get(pool, id).await.map(|opt| opt.is_some())
 }

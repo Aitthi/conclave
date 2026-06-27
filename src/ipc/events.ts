@@ -9,6 +9,7 @@ export const EVENT_NAMES = {
   sessionOutput: "session:output",
   sessionStatus: "session:status",
   fusionStage: "fusion:stage",
+  messageInjected: "message:injected",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -31,6 +32,20 @@ export interface FusionStageEvent {
   runId: string;
   stage: "panel" | "judge" | "synthesize";
   data?: unknown;
+}
+
+/**
+ * An inter-agent injection delivered to a target instance's live input.
+ * Emitted only when the injection is actually delivered (target is live), so
+ * `toSessionId` is normally present. The origin is carried as `fromInstanceId`;
+ * the UI renders the "injected from X" chrome from this event.
+ */
+export interface MessageInjectedEvent {
+  toInstanceId: string;
+  toSessionId?: string;
+  fromInstanceId: string;
+  text: string;
+  autoSubmitted: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 pub const SESSION_OUTPUT: &str = "session:output";
 pub const SESSION_STATUS: &str = "session:status";
 pub const FUSION_STAGE: &str = "fusion:stage";
+pub const MESSAGE_INJECTED: &str = "message:injected";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -58,6 +59,28 @@ pub struct FusionStage {
     pub data: Option<serde_json::Value>,
 }
 
+/// Payload for `message:injected` — an inter-agent injection delivered to a
+/// target instance's live input (M3.1 message router).
+///
+/// Emitted only when the injection is actually DELIVERED (the target is live),
+/// so `to_session_id` is normally `Some`. It is `Option` because the live
+/// session id is resolved from the runtime registry; `skip_serializing_if`
+/// omits the key entirely when `None` (matching the optional `toSessionId?`
+/// field in the `MessageInjectedEvent` TS interface — `string | undefined`, not
+/// `null`). The origin is carried as `from_instance_id` — the UI renders the
+/// "injected from X" chrome from this event (the raw `text` was injected into
+/// stdin with no marker pollution).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageInjected {
+    pub to_instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_session_id: Option<String>,
+    pub from_instance_id: String,
+    pub text: String,
+    pub auto_submitted: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Generic emit helper
 // ---------------------------------------------------------------------------
@@ -85,6 +108,11 @@ pub fn session_status(app: &AppHandle, payload: SessionStatus) -> tauri::Result<
 /// Emit a `fusion:stage` event carrying stage-progress data.
 pub fn fusion_stage(app: &AppHandle, payload: FusionStage) -> tauri::Result<()> {
     emit(app, FUSION_STAGE, payload)
+}
+
+/// Emit a `message:injected` event carrying a delivered inter-agent injection.
+pub fn message_injected(app: &AppHandle, payload: MessageInjected) -> tauri::Result<()> {
+    emit(app, MESSAGE_INJECTED, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +160,53 @@ mod tests {
             val,
             json!({ "runId": "r1", "stage": "panel", "data": { "count": 3 } })
         );
+    }
+
+    #[test]
+    fn message_injected_camel_case() {
+        let val = serde_json::to_value(MessageInjected {
+            to_instance_id: "i2".into(),
+            to_session_id: Some("s2".into()),
+            from_instance_id: "i1".into(),
+            text: "hi".into(),
+            auto_submitted: true,
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({
+                "toInstanceId": "i2",
+                "toSessionId": "s2",
+                "fromInstanceId": "i1",
+                "text": "hi",
+                "autoSubmitted": true
+            })
+        );
+    }
+
+    #[test]
+    fn message_injected_omits_session_id_when_none() {
+        // `to_session_id: None` must omit the key (TS `toSessionId?: string`),
+        // NOT serialise `"toSessionId": null` — null is unassignable under
+        // strict null checks.
+        let val = serde_json::to_value(MessageInjected {
+            to_instance_id: "i2".into(),
+            to_session_id: None,
+            from_instance_id: "i1".into(),
+            text: "hi".into(),
+            auto_submitted: true,
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({
+                "toInstanceId": "i2",
+                "fromInstanceId": "i1",
+                "text": "hi",
+                "autoSubmitted": true
+            })
+        );
+        assert!(val.get("toSessionId").is_none(), "key must be absent");
     }
 
     #[test]
