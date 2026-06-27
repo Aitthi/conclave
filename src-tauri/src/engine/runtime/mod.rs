@@ -19,6 +19,8 @@
 //! **never** held across an `.await`. A poisoned mutex is recovered with
 //! `unwrap_or_else(|e| e.into_inner())` so a panicked holder cannot cascade.
 
+pub mod chat;
+pub mod provider;
 pub mod pty;
 
 use std::collections::HashMap;

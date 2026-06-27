@@ -47,8 +47,10 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
 ///    - `cli`: spawn the real CLI process inside a PTY (M2.2) and stream its
 ///      output back over the bus; the detached forwarder also marks the
 ///      instance `idle` when the child self-terminates.
-///    - otherwise (`chat` / `orchestrator`): attach the placeholder backend
-///      (the provider chat loop arrives in M2.4).
+///    - `chat`: spawn the provider chat loop (M2.4) which streams assistant
+///      text deltas back over the same forwarder.
+///    - otherwise (`orchestrator` / unknown): attach the placeholder backend
+///      (fusion arrives in M4).
 /// 5. Register it in the runtime, persist status `running`, and emit a
 ///    `session:status` event.
 pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> {
@@ -91,40 +93,68 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             AppError::NotFound(format!("workspace id={} not found", instance.workspace_id))
         })?;
 
-    // Build the backend and register it. For CLI we keep the PTY output stream
-    // to forward; for chat/orchestrator the placeholder has none.
-    let output_rx = if def.r#type == "cli" {
-        // Map the configured CLI kind to a concrete launcher command. `custom`
-        // and unset both defer to M5 settings.
-        let command = match def.cli_kind.as_deref() {
-            Some("claude-code") => "claude",
-            Some("codex") => "codex",
-            _ => {
-                return Err(AppError::NotImplemented(
-                    "custom CLI command is not configurable yet (M5 settings)".into(),
-                ))
+    // Build the backend and register it. `cli` (PTY child) and `chat` (provider
+    // chat loop) both produce an output stream to forward; `orchestrator` and
+    // anything else attach the placeholder backend (fusion arrives in M4) and
+    // have no stream. In every branch a successful `register` yields an
+    // `Option<output_rx>`; a lost race returns the existing session early.
+    let output_rx = match def.r#type.as_str() {
+        "cli" => {
+            // Map the configured CLI kind to a concrete launcher command.
+            // `custom` and unset both defer to M5 settings.
+            let command = match def.cli_kind.as_deref() {
+                Some("claude-code") => "claude",
+                Some("codex") => "codex",
+                _ => {
+                    return Err(AppError::NotImplemented(
+                        "custom CLI command is not configurable yet (M5 settings)".into(),
+                    ))
+                }
+            };
+
+            let backend = runtime::pty::spawn_cli(&session.id, command, &[], &ws.folder_path)
+                .map_err(|e| AppError::Internal(format!("spawn {command}: {e}")))?;
+
+            // Register; if we lost a race with a concurrent spawn, the handle is
+            // dropped (its shutdown closure tears down the just-spawned child)
+            // and we return the existing session without double-persisting.
+            if !state.runtime.register(&id, backend.handle) {
+                return serde_json::to_value(&session)
+                    .map_err(|e| AppError::Internal(e.to_string()));
             }
-        };
-
-        let backend = runtime::pty::spawn_cli(&session.id, command, &[], &ws.folder_path)
-            .map_err(|e| AppError::Internal(format!("spawn {command}: {e}")))?;
-
-        // Register; if we lost a race with a concurrent spawn, the handle is
-        // dropped (its shutdown closure tears down the just-spawned child) and
-        // we return the existing session without double-persisting.
-        if !state.runtime.register(&id, backend.handle) {
-            return serde_json::to_value(&session).map_err(|e| AppError::Internal(e.to_string()));
+            Some(backend.output_rx)
         }
-        Some(backend.output_rx)
-    } else {
-        // chat / orchestrator: placeholder backend (chat loop arrives in M2.4).
-        if !state
-            .runtime
-            .register(&id, runtime::LiveHandle::placeholder(&session.id))
-        {
-            return serde_json::to_value(&session).map_err(|e| AppError::Internal(e.to_string()));
+        "chat" => {
+            // Resolve the provider from the agent's `provider_id` (keys come
+            // from env vars for now) and its configured model.
+            let provider = runtime::provider::Provider::from_config(def.provider_id.as_deref())
+                .map_err(|e| AppError::Invalid(format!("chat agent provider: {e}")))?;
+            let model = def
+                .model
+                .clone()
+                .ok_or_else(|| AppError::Invalid("chat agent has no model configured".into()))?;
+
+            let backend = runtime::chat::spawn_chat(&session.id, provider, model);
+
+            // Same lost-race handling as the CLI branch: the dropped handle's
+            // shutdown closure aborts the just-spawned chat loop.
+            if !state.runtime.register(&id, backend.handle) {
+                return serde_json::to_value(&session)
+                    .map_err(|e| AppError::Internal(e.to_string()));
+            }
+            Some(backend.output_rx)
         }
-        None
+        _ => {
+            // orchestrator / unknown: placeholder backend (fusion arrives in M4).
+            if !state
+                .runtime
+                .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            {
+                return serde_json::to_value(&session)
+                    .map_err(|e| AppError::Internal(e.to_string()));
+            }
+            None
+        }
     };
 
     // Persist `running` and emit BEFORE spawning the forwarder. The forwarder
@@ -144,7 +174,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
     // Detached forwarder: bridge PTY output → bus, and mark the instance idle
     // when the child self-terminates (EOF closes output_rx).
     if let Some(output_rx) = output_rx {
-        tokio::spawn(forward_pty_output(
+        tokio::spawn(forward_session_output(
             state.db.clone(),
             Arc::clone(&state.runtime),
             state.app().cloned(),
@@ -157,14 +187,16 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
     serde_json::to_value(&session).map_err(|e| AppError::Internal(e.to_string()))
 }
 
-/// Drain a CLI backend's PTY output onto the event bus as `session:output`
-/// chunks, then perform idle cleanup when the child self-terminates (the read
-/// side hits EOF and `output_rx` closes). Spawned detached by [`spawn`].
+/// Drain a backend's output stream (CLI PTY chunks or chat-loop assistant text
+/// deltas) onto the event bus as `session:output` chunks, then perform idle
+/// cleanup when the backend self-terminates (the source hits EOF and
+/// `output_rx` closes). Shared by the `cli` and `chat` backends; spawned
+/// detached by [`spawn`].
 ///
 /// The idle transition is gated on `unregister` returning `true`, so a
 /// concurrent `stop` and this EOF path can't both emit `idle` — only the winner
 /// does. `app` is `None` in non-Tauri contexts (tests); emits are then skipped.
-async fn forward_pty_output(
+async fn forward_session_output(
     db: sqlx::SqlitePool,
     runtime: Arc<runtime::Runtime>,
     app: Option<tauri::AppHandle>,
@@ -247,11 +279,12 @@ mod tests {
     /// Create a workspace + agent_definition, instantiate an instance (idle,
     /// with a session), and return its workspace_agent id.
     ///
-    /// Uses a `chat`-type agent so the lifecycle tests exercise the placeholder
-    /// backend path — deterministic and binary-free (a `cli` agent would take
-    /// the PTY path and try to spawn `claude`, which CI does not have).
+    /// Uses an `orchestrator`-type agent so the lifecycle tests exercise the
+    /// placeholder backend path — deterministic and binary-free. (`cli` would
+    /// take the PTY path and try to spawn `claude`; `chat` would require a
+    /// configured provider + API key, neither of which CI has.)
     async fn fixture_instance(state: &AppState) -> String {
-        fixture_instance_typed(state, "chat", None).await
+        fixture_instance_typed(state, "orchestrator", None).await
     }
 
     /// Like [`fixture_instance`] but with an explicit agent `type` and
@@ -377,7 +410,7 @@ mod tests {
             .expect("set running");
 
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
-        let task = tokio::spawn(forward_pty_output(
+        let task = tokio::spawn(forward_session_output(
             state.db.clone(),
             Arc::clone(&state.runtime),
             None,
