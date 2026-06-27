@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, CornerDownLeft, CornerUpRight } from "lucide-react";
 import { ipc } from "../ipc";
 import { useSessionOutput, useMessageInjected } from "../ipc";
 import { ToolCallCard } from "./ToolCallCard";
 import { SkillRunningCard } from "./SkillRunningCard";
+import { ArtifactView, splitMessageArtifacts } from "./ArtifactView";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
 
 // ---------------------------------------------------------------------------
@@ -413,21 +414,14 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
         {msg.parts.map((part, i) => {
           const key = `${msg.id}-${i}`;
           switch (part.kind) {
-            case "text": {
-              const isTrailing = i === msg.parts.length - 1;
-              if (part.text.length === 0) {
-                // Only show the typing indicator for the live (last) message.
-                return isLast && isTrailing ? <TypingDots key={key} /> : null;
-              }
+            case "text":
               return (
-                <div
+                <AssistantTextPart
                   key={key}
-                  className="bg-[#f2f2f4] rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words"
-                >
-                  {part.text}
-                </div>
+                  text={part.text}
+                  showTyping={isLast && i === msg.parts.length - 1}
+                />
               );
-            }
             case "tool":
               return (
                 <ToolCallCard
@@ -446,6 +440,40 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
         })}
       </div>
     </div>
+  );
+}
+
+// Assistant text part: split out any closed ```html / ```htm fenced blocks —
+// each becomes an ArtifactView; surrounding prose stays as plain bubbles. An
+// unclosed trailing fence (still streaming) remains text until its closing ```
+// arrives. The split is memoized on `text` so the regex isn't re-run on every
+// unrelated render during streaming.
+//
+// NOTE: segment keys are positional, so when a fence closes mid-stream the
+// freshly-promoted ArtifactView remounts with default state — acceptable until
+// a persisted-artifact registry exists (tied to message persistence).
+function AssistantTextPart({ text, showTyping }: { text: string; showTyping: boolean }) {
+  const segs = useMemo(() => splitMessageArtifacts(text), [text]);
+  // Whitespace-only text during a streaming preamble should still show the
+  // typing indicator, not render an empty bubble.
+  if (text.trim().length === 0) {
+    return showTyping ? <TypingDots /> : null;
+  }
+  return (
+    <>
+      {segs.map((seg, segIndex) =>
+        seg.kind === "html" ? (
+          <ArtifactView key={segIndex} html={seg.html} filename={seg.filename} />
+        ) : (
+          <div
+            key={segIndex}
+            className="bg-[#f2f2f4] rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words"
+          >
+            {seg.text}
+          </div>
+        ),
+      )}
+    </>
   );
 }
 
