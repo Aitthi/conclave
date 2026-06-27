@@ -2592,7 +2592,7 @@
           },
           {
             "title": "Agent Library screen: list definitions + 'in N workspaces' + instances drawer",
-            "status": "doing",
+            "status": "done",
             "priority": "normal"
           },
           {
@@ -2612,32 +2612,32 @@
         "tasks": [
           {
             "title": "Agent runtime core (tokio): session lifecycle + status + concurrency",
-            "status": "todo",
+            "status": "done",
             "priority": "urgent"
           },
           {
             "title": "CLI agent: spawn Claude Code/Codex ผ่าน PTY + stream stdout",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Terminal pane UI: terminal render + session tabs + stdin bar",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Chat agent loop + provider clients (Anthropic/OpenAI/local) streaming",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Custom chat UI: bubbles + tool-call cards + skill-running",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {
             "title": "Context drawer: harness/model/tools/skills/messages (per agent type)",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           }
         ]
@@ -2647,22 +2647,22 @@
         "tasks": [
           {
             "title": "Message router: input-injection → target session input + auto-submit + origin tag",
-            "status": "todo",
+            "status": "done",
             "priority": "urgent"
           },
           {
             "title": "Routing composer (Send to @agent) + inbox/outbox UI",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {
             "title": "Blackboard service: KV ต่อ workspace + activity log + access scope",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Blackboard screen: key/value table + last-writer + activity",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           }
         ]
@@ -2672,22 +2672,22 @@
         "tasks": [
           {
             "title": "Snapshot manager: context meter + auto-compact ≥~90% + manual (chat & CLI)",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Timeline screen + snapshot detail + Read/Fork/Restore",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {
             "title": "Fusion orchestrator: panel fan-out → judge (structured JSON) → synthesize",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Fusion UI: pipeline turn (panel/judge/answer) + config drawer (panel/judge/cost)",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           }
         ]
@@ -2697,7 +2697,7 @@
         "tasks": [
           {
             "title": "UDS server: conclave.sock (0600) + JSON-RPC dispatch → command router",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
