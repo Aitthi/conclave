@@ -41,6 +41,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
 
         // ── fusion ────────────────────────────────────────────────────────
         "fusion.run" => fusion::run(state, payload).await,
+        "fusion.get" => fusion::get(state, payload).await,
 
         // ── provider ──────────────────────────────────────────────────────
         "provider.upsert" => provider::upsert(state, payload).await,

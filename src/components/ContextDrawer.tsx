@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   PanelRight,
   Bot,
@@ -13,6 +13,8 @@ import {
   CornerDownLeft,
   CornerUpRight,
   History,
+  Scale,
+  Gauge,
 } from "lucide-react";
 import { ipc, useMessageInjected, useSessionContext, useSnapshotCreated } from "../ipc";
 import type {
@@ -222,6 +224,16 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   const nameOf = (id: string): string =>
     roster.find((t) => t.instanceId === id)?.name ?? id;
 
+  // Fusion panel (orchestrator branch) — the workspace's chat agents excluding
+  // self, capped at 8 (the same derivation the M4.3 backend does). Memoised so
+  // the drawer's frequent re-renders (message/snapshot/context events) don't
+  // re-filter the roster each time. `costMult` = panel + judge + synth.
+  const fusionPanel = useMemo(
+    () => roster.filter((t) => t.type === "chat" && t.instanceId !== instanceId).slice(0, 8),
+    [roster, instanceId],
+  );
+  const fusionCostMult = fusionPanel.length + 2;
+
   if (!open) {
     return (
       <aside className="w-9 vibrancy border-l border-black/[0.06] flex flex-col items-center shrink-0">
@@ -242,7 +254,14 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   const meterTokens = ctx?.tokens ?? session?.contextTokens ?? null;
   const meterLimit = ctx?.limit ?? session?.contextLimit ?? null;
   const meterEstimated = ctx?.estimated ?? true;
-  const showMeter = session != null && meterTokens != null && meterLimit != null && meterLimit > 0;
+  // Orchestrators don't have a streaming context window — never show the meter
+  // for them (their config drawer is the Fusion panel/judge/cost set above).
+  const showMeter =
+    def.type !== "orchestrator" &&
+    session != null &&
+    meterTokens != null &&
+    meterLimit != null &&
+    meterLimit > 0;
 
   return (
     <>
@@ -270,11 +289,77 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
 
       <div className="flex-1 overflow-y-auto scroll-thin p-3 space-y-4">
         {def.type === "orchestrator" ? (
-          // Orchestrator (Fusion) config is M4 — no honest source yet.
-          <div>
-            <SectionLabel>Fusion</SectionLabel>
-            <DeferredNote>Fusion settings coming in M4</DeferredNote>
-          </div>
+          // Orchestrator (Fusion) config — REAL/derived values (M4.4). The panel
+          // is derived from the workspace's chat agents (the same derivation the
+          // M4.3 backend does); the judge is the orchestrator's own model; the
+          // cost is an honest derived estimate. Tuning options aren't wired into
+          // the pipeline yet → an honest deferred note, NOT fake toggles.
+          <>
+            {/* Panel agents — derived from the workspace's chat agents. */}
+            <div>
+              <SectionLabel>
+                <span>Panel agents</span>
+                <span className="normal-case tracking-normal text-[10.5px] font-medium text-[#86868b]">
+                  {fusionPanel.length} / 8
+                </span>
+              </SectionLabel>
+              {fusionPanel.length === 0 ? (
+                <DeferredNote>No chat agents in this workspace to fuse.</DeferredNote>
+              ) : (
+                <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1.5">
+                  {fusionPanel.map((t) => (
+                    <div key={t.instanceId} className="flex items-center gap-2">
+                      <span
+                        className="w-5 h-5 rounded-md text-white grid place-items-center text-[10px] font-bold shrink-0"
+                        style={{ backgroundColor: t.color }}
+                      >
+                        {t.name[0]?.toUpperCase() ?? "A"}
+                      </span>
+                      <span className="text-[12px] font-medium truncate flex-1 min-w-0">
+                        {t.name}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Judge — the orchestrator's own model (matches the M4.3 backend). */}
+            <div>
+              <SectionLabel>Judge</SectionLabel>
+              <div className="rounded-xl ring-hair bg-white px-2.5 py-2 flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-[#5e5ce6] grid place-items-center text-white shrink-0">
+                  <Scale className="w-3.5 h-3.5" />
+                </div>
+                <div className="leading-tight flex-1 min-w-0">
+                  <div className="text-[12px] font-medium truncate">{def.model ?? "—"}</div>
+                  <div className="text-[10.5px] text-[#86868b] truncate">structured JSON</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Est. cost — honest derived estimate (panel + judge + synth). */}
+            <div>
+              <SectionLabel>Est. cost</SectionLabel>
+              <div className="rounded-xl ring-hair bg-white px-2.5 py-2 flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-[#0a84ff] grid place-items-center text-white shrink-0">
+                  <Gauge className="w-3.5 h-3.5" />
+                </div>
+                <div className="leading-tight flex-1 min-w-0">
+                  <div className="text-[12px] font-medium">~{fusionCostMult}×</div>
+                  <div className="text-[10.5px] text-[#86868b] truncate">
+                    panel runs in parallel; judge + synthesize add 2 stages
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Tuning — not wired into the M4.3 pipeline yet. */}
+            <div>
+              <SectionLabel>Tuning</SectionLabel>
+              <DeferredNote>Panel/judge tuning isn't wired yet.</DeferredNote>
+            </div>
+          </>
         ) : (
           <>
             {/* Model · API — REAL (model + providerId), chat-focused */}

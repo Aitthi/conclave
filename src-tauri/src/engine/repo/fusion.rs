@@ -205,10 +205,8 @@ pub async fn get_run(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<FusionR
 
 /// List every panel response for a run, oldest-first (`created_at`, `id` tie-break).
 ///
-/// `#[allow(dead_code)]`: no production caller yet — used by tests and the M4.4
-/// fusion-result read path (the run pipeline persists responses but doesn't read
-/// them back).
-#[allow(dead_code)]
+/// Production caller: `fusion::get` (the M4.4 fusion-result read path). The run
+/// pipeline persists responses; this reads them back for the UI.
 pub async fn list_responses(
     pool: &SqlitePool,
     fusion_run_id: &str,

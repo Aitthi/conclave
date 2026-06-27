@@ -46,6 +46,13 @@ struct RunReq {
     prompt: String,
 }
 
+/// Payload for `fusion.get` — `{ runId }`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetReq {
+    run_id: String,
+}
+
 // ── Panel member ────────────────────────────────────────────────────────────
 
 /// One resolved panel member: the instance to attribute the answer to, its
@@ -412,6 +419,25 @@ pub async fn run(state: &AppState, payload: Value) -> Result<Value, AppError> {
     serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// `fusion.get` — load a persisted run and its panel responses for the UI.
+///
+/// Returns `{ "run": <FusionRunRow>, "responses": [<FusionPanelResponseRow>] }`.
+/// The run renders REAL data: panel answers (a member that couldn't run shows
+/// `status = "error"` with the honest error string), the run's `judgeAnalysis`
+/// JSON string, and the run's real `synthesized` answer.
+pub async fn get(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: GetReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let db = &state.db;
+
+    let run = repo::fusion::get_run(db, &req.run_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("fusion run id={} not found", req.run_id)))?;
+    let responses = repo::fusion::list_responses(db, &req.run_id).await?;
+
+    Ok(json!({ "run": run, "responses": responses }))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -734,5 +760,63 @@ mod tests {
             .await
             .expect_err("empty prompt must be rejected");
         assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    /// get() returns the persisted run + its panel responses (the UI read path).
+    #[tokio::test]
+    async fn get_returns_run_and_responses() {
+        let state = AppState::for_tests().await;
+        let db = &state.db;
+        let ws = workspace::create(db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let orch = instance_in(
+            &state,
+            &ws.id,
+            &chat_input("Orch", None, Some("judge-model")),
+        )
+        .await;
+        let session = session::get_by_instance(db, &orch)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        // Create a run + 2 panel responses via the repo.
+        let run = repo::fusion::create_run(db, &session.id, "Q")
+            .await
+            .expect("create_run failed");
+        repo::fusion::create_panel_response(db, &run.id, &orch, Some("an answer"), "done")
+            .await
+            .expect("create done response failed");
+        repo::fusion::create_panel_response(db, &run.id, &orch, Some("boom"), "error")
+            .await
+            .expect("create error response failed");
+
+        let out = get(&state, json!({ "runId": run.id }))
+            .await
+            .expect("get failed");
+
+        assert_eq!(
+            out.get("run")
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str),
+            Some(run.id.as_str()),
+            "returned run.id must match"
+        );
+        let responses = out
+            .get("responses")
+            .and_then(Value::as_array)
+            .expect("responses is an array");
+        assert_eq!(responses.len(), 2, "both panel responses returned");
+    }
+
+    /// get() with an unknown runId → NotFound (no fabricated run).
+    #[tokio::test]
+    async fn get_unknown_run_not_found() {
+        let state = AppState::for_tests().await;
+        let err = get(&state, json!({ "runId": "nope" }))
+            .await
+            .expect_err("get must fail for an unknown run");
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 }

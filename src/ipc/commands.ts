@@ -11,6 +11,7 @@ import type {
   BlackboardActivity,
   Snapshot,
   FusionRun,
+  FusionPanelResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,10 @@ export interface Commands {
     req: { orchestratorId: string; prompt: string };
     res: FusionRun;
   };
+  "fusion.get": {
+    req: { runId: string };
+    res: { run: FusionRun; responses: FusionPanelResponse[] };
+  };
   "provider.upsert": {
     req: { name: Provider["name"]; key?: string; baseUrl?: string };
     res: Provider;
@@ -183,6 +188,7 @@ export const ipc = {
   },
   fusion: {
     run: (req: Commands["fusion.run"]["req"]) => call("fusion.run", req),
+    get: (req: Commands["fusion.get"]["req"]) => call("fusion.get", req),
   },
   provider: {
     upsert: (req: Commands["provider.upsert"]["req"]) => call("provider.upsert", req),

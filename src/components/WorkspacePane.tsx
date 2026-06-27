@@ -5,6 +5,7 @@ import type { AgentDefinition, Session, WorkspaceAgent } from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
+import { FusionView } from "./FusionView";
 import { ContextDrawer } from "./ContextDrawer";
 import type { RoutingTarget } from "./RoutingPicker";
 
@@ -282,10 +283,13 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
             </div>
           )
         ) : (
-          // Orchestrator / unknown → placeholder.
-          <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6] px-6 text-center">
-            Orchestrator · Fusion — coming in M4
-          </div>
+          // Orchestrator → Fusion pipeline UI (drives the real M4.3 backend via
+          // the instance id; it doesn't need the placeholder session object).
+          <FusionView
+            instanceId={activeTab.instanceId}
+            def={activeTab.def}
+            roster={roster}
+          />
         )}
       </main>
 
