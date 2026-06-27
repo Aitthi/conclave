@@ -28,7 +28,11 @@ pub struct AppState {
     ///
     /// A pure concurrency primitive with no DB/Tauri dependency; status
     /// persistence and event emission happen in the command handlers.
-    pub runtime: crate::engine::runtime::Runtime,
+    ///
+    /// `Arc` so a PTY backend's detached forwarder task can hold its own
+    /// reference and clean up the registry when the child self-terminates
+    /// (M2.2), independent of the `AppState`'s lifetime.
+    pub runtime: std::sync::Arc<crate::engine::runtime::Runtime>,
 }
 
 impl AppState {
@@ -43,7 +47,7 @@ impl AppState {
         Self {
             db: pool,
             app: OnceLock::new(),
-            runtime: crate::engine::runtime::Runtime::new(),
+            runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
         }
     }
 
@@ -100,7 +104,7 @@ impl AppState {
         Self {
             db: crate::engine::db::connect_in_memory().await,
             app: OnceLock::new(),
-            runtime: crate::engine::runtime::Runtime::new(),
+            runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
         }
     }
 }
