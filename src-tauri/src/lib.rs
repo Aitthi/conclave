@@ -2,6 +2,7 @@ mod engine;
 
 use engine::{router, AppState};
 use serde_json::Value;
+use tauri::Manager;
 
 /// Single IPC entry-point for the Tauri invoke bridge.
 ///
@@ -23,6 +24,13 @@ async fn ipc(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
+        .setup(|app| {
+            // Wire the AppHandle into AppState so that bus::emit helpers and
+            // state.emit(...) can push events to the UI from any async context.
+            let state = app.state::<AppState>();
+            state.set_app(app.handle().clone());
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![ipc])
         .run(tauri::generate_context!())

@@ -5,7 +5,10 @@
 //! cannot be initialised — this is intentional: a missing or corrupt
 //! database is not a recoverable situation at launch time.
 
+use serde::Serialize;
 use sqlx::SqlitePool;
+use std::sync::OnceLock;
+use tauri::AppHandle;
 
 pub struct AppState {
     /// Live, migration-applied SQLite connection pool.
@@ -16,6 +19,13 @@ pub struct AppState {
     /// `#[allow(dead_code)]`: no command handler reads `db` yet (M1+).
     #[allow(dead_code)]
     pub db: SqlitePool,
+
+    /// Tauri application handle, stored once during `.setup()`.
+    ///
+    /// `OnceLock<AppHandle>` is `Send + Sync` because `AppHandle` is
+    /// `Send + Sync + Clone`, satisfying the bounds that `tauri::State`
+    /// requires of managed state.
+    app: OnceLock<AppHandle>,
 }
 
 impl AppState {
@@ -27,6 +37,52 @@ impl AppState {
     pub fn new() -> Self {
         let pool = tauri::async_runtime::block_on(crate::engine::db::connect())
             .expect("failed to open/migrate Conclave database");
-        Self { db: pool }
+        Self {
+            db: pool,
+            app: OnceLock::new(),
+        }
+    }
+
+    /// Store the `AppHandle` obtained during Tauri's `.setup()` phase.
+    ///
+    /// Silently ignores a second call — the handle is intended to be set
+    /// exactly once and never replaced.
+    pub fn set_app(&self, handle: AppHandle) {
+        if self.app.set(handle).is_err() {
+            #[cfg(debug_assertions)]
+            eprintln!("[bus] set_app called more than once — second handle dropped");
+        }
+    }
+
+    /// Return a reference to the stored `AppHandle`, or `None` if `.setup()`
+    /// has not yet completed.
+    ///
+    /// `#[allow(dead_code)]`: consumed by the runtime in M2.
+    #[allow(dead_code)]
+    pub fn app(&self) -> Option<&AppHandle> {
+        self.app.get()
+    }
+
+    /// Emit a typed event to the Tauri frontend.
+    ///
+    /// Non-fatal: if the `AppHandle` has not been set yet, a debug-only
+    /// message is printed and the call returns silently.  This lets handler
+    /// code call `state.emit(...)` without needing to propagate `Option`
+    /// or `Result` just for the handle-not-ready case.
+    ///
+    /// `#[allow(dead_code)]`: the runtime begins emitting in M2.
+    #[allow(dead_code)]
+    pub fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
+        match self.app.get() {
+            Some(handle) => {
+                if let Err(e) = super::bus::emit(handle, event, payload) {
+                    eprintln!("[bus] emit error on event \"{event}\": {e}");
+                }
+            }
+            None => {
+                #[cfg(debug_assertions)]
+                eprintln!("[bus] emit(\"{event}\") called before AppHandle was set");
+            }
+        }
     }
 }

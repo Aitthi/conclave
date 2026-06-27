@@ -1,3 +1,4 @@
+pub mod bus;
 pub mod commands;
 pub mod db;
 pub mod error;

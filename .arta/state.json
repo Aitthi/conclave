@@ -2562,7 +2562,7 @@
           },
           {
             "title": "Port design tokens → tailwind.config (สี/typography/radii/shadow)",
-            "status": "doing",
+            "status": "done",
             "priority": "normal"
           },
           {
@@ -2572,7 +2572,7 @@
           },
           {
             "title": "Event bus: Tauri events channel + React subscription helper",
-            "status": "todo",
+            "status": "doing",
             "priority": "normal"
           }
         ]
