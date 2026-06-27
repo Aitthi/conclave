@@ -84,6 +84,14 @@ export interface BlackboardEntry {
   updatedAt: string;
 }
 
+export interface BlackboardActivity {
+  id: string;
+  entryId: string;
+  instanceId: string;
+  action: "read" | "write";
+  at: string;
+}
+
 export interface Snapshot {
   id: string;
   sessionId: string;

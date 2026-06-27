@@ -8,6 +8,7 @@ import type {
   Message,
   InterAgentMessage,
   BlackboardEntry,
+  BlackboardActivity,
   Snapshot,
   FusionRun,
 } from "./types";
@@ -80,10 +81,10 @@ export interface Commands {
   };
   "blackboard.list": {
     req: { workspaceId: string };
-    res: BlackboardEntry[];
+    res: { entries: BlackboardEntry[]; activity: BlackboardActivity[] };
   };
   "blackboard.get": {
-    req: { workspaceId: string; key: string };
+    req: { workspaceId: string; key: string; readerId?: string };
     res: BlackboardEntry | null;
   };
   "blackboard.set": {

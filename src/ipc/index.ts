@@ -10,6 +10,7 @@ export type {
   Message,
   InterAgentMessage,
   BlackboardEntry,
+  BlackboardActivity,
   Snapshot,
   Artifact,
   FusionRun,
