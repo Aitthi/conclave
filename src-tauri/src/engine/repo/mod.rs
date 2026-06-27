@@ -16,6 +16,7 @@
 //!
 //! Milestones that add new entities should copy `workspace.rs` as a template.
 
+pub mod agent_definition;
 pub mod workspace;
 
 /// Map a `chain_builder::Error` to a `sqlx::Error` so repo fns can return the

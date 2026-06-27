@@ -2582,7 +2582,7 @@
         "tasks": [
           {
             "title": "Workspace repo + Rail switcher + active workspace state",
-            "status": "doing",
+            "status": "done",
             "priority": "high"
           },
           {
@@ -2597,7 +2597,7 @@
           },
           {
             "title": "Agent builder: form → agentDef.save (identity/type/model/harness/tools/skills/messaging)",
-            "status": "todo",
+            "status": "doing",
             "priority": "high"
           },
           {

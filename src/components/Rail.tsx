@@ -15,9 +15,10 @@ interface RailProps {
   workspaces: Workspace[];
   activeWorkspaceId: string | null;
   onSelectWorkspace: (id: string) => void;
+  onOpenBuilder?: () => void;
 }
 
-export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace }: RailProps) {
+export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenBuilder }: RailProps) {
   return (
     <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center py-2.5 gap-1 overflow-hidden">
       {/* Brand mark */}
@@ -77,7 +78,8 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace }: RailP
         </button>
         <button
           className="w-9 h-9 rounded-[10px] bg-white ring-hair text-[#3a3a3c] grid place-items-center hover:bg-black/[0.03]"
-          title="Agent Library"
+          title="Agent Library — new agent"
+          onClick={onOpenBuilder}
         >
           <UsersRound className="w-[17px] h-[17px]" />
         </button>

@@ -3,6 +3,7 @@ import { ipc } from "../ipc";
 import type { Workspace } from "../ipc";
 import { Rail } from "./Rail";
 import { Roster } from "./Roster";
+import { Builder } from "./Builder";
 
 // Minimal info needed for the placeholder main pane header
 // (kept local — M1 screens will own their own header)
@@ -97,6 +98,9 @@ export function AppShell() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
 
+  // ── Builder state ──────────────────────────────────────────────────────
+  const [showBuilder, setShowBuilder] = useState(false);
+
   // Load workspaces from the DB on mount.
   // Falls back to an empty list if Tauri is not present (plain Vite dev).
   useEffect(() => {
@@ -139,6 +143,7 @@ export function AppShell() {
           workspaces={workspaces}
           activeWorkspaceId={activeWorkspaceId}
           onSelectWorkspace={handleSelectWorkspace}
+          onOpenBuilder={() => setShowBuilder(true)}
         />
         <Roster selectedId={selectedId} onSelect={setSelectedId} />
 
@@ -208,6 +213,11 @@ export function AppShell() {
           </div>
         </main>
       </div>
+
+      {/* ── Agent builder overlay ─────────────────────────────────────── */}
+      {showBuilder && (
+        <Builder onClose={() => setShowBuilder(false)} />
+      )}
     </div>
   );
 }
