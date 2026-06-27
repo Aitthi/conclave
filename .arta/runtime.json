@@ -1,0 +1,55 @@
+{
+  "tab": "plan",
+  "screen": "workspace",
+  "screens": [
+    {
+      "id": "workspace",
+      "title": "Workspace home"
+    },
+    {
+      "id": "terminal",
+      "title": "Terminal pane"
+    },
+    {
+      "id": "chat",
+      "title": "Custom chat agent"
+    },
+    {
+      "id": "builder",
+      "title": "Agent builder"
+    },
+    {
+      "id": "library",
+      "title": "Agent Library"
+    },
+    {
+      "id": "blackboard",
+      "title": "Shared blackboard"
+    },
+    {
+      "id": "orchestrator",
+      "title": "Orchestrator · Fusion"
+    },
+    {
+      "id": "settings",
+      "title": "Settings"
+    },
+    {
+      "id": "link-folder",
+      "title": "Link folder · new workspace"
+    },
+    {
+      "id": "timeline",
+      "title": "Memory timeline"
+    },
+    {
+      "id": "cli",
+      "title": "Conclave CLI"
+    }
+  ],
+  "phase": "plan",
+  "store": {},
+  "errors": [],
+  "updatedAt": "03:05:39 PM",
+  "reportedAt": "2026-06-27T08:05:39.301Z"
+}

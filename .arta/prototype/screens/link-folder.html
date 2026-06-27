@@ -1,0 +1,66 @@
+<div class="h-screen w-full flex bg-white text-[#1d1d1f] overflow-hidden select-none">
+
+  {{>rail}}
+
+  <!-- ===== Center: link folder ===== -->
+  <main class="flex-1 flex flex-col min-w-0 bg-[#f5f5f7]">
+    <div class="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] bg-white shrink-0">
+      <div class="flex items-center gap-2"><i data-lucide="folder-plus" class="w-4 h-4 text-[#0a84ff]"></i><span class="text-[13px] font-semibold tracking-tight">New workspace</span></div>
+      <button data-to="workspace" class="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="w-[15px] h-[15px]"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto scroll-thin grid place-items-center p-6">
+      <div class="w-full max-w-[520px] rounded-2xl ring-hair bg-white p-6" style="box-shadow:0 8px 28px rgba(0,0,0,0.10)">
+        <div class="text-center mb-5">
+          <div class="w-12 h-12 rounded-[14px] bg-[#0a84ff]/10 grid place-items-center mx-auto mb-2.5"><i data-lucide="folder-plus" class="w-6 h-6 text-[#0a84ff]"></i></div>
+          <div class="text-[16px] font-bold tracking-tight">Link a folder as workspace</div>
+          <div class="text-[12px] text-[#86868b] mt-0.5">แต่ละ workspace ผูกกับ 1 โฟลเดอร์ และมี roster + blackboard ของตัวเอง</div>
+        </div>
+
+        <!-- folder picker -->
+        <div class="mb-4">
+          <div class="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5">Folder</div>
+          <div class="flex items-center gap-2 rounded-lg ring-1 ring-black/[0.1] bg-[#f7f7f8] px-3 h-10">
+            <i data-lucide="folder" class="w-4 h-4 text-[#ff9f0a]"></i>
+            <span class="flex-1 font-mono text-[12.5px] text-[#3a3a3c] truncate">~/code/api-gateway</span>
+            <button class="text-[11.5px] font-semibold text-[#0a84ff] bg-white ring-hair px-2.5 py-1 rounded-md hover:bg-black/[0.02]">Browse…</button>
+          </div>
+        </div>
+
+        <!-- name + color -->
+        <div class="grid grid-cols-[1fr_auto] gap-3 mb-4">
+          <div>
+            <div class="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5">Name</div>
+            <input value="api-gateway" class="w-full rounded-lg ring-1 ring-black/[0.1] bg-white px-3 h-10 text-[13px] outline-none focus:ring-[#0a84ff]/50"/>
+          </div>
+          <div>
+            <div class="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5">Color</div>
+            <div class="flex items-center gap-1.5 h-10">
+              <span class="w-6 h-6 rounded-full bg-[#ff3b30] ring-2 ring-[#ff3b30]/40 ring-offset-2"></span>
+              <span class="w-6 h-6 rounded-full bg-[#0a84ff]"></span>
+              <span class="w-6 h-6 rounded-full bg-[#30d158]"></span>
+              <span class="w-6 h-6 rounded-full bg-[#ff9f0a]"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- initial agents -->
+        <div class="mb-5">
+          <div class="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 flex items-center justify-between">Add agents from Library <span class="text-[10px] text-[#86868b] normal-case tracking-normal font-medium">instance แยก session</span></div>
+          <div class="grid grid-cols-2 gap-1.5">
+            <label class="flex items-center gap-2 rounded-lg ring-1 ring-[#0a84ff]/30 bg-[#0a84ff]/[0.05] px-2.5 py-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#0a84ff] grid place-items-center"><i data-lucide="check" class="w-3 h-3 text-white"></i></span><span class="w-5 h-5 rounded-[6px] bg-[#ff7a45] text-white grid place-items-center text-[10px] font-bold">A</span><span class="text-[12px] font-medium">Atlas</span></label>
+            <label class="flex items-center gap-2 rounded-lg ring-1 ring-[#0a84ff]/30 bg-[#0a84ff]/[0.05] px-2.5 py-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#0a84ff] grid place-items-center"><i data-lucide="check" class="w-3 h-3 text-white"></i></span><span class="w-5 h-5 rounded-[6px] bg-[#ff9f0a] text-white grid place-items-center text-[10px] font-bold">S</span><span class="text-[12px] font-medium">Sol</span></label>
+            <label class="flex items-center gap-2 rounded-lg ring-hair bg-white px-2.5 py-1.5"><span class="w-4 h-4 rounded-[5px] ring-1 ring-black/15"></span><span class="w-5 h-5 rounded-[6px] bg-[#d6409f] text-white grid place-items-center text-[10px] font-bold">I</span><span class="text-[12px]">Iris</span></label>
+            <label class="flex items-center gap-2 rounded-lg ring-hair bg-white px-2.5 py-1.5"><span class="w-4 h-4 rounded-[5px] ring-1 ring-black/15"></span><span class="w-5 h-5 rounded-[6px] bg-[#5e5ce6] text-white grid place-items-center text-[10px] font-bold"><i data-lucide="waypoints" class="w-3 h-3"></i></span><span class="text-[12px]">Maestro</span></label>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button data-to="workspace" class="flex-1 text-[12.5px] font-medium text-[#6e6e73] bg-white ring-hair rounded-lg py-2.5 hover:bg-black/[0.02]">Cancel</button>
+          <button data-to="workspace" class="flex-[1.4] text-[12.5px] font-semibold text-white bg-[#0a84ff] rounded-lg py-2.5 hover:brightness-105 flex items-center justify-center gap-1.5"><i data-lucide="folder-plus" class="w-4 h-4"></i>Create workspace</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+</div>

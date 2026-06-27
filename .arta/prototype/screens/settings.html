@@ -1,0 +1,68 @@
+<div class="h-screen w-full flex bg-white text-[#1d1d1f] overflow-hidden select-none">
+
+  {{>rail}}
+
+  <!-- ===== Settings nav ===== -->
+  <aside class="w-[230px] vibrancy border-r border-black/[0.06] flex flex-col shrink-0">
+    <div class="h-12 flex items-center gap-2 px-4 border-b border-black/[0.06] shrink-0">
+      <i data-lucide="settings" class="w-[15px] h-[15px] text-[#6e6e73]"></i>
+      <span class="text-[13px] font-semibold tracking-tight">Settings</span>
+    </div>
+    <div class="flex-1 overflow-y-auto scroll-thin p-2 space-y-0.5">
+      <button class="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.04]"><i data-lucide="sliders-horizontal" class="w-4 h-4 text-[#6e6e73]"></i><span class="text-[12.5px]">General</span></button>
+      <button class="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg bg-[#0a84ff]/10 ring-1 ring-[#0a84ff]/30"><i data-lucide="key-round" class="w-4 h-4 text-[#0a84ff]"></i><span class="text-[12.5px] font-semibold">Providers &amp; keys</span></button>
+      <button class="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.04]"><i data-lucide="palette" class="w-4 h-4 text-[#6e6e73]"></i><span class="text-[12.5px]">Appearance</span></button>
+      <button class="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.04]"><i data-lucide="cpu" class="w-4 h-4 text-[#6e6e73]"></i><span class="text-[12.5px]">Harness defaults</span></button>
+      <button class="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.04]"><i data-lucide="blocks" class="w-4 h-4 text-[#6e6e73]"></i><span class="text-[12.5px]">Plugins &amp; MCP</span></button>
+      <button class="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-black/[0.04]"><i data-lucide="info" class="w-4 h-4 text-[#6e6e73]"></i><span class="text-[12.5px]">About</span></button>
+    </div>
+    <div class="border-t border-black/[0.06] p-3 shrink-0 text-[10.5px] text-[#86868b] leading-snug flex items-center gap-1.5"><i data-lucide="hard-drive" class="w-3.5 h-3.5 shrink-0"></i>Local app · ข้อมูลเก็บในเครื่อง ไม่มีบัญชี</div>
+  </aside>
+
+  <!-- ===== Center: providers detail ===== -->
+  <main class="flex-1 flex flex-col min-w-0 bg-white">
+    <div class="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+      <span class="text-[13px] font-semibold tracking-tight">Providers &amp; keys</span>
+      <button data-to="workspace" class="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="w-[15px] h-[15px]"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto scroll-thin px-8 py-6">
+      <div class="max-w-[600px] mx-auto space-y-6">
+        <p class="text-[12.5px] text-[#6e6e73] leading-relaxed -mt-1">เก็บ API key ของผู้ให้บริการที่คุณใช้เอง — key ถูกเก็บใน Keychain ของเครื่องนี้เท่านั้น แต่ละ agent เลือก provider/model ได้อิสระ</p>
+
+        <div class="space-y-2.5">
+          <!-- Anthropic -->
+          <div class="rounded-xl ring-hair bg-white p-3.5">
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 rounded-[10px] bg-[#d97757] grid place-items-center text-white ring-hair"><i data-lucide="sparkle" class="w-4.5 h-4.5"></i></div>
+              <div class="flex-1"><div class="text-[13px] font-semibold">Anthropic</div><div class="text-[11px] text-[#86868b] font-mono">sk-ant-•••••2f9</div></div>
+              <span class="text-[10.5px] font-semibold text-[#30a14e] bg-[#30a14e]/10 px-2 py-0.5 rounded-full flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3 h-3"></i>connected</span>
+              <button class="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73] ml-1"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+          <!-- OpenAI -->
+          <div class="rounded-xl ring-hair bg-white p-3.5">
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 rounded-[10px] bg-[#10a37f] grid place-items-center text-white ring-hair"><i data-lucide="bot" class="w-4.5 h-4.5"></i></div>
+              <div class="flex-1"><div class="text-[13px] font-semibold">OpenAI</div><div class="text-[11px] text-[#86868b] font-mono">sk-•••••a1c</div></div>
+              <span class="text-[10.5px] font-semibold text-[#30a14e] bg-[#30a14e]/10 px-2 py-0.5 rounded-full flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3 h-3"></i>connected</span>
+              <button class="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73] ml-1"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+          <!-- Custom / local -->
+          <div class="rounded-xl ring-hair bg-white p-3.5">
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 rounded-[10px] bg-[#1d1d1f] grid place-items-center text-white ring-hair"><i data-lucide="server" class="w-4.5 h-4.5"></i></div>
+              <div class="flex-1"><div class="text-[13px] font-semibold">Local · Ollama</div><div class="text-[11px] text-[#86868b] font-mono">http://localhost:11434</div></div>
+              <span class="text-[10.5px] font-semibold text-[#6e6e73] bg-black/[0.05] px-2 py-0.5 rounded-full">offline</span>
+              <button class="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73] ml-1"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+        </div>
+
+        <button class="w-full text-[12.5px] font-medium text-[#0a84ff] border border-dashed border-[#0a84ff]/40 rounded-xl py-2.5 flex items-center justify-center gap-1.5 hover:bg-[#0a84ff]/[0.04]"><i data-lucide="plus" class="w-4 h-4"></i>Add provider</button>
+      </div>
+    </div>
+  </main>
+
+</div>

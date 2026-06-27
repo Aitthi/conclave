@@ -1,0 +1,87 @@
+<div class="h-screen w-full flex bg-white text-[#1d1d1f] overflow-hidden select-none">
+
+  {{>rail}}
+  {{>roster}}
+
+  <!-- ===== Center: blackboard table ===== -->
+  <main class="flex-1 flex flex-col min-w-0 bg-white">
+    <div class="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+      <div class="flex items-center gap-2.5">
+        <div class="w-6 h-6 rounded-[7px] bg-[#1d1d1f] text-white grid place-items-center ring-hair"><i data-lucide="layers" class="w-[13px] h-[13px]"></i></div>
+        <div class="text-[13px] font-semibold tracking-tight flex items-center gap-1.5">Blackboard
+          <span class="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md">codeup · shared</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 bg-black/[0.05] rounded-lg px-2.5 h-7 w-44"><i data-lucide="search" class="w-[13px] h-[13px] text-[#86868b]"></i><input placeholder="Search keys" class="bg-transparent outline-none text-[12px] placeholder:text-[#a1a1a6] w-full"/></div>
+        <button class="text-[12px] font-semibold text-white bg-[#0a84ff] px-3 h-7 rounded-lg hover:brightness-105 flex items-center gap-1.5"><i data-lucide="plus" class="w-3.5 h-3.5"></i>New key</button>
+      </div>
+    </div>
+
+    <div class="flex-1 overflow-y-auto scroll-thin">
+      <!-- column head -->
+      <div class="grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 h-8 items-center text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase border-b border-black/[0.06] sticky top-0 bg-white/90 backdrop-blur">
+        <span>Key</span><span>Value</span><span>Last writer</span><span>Updated</span>
+      </div>
+      <!-- rows -->
+      <div class="divide-y divide-black/[0.05] text-[12.5px]">
+        <button class="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-black/[0.02]">
+          <span class="font-mono text-[12px] text-[#3a3a3c]">bench/results</span>
+          <span class="text-[#6e6e73] truncate">{ opus: 91.4, sonnet: 78.0, … }</span>
+          <span class="flex items-center gap-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#ff7a45] text-white grid place-items-center text-[9px] font-bold">A</span><span class="text-[#3a3a3c]">Atlas</span></span>
+          <span class="text-[#86868b] text-[11.5px]">just now</span>
+        </button>
+        <button class="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-black/[0.02]">
+          <span class="font-mono text-[12px] text-[#3a3a3c]">plan/tasks</span>
+          <span class="text-[#6e6e73] truncate">[ "fix payments", "write summary", … ]</span>
+          <span class="flex items-center gap-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#5e5ce6] text-white grid place-items-center text-[9px] font-bold">M</span><span class="text-[#3a3a3c]">Maestro</span></span>
+          <span class="text-[#86868b] text-[11.5px]">2m</span>
+        </button>
+        <button class="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-black/[0.02]">
+          <span class="font-mono text-[12px] text-[#3a3a3c]">review/payments.ts</span>
+          <span class="text-[#6e6e73] truncate">{ verdict: "needs log", line: 42 }</span>
+          <span class="flex items-center gap-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#ff9f0a] text-white grid place-items-center text-[9px] font-bold">S</span><span class="text-[#3a3a3c]">Sol</span></span>
+          <span class="text-[#86868b] text-[11.5px]">5m</span>
+        </button>
+        <button class="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-black/[0.02]">
+          <span class="font-mono text-[12px] text-[#3a3a3c]">summary/draft</span>
+          <span class="text-[#6e6e73] truncate">"Q2 benchmark: Opus leads at 91.4% …"</span>
+          <span class="flex items-center gap-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#d6409f] text-white grid place-items-center text-[9px] font-bold">I</span><span class="text-[#3a3a3c]">Iris</span></span>
+          <span class="text-[#86868b] text-[11.5px]">6m</span>
+        </button>
+        <button class="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-black/[0.02]">
+          <span class="font-mono text-[12px] text-[#3a3a3c]">build/status</span>
+          <span class="text-[#6e6e73] truncate">{ ci: "green", tests: "21/21" }</span>
+          <span class="flex items-center gap-1.5"><span class="w-4 h-4 rounded-[5px] bg-[#0fa3a3] text-white grid place-items-center text-[9px] font-bold">V</span><span class="text-[#3a3a3c]">Vega</span></span>
+          <span class="text-[#86868b] text-[11.5px]">12m</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ===== Right: activity / access ===== -->
+  <aside class="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
+    <div class="h-12 flex items-center px-4 border-b border-black/[0.06] shrink-0"><span class="text-[12px] font-semibold text-[#6e6e73] tracking-tight">Activity</span></div>
+    <div class="flex-1 overflow-y-auto scroll-thin p-3 space-y-4">
+      <div>
+        <div class="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5">Recent writes</div>
+        <div class="space-y-2">
+          <div class="flex items-start gap-2 text-[11.5px]"><span class="w-4 h-4 rounded-[5px] bg-[#ff7a45] text-white grid place-items-center text-[9px] font-bold mt-0.5 shrink-0">A</span><div><span class="font-semibold text-[#ff7a45]">Atlas</span> <span class="text-[#6e6e73]">wrote</span> <span class="font-mono text-[11px]">bench/results</span><div class="text-[10px] text-[#86868b]">just now</div></div></div>
+          <div class="flex items-start gap-2 text-[11.5px]"><span class="w-4 h-4 rounded-[5px] bg-[#d6409f] text-white grid place-items-center text-[9px] font-bold mt-0.5 shrink-0">I</span><div><span class="font-semibold text-[#d6409f]">Iris</span> <span class="text-[#6e6e73]">read</span> <span class="font-mono text-[11px]">bench/results</span><div class="text-[10px] text-[#86868b]">just now</div></div></div>
+          <div class="flex items-start gap-2 text-[11.5px]"><span class="w-4 h-4 rounded-[5px] bg-[#ff9f0a] text-white grid place-items-center text-[9px] font-bold mt-0.5 shrink-0">S</span><div><span class="font-semibold text-[#ff9f0a]">Sol</span> <span class="text-[#6e6e73]">wrote</span> <span class="font-mono text-[11px]">review/payments.ts</span><div class="text-[10px] text-[#86868b]">5m</div></div></div>
+          <div class="flex items-start gap-2 text-[11.5px]"><span class="w-4 h-4 rounded-[5px] bg-[#5e5ce6] text-white grid place-items-center text-[9px] font-bold mt-0.5 shrink-0">M</span><div><span class="font-semibold text-[#5e5ce6]">Maestro</span> <span class="text-[#6e6e73]">wrote</span> <span class="font-mono text-[11px]">plan/tasks</span><div class="text-[10px] text-[#86868b]">2m</div></div></div>
+        </div>
+      </div>
+      <div>
+        <div class="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5">Access</div>
+        <div class="rounded-xl ring-hair bg-white p-2.5 space-y-2 text-[11.5px]">
+          <div class="flex items-center justify-between"><span class="text-[#6e6e73] flex items-center gap-1.5"><i data-lucide="eye" class="w-3.5 h-3.5"></i>Readers</span><span class="font-medium">all agents</span></div>
+          <div class="flex items-center justify-between"><span class="text-[#6e6e73] flex items-center gap-1.5"><i data-lucide="pencil" class="w-3.5 h-3.5"></i>Writers</span><span class="font-medium">all agents</span></div>
+          <div class="flex items-center justify-between"><span class="text-[#6e6e73] flex items-center gap-1.5"><i data-lucide="lock" class="w-3.5 h-3.5"></i>Scope</span><span class="font-medium">this workspace</span></div>
+        </div>
+        <div class="mt-1.5 text-[10.5px] text-[#86868b] leading-snug px-0.5">blackboard นี้แชร์เฉพาะใน workspace <span class="font-medium text-[#3a3a3c]">codeup</span> — workspace อื่นมีของตัวเอง</div>
+      </div>
+    </div>
+  </aside>
+
+</div>

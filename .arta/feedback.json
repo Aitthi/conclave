@@ -1,0 +1,14 @@
+[
+  {
+    "text": "เป็น local app ไม่มีระบบ account",
+    "tab": "prototype",
+    "screen": "builder",
+    "element": {
+      "tag": "div",
+      "text": "DT",
+      "selector": "div.mt-auto"
+    },
+    "at": "2026-06-27T06:41:22.742Z",
+    "read": true
+  }
+]
