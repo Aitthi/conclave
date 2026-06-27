@@ -23,6 +23,12 @@ pub struct AppState {
     /// `Send + Sync + Clone`, satisfying the bounds that `tauri::State`
     /// requires of managed state.
     app: OnceLock<AppHandle>,
+
+    /// In-memory registry of live agent sessions (M2 runtime core).
+    ///
+    /// A pure concurrency primitive with no DB/Tauri dependency; status
+    /// persistence and event emission happen in the command handlers.
+    pub runtime: crate::engine::runtime::Runtime,
 }
 
 impl AppState {
@@ -37,6 +43,7 @@ impl AppState {
         Self {
             db: pool,
             app: OnceLock::new(),
+            runtime: crate::engine::runtime::Runtime::new(),
         }
     }
 
@@ -93,6 +100,7 @@ impl AppState {
         Self {
             db: crate::engine::db::connect_in_memory().await,
             app: OnceLock::new(),
+            runtime: crate::engine::runtime::Runtime::new(),
         }
     }
 }

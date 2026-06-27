@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod repo;
 pub mod router;
+pub mod runtime;
 pub mod state;
 
 pub use error::AppError;

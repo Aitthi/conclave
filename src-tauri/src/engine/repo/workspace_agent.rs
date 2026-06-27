@@ -223,6 +223,29 @@ pub async fn instantiate(
     })
 }
 
+/// Update the status of a workspace_agent. status must be one of
+/// 'running' | 'idle' | 'waiting' (DB CHECK enforces this).
+///
+/// Uses chain-builder UPDATE with `where_eq("id", …)`. Called by the M2
+/// runtime handlers (`instance.spawn` / `instance.stop`) to persist the
+/// lifecycle state that mirrors the in-memory [`crate::engine::runtime`]
+/// registry.
+///
+/// # Precondition
+///
+/// A non-existent `id` is a silent no-op (0 rows updated → `Ok(())`); this
+/// function does NOT report "not found". Callers must validate existence first
+/// (the spawn/stop handlers do, via `exists` / the runtime registry).
+pub async fn set_status(pool: &SqlitePool, id: &str, status: &str) -> sqlx::Result<()> {
+    QueryBuilder::<Sqlite>::table("workspace_agent")
+        .update([("status", Bind::Text(status.to_owned()))])
+        .where_eq("id", id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -432,6 +455,28 @@ mod tests {
             1,
             "must be exactly 1 workspace_agent after two instantiate calls"
         );
+    }
+
+    /// set_status() persists a new status that survives a re-fetch.
+    #[tokio::test]
+    async fn set_status_updates_row() {
+        let pool = connect_in_memory().await;
+        let (ws_id, def_id) = fixtures(&pool).await;
+
+        let row = instantiate(&pool, &ws_id, &def_id)
+            .await
+            .expect("instantiate failed");
+        assert_eq!(row.status, "idle");
+
+        set_status(&pool, &row.id, "running")
+            .await
+            .expect("set_status failed");
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert_eq!(fetched.status, "running");
     }
 
     /// JSON serialization uses camelCase — locks the TS WorkspaceAgent contract.
