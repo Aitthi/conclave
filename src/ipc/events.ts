@@ -8,8 +8,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export const EVENT_NAMES = {
   sessionOutput: "session:output",
   sessionStatus: "session:status",
+  sessionContext: "session:context",
   fusionStage: "fusion:stage",
   messageInjected: "message:injected",
+  snapshotCreated: "snapshot:created",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -26,6 +28,34 @@ export interface SessionOutputEvent {
 export interface SessionStatusEvent {
   sessionId: string;
   status: "running" | "idle" | "waiting";
+}
+
+/**
+ * A live context-meter update for a session. HONESTY: `estimated` is always
+ * `true` for now — `contextTokens` is derived from streamed output bytes
+ * (≈4 chars/token), NOT real provider token-usage telemetry. The UI labels the
+ * meter "estimate" accordingly.
+ */
+export interface SessionContextEvent {
+  sessionId: string;
+  contextTokens: number;
+  contextLimit: number;
+  estimated: boolean;
+}
+
+/**
+ * A snapshot (manual or auto-compact) was persisted for a session. `tokens` and
+ * `triggerPct` are the estimate at capture time (absent when the session had no
+ * estimate yet).
+ */
+export interface SnapshotCreatedEvent {
+  sessionId: string;
+  snapshotId: string;
+  // Named `type` (not `kind`) to align with the `Snapshot.type` domain field and
+  // the `snapshot.create` payload — same union, one name across the wire.
+  type: "auto" | "manual" | "handoff";
+  tokens?: number;
+  triggerPct?: number;
 }
 
 export interface FusionStageEvent {
@@ -124,6 +154,33 @@ export function useSessionStatus(
   cb: (event: SessionStatusEvent) => void,
 ): void {
   useEvent<SessionStatusEvent>(EVENT_NAMES.sessionStatus, (payload) => {
+    if (payload.sessionId === sessionId) cb(payload);
+  });
+}
+
+/**
+ * Subscribe to live context-meter updates for a specific session.
+ * The callback fires for each `SessionContextEvent` whose sessionId matches.
+ */
+export function useSessionContext(
+  sessionId: string,
+  cb: (event: SessionContextEvent) => void,
+): void {
+  useEvent<SessionContextEvent>(EVENT_NAMES.sessionContext, (payload) => {
+    if (payload.sessionId === sessionId) cb(payload);
+  });
+}
+
+/**
+ * Subscribe to snapshot-created events for a specific session (manual or
+ * auto-compact). The callback fires for each `SnapshotCreatedEvent` whose
+ * sessionId matches — drives the snapshot list to refresh live.
+ */
+export function useSnapshotCreated(
+  sessionId: string,
+  cb: (event: SnapshotCreatedEvent) => void,
+): void {
+  useEvent<SnapshotCreatedEvent>(EVENT_NAMES.snapshotCreated, (payload) => {
     if (payload.sessionId === sessionId) cb(payload);
   });
 }

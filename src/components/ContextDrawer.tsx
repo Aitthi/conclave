@@ -8,12 +8,19 @@ import {
   Wrench,
   Sparkles,
   Camera,
+  Clock,
   Waypoints,
   CornerDownLeft,
   CornerUpRight,
 } from "lucide-react";
-import { ipc, useMessageInjected } from "../ipc";
-import type { AgentDefinition, InterAgentMessage, Session, WorkspaceAgent } from "../ipc";
+import { ipc, useMessageInjected, useSessionContext, useSnapshotCreated } from "../ipc";
+import type {
+  AgentDefinition,
+  InterAgentMessage,
+  Session,
+  Snapshot,
+  WorkspaceAgent,
+} from "../ipc";
 import type { RoutingTarget } from "./RoutingPicker";
 import { timeHint } from "../lib/timeHint";
 
@@ -44,6 +51,9 @@ interface ContextDrawerProps {
 
 // How many recent inbox/outbox rows the Messages log shows.
 const MESSAGE_LOG_LIMIT = 6;
+
+// How many recent snapshots the Memory section shows.
+const SNAPSHOT_LOG_LIMIT = 6;
 
 function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
   switch (v) {
@@ -121,6 +131,96 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   // Refetch when an injection involving this instance fires (in OR out).
   useMessageInjected(instanceId, () => refetch());
 
+  // ── Live context meter ─────────────────────────────────────────────────────
+  // Seed from the spawned `session` prop (a fresh session reports 0 tokens), then
+  // track live `session:context` estimates. HONESTY: this is an ESTIMATE derived
+  // from streamed output bytes, not exact provider usage — labelled as such below.
+  const sessionId = session?.id ?? "";
+  const [ctx, setCtx] = useState<{ tokens: number; limit: number; estimated: boolean } | null>(
+    session?.contextTokens != null && session?.contextLimit != null
+      ? { tokens: session.contextTokens, limit: session.contextLimit, estimated: true }
+      : null,
+  );
+  useSessionContext(sessionId, (e) =>
+    setCtx({ tokens: e.contextTokens, limit: e.contextLimit, estimated: e.estimated }),
+  );
+  // Reset the meter (and any transient snapshot UI) when the focused session
+  // changes. ContextDrawer is NOT keyed per instance (its open/closed state is a
+  // workspace-scoped preference that must persist across tab switches), so these
+  // `useState` values would otherwise carry the PREVIOUS session's estimate —
+  // `ctx` wins over the `session` prop in the meter fallback, so without this the
+  // meter shows a stale token count until the new session happens to emit
+  // `session:context` (which an idle session never does). Keyed by id, not the
+  // whole `session` object, to avoid resetting on unrelated prop identity churn.
+  useEffect(() => {
+    setCtx(
+      session?.contextTokens != null && session?.contextLimit != null
+        ? { tokens: session.contextTokens, limit: session.contextLimit, estimated: true }
+        : null,
+    );
+    setSnapshotError(false);
+    setSnapshotBusy(false);
+    // `session` is intentionally read but excluded from deps — we re-seed only on
+    // identity change of the session id, not on every new session object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // ── Snapshots (Memory section) ─────────────────────────────────────────────
+  // Recent snapshots for this session, newest-first. Same refetch discipline as
+  // the message log: a per-session useCallback + a monotonic seq guard so a stale
+  // response can't overwrite a newer one. Refetches on session change AND on each
+  // `snapshot:created` (so an auto-compact snapshot appears live).
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [snapshotError, setSnapshotError] = useState(false);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const snapSeq = useRef(0);
+  const refetchSnapshots = useCallback(() => {
+    if (!sessionId) {
+      setSnapshots([]);
+      return;
+    }
+    const mine = ++snapSeq.current;
+    ipc.snapshot
+      .list({ sessionId })
+      .then((rows) => {
+        if (mounted.current && mine === snapSeq.current) {
+          setSnapshots(rows.slice(0, SNAPSHOT_LOG_LIMIT));
+          setSnapshotError(false); // a successful list dismisses a stale create-error
+        }
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: snapshot.list failed", err);
+        }
+      });
+  }, [sessionId]);
+  useEffect(() => {
+    refetchSnapshots();
+  }, [refetchSnapshots]);
+  useSnapshotCreated(sessionId, () => refetchSnapshots());
+
+  // "Snapshot now" — create a manual snapshot, then refetch. Errors are surfaced
+  // honestly (dev console + a tiny inline note), never silently swallowed.
+  const doSnapshot = useCallback(() => {
+    if (!sessionId) return;
+    setSnapshotBusy(true);
+    setSnapshotError(false);
+    ipc.snapshot
+      .create({ sessionId, type: "manual" })
+      .then(() => {
+        if (mounted.current) refetchSnapshots();
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: snapshot.create failed", err);
+        }
+        if (mounted.current) setSnapshotError(true);
+      })
+      .finally(() => {
+        if (mounted.current) setSnapshotBusy(false);
+      });
+  }, [sessionId, refetchSnapshots]);
+
   // Resolve a counterpart instance id → display name via the roster.
   const nameOf = (id: string): string =>
     roster.find((t) => t.instanceId === id)?.name ?? id;
@@ -138,6 +238,14 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
       </aside>
     );
   }
+
+  // Live meter values: prefer the streamed `ctx` estimate, fall back to the
+  // session prop's counts. Render only when a real session reports a usable
+  // limit — we never fabricate a meter.
+  const meterTokens = ctx?.tokens ?? session?.contextTokens ?? null;
+  const meterLimit = ctx?.limit ?? session?.contextLimit ?? null;
+  const meterEstimated = ctx?.estimated ?? true;
+  const showMeter = session != null && meterTokens != null && meterLimit != null && meterLimit > 0;
 
   return (
     <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
@@ -213,19 +321,52 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
               </DeferredNote>
             </div>
 
-            {/* Memory · snapshots (cli) — DEFERRED to M4 (snapshot manager).
-                Kept as an honest deferred note so the cli drawer's section set
-                matches the prototype; the live context meter below lights up
-                only when real Session token counts exist. */}
-            {def.type === "cli" && (
+            {/* Memory · snapshots — REAL (M4.1 snapshot manager). Shown for both
+                cli and chat agents, but only once a real session exists (we never
+                fabricate rows). "Snapshot now" creates a manual snapshot; the list
+                shows the newest few. Auto-compact snapshots appear live via
+                `snapshot:created`. */}
+            {session && (
               <div>
-                <SectionLabel>Memory · snapshots</SectionLabel>
-                <DeferredNote>
-                  <span className="flex items-center gap-1.5">
-                    <Camera className="w-3.5 h-3.5" />
-                    Session snapshots coming in M4
-                  </span>
-                </DeferredNote>
+                <SectionLabel>
+                  <span>Memory · snapshots</span>
+                  <button
+                    onClick={doSnapshot}
+                    disabled={snapshotBusy}
+                    title="Create a manual snapshot"
+                    className="normal-case tracking-normal text-[10.5px] font-medium text-[#0a84ff] hover:underline disabled:opacity-40 disabled:hover:no-underline flex items-center gap-1"
+                  >
+                    <Camera className="w-3 h-3" />
+                    {snapshotBusy ? "Saving…" : "Snapshot now"}
+                  </button>
+                </SectionLabel>
+                <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1 text-[11.5px]">
+                  {snapshotError && (
+                    <div className="text-[10.5px] text-[#ff3b30]">Couldn't save snapshot</div>
+                  )}
+                  {snapshots.length === 0 ? (
+                    <div className="text-[10.5px] text-[#a1a1a6] py-0.5">No snapshots yet</div>
+                  ) : (
+                    snapshots.map((s) => (
+                      <div key={s.id} className="flex items-center gap-1.5">
+                        {s.type === "auto" ? (
+                          <Clock className="w-3 h-3 shrink-0 text-[#ff9f0a]" />
+                        ) : (
+                          <Camera className="w-3 h-3 shrink-0 text-[#0a84ff]" />
+                        )}
+                        <span className="font-medium shrink-0">{s.type}</span>
+                        {s.tokens != null && (
+                          <span className="text-[#6e6e73] truncate flex-1 min-w-0">
+                            ~{s.tokens.toLocaleString()} tok
+                          </span>
+                        )}
+                        <span className="text-[10px] text-[#a1a1a6] shrink-0 ml-auto">
+                          {timeHint(s.createdAt)}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             )}
 
@@ -286,23 +427,30 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
           </>
         )}
 
-        {/* Context meter — REAL only if the session reports token counts.
-            (Snapshot manager / Memory section is M4; we do NOT fabricate a meter.) */}
-        {session && session.contextTokens != null && session.contextLimit != null && session.contextLimit > 0 && (
+        {/* Context meter — LIVE from `session:context` estimates (falls back to
+            the session prop). HONESTY: the count is an ESTIMATE (streamed-byte
+            derived, ≈4 chars/token), NOT exact provider usage — labelled below.
+            Rendered only when a real session reports a usable limit. */}
+        {showMeter && meterTokens != null && meterLimit != null && (
           <div>
             <SectionLabel>Context</SectionLabel>
             <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1.5 text-[11.5px]">
               <div className="flex items-center justify-between text-[#6e6e73]">
-                <span>tokens</span>
+                <span className="flex items-center gap-1">
+                  tokens
+                  {meterEstimated && (
+                    <span className="text-[9.5px] text-[#a1a1a6] font-normal">estimate</span>
+                  )}
+                </span>
                 <span className="font-mono">
-                  {session.contextTokens.toLocaleString()} / {session.contextLimit.toLocaleString()}
+                  {meterTokens.toLocaleString()} / {meterLimit.toLocaleString()}
                 </span>
               </div>
               <div className="h-1.5 rounded-full bg-black/[0.06] overflow-hidden">
                 <div
                   className="h-full bg-[#0a84ff]"
                   style={{
-                    width: `${Math.min(100, Math.round((session.contextTokens / session.contextLimit) * 100))}%`,
+                    width: `${Math.min(100, Math.round((meterTokens / meterLimit) * 100))}%`,
                   }}
                 />
               </div>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
 import { ipc } from "../ipc";
-import type { AgentDefinition, WorkspaceAgent } from "../ipc";
+import type { AgentDefinition, Session, WorkspaceAgent } from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
@@ -63,6 +63,9 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   // instanceId → sessionId for already-spawned sessions.
   const [sessions, setSessions] = useState<Record<string, string>>({});
+  // instanceId → the full Session object (carries context token counts for the
+  // Context drawer's live meter). Parallel to `sessions` (which is only the id).
+  const [sessionObjs, setSessionObjs] = useState<Record<string, Session>>({});
   // instanceId → spawn error message (claude not installed, etc.).
   const [spawnErrors, setSpawnErrors] = useState<Record<string, string>>({});
   // Instances a spawn has already been kicked off for — kept in a ref so it
@@ -80,6 +83,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
     setLoadError(false);
     setActiveInstanceId(null);
     setSessions({});
+    setSessionObjs({});
     setSpawnErrors({});
     spawnAttempted.current = new Set();
 
@@ -145,6 +149,9 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
       .spawn({ workspaceAgentId: id })
       .then((session) => {
         setSessions((prev) => ({ ...prev, [id]: session.id }));
+        // Stash the full Session too so the Context drawer can seed its live
+        // meter from the spawned session's token counts.
+        setSessionObjs((prev) => ({ ...prev, [id]: session }));
       })
       .catch((err: unknown) => {
         // Allow a retry on a later re-select by clearing the attempt mark.
@@ -197,6 +204,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
     ? (tabs.find((t) => t.instanceId === activeInstanceId) ?? null)
     : null;
   const activeSessionId = activeInstanceId ? (sessions[activeInstanceId] ?? null) : null;
+  const activeSession = activeInstanceId ? (sessionObjs[activeInstanceId] ?? null) : null;
   const activeError = activeInstanceId ? (spawnErrors[activeInstanceId] ?? null) : null;
 
   return (
@@ -283,16 +291,17 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
 
       {/* Right Context drawer — renders only when a tab is active. The active
           tab carries the full AgentDefinition (its config is the drawer's data).
-          The optional `session` prop (which would light up the context meter) is
-          intentionally NOT passed yet: we only memoize each spawn's session id,
-          and a fresh session carries no token counts. Real contextTokens/limit
-          arrive with the snapshot manager in M4 — wire `session` then. */}
+          `session` is the spawned Session (M4.1 snapshot manager): it seeds the
+          live context meter and scopes the Memory · snapshots section. It is
+          `null` until the spawn resolves; the drawer renders the meter/snapshots
+          only once a real session exists. */}
       {activeTab !== null && (
         <ContextDrawer
           def={activeTab.def}
           status={activeTab.status}
           instanceId={activeTab.instanceId}
           roster={roster}
+          session={activeSession}
         />
       )}
     </div>

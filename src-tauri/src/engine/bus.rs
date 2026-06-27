@@ -17,8 +17,10 @@ use tauri::{AppHandle, Emitter};
 
 pub const SESSION_OUTPUT: &str = "session:output";
 pub const SESSION_STATUS: &str = "session:status";
+pub const SESSION_CONTEXT: &str = "session:context";
 pub const FUSION_STAGE: &str = "fusion:stage";
 pub const MESSAGE_INJECTED: &str = "message:injected";
+pub const SNAPSHOT_CREATED: &str = "snapshot:created";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -44,6 +46,46 @@ pub struct SessionOutput {
 pub struct SessionStatus {
     pub session_id: String,
     pub status: String,
+}
+
+/// Payload for `session:context` — a live context-meter update for a session.
+///
+/// Serialises to `{ "sessionId", "contextTokens", "contextLimit", "estimated" }`
+/// (camelCase) to match `SessionContextEvent` in `src/ipc/events.ts`.
+///
+/// HONESTY: `estimated` is always `true` for now — `context_tokens` is derived
+/// from streamed output bytes (≈4 chars/token), NOT from real provider
+/// token-usage telemetry. The UI labels the meter "estimate" accordingly.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContext {
+    pub session_id: String,
+    pub context_tokens: i64,
+    pub context_limit: i64,
+    pub estimated: bool,
+}
+
+/// Payload for `snapshot:created` — a snapshot (manual or auto-compact) was
+/// persisted for a session.
+///
+/// Serialises to `{ "sessionId", "snapshotId", "type", "tokens"?, "triggerPct"? }`
+/// (camelCase) to match `SnapshotCreatedEvent` in `src/ipc/events.ts`. The kind
+/// field is wired as `"type"` to align with the `Snapshot.type` domain field and
+/// the `snapshot.create` payload (one name across the wire). `tokens` and
+/// `trigger_pct` are `Option` (a session with no token estimate yet has neither);
+/// `skip_serializing_if` omits the key entirely when `None` (matching the
+/// optional `tokens?` / `triggerPct?` TS fields — never `null`).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotCreated {
+    pub session_id: String,
+    pub snapshot_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_pct: Option<i64>,
 }
 
 /// Payload for `fusion:stage` — stage progress in a multi-agent fusion run.
@@ -105,6 +147,16 @@ pub fn session_status(app: &AppHandle, payload: SessionStatus) -> tauri::Result<
     emit(app, SESSION_STATUS, payload)
 }
 
+/// Emit a `session:context` event carrying a live context-meter estimate.
+pub fn session_context(app: &AppHandle, payload: SessionContext) -> tauri::Result<()> {
+    emit(app, SESSION_CONTEXT, payload)
+}
+
+/// Emit a `snapshot:created` event carrying a freshly-persisted snapshot.
+pub fn snapshot_created(app: &AppHandle, payload: SnapshotCreated) -> tauri::Result<()> {
+    emit(app, SNAPSHOT_CREATED, payload)
+}
+
 /// Emit a `fusion:stage` event carrying stage-progress data.
 pub fn fusion_stage(app: &AppHandle, payload: FusionStage) -> tauri::Result<()> {
     emit(app, FUSION_STAGE, payload)
@@ -146,6 +198,71 @@ mod tests {
         })
         .unwrap();
         assert_eq!(val, json!({ "sessionId": "s2", "status": "running" }));
+    }
+
+    #[test]
+    fn session_context_camel_case() {
+        let val = serde_json::to_value(SessionContext {
+            session_id: "s1".into(),
+            context_tokens: 50_000,
+            context_limit: 200_000,
+            estimated: true,
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({
+                "sessionId": "s1",
+                "contextTokens": 50_000,
+                "contextLimit": 200_000,
+                "estimated": true
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_created_camel_case() {
+        let val = serde_json::to_value(SnapshotCreated {
+            session_id: "s1".into(),
+            snapshot_id: "snap1".into(),
+            kind: "manual".into(),
+            tokens: Some(50_000),
+            trigger_pct: Some(25),
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({
+                "sessionId": "s1",
+                "snapshotId": "snap1",
+                "type": "manual",
+                "tokens": 50_000,
+                "triggerPct": 25
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_created_omits_tokens_when_none() {
+        // `tokens: None` must omit the key (TS `tokens?: number`), NOT serialise
+        // `"tokens": null` — null is unassignable under strict null checks.
+        let val = serde_json::to_value(SnapshotCreated {
+            session_id: "s1".into(),
+            snapshot_id: "snap1".into(),
+            kind: "auto".into(),
+            tokens: None,
+            trigger_pct: None,
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({ "sessionId": "s1", "snapshotId": "snap1", "type": "auto" })
+        );
+        assert!(val.get("tokens").is_none(), "tokens key must be absent");
+        assert!(
+            val.get("triggerPct").is_none(),
+            "triggerPct key must be absent"
+        );
     }
 
     #[test]

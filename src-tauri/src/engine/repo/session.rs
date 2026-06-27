@@ -145,6 +145,32 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SessionRow>
         .map_err(cb_err)
 }
 
+/// Update a session's context-token count and bump `last_active_at` to now.
+///
+/// Called by the output forwarder (`commands::instance`) as streamed output
+/// accumulates, so the live context meter reflects the rolling estimate. The
+/// stored `context_tokens` is a labelled ESTIMATE (no real provider telemetry
+/// yet — see the forwarder's flush logic), not exact provider usage.
+///
+/// chain-builder (single-table UPDATE), mirroring `workspace_agent::set_status`.
+pub async fn set_context_tokens(
+    pool: &SqlitePool,
+    session_id: &str,
+    tokens: i64,
+) -> sqlx::Result<()> {
+    let now = Utc::now().to_rfc3339();
+    QueryBuilder::<Sqlite>::table("session")
+        .update([
+            ("context_tokens", Bind::I64(tokens)),
+            ("last_active_at", Bind::Text(now)),
+        ])
+        .where_eq("id", session_id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -247,6 +273,34 @@ mod tests {
         assert!(
             second.is_err(),
             "second session for same workspace_agent must fail (UNIQUE constraint)"
+        );
+    }
+
+    /// set_context_tokens updates the count and stamps a non-null last_active_at.
+    #[tokio::test]
+    async fn set_context_tokens_reflected_in_get() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+
+        let row = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create_for_instance failed");
+        // Fresh session has 0 tokens and a NULL last_active_at.
+        assert_eq!(row.context_tokens, Some(0));
+        assert!(row.last_active_at.is_none());
+
+        set_context_tokens(&pool, &row.id, 12_345)
+            .await
+            .expect("set_context_tokens failed");
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(fetched.context_tokens, Some(12_345));
+        assert!(
+            fetched.last_active_at.is_some(),
+            "last_active_at must be stamped after an update"
         );
     }
 

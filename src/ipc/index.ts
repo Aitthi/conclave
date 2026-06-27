@@ -24,14 +24,18 @@ export type {
   EventName,
   SessionOutputEvent,
   SessionStatusEvent,
+  SessionContextEvent,
   FusionStageEvent,
   MessageInjectedEvent,
+  SnapshotCreatedEvent,
 } from "./events";
 export {
   EVENT_NAMES,
   useEvent,
   useSessionOutput,
   useSessionStatus,
+  useSessionContext,
   useFusionStage,
   useMessageInjected,
+  useSnapshotCreated,
 } from "./events";

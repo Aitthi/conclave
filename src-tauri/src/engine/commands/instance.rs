@@ -3,6 +3,24 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 
+// ── Context-estimate constants ────────────────────────────────────────────────
+//
+// HONESTY: there is no real provider token-usage telemetry yet, so the live
+// context meter is a labelled ESTIMATE derived from streamed output bytes. We
+// approximate ≈4 chars per token (a common rough English ratio) and persist the
+// running estimate every ~100 tokens of output, NOT on every delta — a DB write
+// per chunk would be wasteful. Both values are coarse on purpose.
+
+/// Rough characters-per-token ratio for the streamed-output estimate.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Persist + emit the context estimate once this many new chars accumulate
+/// (≈100 tokens between writes).
+const FLUSH_CHARS: usize = 400;
+
+/// Auto-compact trigger as a whole percent of the context limit (≈90%).
+const AUTO_COMPACT_PCT: i64 = 90;
+
 // ── Request types ────────────────────────────────────────────────────────────
 
 /// Payload for `instance.list` — filter by workspace.
@@ -204,7 +222,26 @@ async fn forward_session_output(
     session_id: String,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
 ) {
+    // Read the session's context limit once (default if unset or on error) — it
+    // drives both the live meter denominator and the auto-compact threshold.
+    let limit = match repo::session::get(&db, &session_id).await {
+        Ok(Some(s)) => s
+            .context_limit
+            .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
+        _ => repo::session::DEFAULT_CONTEXT_LIMIT,
+    };
+
+    // Rolling ESTIMATE of context usage in characters. `last_flush_chars` is the
+    // baseline at the previous persist, so we only write every FLUSH_CHARS.
+    let mut total_chars: usize = 0;
+    let mut last_flush_chars: usize = 0;
+
     while let Some(chunk) = output_rx.recv().await {
+        // Count before moving `chunk` into the emit — avoids cloning every chunk
+        // just to measure it. `chars().count()` (not `len()`) so multi-byte UTF-8
+        // output isn't over-counted in the ≈4-chars/token estimate.
+        total_chars += chunk.chars().count();
+
         if let Some(app) = &app {
             let _ = bus::session_output(
                 app,
@@ -213,6 +250,22 @@ async fn forward_session_output(
                     chunk,
                 },
             );
+        }
+
+        // Flush the estimate roughly every ~100 tokens of new output.
+        if total_chars - last_flush_chars >= FLUSH_CHARS {
+            let compacted =
+                flush_context_estimate(&db, app.as_ref(), &session_id, total_chars, limit).await;
+            last_flush_chars = total_chars;
+            if compacted {
+                // Auto-compact boundary: model the post-compaction window by
+                // resetting the estimate baseline so the meter re-arms and won't
+                // re-fire until it fills again. This is an ESTIMATE-based
+                // compaction boundary — real summary carry-forward is deferred
+                // to M4.2 (the snapshot's carried_forward stays NULL).
+                total_chars = 0;
+                last_flush_chars = 0;
+            }
         }
     }
     // Child exited / EOF. Idempotent self-termination cleanup.
@@ -228,6 +281,71 @@ async fn forward_session_output(
             );
         }
     }
+}
+
+/// Persist + emit the current context estimate, then run the auto-compact check.
+///
+/// Computes `tokens` from accumulated output chars (≈4 chars/token), writes the
+/// estimate to the session, and emits a `session:context` event (labelled
+/// `estimated: true`). If the estimate crosses the auto-compact threshold, an
+/// `auto` snapshot is created via the shared `snapshot::create_auto` path and a
+/// second `session:context` with `context_tokens: 0` is emitted to model the
+/// post-compaction window. DB/emit errors are non-fatal (best-effort meter).
+///
+/// Returns `true` iff an auto-compaction fired, so the caller can reset its
+/// char baseline and re-arm the trigger.
+async fn flush_context_estimate(
+    db: &sqlx::SqlitePool,
+    app: Option<&tauri::AppHandle>,
+    session_id: &str,
+    total_chars: usize,
+    limit: i64,
+) -> bool {
+    let tokens = (total_chars / CHARS_PER_TOKEN) as i64;
+
+    // Best-effort persist — a failed write must not kill the forwarder.
+    let _ = repo::session::set_context_tokens(db, session_id, tokens).await;
+
+    if let Some(app) = app {
+        let _ = bus::session_context(
+            app,
+            bus::SessionContext {
+                session_id: session_id.to_owned(),
+                context_tokens: tokens,
+                context_limit: limit,
+                estimated: true,
+            },
+        );
+    }
+
+    if super::snapshot::should_auto_compact(tokens, limit, AUTO_COMPACT_PCT) {
+        // Shared auto-snapshot path (also emits `snapshot:created`). A failed
+        // create is non-fatal (the meter keeps running), but we LOG it: the meter
+        // is about to reset to a zero window, so without the snapshot row the UI
+        // would imply a compaction that left no timeline entry. Logging makes that
+        // discrepancy observable rather than silent.
+        if let Err(e) = super::snapshot::create_auto(db, app, session_id, tokens, limit).await {
+            eprintln!("auto-compact snapshot failed for session {session_id}: {e}");
+        }
+
+        // Post-compaction: persist + emit a fresh (estimated) zero window. The
+        // real carry-forward summary is deferred to M4.2.
+        let _ = repo::session::set_context_tokens(db, session_id, 0).await;
+        if let Some(app) = app {
+            let _ = bus::session_context(
+                app,
+                bus::SessionContext {
+                    session_id: session_id.to_owned(),
+                    context_tokens: 0,
+                    context_limit: limit,
+                    estimated: true,
+                },
+            );
+        }
+        return true;
+    }
+
+    false
 }
 
 /// Stop a live session: abort its backend task, mark the instance idle, emit status.
@@ -428,6 +546,113 @@ mod tests {
             .expect("get failed")
             .expect("row exists");
         assert_eq!(row.status, "idle");
+    }
+
+    /// The forwarder must persist a context-token ESTIMATE once enough output
+    /// chars accumulate (≥ FLUSH_CHARS), before EOF. app=None in tests, so the
+    /// `session:context` emit is skipped — we assert only the DB write landed.
+    #[tokio::test]
+    async fn forwarder_updates_context_estimate() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        assert!(state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            rx,
+        ));
+
+        // Push > FLUSH_CHARS (400) chars so a flush fires.
+        tx.send("x".repeat(500)).await.expect("send chunk failed");
+        drop(tx); // EOF → forwarder finishes.
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert!(
+            after.context_tokens.unwrap_or(0) > 0,
+            "forwarder must persist a positive token estimate (got {:?})",
+            after.context_tokens
+        );
+        // 500 chars / 4 ≈ 125 tokens.
+        assert_eq!(after.context_tokens, Some(125));
+    }
+
+    /// The forwarder's auto-compact branch: enough streamed output to cross 90%
+    /// of the default 200_000-token limit (= 180_000 tokens = 720_000 chars)
+    /// must create an `auto` snapshot AND reset the persisted estimate to the
+    /// zero post-compaction window. Exercises the `if compacted { … }` reset that
+    /// no other test covers (the snapshot repo test calls `create_auto` directly,
+    /// bypassing the forwarder).
+    #[tokio::test]
+    async fn forwarder_auto_compacts_at_threshold() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        assert!(state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            rx,
+        ));
+
+        // 720_000 chars / 4 = 180_000 tokens = 90% of the 200_000 default limit.
+        tx.send("x".repeat(720_000))
+            .await
+            .expect("send chunk failed");
+        drop(tx); // EOF → forwarder finishes.
+        task.await.expect("forwarder task panicked");
+
+        // An `auto` snapshot was persisted for the session…
+        let snaps = repo::snapshot::list_for_session(&state.db, &session.id)
+            .await
+            .expect("list_for_session failed");
+        assert_eq!(snaps.len(), 1, "auto-compact must persist one snapshot");
+        assert_eq!(snaps[0].r#type, "auto");
+        assert_eq!(snaps[0].tokens, Some(180_000));
+        assert_eq!(snaps[0].trigger_pct, Some(90));
+
+        // …and the estimate was reset to the zero post-compaction window.
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_tokens,
+            Some(0),
+            "estimate must reset to 0 after an auto-compact boundary"
+        );
     }
 
     #[tokio::test]

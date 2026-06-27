@@ -20,6 +20,7 @@ pub mod agent_definition;
 pub mod blackboard;
 pub mod inter_agent_message;
 pub mod session;
+pub mod snapshot;
 pub mod workspace;
 pub mod workspace_agent;
 
