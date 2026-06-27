@@ -186,5 +186,6 @@ CREATE INDEX idx_workspace_agent_workspace  ON workspace_agent(workspace_id);
 CREATE INDEX idx_snapshot_session           ON snapshot(session_id);
 CREATE INDEX idx_blackboard_entry_workspace ON blackboard_entry(workspace_id);
 CREATE INDEX idx_inter_agent_msg_to         ON inter_agent_message(to_instance_id);
+CREATE INDEX idx_inter_agent_msg_from       ON inter_agent_message(from_instance_id);
 CREATE INDEX idx_fusion_run_session         ON fusion_run(session_id);
 CREATE INDEX idx_fusion_panel_resp_run      ON fusion_panel_response(fusion_run_id);

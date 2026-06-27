@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PanelRight,
   Bot,
@@ -9,8 +9,12 @@ import {
   Sparkles,
   Camera,
   Waypoints,
+  CornerDownLeft,
+  CornerUpRight,
 } from "lucide-react";
-import type { AgentDefinition, Session, WorkspaceAgent } from "../ipc";
+import { ipc, useMessageInjected } from "../ipc";
+import type { AgentDefinition, InterAgentMessage, Session, WorkspaceAgent } from "../ipc";
+import type { RoutingTarget } from "./RoutingPicker";
 
 // ---------------------------------------------------------------------------
 // Right-side Context drawer — shows the ACTIVE agent's configuration. The
@@ -29,8 +33,27 @@ interface ContextDrawerProps {
   def: AgentDefinition;
   /** Live status of the active instance. */
   status: WorkspaceAgent["status"];
+  /** The active instance id — keys the inbox/outbox message query. */
+  instanceId: string;
+  /** The workspace routing roster — resolves message counterpart names. */
+  roster: RoutingTarget[];
   /** The active session, when one has been spawned (for context meter). */
   session?: Session | null;
+}
+
+// How many recent inbox/outbox rows the Messages log shows.
+const MESSAGE_LOG_LIMIT = 6;
+
+// Compact relative-ish time hint from an ISO `createdAt` ("เมื่อสักครู่" / "5 น."
+// / "3 ชม." / a date). Best-effort, never throws — falls back to the raw string.
+function timeHint(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (diffSec < 60) return "เมื่อสักครู่";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} น.`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} ชม.`;
+  return `${Math.floor(diffSec / 86400)} วัน`;
 }
 
 function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
@@ -64,13 +87,54 @@ function DeferredNote({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function ContextDrawer({ def, status, session }: ContextDrawerProps) {
+export function ContextDrawer({ def, status, instanceId, roster, session }: ContextDrawerProps) {
   // Simplest collapse affordance: internal open/closed state. The header
   // `panel-right` button toggles it; collapsed → a thin strip to reopen.
   // Scope: this state is workspace-scoped — it persists across tab switches
   // (drawer visibility is a user preference, not per-agent) and resets only
   // when the pane remounts (WorkspacePane is keyed by workspaceId).
   const [open, setOpen] = useState(true);
+
+  // Recent inbox/outbox for this instance — REAL data from `message.list`.
+  const [messages, setMessages] = useState<InterAgentMessage[]>([]);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Fetch on mount / when the active instance changes, and on each injection.
+  // `refetch` is memoised per instanceId so the effect deps stay honest (no
+  // exhaustive-deps trap). A monotonic seq guard drops stale results: if two
+  // injections fire in quick succession, only the latest list response wins,
+  // even if an earlier (slower) request settles after it.
+  const seq = useRef(0);
+  const refetch = useCallback(() => {
+    const mine = ++seq.current;
+    ipc.message
+      .list({ instanceId, limit: MESSAGE_LOG_LIMIT })
+      .then((rows) => {
+        if (mounted.current && mine === seq.current) setMessages(rows);
+      })
+      .catch((err: unknown) => {
+        // Non-Tauri dev context (plain `vite`) lands here — surface in dev only.
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: message.list failed", err);
+        }
+      });
+  }, [instanceId]);
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+
+  // Refetch when an injection involving this instance fires (in OR out).
+  useMessageInjected(instanceId, () => refetch());
+
+  // Resolve a counterpart instance id → display name via the roster.
+  const nameOf = (id: string): string =>
+    roster.find((t) => t.instanceId === id)?.name ?? id;
 
   if (!open) {
     return (
@@ -176,8 +240,8 @@ export function ContextDrawer({ def, status, session }: ContextDrawerProps) {
               </div>
             )}
 
-            {/* Messages — message LOG is M3 (deferred). The routing POLICY below
-                is REAL config from AgentDefinition (allowedSenders / autoSubmitInjected). */}
+            {/* Messages — routing POLICY (REAL config from AgentDefinition) + a
+                REAL recent inbox/outbox log from `message.list`. */}
             <div>
               <SectionLabel>Messages</SectionLabel>
               <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1.5 text-[11.5px]">
@@ -195,8 +259,38 @@ export function ContextDrawer({ def, status, session }: ContextDrawerProps) {
                   </span>
                   <span className="font-medium">{def.autoSubmitInjected ? "เปิด" : "ปิด"}</span>
                 </div>
-                <div className="text-[10.5px] text-[#a1a1a6] pt-0.5">
-                  บันทึกข้อความระหว่าง agent จะมาใน M3
+
+                {/* Recent inbox/outbox — newest first. Honest empty state. */}
+                <div className="pt-1.5 mt-0.5 border-t border-black/[0.06] space-y-1">
+                  {messages.length === 0 ? (
+                    <div className="text-[10.5px] text-[#a1a1a6] py-0.5">ยังไม่มีข้อความ</div>
+                  ) : (
+                    messages.map((m) => {
+                      const inbound = m.toInstanceId === instanceId;
+                      const counterpart = inbound ? m.fromInstanceId : m.toInstanceId;
+                      return (
+                        <div key={m.id} className="flex items-center gap-1.5">
+                          {inbound ? (
+                            <CornerDownLeft className="w-3 h-3 shrink-0 text-[#30a14e]" />
+                          ) : (
+                            <CornerUpRight className="w-3 h-3 shrink-0 text-[#0a84ff]" />
+                          )}
+                          <span className="text-[#6e6e73] shrink-0">
+                            {inbound ? "from" : "to"}
+                          </span>
+                          <span className="font-medium truncate flex-1 min-w-0">
+                            {nameOf(counterpart)}
+                          </span>
+                          {m.status === "queued" && (
+                            <span className="text-[10px] text-[#ff9f0a] shrink-0">คิว</span>
+                          )}
+                          <span className="text-[10px] text-[#a1a1a6] shrink-0">
+                            {timeHint(m.createdAt)}
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
             </div>

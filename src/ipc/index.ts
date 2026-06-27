@@ -24,6 +24,7 @@ export type {
   SessionOutputEvent,
   SessionStatusEvent,
   FusionStageEvent,
+  MessageInjectedEvent,
 } from "./events";
 export {
   EVENT_NAMES,
@@ -31,4 +32,5 @@ export {
   useSessionOutput,
   useSessionStatus,
   useFusionStage,
+  useMessageInjected,
 } from "./events";

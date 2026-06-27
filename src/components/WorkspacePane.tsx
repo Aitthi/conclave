@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
 import { ipc } from "../ipc";
 import type { AgentDefinition, WorkspaceAgent } from "../ipc";
@@ -6,6 +6,11 @@ import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
 import { ContextDrawer } from "./ContextDrawer";
+import type { RoutingTarget } from "./RoutingPicker";
+
+// Re-exported here (the pane builds the roster) for consumers that think of the
+// routing roster as a workspace concept; the type itself lives with the picker.
+export type { RoutingTarget };
 
 interface WorkspacePaneProps {
   workspaceId: string;
@@ -173,6 +178,21 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
     );
   }
 
+  // Routing roster — ALL agents (the picker shows self + others; consumers
+  // exclude self where needed). Derived straight from the tab view-models.
+  // Memoised so its identity is stable across renders (safe when consumers
+  // become memoised later; harmless today).
+  const roster: RoutingTarget[] = useMemo(
+    () =>
+      tabs.map((t) => ({
+        instanceId: t.instanceId,
+        name: t.name,
+        color: t.color,
+        type: t.type,
+      })),
+    [tabs],
+  );
+
   const activeTab = activeInstanceId
     ? (tabs.find((t) => t.instanceId === activeInstanceId) ?? null)
     : null;
@@ -219,14 +239,18 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
           ) : activeSessionId ? (
             <>
               <Terminal key={activeSessionId} sessionId={activeSessionId} />
-              <StdinBar sessionId={activeSessionId} />
+              <StdinBar
+                sessionId={activeSessionId}
+                instanceId={activeTab.instanceId}
+                roster={roster}
+              />
             </>
           ) : (
             <>
               <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#a1a1a6]">
                 กำลังเปิด session…
               </div>
-              <StdinBar sessionId={null} />
+              <StdinBar sessionId={null} instanceId={activeTab.instanceId} roster={roster} />
             </>
           )
         ) : activeTab.type === "chat" ? (
@@ -239,6 +263,8 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
             <ChatView
               key={activeSessionId}
               sessionId={activeSessionId}
+              instanceId={activeTab.instanceId}
+              roster={roster}
               agentName={activeTab.name}
               agentColor={activeTab.color}
             />
@@ -262,7 +288,12 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
           and a fresh session carries no token counts. Real contextTokens/limit
           arrive with the snapshot manager in M4 — wire `session` then. */}
       {activeTab !== null && (
-        <ContextDrawer def={activeTab.def} status={activeTab.status} />
+        <ContextDrawer
+          def={activeTab.def}
+          status={activeTab.status}
+          instanceId={activeTab.instanceId}
+          roster={roster}
+        />
       )}
     </div>
   );

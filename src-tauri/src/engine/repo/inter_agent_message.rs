@@ -8,9 +8,13 @@
 //! # chain-builder usage
 //!
 //! [`create`] uses chain-builder for a single-table INSERT — same idiom as
-//! `session::create_for_instance` / `workspace_agent::create`. No raw sqlx is
-//! needed. A future read path (M3.2 inbox/outbox queries) will add the SELECT
-//! helpers; this module is intentionally limited to `create` + the row.
+//! `session::create_for_instance` / `workspace_agent::create`.
+//!
+//! [`list_for_instance`] is the M3.2 inbox/outbox reader. It uses raw
+//! `sqlx::query_as` (the codebase's documented fallback — see
+//! `agent_definition::list_with_counts`) because the filter is an OR across two
+//! columns (`to_instance_id = ? OR from_instance_id = ?`), which chain-builder
+//! 3.1's `where_eq` chain (AND-only) cannot express cleanly.
 
 use super::cb_err;
 use chain_builder::{QueryBuilder, Sqlite, Value as Bind};
@@ -93,6 +97,35 @@ pub async fn create(
     })
 }
 
+/// List the inbox + outbox for one instance: every message where the instance
+/// is either the sender OR the recipient, newest first, capped at `limit`.
+///
+/// Raw `sqlx::query_as` (not chain-builder): the `OR` across two columns is the
+/// documented fallback case — chain-builder 3.1's `where_eq` chain only ANDs
+/// conditions, so an inbox-or-outbox filter can't be built fluently. The column
+/// list mirrors the `InterAgentMessageRow` fields (keep in sync with the table).
+pub async fn list_for_instance(
+    pool: &SqlitePool,
+    instance_id: &str,
+    limit: i64,
+) -> sqlx::Result<Vec<InterAgentMessageRow>> {
+    // Self-defend: SQLite treats a negative LIMIT as "unbounded". Callers
+    // (message::list) already clamp, but the repo guards too so a future
+    // crate-internal caller can't trigger an unbounded scan.
+    let limit = limit.max(1);
+    sqlx::query_as::<_, InterAgentMessageRow>(
+        "SELECT id, from_instance_id, to_instance_id, text, status, auto_submitted, created_at \
+         FROM inter_agent_message \
+         WHERE to_instance_id = ?1 OR from_instance_id = ?1 \
+         ORDER BY created_at DESC \
+         LIMIT ?2",
+    )
+    .bind(instance_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -154,6 +187,78 @@ mod tests {
         assert_eq!(row.auto_submitted, Some(true));
         assert!(!row.id.is_empty());
         assert!(!row.created_at.is_empty());
+    }
+
+    /// list_for_instance returns BOTH inbox (to=me) and outbox (from=me) rows
+    /// for the queried instance, newest-first, and excludes unrelated messages.
+    #[tokio::test]
+    async fn list_for_instance_in_and_out_newest_first() {
+        let pool = connect_in_memory().await;
+        let a = fixture_instance(&pool, "Alpha").await;
+        let b = fixture_instance(&pool, "Bravo").await;
+        let c = fixture_instance(&pool, "Charlie").await;
+
+        // Insert in a known chronological order (created_at is RFC3339 with
+        // sub-second precision, so sequential awaits produce strictly-increasing
+        // timestamps). Sleep a hair to guarantee distinct, orderable values.
+        // 1. a → b  (outbox for a)
+        let m1 = create(&pool, &a, &b, "first", "delivered", true)
+            .await
+            .expect("create m1 failed");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // 2. b → a  (inbox for a)
+        let m2 = create(&pool, &b, &a, "second", "delivered", true)
+            .await
+            .expect("create m2 failed");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // 3. b → c  (unrelated to a)
+        let _m3 = create(&pool, &b, &c, "third", "queued", true)
+            .await
+            .expect("create m3 failed");
+
+        let rows = list_for_instance(&pool, &a, 50)
+            .await
+            .expect("list_for_instance failed");
+
+        // Only a's two messages, the unrelated b→c excluded.
+        assert_eq!(rows.len(), 2, "expected both in+out rows for a");
+        // Newest first: m2 (inbox) before m1 (outbox).
+        assert_eq!(rows[0].id, m2.id, "newest (inbox) first");
+        assert_eq!(rows[1].id, m1.id, "older (outbox) second");
+        // Both directions present.
+        assert!(
+            rows.iter().any(|r| r.to_instance_id == a),
+            "inbox row present"
+        );
+        assert!(
+            rows.iter().any(|r| r.from_instance_id == a),
+            "outbox row present"
+        );
+    }
+
+    /// The `limit` argument caps the returned row count.
+    #[tokio::test]
+    async fn list_for_instance_respects_limit() {
+        let pool = connect_in_memory().await;
+        let a = fixture_instance(&pool, "Alpha").await;
+        let b = fixture_instance(&pool, "Bravo").await;
+
+        for i in 0..4 {
+            create(&pool, &a, &b, &format!("msg {i}"), "delivered", true)
+                .await
+                .expect("create failed");
+            // Space inserts so created_at strictly increases (sub-second RFC3339
+            // ties would make "which 2 rows" underdetermined below).
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let rows = list_for_instance(&pool, &a, 2)
+            .await
+            .expect("list_for_instance failed");
+        assert_eq!(rows.len(), 2, "limit must cap the row count");
+        // ...and they must be the NEWEST two (msg 3, msg 2), not the oldest.
+        assert_eq!(rows[0].text, "msg 3");
+        assert_eq!(rows[1].text, "msg 2");
     }
 
     /// JSON serialization uses camelCase — locks the TS InterAgentMessage contract.

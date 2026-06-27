@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, CornerDownLeft, CornerUpRight } from "lucide-react";
 import { ipc } from "../ipc";
-import { useSessionOutput } from "../ipc";
+import { useSessionOutput, useMessageInjected } from "../ipc";
 import { ToolCallCard } from "./ToolCallCard";
 import { SkillRunningCard } from "./SkillRunningCard";
+import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
 
 // ---------------------------------------------------------------------------
 // IMPORTANT — backend capability note
@@ -22,6 +23,10 @@ import { SkillRunningCard } from "./SkillRunningCard";
 
 interface ChatViewProps {
   sessionId: string;
+  /** Own instance id — the SELF routing target + the inbox/outbox key. */
+  instanceId: string;
+  /** All routable agents in the workspace (includes self). */
+  roster: RoutingTarget[];
   /** Agent display name — drives the assistant avatar letter. */
   agentName: string;
   /** Agent accent color — the assistant avatar fill. */
@@ -32,11 +37,17 @@ interface ChatViewProps {
 type ChatPart =
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; status: "running" | "done" | "error"; detail?: string }
-  | { kind: "skill"; name: string; status: "running" | "done" };
+  | { kind: "skill"; name: string; status: "running" | "done" }
+  // Inbox: an injection THIS agent received (origin-tagged incoming bubble).
+  | { kind: "inbox"; fromName: string; tint: string; autoSubmitted: boolean; text: string }
+  // Outbox: a routed send confirmation (this agent → another agent).
+  | { kind: "outbox"; toName: string; tint: string; status: "queued" | "delivered"; text: string };
 
 interface ChatMsg {
   id: string;
-  role: "user" | "assistant";
+  // "event" rows carry inbox/outbox parts (inter-agent routing chrome); they
+  // render full-width with no avatar, distinct from user/assistant turns.
+  role: "user" | "assistant" | "event";
   parts: ChatPart[];
 }
 
@@ -45,10 +56,18 @@ interface ChatMsg {
 // double-invokes updaters; a counter mutated inside would skip values).
 const makeId = (): string => crypto.randomUUID();
 
-export function ChatView({ sessionId, agentName, agentColor }: ChatViewProps) {
+export function ChatView({
+  sessionId,
+  instanceId,
+  roster,
+  agentName,
+  agentColor,
+}: ChatViewProps) {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // Routing target for the NEXT send. Default = self (own session).
+  const [targetId, setTargetId] = useState(instanceId);
 
   const avatarLetter = agentName[0]?.toUpperCase() ?? "A";
 
@@ -100,10 +119,38 @@ export function ChatView({ sessionId, agentName, agentColor }: ChatViewProps) {
 
   useSessionOutput(sessionId, (e) => appendChunk(e.chunk));
 
+  // Inbox: render an origin-tagged INCOMING bubble whenever this agent RECEIVES
+  // an injection. The agent's actual reply still streams via useSessionOutput;
+  // this bubble is the inbound stimulus that precedes it. (Outbound events are
+  // ignored here — the outbox confirmation is rendered synchronously on send.)
+  useMessageInjected(instanceId, (e) => {
+    if (e.toInstanceId !== instanceId) return;
+    const sender = roster.find((t) => t.instanceId === e.fromInstanceId);
+    const fromName = sender?.name ?? e.fromInstanceId;
+    const tint = sender?.color ?? "#6e6e73";
+    const id = makeId();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id,
+        role: "event",
+        parts: [{ kind: "inbox", fromName, tint, autoSubmitted: e.autoSubmitted, text: e.text }],
+      },
+    ]);
+  });
+
   async function handleSend() {
     const text = draft.trim();
     if (text.length === 0 || sending) return;
 
+    // Routed send (→ another agent) takes a different path from a self send.
+    const target = roster.find((t) => t.instanceId === targetId);
+    if (target && target.instanceId !== instanceId) {
+      await handleRoutedSend(target, text);
+      return;
+    }
+
+    // ── Self send (own session) — unchanged behavior ──
     // Append the user turn AND a fresh empty assistant bubble (the streaming
     // target the chunks will flow into). Ids pre-generated so the updater is pure.
     const userId = makeId();
@@ -140,6 +187,56 @@ export function ChatView({ sessionId, agentName, agentColor }: ChatViewProps) {
     }
   }
 
+  // Routed send: inject into a TARGET agent's live input. `inject` appends the
+  // newline server-side, so we send the raw text. On success an OUTBOX bubble
+  // confirms delivery (delivered vs queued); target resets to self afterward.
+  async function handleRoutedSend(target: RoutingTarget, text: string) {
+    setDraft("");
+    setSending(true);
+    try {
+      const msg = await ipc.message.inject({
+        fromInstanceId: instanceId,
+        toInstanceId: target.instanceId,
+        text,
+      });
+      if (mounted.current) {
+        const id = makeId();
+        setMessages((prev) => [
+          ...prev,
+          {
+            id,
+            role: "event",
+            parts: [
+              {
+                kind: "outbox",
+                toName: target.name,
+                tint: target.color,
+                status: msg.status,
+                text,
+              },
+            ],
+          },
+        ]);
+        setTargetId(instanceId);
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (mounted.current) {
+        const id = makeId();
+        setMessages((prev) => [
+          ...prev,
+          {
+            id,
+            role: "event",
+            parts: [{ kind: "text", text: `⚠️ ส่งให้ ${target.name} ไม่สำเร็จ: ${detail}` }],
+          },
+        ]);
+      }
+    } finally {
+      if (mounted.current) setSending(false);
+    }
+  }
+
   return (
     <main className="flex-1 flex flex-col min-w-0 bg-white">
       {/* Message list */}
@@ -169,6 +266,19 @@ export function ChatView({ sessionId, agentName, agentColor }: ChatViewProps) {
       {/* Composer */}
       <div className="border-t border-black/[0.07] px-8 py-3 bg-white shrink-0">
         <div className="max-w-[720px] mx-auto">
+          {/* Route reply into… — default self, choose another agent to inject. */}
+          <div className="mb-2 flex items-center gap-2">
+            <RoutingPicker
+              selfId={instanceId}
+              roster={roster}
+              value={targetId}
+              onChange={setTargetId}
+              disabled={sending}
+            />
+            {targetId !== instanceId && (
+              <span className="text-[11px] text-[#a1a1a6]">ฉีดเข้า input ของ agent ปลายทาง · ส่งอัตโนมัติ</span>
+            )}
+          </div>
           <div className="rounded-2xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-3 pt-2.5 pb-2">
             <div className="flex items-end gap-2">
               <textarea
@@ -212,6 +322,61 @@ interface MessageRowProps {
 }
 
 function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps) {
+  // Event rows — inter-agent routing chrome (inbox / outbox). Full-width, no avatar.
+  if (msg.role === "event") {
+    return (
+      <div className="space-y-2.5">
+        {msg.parts.map((part, i) => {
+          const key = `${msg.id}-${i}`;
+          if (part.kind === "inbox") {
+            return (
+              <div
+                key={key}
+                className="rounded-2xl rounded-tl-md px-3.5 py-2.5 bg-[#fafafa]"
+                style={{ boxShadow: `inset 0 0 0 1px ${part.tint}59` }}
+              >
+                <div className="flex items-center gap-1.5 text-[10.5px] font-medium mb-1" style={{ color: part.tint }}>
+                  <CornerDownLeft className="w-3 h-3" />
+                  ฉีดเข้ามาจาก {part.fromName}
+                  {part.autoSubmitted ? " · ส่งอัตโนมัติ" : ""}
+                </div>
+                <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words text-[#1d1d1f]">
+                  {part.text}
+                </div>
+              </div>
+            );
+          }
+          if (part.kind === "outbox") {
+            return (
+              <div key={key} className="flex justify-center">
+                <div className="max-w-[90%] rounded-full bg-[#f2f2f4] px-3 py-1.5 text-[11.5px] text-[#6e6e73] flex items-center gap-1.5">
+                  <CornerUpRight className="w-3 h-3 shrink-0" style={{ color: part.tint }} />
+                  <span className="font-medium text-[#1d1d1f]">→ ส่งให้ {part.toName}</span>
+                  {part.status === "delivered" ? (
+                    <span>· ส่งอัตโนมัติ</span>
+                  ) : (
+                    <span className="text-[#ff9f0a]">· agent ปลายทางยังไม่ทำงาน — คิวไว้แล้ว</span>
+                  )}
+                </div>
+              </div>
+            );
+          }
+          // A routed-send failure surfaces as a plain text notice.
+          if (part.kind === "text") {
+            return (
+              <div key={key} className="flex justify-center">
+                <div className="max-w-[90%] rounded-full bg-[#fff1f0] px-3 py-1.5 text-[11.5px] text-[#ff3b30]">
+                  {part.text}
+                </div>
+              </div>
+            );
+          }
+          return null;
+        })}
+      </div>
+    );
+  }
+
   const isUser = msg.role === "user";
 
   if (isUser) {
@@ -274,6 +439,9 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
               );
             case "skill":
               return <SkillRunningCard key={key} name={part.name} status={part.status} />;
+            // inbox / outbox parts only ever appear on "event" rows (handled above).
+            default:
+              return null;
           }
         })}
       </div>

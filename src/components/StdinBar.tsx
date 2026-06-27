@@ -1,22 +1,44 @@
 import { useEffect, useRef, useState } from "react";
+import { CornerUpRight } from "lucide-react";
 import { ipc } from "../ipc";
+import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
 
 interface StdinBarProps {
   /** The focused session to send input to, or null when none is live. */
   sessionId: string | null;
+  /** Own instance id — the SELF routing target. */
+  instanceId: string;
+  /** All routable agents in the workspace (includes self). */
+  roster: RoutingTarget[];
+}
+
+// A transient outbox confirmation for a routed send (this agent → another).
+interface OutboxNote {
+  toName: string;
+  status: "queued" | "delivered";
 }
 
 /**
  * Input bar pinned below the terminal. On Enter, forwards the line (plus a
- * trailing newline — the backend forwards stdin verbatim) to the live session.
+ * trailing newline — the backend forwards stdin verbatim) to the live session,
+ * OR, when a non-self target is picked, injects it into that agent's session.
  *
  * Send failures (e.g. the session is not running) are surfaced inline rather
  * than swallowed.
+ *
+ * NOTE: inbound injections (this agent RECEIVING) are intentionally NOT banners
+ * here — the injected text already appears in the terminal's stdout stream, so a
+ * separate line would duplicate the PTY echo. We only surface the OUTBOX
+ * confirmation (messages this agent SENT), which has no such overlap.
  */
-export function StdinBar({ sessionId }: StdinBarProps) {
+export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // Routing target for the NEXT send. Default = self (own session).
+  const [targetId, setTargetId] = useState(instanceId);
+  // Last routed-send confirmation (cleared on the next keystroke).
+  const [outbox, setOutbox] = useState<OutboxNote | null>(null);
 
   // Guard setState against a send that resolves after unmount (e.g. the pane
   // closes mid-send) — React 19 no-ops the update but `sending` would otherwise
@@ -29,11 +51,31 @@ export function StdinBar({ sessionId }: StdinBarProps) {
     };
   }, []);
 
-  const disabled = sessionId === null || sending;
+  // Reset the routing target to SELF when the focused instance changes. Unlike
+  // ChatView (keyed by sessionId → remounts per tab), StdinBar persists across
+  // CLI tab switches, so without this the previous tab's target would carry over
+  // and silently inject into the wrong agent.
+  useEffect(() => {
+    setTargetId(instanceId);
+    setOutbox(null);
+  }, [instanceId]);
+
+  const routingToOther = targetId !== instanceId;
+  // Self send needs a live session; a routed inject only needs own instanceId.
+  const disabled = sending || (!routingToOther && sessionId === null);
 
   async function handleSend() {
     const text = value;
-    if (sessionId === null || text.length === 0) return;
+    if (text.length === 0) return;
+
+    const target = roster.find((t) => t.instanceId === targetId);
+    if (target && target.instanceId !== instanceId) {
+      await handleRoutedSend(target, text);
+      return;
+    }
+
+    // ── Self send (own PTY) — unchanged behavior (trailing newline submits) ──
+    if (sessionId === null) return;
     setError(null);
     setSending(true);
     try {
@@ -47,24 +89,76 @@ export function StdinBar({ sessionId }: StdinBarProps) {
     }
   }
 
+  // Routed send: inject into a TARGET agent's live input. `inject` appends the
+  // newline server-side (no trailing "\n" here). On success an outbox note
+  // confirms delivery (delivered vs queued); target resets to self afterward.
+  async function handleRoutedSend(target: RoutingTarget, text: string) {
+    setError(null);
+    setSending(true);
+    try {
+      const msg = await ipc.message.inject({
+        fromInstanceId: instanceId,
+        toInstanceId: target.instanceId,
+        text,
+      });
+      if (mounted.current) {
+        setValue("");
+        setOutbox({ toName: target.name, status: msg.status });
+        setTargetId(instanceId);
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (mounted.current) setError(`ส่งให้ ${target.name} ไม่สำเร็จ: ${detail}`);
+    } finally {
+      if (mounted.current) setSending(false);
+    }
+  }
+
+  const placeholder = routingToOther
+    ? "พิมพ์เพื่อ inject เข้า session ปลายทาง…"
+    : sessionId === null
+      ? "ไม่มี session ที่กำลังทำงาน"
+      : "พิมพ์ข้อความถึง agent…";
+
   return (
     <div className="shrink-0 border-t border-black/[0.06] bg-white">
       {error && (
         <div className="px-3 pt-1.5 text-[11px] text-[#ff3b30]">{error}</div>
       )}
+      {outbox && (
+        <div className="px-3 pt-1.5 text-[11px] flex items-center gap-1.5 text-[#6e6e73]">
+          <CornerUpRight className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
+          <span className="font-medium text-[#1d1d1f]">→ ส่งให้ {outbox.toName}</span>
+          {outbox.status === "delivered" ? (
+            <span>· ส่งอัตโนมัติ</span>
+          ) : (
+            <span className="text-[#ff9f0a]">· agent ปลายทางยังไม่ทำงาน — คิวไว้แล้ว</span>
+          )}
+        </div>
+      )}
       <div className="flex items-center gap-2 px-3 py-2">
+        <RoutingPicker
+          selfId={instanceId}
+          roster={roster}
+          value={targetId}
+          onChange={setTargetId}
+          disabled={sending}
+        />
         <span className="text-[13px] text-[#a1a1a6] font-mono select-none">›</span>
         <input
           value={value}
           disabled={disabled}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value);
+            if (outbox) setOutbox(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
               void handleSend();
             }
           }}
-          placeholder={sessionId === null ? "ไม่มี session ที่กำลังทำงาน" : "พิมพ์ข้อความถึง agent…"}
+          placeholder={placeholder}
           className="flex-1 bg-transparent outline-none text-[13px] font-mono placeholder:text-[#a1a1a6] disabled:opacity-50"
         />
       </div>

@@ -170,6 +170,43 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Payload for `message.list` — the inbox/outbox query for one instance.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListReq {
+    instance_id: String,
+    limit: Option<i64>,
+}
+
+/// Default + max number of messages returned by `message.list`.
+const DEFAULT_LIST_LIMIT: i64 = 50;
+const MAX_LIST_LIMIT: i64 = 200;
+
+/// List an instance's inbox + outbox (inter-agent messages where it is sender
+/// OR recipient), newest-first, as a JSON array of `InterAgentMessage`.
+///
+/// `limit` defaults to [`DEFAULT_LIST_LIMIT`] and is clamped to
+/// `1..=MAX_LIST_LIMIT` so a hostile/garbage value can't ask for an unbounded
+/// scan or a non-positive LIMIT.
+///
+/// Errors:
+/// - malformed payload → [`AppError::Invalid`]
+/// - unknown instance → [`AppError::NotFound`]
+pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let ListReq { instance_id, limit } =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    if !repo::workspace_agent::exists(&state.db, &instance_id).await? {
+        return Err(AppError::NotFound(format!(
+            "instance id={instance_id} not found"
+        )));
+    }
+
+    let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
+    let rows = repo::inter_agent_message::list_for_instance(&state.db, &instance_id, limit).await?;
+    serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +352,50 @@ mod tests {
             val.get("autoSubmitted").and_then(Value::as_bool),
             Some(true)
         );
+    }
+
+    #[tokio::test]
+    async fn list_unknown_instance_not_found() {
+        let state = AppState::for_tests().await;
+        let err = list(&state, json!({ "instanceId": "nope" }))
+            .await
+            .expect_err("list should fail for unknown instance");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn list_returns_in_and_out_newest_first() {
+        let state = AppState::for_tests().await;
+        let a = fixture_instance_id(&state, "Alpha").await;
+        let b = fixture_instance_id(&state, "Bravo").await;
+
+        // a → b (outbox for a), then b → a (inbox for a). Offline targets queue,
+        // which is fine — we only care that both rows persist and come back.
+        inject(
+            &state,
+            json!({ "fromInstanceId": a, "toInstanceId": b, "text": "out" }),
+        )
+        .await
+        .expect("first inject failed");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        inject(
+            &state,
+            json!({ "fromInstanceId": b, "toInstanceId": a, "text": "in" }),
+        )
+        .await
+        .expect("second inject failed");
+
+        let val = list(&state, json!({ "instanceId": a }))
+            .await
+            .expect("list failed");
+        let arr = val.as_array().expect("list returns an array");
+        assert_eq!(arr.len(), 2, "both in+out rows for a");
+        // Newest first: the b→a inbox row.
+        assert_eq!(arr[0].get("text").and_then(Value::as_str), Some("in"));
+        assert_eq!(arr[1].get("text").and_then(Value::as_str), Some("out"));
+        // camelCase contract surfaces through the command boundary.
+        assert!(arr[0].get("fromInstanceId").is_some());
+        assert!(arr[0].get("toInstanceId").is_some());
     }
 
     #[tokio::test]

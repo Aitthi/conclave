@@ -129,6 +129,21 @@ export function useSessionStatus(
 }
 
 /**
+ * Subscribe to inter-agent injections involving a specific instance.
+ * The callback fires for each `MessageInjectedEvent` where the instance is the
+ * recipient (`toInstanceId`) OR the sender (`fromInstanceId`) — so a single
+ * subscription drives both the receiver's inbox and the sender's outbox.
+ */
+export function useMessageInjected(
+  instanceId: string,
+  cb: (event: MessageInjectedEvent) => void,
+): void {
+  useEvent<MessageInjectedEvent>(EVENT_NAMES.messageInjected, (payload) => {
+    if (payload.toInstanceId === instanceId || payload.fromInstanceId === instanceId) cb(payload);
+  });
+}
+
+/**
  * Subscribe to all fusion stage events (not filtered by runId because a
  * single fusion run covers all stages; callers can filter if needed).
  */
