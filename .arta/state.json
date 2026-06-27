@@ -2547,12 +2547,12 @@
           },
           {
             "title": "Rust core skeleton: command router + 19 command stubs",
-            "status": "doing",
+            "status": "done",
             "priority": "urgent"
           },
           {
             "title": "SQLite: migration 0001_init (20 tables, WAL, FK, indexes) จาก dataModel",
-            "status": "todo",
+            "status": "doing",
             "priority": "high"
           },
           {
