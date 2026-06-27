@@ -2557,7 +2557,7 @@
           },
           {
             "title": "Typed IPC: invoke wrapper + event-subscribe React hooks",
-            "status": "doing",
+            "status": "done",
             "priority": "high"
           },
           {

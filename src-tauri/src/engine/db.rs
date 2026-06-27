@@ -1,15 +1,22 @@
 //! Database connection management and migration runner.
 //!
 //! Entry points:
-//! - [`open`]           — on-disk connection for production use
-//! - [`open_in_memory`] — in-memory connection for tests
+//! - [`connect`]           — on-disk pool for production use
+//! - [`connect_in_memory`] — in-memory pool for tests
 //!
 //! Migration strategy: `PRAGMA user_version` is the version counter.
 //! Each milestone appends a new version gate inside [`migrate`].
 
 use std::path::PathBuf;
+use std::time::Duration;
+// `FromStr` is only needed by the in-memory pool helpers, which are test-only.
+#[cfg(test)]
+use std::str::FromStr;
 
-use rusqlite::{Connection, Result};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    SqlitePool,
+};
 
 /// Returns `~/Library/Application Support/Conclave/conclave.db` (macOS).
 /// Creates the parent directory if it does not exist.
@@ -26,66 +33,78 @@ pub fn db_path() -> PathBuf {
     dir.join("conclave.db")
 }
 
-/// Opens the on-disk SQLite database, applies PRAGMAs, and runs pending migrations.
+/// Opens the on-disk SQLite database as a connection pool, applies PRAGMAs,
+/// and runs pending migrations.
 ///
 /// # Errors
-/// Returns [`rusqlite::Error`] if the database file cannot be opened or migrated.
-/// The caller (startup) is expected to `.expect()` on this.
-pub fn open() -> Result<Connection> {
-    let conn = Connection::open(db_path())?;
-    apply_pragmas(&conn, true)?;
-    migrate(&conn)?;
-    Ok(conn)
-}
-
-/// Opens an in-memory SQLite connection suitable for unit tests.
-/// Applies the same PRAGMAs as [`open`] (WAL is skipped — incompatible with
-/// `:memory:`) and runs all migrations.
-///
-/// # Panics
-/// Panics if the in-memory database cannot be opened or migrated.
-#[cfg(test)]
-pub fn open_in_memory() -> Connection {
-    let conn = Connection::open_in_memory().expect("failed to open in-memory db");
-    apply_pragmas(&conn, false).expect("failed to apply pragmas to in-memory db");
-    migrate(&conn).expect("failed to migrate in-memory db");
-    conn
-}
-
-/// Applies standard PRAGMAs to `conn`.
-///
-/// - `wal`: also sets `journal_mode=WAL`; pass `false` for in-memory databases.
-fn apply_pragmas(conn: &Connection, wal: bool) -> Result<()> {
-    if wal {
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-    }
-    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
-    Ok(())
+/// Returns [`sqlx::Error`] if the database file cannot be opened or migrated.
+pub async fn connect() -> sqlx::Result<SqlitePool> {
+    let opts = SqliteConnectOptions::new()
+        .filename(db_path())
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new().connect_with(opts).await?;
+    migrate(&pool).await?;
+    Ok(pool)
 }
 
 /// Idempotent migration runner.
 ///
 /// Reads `PRAGMA user_version` and applies pending migrations in order.
-/// Each migration runs inside an explicit `BEGIN … COMMIT` block, and the
+/// Each migration runs inside an explicit transaction, and the
 /// `user_version` bump is issued INSIDE that transaction (SQLite makes
 /// `user_version` transactional). This makes apply-and-bump atomic: a crash
 /// mid-migration rolls back the DDL *and* the version, so the schema and the
 /// version counter can never disagree — re-running on next launch is safe.
 ///
-/// **Adding future migrations**: append another `if user_version < N { … }` block.
-fn migrate(conn: &Connection) -> Result<()> {
-    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+/// **Adding future migrations**: append another `if version < N { … }` block.
+pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
+    // Read the version INSIDE the transaction so check-and-bump is atomic —
+    // no TOCTOU window between two separate pool checkouts.
+    let mut tx = pool.begin().await?;
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut *tx)
+        .await?;
 
-    if user_version < 1 {
-        conn.execute_batch(concat!(
-            "BEGIN;\n",
-            include_str!("migrations/0001_init.sql"),
-            "\nPRAGMA user_version = 1;\n",
-            "COMMIT;"
-        ))?;
+    if version < 1 {
+        sqlx::raw_sql(include_str!("migrations/0001_init.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 1;")
+            .execute(&mut *tx)
+            .await?;
     }
 
+    // Future: if version < 2 { ... }
+
+    tx.commit().await?;
     Ok(())
+}
+
+/// Opens an in-memory SQLite pool suitable for unit tests.
+/// Uses `max_connections(1)` to prevent sqlx from opening multiple
+/// connections — each `:memory:` connection is a separate database, so
+/// with more than one connection the schema from migration would be
+/// invisible to queries hitting a different connection.
+///
+/// # Panics
+/// Panics if the in-memory database cannot be opened or migrated.
+#[cfg(test)]
+pub(crate) async fn connect_in_memory() -> SqlitePool {
+    let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+        .expect("invalid in-memory connection string")
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .expect("failed to open in-memory pool");
+    migrate(&pool)
+        .await
+        .expect("failed to migrate in-memory db");
+    pool
 }
 
 #[cfg(test)]
@@ -93,61 +112,85 @@ mod tests {
     use super::*;
 
     /// All 19 entity tables must exist after migration.
-    #[test]
-    fn migrate_creates_all_tables() {
-        let conn = open_in_memory();
-        let count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master \
-                 WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("table-count query failed");
+    #[tokio::test]
+    async fn migrate_creates_all_tables() {
+        let pool = connect_in_memory().await;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master \
+             WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("table-count query failed");
         assert_eq!(count, 19, "expected 19 tables, got {count}");
     }
 
     /// Running migrate twice must not error and must leave user_version == 1.
-    #[test]
-    fn migrate_is_idempotent() {
-        let conn = Connection::open_in_memory().expect("open failed");
-        apply_pragmas(&conn, false).expect("pragmas failed");
+    #[tokio::test]
+    async fn migrate_is_idempotent() {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("open failed");
 
-        migrate(&conn).expect("first migration failed");
-        migrate(&conn).expect("second migration must be a no-op");
+        migrate(&pool).await.expect("first migration failed");
+        migrate(&pool)
+            .await
+            .expect("second migration must be a no-op");
 
-        let count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master \
-                 WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("table-count query failed");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master \
+             WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("table-count query failed");
         assert_eq!(
             count, 19,
             "expected 19 tables after idempotent run, got {count}"
         );
 
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
             .expect("user_version query failed");
         assert_eq!(version, 1, "user_version should be 1");
     }
 
-    /// With `PRAGMA foreign_keys=ON`, inserting a `workspace_agent` row that
+    /// With `foreign_keys(true)`, inserting a `workspace_agent` row that
     /// references a non-existent workspace must fail.
-    #[test]
-    fn foreign_keys_enforced() {
-        let conn = open_in_memory();
-        let result = conn.execute(
+    #[tokio::test]
+    async fn foreign_keys_enforced() {
+        let pool = connect_in_memory().await;
+        let result = sqlx::query(
             "INSERT INTO workspace_agent(id, workspace_id, agent_def_id, status, added_at) \
              VALUES ('wa-1', 'no-such-workspace', 'no-such-agent', 'idle', '2024-01-01T00:00:00Z')",
-            [],
-        );
+        )
+        .execute(&pool)
+        .await;
         assert!(
             result.is_err(),
             "FK violation against workspace should return an error"
         );
+    }
+
+    /// Smoke-test that chain-builder is linked and produces correct SQLite SQL.
+    #[tokio::test]
+    async fn chain_builder_builds_select() {
+        use chain_builder::{QueryBuilder, Sqlite};
+        let (sql, binds) = QueryBuilder::<Sqlite>::table("workspace")
+            .select(["id", "name"])
+            .where_eq("id", "w1")
+            .to_sql();
+        assert!(
+            sql.contains("workspace"),
+            "sql should reference table: {sql}"
+        );
+        assert!(sql.contains('?'), "sqlite should use ? placeholders: {sql}");
+        assert_eq!(binds.len(), 1, "one bind for the id filter");
     }
 }
