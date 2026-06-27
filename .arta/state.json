@@ -2552,12 +2552,12 @@
           },
           {
             "title": "SQLite: migration 0001_init (20 tables, WAL, FK, indexes) จาก dataModel",
-            "status": "doing",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Typed IPC: invoke wrapper + event-subscribe React hooks",
-            "status": "todo",
+            "status": "doing",
             "priority": "high"
           },
           {
