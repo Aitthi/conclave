@@ -15,6 +15,7 @@ export type {
   Artifact,
   FusionRun,
   FusionPanelResponse,
+  Tool,
 } from "./types";
 
 export type { Commands } from "./commands";

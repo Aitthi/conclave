@@ -77,7 +77,14 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
-    // Future: if version < 2 { ... }
+    if version < 2 {
+        sqlx::raw_sql(include_str!("migrations/0002_seed_core_tools.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 2;")
+            .execute(&mut *tx)
+            .await?;
+    }
 
     tx.commit().await?;
     Ok(())
@@ -125,7 +132,7 @@ mod tests {
         assert_eq!(count, 19, "expected 19 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 1.
+    /// Running migrate twice must not error and must leave user_version == 2.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -158,7 +165,46 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 1, "user_version should be 1");
+        assert_eq!(version, 2, "user_version should be 2");
+
+        // The seed migration must not duplicate rows across an idempotent run.
+        let tool_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM tool WHERE id = 'tool-conclave'")
+                .fetch_one(&pool)
+                .await
+                .expect("tool-count query failed");
+        assert_eq!(
+            tool_count, 1,
+            "seed must not duplicate after idempotent run"
+        );
+    }
+
+    /// Migration 0002 seeds exactly one `tool-conclave` core row; running
+    /// migrate again leaves exactly one row (INSERT OR IGNORE is idempotent).
+    #[tokio::test]
+    async fn migrate_seeds_core_conclave_tool() {
+        let pool = connect_in_memory().await;
+
+        let (id, is_core, kind): (String, i64, String) =
+            sqlx::query_as("SELECT id, is_core, kind FROM tool WHERE id = 'tool-conclave'")
+                .fetch_one(&pool)
+                .await
+                .expect("conclave tool row should exist after migration");
+
+        assert_eq!(id, "tool-conclave");
+        assert_eq!(is_core, 1, "is_core must be 1");
+        assert_eq!(kind, "builtin");
+
+        // Second migrate run — seed must stay at exactly one row.
+        migrate(&pool)
+            .await
+            .expect("second migrate must be a no-op");
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tool WHERE id = 'tool-conclave'")
+            .fetch_one(&pool)
+            .await
+            .expect("count query failed");
+        assert_eq!(count, 1, "INSERT OR IGNORE must not duplicate the row");
     }
 
     /// With `foreign_keys(true)`, inserting a `workspace_agent` row that

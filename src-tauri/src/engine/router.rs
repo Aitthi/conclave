@@ -1,5 +1,5 @@
 use crate::engine::commands::{
-    agent, blackboard, cli, fusion, instance, message, provider, snapshot, workspace,
+    agent, blackboard, cli, fusion, instance, message, provider, snapshot, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -45,6 +45,9 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
 
         // ── provider ──────────────────────────────────────────────────────
         "provider.upsert" => provider::upsert(state, payload).await,
+
+        // ── tool ──────────────────────────────────────────────────────────
+        "tool.list" => tool::list(state, payload).await,
 
         // ── cli ───────────────────────────────────────────────────────────
         "cli.exec" => cli::exec(state, payload).await,

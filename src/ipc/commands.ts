@@ -12,6 +12,7 @@ import type {
   Snapshot,
   FusionRun,
   FusionPanelResponse,
+  Tool,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -121,9 +122,16 @@ export interface Commands {
     req: { name: Provider["name"]; key?: string; baseUrl?: string };
     res: Provider;
   };
+  "tool.list": {
+    req: void;
+    res: Tool[];
+  };
   "cli.exec": {
+    // The CLI funnels every subcommand through the allowlisted `cli.exec`
+    // router method; the result is whatever the mapped inner method returns,
+    // so the shape is not statically known. Callers must validate before use.
     req: { argv: string[] };
-    res: { stdout: string; exit: number };
+    res: unknown;
   };
 }
 
@@ -192,6 +200,9 @@ export const ipc = {
   },
   provider: {
     upsert: (req: Commands["provider.upsert"]["req"]) => call("provider.upsert", req),
+  },
+  tool: {
+    list: () => call("tool.list"),
   },
   cli: {
     exec: (req: Commands["cli.exec"]["req"]) => call("cli.exec", req),

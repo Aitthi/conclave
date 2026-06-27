@@ -22,6 +22,7 @@ pub mod fusion;
 pub mod inter_agent_message;
 pub mod session;
 pub mod snapshot;
+pub mod tool;
 pub mod workspace;
 pub mod workspace_agent;
 

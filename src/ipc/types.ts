@@ -132,3 +132,11 @@ export interface FusionPanelResponse {
   status: "running" | "done" | "error";
   createdAt: string;
 }
+
+export interface Tool {
+  id: string;
+  name: string;
+  kind: "builtin" | "plugin" | "mcp";
+  icon?: string;
+  isCore: boolean;
+}
