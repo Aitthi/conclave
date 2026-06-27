@@ -17,9 +17,10 @@ interface RailProps {
   onSelectWorkspace: (id: string) => void;
   onOpenLibrary?: () => void;
   onOpenLinkFolder?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder }: RailProps) {
+export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder, onOpenSettings }: RailProps) {
   return (
     <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center py-2.5 gap-1 overflow-hidden">
       {/* Brand mark */}
@@ -88,6 +89,7 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
         <button
           className="w-9 h-9 rounded-[10px] text-[#6e6e73] grid place-items-center hover:bg-black/[0.05]"
           title="Settings"
+          onClick={onOpenSettings}
         >
           <Settings className="w-[17px] h-[17px]" />
         </button>

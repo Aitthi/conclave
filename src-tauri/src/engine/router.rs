@@ -45,6 +45,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
 
         // ── provider ──────────────────────────────────────────────────────
         "provider.upsert" => provider::upsert(state, payload).await,
+        "provider.list" => provider::list(state, payload).await,
 
         // ── tool ──────────────────────────────────────────────────────────
         "tool.list" => tool::list(state, payload).await,

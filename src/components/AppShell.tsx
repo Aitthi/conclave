@@ -6,6 +6,7 @@ import { Roster } from "./Roster";
 import { Builder } from "./Builder";
 import { Library } from "./Library";
 import { LinkFolder } from "./LinkFolder";
+import { Settings } from "./Settings";
 import { WorkspacePane } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
 
@@ -33,6 +34,9 @@ export function AppShell() {
   const [builderInitialDef, setBuilderInitialDef] = useState<AgentDefinition | undefined>(
     undefined,
   );
+
+  // ── Settings state ─────────────────────────────────────────────────────
+  const [showSettings, setShowSettings] = useState(false);
 
   // ── LinkFolder state ───────────────────────────────────────────────────
   const [showLinkFolder, setShowLinkFolder] = useState(false);
@@ -100,6 +104,7 @@ export function AppShell() {
             setShowLibrary(true);
           }}
           onOpenLinkFolder={() => setShowLinkFolder(true)}
+          onOpenSettings={() => setShowSettings(true)}
         />
 
         {showLibrary ? (
@@ -169,6 +174,11 @@ export function AppShell() {
             setLibraryRefreshKey((k) => k + 1);
           }}
         />
+      )}
+
+      {/* ── Settings overlay ─────────────────────────────────────────── */}
+      {showSettings && (
+        <Settings onClose={() => setShowSettings(false)} />
       )}
 
       {/* ── Link-folder overlay ───────────────────────────────────────── */}

@@ -122,6 +122,10 @@ export interface Commands {
     req: { name: Provider["name"]; key?: string; baseUrl?: string };
     res: Provider;
   };
+  "provider.list": {
+    req: void;
+    res: Provider[];
+  };
   "tool.list": {
     req: void;
     res: Tool[];
@@ -200,6 +204,7 @@ export const ipc = {
   },
   provider: {
     upsert: (req: Commands["provider.upsert"]["req"]) => call("provider.upsert", req),
+    list: () => call("provider.list"),
   },
   tool: {
     list: () => call("tool.list"),

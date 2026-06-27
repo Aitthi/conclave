@@ -5,6 +5,7 @@ pub mod error;
 pub mod repo;
 pub mod router;
 pub mod runtime;
+pub mod secrets;
 pub mod state;
 pub mod uds;
 

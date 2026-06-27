@@ -20,6 +20,7 @@ pub mod agent_definition;
 pub mod blackboard;
 pub mod fusion;
 pub mod inter_agent_message;
+pub mod provider;
 pub mod session;
 pub mod snapshot;
 pub mod tool;

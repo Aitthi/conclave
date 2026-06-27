@@ -143,10 +143,21 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             Some(backend.output_rx)
         }
         "chat" => {
-            // Resolve the provider from the agent's `provider_id` (keys come
-            // from env vars for now) and its configured model.
+            // Resolve the provider from the agent's `provider_id`. The API key
+            // comes from the macOS Keychain (or env vars) inside `from_config`;
+            // the user's Settings-configured base URL (if any) is then applied
+            // as an override from the DB.
+            let base_url_override = match def.provider_id.as_deref() {
+                Some(name) => repo::provider::get_by_name(&state.db, name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.base_url),
+                None => None,
+            };
             let provider = runtime::provider::Provider::from_config(def.provider_id.as_deref())
-                .map_err(|e| AppError::Invalid(format!("chat agent provider: {e}")))?;
+                .map_err(|e| AppError::Invalid(format!("chat agent provider: {e}")))?
+                .with_base_url(base_url_override.as_deref());
             let model = def
                 .model
                 .clone()

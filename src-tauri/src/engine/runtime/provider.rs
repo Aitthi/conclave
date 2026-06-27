@@ -9,8 +9,10 @@
 //! (`runtime::chat`) drives it and the command handler bridges output onto the
 //! bus.
 //!
-//! API keys come from environment variables for now (`ANTHROPIC_API_KEY`,
-//! `OPENAI_API_KEY`); the Keychain/Settings path is a later milestone.
+//! API keys come from environment variables (`ANTHROPIC_API_KEY`,
+//! `OPENAI_API_KEY`) **or** from the macOS Keychain when configured via
+//! Settings (`engine::secrets`). Environment variables take precedence so
+//! developers can override the Keychain value without touching the UI.
 //!
 //! # Testing
 //!
@@ -105,15 +107,27 @@ impl Provider {
     pub fn from_config(provider_id: Option<&str>) -> Result<Provider, ProviderError> {
         match provider_id {
             Some("anthropic") => {
-                let api_key = non_empty_env("ANTHROPIC_API_KEY").ok_or_else(|| {
-                    ProviderError::MissingKey("ANTHROPIC_API_KEY is not set".into())
-                })?;
+                let api_key = non_empty_env("ANTHROPIC_API_KEY")
+                    .or_else(|| {
+                        // Fall back to the Keychain when the env var is absent.
+                        // `get_key` is sync; errors are silenced so a Keychain
+                        // hiccup degrades gracefully to MissingKey below.
+                        provider_id
+                            .and_then(|id| crate::engine::secrets::get_key(id).ok().flatten())
+                    })
+                    .ok_or_else(|| {
+                        ProviderError::MissingKey("ANTHROPIC_API_KEY is not set".into())
+                    })?;
                 let base_url = non_empty_env("CONCLAVE_ANTHROPIC_BASE_URL")
                     .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE.to_owned());
                 Ok(Provider::Anthropic { api_key, base_url })
             }
             Some("openai") => {
                 let api_key = non_empty_env("OPENAI_API_KEY")
+                    .or_else(|| {
+                        provider_id
+                            .and_then(|id| crate::engine::secrets::get_key(id).ok().flatten())
+                    })
                     .ok_or_else(|| ProviderError::MissingKey("OPENAI_API_KEY is not set".into()))?;
                 let base_url = non_empty_env("CONCLAVE_OPENAI_BASE_URL")
                     .unwrap_or_else(|| OPENAI_DEFAULT_BASE.to_owned());
@@ -122,12 +136,41 @@ impl Provider {
             Some("local") => {
                 // Local servers (Ollama et al.) are OpenAI-compatible and often
                 // need no key — default to empty rather than erroring.
-                let api_key = non_empty_env("OPENAI_API_KEY").unwrap_or_default();
+                let api_key = non_empty_env("OPENAI_API_KEY")
+                    .or_else(|| {
+                        provider_id
+                            .and_then(|id| crate::engine::secrets::get_key(id).ok().flatten())
+                    })
+                    .unwrap_or_default();
                 let base_url = non_empty_env("CONCLAVE_LOCAL_BASE_URL")
                     .unwrap_or_else(|| LOCAL_DEFAULT_BASE.to_owned());
                 Ok(Provider::OpenAi { api_key, base_url })
             }
             _ => Err(ProviderError::MissingKey("no provider configured".into())),
+        }
+    }
+
+    /// Override the base URL with a user-configured value (the provider's
+    /// Settings `base_url` from the DB) when present and non-empty. `None` /
+    /// empty leaves the env-or-default base URL chosen by [`from_config`]
+    /// untouched, so a user's explicit Settings endpoint takes precedence.
+    pub fn with_base_url(self, base_url: Option<&str>) -> Self {
+        let url = match base_url.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(u) => u.to_owned(),
+            None => return self,
+        };
+        match self {
+            Provider::Anthropic { api_key, .. } => Provider::Anthropic {
+                api_key,
+                base_url: url,
+            },
+            Provider::OpenAi { api_key, .. } => Provider::OpenAi {
+                api_key,
+                base_url: url,
+            },
+            // Test-only variants (Mock / EchoLen) carry no base URL.
+            #[cfg(test)]
+            other => other,
         }
     }
 
@@ -449,6 +492,40 @@ mod tests {
             Provider::from_config(None),
             Err(ProviderError::MissingKey(_))
         ));
+    }
+
+    /// `with_base_url` overrides only when given a non-empty value, and only
+    /// the base URL — the api key is preserved.
+    #[test]
+    fn with_base_url_overrides_when_present() {
+        let p = Provider::OpenAi {
+            api_key: "k".into(),
+            base_url: "http://default".into(),
+        }
+        .with_base_url(Some("http://custom:9000/v1"));
+        match p {
+            Provider::OpenAi { api_key, base_url } => {
+                assert_eq!(api_key, "k");
+                assert_eq!(base_url, "http://custom:9000/v1");
+            }
+            _ => panic!("variant changed"),
+        }
+    }
+
+    /// `with_base_url(None)` and an all-whitespace value leave the base URL intact.
+    #[test]
+    fn with_base_url_noop_on_empty() {
+        for arg in [None, Some(""), Some("   ")] {
+            let p = Provider::Anthropic {
+                api_key: "k".into(),
+                base_url: "http://keep".into(),
+            }
+            .with_base_url(arg);
+            match p {
+                Provider::Anthropic { base_url, .. } => assert_eq!(base_url, "http://keep"),
+                _ => panic!("variant changed"),
+            }
+        }
     }
 
     /// Regression for the SSE byte-framing fix: a multi-byte UTF-8 codepoint
