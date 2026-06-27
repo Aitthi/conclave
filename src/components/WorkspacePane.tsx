@@ -5,18 +5,21 @@ import type { AgentDefinition, WorkspaceAgent } from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
+import { ContextDrawer } from "./ContextDrawer";
 
 interface WorkspacePaneProps {
   workspaceId: string;
 }
 
-// View-model for one agent tab (any type).
+// View-model for one agent tab (any type). Carries the full `AgentDefinition`
+// so the Context drawer can render the active agent's config without a re-fetch.
 interface AgentTab {
   instanceId: string;
   name: string;
   color: string;
   type: AgentDefinition["type"];
   status: WorkspaceAgent["status"];
+  def: AgentDefinition;
 }
 
 // Status dot colors (matches Roster / AppShell tokens).
@@ -89,6 +92,7 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
             color: def.color ?? "#6e6e73",
             type: def.type,
             status: inst.status,
+            def,
           });
         }
         setTabs(agentTabs);
@@ -176,78 +180,90 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
   const activeError = activeInstanceId ? (spawnErrors[activeInstanceId] ?? null) : null;
 
   return (
-    <main className="flex-1 flex flex-col min-w-0 bg-white">
-      {/* Tab strip — one tab per instance, with a per-type glyph */}
-      <div className="h-10 flex items-stretch gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin">
-        {tabs.map((tab) => {
-          const isActive = tab.instanceId === activeInstanceId;
-          return (
-            <button
-              key={tab.instanceId}
-              onClick={() => setActiveInstanceId(tab.instanceId)}
-              className={`flex items-center gap-2 px-3 my-1.5 rounded-md text-[13px] transition-colors${
-                isActive ? " bg-black/[0.06] font-semibold" : " hover:bg-black/[0.04] text-[#6e6e73]"
-              }`}
-            >
-              <span
-                className="w-2 h-2 rounded-full shrink-0"
-                style={{ backgroundColor: STATUS_COLOR[tab.status] }}
-              />
-              <span className="truncate max-w-[140px]">{tab.name}</span>
-              <TypeGlyph type={tab.type} />
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Active body — dispatched by the focused tab's agent type */}
-      {activeTab === null ? (
-        <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
-          เลือก agent
+    <div className="flex-1 flex min-w-0 bg-white">
+      <main className="flex-1 flex flex-col min-w-0">
+        {/* Tab strip — one tab per instance, with a per-type glyph */}
+        <div className="h-10 flex items-stretch gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin">
+          {tabs.map((tab) => {
+            const isActive = tab.instanceId === activeInstanceId;
+            return (
+              <button
+                key={tab.instanceId}
+                onClick={() => setActiveInstanceId(tab.instanceId)}
+                className={`flex items-center gap-2 px-3 my-1.5 rounded-md text-[13px] transition-colors${
+                  isActive ? " bg-black/[0.06] font-semibold" : " hover:bg-black/[0.04] text-[#6e6e73]"
+                }`}
+              >
+                <span
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: STATUS_COLOR[tab.status] }}
+                />
+                <span className="truncate max-w-[140px]">{tab.name}</span>
+                <TypeGlyph type={tab.type} />
+              </button>
+            );
+          })}
         </div>
-      ) : activeTab.type === "cli" ? (
-        // CLI → live terminal + stdin bar.
-        activeError ? (
-          <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#ff453a] px-6 text-center">
-            ไม่สามารถเปิด session: {activeError}
+
+        {/* Active body — dispatched by the focused tab's agent type */}
+        {activeTab === null ? (
+          <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
+            เลือก agent
           </div>
-        ) : activeSessionId ? (
-          <>
-            <Terminal key={activeSessionId} sessionId={activeSessionId} />
-            <StdinBar sessionId={activeSessionId} />
-          </>
-        ) : (
-          <>
-            <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#a1a1a6]">
+        ) : activeTab.type === "cli" ? (
+          // CLI → live terminal + stdin bar.
+          activeError ? (
+            <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#ff453a] px-6 text-center">
+              ไม่สามารถเปิด session: {activeError}
+            </div>
+          ) : activeSessionId ? (
+            <>
+              <Terminal key={activeSessionId} sessionId={activeSessionId} />
+              <StdinBar sessionId={activeSessionId} />
+            </>
+          ) : (
+            <>
+              <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#a1a1a6]">
+                กำลังเปิด session…
+              </div>
+              <StdinBar sessionId={null} />
+            </>
+          )
+        ) : activeTab.type === "chat" ? (
+          // Chat → custom chat UI.
+          activeError ? (
+            <div className="flex-1 grid place-items-center text-[13px] text-[#ff3b30] px-6 text-center">
+              ไม่สามารถเปิด session: {activeError}
+            </div>
+          ) : activeSessionId ? (
+            <ChatView
+              key={activeSessionId}
+              sessionId={activeSessionId}
+              agentName={activeTab.name}
+              agentColor={activeTab.color}
+            />
+          ) : (
+            <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
               กำลังเปิด session…
             </div>
-            <StdinBar sessionId={null} />
-          </>
-        )
-      ) : activeTab.type === "chat" ? (
-        // Chat → custom chat UI.
-        activeError ? (
-          <div className="flex-1 grid place-items-center text-[13px] text-[#ff3b30] px-6 text-center">
-            ไม่สามารถเปิด session: {activeError}
-          </div>
-        ) : activeSessionId ? (
-          <ChatView
-            key={activeSessionId}
-            sessionId={activeSessionId}
-            agentName={activeTab.name}
-            agentColor={activeTab.color}
-          />
+          )
         ) : (
-          <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
-            กำลังเปิด session…
+          // Orchestrator / unknown → placeholder.
+          <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6] px-6 text-center">
+            Orchestrator · Fusion — มาใน M4
           </div>
-        )
-      ) : (
-        // Orchestrator / unknown → placeholder.
-        <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6] px-6 text-center">
-          Orchestrator · Fusion — มาใน M4
-        </div>
+        )}
+      </main>
+
+      {/* Right Context drawer — renders only when a tab is active. The active
+          tab carries the full AgentDefinition (its config is the drawer's data).
+          The optional `session` prop (which would light up the context meter) is
+          intentionally NOT passed yet: we only memoize each spawn's session id,
+          and a fresh session carries no token counts. Real contextTokens/limit
+          arrive with the snapshot manager in M4 — wire `session` then. */}
+      {activeTab !== null && (
+        <ContextDrawer def={activeTab.def} status={activeTab.status} />
       )}
-    </main>
+    </div>
   );
 }
