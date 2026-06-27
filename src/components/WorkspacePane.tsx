@@ -15,6 +15,11 @@ export type { RoutingTarget };
 
 interface WorkspacePaneProps {
   workspaceId: string;
+  /** Optional: when set, switches the active tab to the matching instanceId (if
+   *  it exists in the loaded tabs). Used to honor Roster selection. The existing
+   *  auto-focus-first-tab behavior in the load effect is unaffected — this effect
+   *  runs after it and only overrides when the id is a real loaded tab. */
+  focusInstanceId?: string | null;
 }
 
 // View-model for one agent tab (any type). Carries the full `AgentDefinition`
@@ -57,7 +62,7 @@ function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
  * tab lazily spawns its session (idempotent server-side; we also memoize the
  * instance→session mapping so re-selecting never re-spawns).
  */
-export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
+export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePaneProps) {
   const [tabs, setTabs] = useState<AgentTab[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -75,6 +80,14 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
   // (key={workspaceId} at the call site), so this resets naturally; we also
   // clear it in the load effect for safety.
   const spawnAttempted = useRef<Set<string>>(new Set());
+
+  // Latest `focusInstanceId`, mirrored into a ref so the load effect can honor a
+  // pending Roster selection for its initial auto-focus WITHOUT listing
+  // focusInstanceId as a dep (which would re-fetch on every selection change).
+  const focusInstanceIdRef = useRef(focusInstanceId);
+  useEffect(() => {
+    focusInstanceIdRef.current = focusInstanceId;
+  });
 
   // Load + join instances with their definitions whenever the workspace changes.
   useEffect(() => {
@@ -107,8 +120,15 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
         }
         setTabs(agentTabs);
         setLoading(false);
-        // Auto-focus the first tab if there is one.
-        if (agentTabs.length > 0) setActiveInstanceId(agentTabs[0].instanceId);
+        // Auto-focus: honor a pending Roster selection if it resolves to a real
+        // tab, else the first tab. Picking the focused tab up front avoids
+        // spawning the first tab's session then immediately switching away.
+        const pending = focusInstanceIdRef.current;
+        const initial =
+          agentTabs.find((t) => t.instanceId === pending)?.instanceId ??
+          agentTabs[0]?.instanceId ??
+          null;
+        if (initial) setActiveInstanceId(initial);
       })
       .catch((err: unknown) => {
         // A real backend failure (DB down, command missing) is distinct from an
@@ -128,6 +148,18 @@ export function WorkspacePane({ workspaceId }: WorkspacePaneProps) {
       active = false;
     };
   }, [workspaceId]);
+
+  // Honor Roster selection: when focusInstanceId changes (user clicked an agent
+  // in the Roster sidebar), switch the active tab to it — but ONLY if the tab is
+  // loaded. Guard: if tabs haven't loaded yet (empty array or id not found) the
+  // effect is a no-op; it re-fires when tabs arrive and the id then matches.
+  // No double-spawn risk: the spawn effect below is guarded by spawnAttempted.
+  useEffect(() => {
+    if (focusInstanceId == null) return;
+    if (tabs.some((t) => t.instanceId === focusInstanceId)) {
+      setActiveInstanceId(focusInstanceId);
+    }
+  }, [focusInstanceId, tabs]);
 
   // Spawn the active instance's session lazily (once) when it becomes active.
   // The "already attempted" guard lives in a ref, so this effect depends ONLY

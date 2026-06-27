@@ -11,9 +11,8 @@ import { WorkspacePane } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
 
 export function AppShell() {
-  // Roster selection is cosmetic for now (mock data). The WorkspacePane's own
-  // tabs drive the live terminal / chat.
-  // TODO(M3): wire Roster selection to the real instance.list data + WorkspacePane.
+  // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
+  // the active agent tab when the user clicks an agent in the Roster sidebar.
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // ── Workspace state ────────────────────────────────────────────────────
@@ -60,6 +59,9 @@ export function AppShell() {
   function handleSelectWorkspace(id: string) {
     // Optimistically update selection; handler only validates on the Rust side.
     setActiveWorkspaceId(id);
+    // Clear the previous workspace's agent selection so a stale instance id
+    // isn't carried into the remounted pane as focus.
+    setSelectedId(null);
     // Switching workspace returns to that workspace's agent pane.
     setShowBlackboard(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
@@ -120,11 +122,18 @@ export function AppShell() {
         ) : (
           <>
             <Roster
+              workspaceId={activeWorkspaceId}
+              workspaceName={activeWorkspace?.name}
+              folderPath={activeWorkspace?.folderPath}
               selectedId={selectedId}
               onSelect={(id) => {
                 // Selecting an agent returns from the Blackboard to the pane.
                 setShowBlackboard(false);
                 setSelectedId(id);
+              }}
+              onAddAgent={() => {
+                setBuilderInitialDef(undefined);
+                setShowBuilder(true);
               }}
               // Blackboard needs a workspace to scope to — only toggle when one
               // is active (else the view would fall through to "Select a workspace").
@@ -144,7 +153,7 @@ export function AppShell() {
               />
             ) : activeWorkspaceId ? (
               // Remount per workspace so the pane refetches its instances.
-              <WorkspacePane key={activeWorkspaceId} workspaceId={activeWorkspaceId} />
+              <WorkspacePane key={activeWorkspaceId} workspaceId={activeWorkspaceId} focusInstanceId={selectedId} />
             ) : (
               <main className="flex-1 flex flex-col min-w-0 bg-white">
                 <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">

@@ -355,6 +355,7 @@ function DefinitionDetail({ def, workspaces, onEdit, onClose, onRefresh }: Detai
 
 export function Library({ onClose, onOpenBuilder, refreshKey }: LibraryProps) {
   const [defs, setDefs] = useState<AgentDefinition[]>([]);
+  const [loadError, setLoadError] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [filter, setFilter] = useState<FilterType>("all");
   const [search, setSearch] = useState("");
@@ -365,8 +366,13 @@ export function Library({ onClose, onOpenBuilder, refreshKey }: LibraryProps) {
     try {
       const result = await ipc.agentDef.list();
       setDefs(result);
-    } catch {
+      setLoadError(false);
+    } catch (err: unknown) {
+      if (import.meta.env.DEV) {
+        console.error("Library: agentDef.list failed", err);
+      }
       setDefs([]);
+      setLoadError(true);
     }
   }
 
@@ -540,18 +546,24 @@ export function Library({ onClose, onOpenBuilder, refreshKey }: LibraryProps) {
 
         <div className="flex-1 overflow-y-auto p-5">
           {filteredDefs.length === 0 ? (
-            /* ── Empty state ── */
+            /* ── Empty / error state ── */
             <div className="flex flex-col items-center justify-center h-full gap-3 text-center">
               <UsersRound className="w-10 h-10 text-[#c7c7cc]" />
               <p className="text-[14px] font-semibold text-[#6e6e73]">
-                {defs.length === 0 ? "No agents yet — create one" : "No matching agents"}
+                {loadError
+                  ? "Failed to load agents"
+                  : defs.length === 0
+                    ? "No agents yet — create one"
+                    : "No matching agents"}
               </p>
               <p className="text-[12px] text-[#a1a1a6]">
-                {defs.length === 0
-                  ? "Define agents once and deploy to any workspace"
-                  : "Try a different filter or search term"}
+                {loadError
+                  ? "Check the app is running correctly and try again"
+                  : defs.length === 0
+                    ? "Define agents once and deploy to any workspace"
+                    : "Try a different filter or search term"}
               </p>
-              {defs.length === 0 && (
+              {!loadError && defs.length === 0 && (
                 <button
                   onClick={() => onOpenBuilder()}
                   className="mt-2 flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#0a84ff] text-white text-[12.5px] font-semibold hover:brightness-105"
