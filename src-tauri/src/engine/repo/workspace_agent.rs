@@ -10,7 +10,8 @@
 //! (chain-builder joins sibling predicates with `Conj::And` by default).
 //! The `execute` / `fetch_*` methods accept any `sqlx::Executor`, including
 //! `&mut SqliteConnection` obtained via `&mut *tx` from a `Transaction` —
-//! see M1.5 `commands::agent::add_to_workspace` for the transactional pattern.
+//! see [`instantiate`] for the find-or-create transactional pattern shared by
+//! `workspace.link` and `agentDef.addToWorkspace` (M1.2).
 
 use super::cb_err;
 use chain_builder::{Order, QueryBuilder, Sqlite, Value as Bind};
@@ -50,10 +51,10 @@ const COLS: [&str; 5] = ["id", "workspace_id", "agent_def_id", "status", "added_
 ///
 /// Returns the row directly without a re-fetch round-trip.
 ///
-/// Note: `add_to_workspace` uses raw sqlx inside a transaction instead of
-/// this helper to guarantee atomicity with the paired session INSERT.
-/// This function is used by tests and future callers (e.g. M1.2 link-folder).
-#[allow(dead_code)] // called by tests and M1.2 link-folder; not yet from handlers
+/// Note: production handlers (`workspace.link`, `agentDef.addToWorkspace`) go
+/// through [`instantiate`], which pairs this INSERT with the session INSERT in
+/// one transaction. This standalone `create` is test-only.
+#[allow(dead_code)] // test-only; production handlers use `instantiate`
 pub async fn create(
     pool: &SqlitePool,
     workspace_id: &str,
@@ -141,6 +142,85 @@ pub async fn find(
 #[allow(dead_code)] // called by M2 instance.spawn
 pub async fn exists(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     get(pool, id).await.map(|opt| opt.is_some())
+}
+
+/// Idempotently ensure a `workspace_agent` + `session` pair exists for the
+/// given `(workspace_id, agent_def_id)` and return the `workspace_agent` row.
+///
+/// - If the pair is already linked, the existing row is returned unchanged
+///   (no duplicate INSERT).
+/// - Otherwise, a `workspace_agent` + `session` are created atomically in a
+///   single SQLite transaction so a failed session INSERT cannot leave an
+///   orphan instance.
+///
+/// # Preconditions
+///
+/// **Does not validate** that `workspace_id` or `agent_def_id` exist in their
+/// respective tables — callers must check existence before calling this
+/// function (foreign-key enforcement also guards against invalid ids at the DB
+/// level, but caller-side validation gives cleaner `NotFound` errors).
+///
+/// # Usage
+///
+/// Called from both `commands::agent::add_to_workspace` (per workspace_id in
+/// the loop) and `commands::workspace::link` (per agentDefId in the payload).
+/// This is the single source of truth for the atomic instance+session creation
+/// logic — do NOT duplicate the transaction in either handler.
+pub async fn instantiate(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    agent_def_id: &str,
+) -> sqlx::Result<WorkspaceAgentRow> {
+    // ── Idempotency: reuse existing instance if already linked ──────────
+    if let Some(existing) = find(pool, workspace_id, agent_def_id).await? {
+        return Ok(existing);
+    }
+
+    // ── Atomically create workspace_agent + session ──────────────────────
+    //
+    // Raw sqlx inside a transaction — mirrors the pattern in db::migrate.
+    // `super::session::DEFAULT_CONTEXT_LIMIT` is the single source of truth
+    // for the initial context window size.
+    let wa_id = Uuid::new_v4().to_string();
+    let added_at = Utc::now().to_rfc3339();
+    let session_id = Uuid::new_v4().to_string();
+    let started_at = Utc::now().to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO workspace_agent \
+         (id, workspace_id, agent_def_id, status, added_at) \
+         VALUES (?, ?, ?, 'idle', ?)",
+    )
+    .bind(&wa_id)
+    .bind(workspace_id)
+    .bind(agent_def_id)
+    .bind(&added_at)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO session \
+         (id, workspace_agent_id, context_tokens, context_limit, started_at, last_active_at) \
+         VALUES (?, ?, 0, ?, ?, NULL)",
+    )
+    .bind(&session_id)
+    .bind(&wa_id)
+    .bind(super::session::DEFAULT_CONTEXT_LIMIT)
+    .bind(&started_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(WorkspaceAgentRow {
+        id: wa_id,
+        workspace_id: workspace_id.to_owned(),
+        agent_def_id: agent_def_id.to_owned(),
+        status: "idle".to_owned(),
+        added_at,
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -302,6 +382,56 @@ mod tests {
             .expect("create failed");
         assert!(exists(&pool, &row.id).await.expect("exists post-create"));
         assert!(!exists(&pool, "wrong-id").await.expect("exists wrong-id"));
+    }
+
+    /// instantiate() creates workspace_agent + session atomically; returns the row.
+    #[tokio::test]
+    async fn instantiate_creates_instance_and_session() {
+        let pool = connect_in_memory().await;
+        let (ws_id, def_id) = fixtures(&pool).await;
+
+        let row = instantiate(&pool, &ws_id, &def_id)
+            .await
+            .expect("instantiate failed");
+
+        assert_eq!(row.workspace_id, ws_id);
+        assert_eq!(row.agent_def_id, def_id);
+        assert_eq!(row.status, "idle");
+
+        // Session must have been created alongside the workspace_agent.
+        let session = crate::engine::repo::session::get_by_instance(&pool, &row.id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session should exist after instantiate");
+        assert_eq!(session.workspace_agent_id, row.id);
+        assert_eq!(
+            session.context_limit,
+            Some(crate::engine::repo::session::DEFAULT_CONTEXT_LIMIT)
+        );
+    }
+
+    /// instantiate() is idempotent: a second call returns the existing row.
+    #[tokio::test]
+    async fn instantiate_is_idempotent() {
+        let pool = connect_in_memory().await;
+        let (ws_id, def_id) = fixtures(&pool).await;
+
+        let first = instantiate(&pool, &ws_id, &def_id)
+            .await
+            .expect("first instantiate failed");
+        let second = instantiate(&pool, &ws_id, &def_id)
+            .await
+            .expect("second instantiate failed");
+
+        assert_eq!(first.id, second.id, "idempotent: same row id returned");
+
+        // Still only one workspace_agent row in the DB.
+        let all = list_by_workspace(&pool, &ws_id).await.expect("list failed");
+        assert_eq!(
+            all.len(),
+            1,
+            "must be exactly 1 workspace_agent after two instantiate calls"
+        );
     }
 
     /// JSON serialization uses camelCase — locks the TS WorkspaceAgent contract.

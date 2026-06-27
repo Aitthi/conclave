@@ -4,6 +4,7 @@ import type { Workspace } from "../ipc";
 import { Rail } from "./Rail";
 import { Roster } from "./Roster";
 import { Builder } from "./Builder";
+import { LinkFolder } from "./LinkFolder";
 
 // Minimal info needed for the placeholder main pane header
 // (kept local — M1 screens will own their own header)
@@ -101,6 +102,9 @@ export function AppShell() {
   // ── Builder state ──────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder] = useState(false);
 
+  // ── LinkFolder state ───────────────────────────────────────────────────
+  const [showLinkFolder, setShowLinkFolder] = useState(false);
+
   // Load workspaces from the DB on mount.
   // Falls back to an empty list if Tauri is not present (plain Vite dev).
   useEffect(() => {
@@ -144,6 +148,7 @@ export function AppShell() {
           activeWorkspaceId={activeWorkspaceId}
           onSelectWorkspace={handleSelectWorkspace}
           onOpenBuilder={() => setShowBuilder(true)}
+          onOpenLinkFolder={() => setShowLinkFolder(true)}
         />
         <Roster selectedId={selectedId} onSelect={setSelectedId} />
 
@@ -217,6 +222,18 @@ export function AppShell() {
       {/* ── Agent builder overlay ─────────────────────────────────────── */}
       {showBuilder && (
         <Builder onClose={() => setShowBuilder(false)} />
+      )}
+
+      {/* ── Link-folder overlay ───────────────────────────────────────── */}
+      {showLinkFolder && (
+        <LinkFolder
+          onClose={() => setShowLinkFolder(false)}
+          onLinked={(ws) => {
+            setWorkspaces((prev) => [...prev, ws]);
+            setActiveWorkspaceId(ws.id);
+            setShowLinkFolder(false);
+          }}
+        />
       )}
     </div>
   );

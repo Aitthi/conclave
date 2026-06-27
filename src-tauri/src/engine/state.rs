@@ -83,3 +83,16 @@ impl AppState {
         }
     }
 }
+
+/// Test-only constructor: builds an `AppState` backed by an in-memory
+/// SQLite pool (migration applied). The `AppHandle` is intentionally absent
+/// — tests that do not emit events work fine without it.
+#[cfg(test)]
+impl AppState {
+    pub(crate) async fn for_tests() -> Self {
+        Self {
+            db: crate::engine::db::connect_in_memory().await,
+            app: OnceLock::new(),
+        }
+    }
+}

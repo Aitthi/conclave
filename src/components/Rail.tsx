@@ -16,9 +16,10 @@ interface RailProps {
   activeWorkspaceId: string | null;
   onSelectWorkspace: (id: string) => void;
   onOpenBuilder?: () => void;
+  onOpenLinkFolder?: () => void;
 }
 
-export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenBuilder }: RailProps) {
+export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenBuilder, onOpenLinkFolder }: RailProps) {
   return (
     <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center py-2.5 gap-1 overflow-hidden">
       {/* Brand mark */}
@@ -60,10 +61,11 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenB
         );
       })}
 
-      {/* Link folder / new workspace — TODO(M1.2): open link-folder flow */}
+      {/* Link folder / new workspace */}
       <button
         className="w-9 h-9 rounded-[10px] border border-dashed border-black/20 text-[#6e6e73] grid place-items-center hover:border-[#0a84ff] hover:text-[#0a84ff]"
         title="Link folder as workspace"
+        onClick={onOpenLinkFolder}
       >
         <FolderPlus className="w-[17px] h-[17px]" />
       </button>

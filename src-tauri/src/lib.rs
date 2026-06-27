@@ -31,6 +31,7 @@ pub fn run() {
             state.set_app(app.handle().clone());
             Ok(())
         })
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![ipc])
         .run(tauri::generate_context!())

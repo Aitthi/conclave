@@ -1,10 +1,8 @@
 use crate::engine::repo::agent_definition::AgentDefinitionInput;
 use crate::engine::repo::workspace_agent::WorkspaceAgentRow;
 use crate::engine::{repo, AppError, AppState};
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::Value;
-use uuid::Uuid;
 
 // ── Request types ────────────────────────────────────────────────────────────
 
@@ -95,23 +93,13 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
 /// Maps to `agentDef.addToWorkspace` on the IPC bus.
 ///
 /// For each workspace_id:
-/// 1. Validate the workspace and agent_definition both exist (`NotFound` if not).
-/// 2. **Idempotency**: if the (workspace_id, agent_def_id) pair is already linked,
-///    reuse the existing `workspace_agent` row — do not duplicate.
-/// 3. Otherwise create a `workspace_agent` + `session` atomically in a SQLite
-///    transaction so a failed session INSERT cannot leave an orphan instance.
+/// 1. Validate the workspace exists (`NotFound` if not).
+/// 2. Call `repo::workspace_agent::instantiate` — the shared helper that
+///    idempotently finds-or-creates the `workspace_agent` + `session` pair
+///    in a single SQLite transaction (no orphan risk, no duplicate rows).
 ///
-/// # Transaction approach
-///
-/// chain-builder's `execute` accepts any `sqlx::Executor<'e>`, so it can run
-/// against `&mut *tx` (`&mut SqliteConnection`). However, we use raw `sqlx::query`
-/// for the two INSERTs inside the transaction — the same pattern `db::migrate` uses
-/// — because it avoids lifetime complexity from chaining multiple QueryBuilders
-/// through a single mutable borrow. The repo pool-based helpers (`workspace_agent::create`,
-/// `session::create_for_instance`) are used by tests and read-only callers only.
-///
-/// The session's `context_limit` binds `session::DEFAULT_CONTEXT_LIMIT` directly,
-/// so the const is the single source of truth.
+/// The agent_definition is validated once before the loop so a bad id is
+/// reported rather than silently no-op'd on an empty workspace_ids list.
 pub async fn add_to_workspace(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: AddToWorkspaceReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -136,59 +124,13 @@ pub async fn add_to_workspace(state: &AppState, payload: Value) -> Result<Value,
             )));
         }
 
-        // ── 2. Idempotency: reuse existing instance if already linked ────────
-        if let Some(existing) =
-            repo::workspace_agent::find(&state.db, workspace_id, &req.agent_def_id).await?
-        {
-            results.push(existing);
-            continue;
-        }
-
-        // ── 3. Atomically create workspace_agent + session ───────────────────
+        // ── 2 & 3. Idempotent create workspace_agent + session (atomic) ──────
         //
-        // Raw sqlx inside a transaction — mirrors the pattern in db::migrate.
-        let wa_id = Uuid::new_v4().to_string();
-        let added_at = Utc::now().to_rfc3339();
-        let session_id = Uuid::new_v4().to_string();
-        let started_at = Utc::now().to_rfc3339();
-
-        let mut tx = state.db.begin().await?;
-
-        sqlx::query(
-            "INSERT INTO workspace_agent \
-             (id, workspace_id, agent_def_id, status, added_at) \
-             VALUES (?, ?, ?, 'idle', ?)",
-        )
-        .bind(&wa_id)
-        .bind(workspace_id.as_str())
-        .bind(&req.agent_def_id)
-        .bind(&added_at)
-        .execute(&mut *tx)
-        .await?;
-
-        // Bind DEFAULT_CONTEXT_LIMIT (not a literal) so the const is the single
-        // source of truth — no silent divergence if it ever changes.
-        sqlx::query(
-            "INSERT INTO session \
-             (id, workspace_agent_id, context_tokens, context_limit, started_at, last_active_at) \
-             VALUES (?, ?, 0, ?, ?, NULL)",
-        )
-        .bind(&session_id)
-        .bind(&wa_id)
-        .bind(repo::session::DEFAULT_CONTEXT_LIMIT)
-        .bind(&started_at)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-
-        results.push(WorkspaceAgentRow {
-            id: wa_id,
-            workspace_id: workspace_id.to_owned(),
-            agent_def_id: req.agent_def_id.clone(),
-            status: "idle".to_owned(),
-            added_at,
-        });
+        // `instantiate` is the single source of truth for the find-or-create
+        // transaction — no raw sqlx duplicated here.
+        let row =
+            repo::workspace_agent::instantiate(&state.db, workspace_id, &req.agent_def_id).await?;
+        results.push(row);
     }
 
     serde_json::to_value(&results).map_err(|e| AppError::Internal(e.to_string()))

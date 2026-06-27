@@ -2587,7 +2587,7 @@
           },
           {
             "title": "Link-folder flow: folder picker + create workspace + initial agents",
-            "status": "todo",
+            "status": "doing",
             "priority": "normal"
           },
           {
@@ -2602,7 +2602,7 @@
           },
           {
             "title": "addToWorkspace: สร้าง instance + session แยกต่อ workspace",
-            "status": "doing",
+            "status": "done",
             "priority": "high"
           }
         ]
