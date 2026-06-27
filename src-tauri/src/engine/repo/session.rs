@@ -55,7 +55,6 @@ pub struct SessionRow {
 
 // ── Column list ──────────────────────────────────────────────────────────────
 
-#[allow(dead_code)] // used by get_by_instance (not yet called from handlers)
 const COLS: [&str; 6] = [
     "id",
     "workspace_agent_id",
@@ -118,8 +117,8 @@ pub async fn create_for_instance(
 }
 
 /// Fetch the session for a given workspace_agent, or `None` if not yet created.
-// Called by M2 session.get handler; suppress until then.
-#[allow(dead_code)]
+///
+/// Reached in production from `commands::instance::spawn`.
 pub async fn get_by_instance(
     pool: &SqlitePool,
     workspace_agent_id: &str,
@@ -127,6 +126,20 @@ pub async fn get_by_instance(
     QueryBuilder::<Sqlite>::table("session")
         .select(COLS)
         .where_eq("workspace_agent_id", workspace_agent_id)
+        .fetch_optional::<SessionRow, _>(pool)
+        .await
+        .map_err(cb_err)
+}
+
+/// Fetch a session by its primary-key `id`, or `None` if no such session.
+///
+/// Mirror of [`get_by_instance`] keyed on the session `id` instead of the
+/// owning `workspace_agent_id`. Used by `commands::message::send` to resolve a
+/// session before routing stdin to its live backend.
+pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SessionRow>> {
+    QueryBuilder::<Sqlite>::table("session")
+        .select(COLS)
+        .where_eq("id", id)
         .fetch_optional::<SessionRow, _>(pool)
         .await
         .map_err(cb_err)
@@ -196,6 +209,27 @@ mod tests {
             .expect("get_by_instance failed")
             .expect("session should exist after create");
         assert_eq!(fetched, row);
+    }
+
+    /// create_for_instance → get (by session id) round-trip: same row, and an
+    /// unknown id yields `None`.
+    #[tokio::test]
+    async fn get_by_id_roundtrip() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+
+        let row = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create_for_instance failed");
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("session should exist for its own id");
+        assert_eq!(fetched, row);
+
+        let missing = get(&pool, "no-such-session-id").await.expect("get failed");
+        assert!(missing.is_none(), "unknown session id must yield None");
     }
 
     /// UNIQUE(workspace_agent_id) is enforced — creating a second session for

@@ -191,15 +191,16 @@ impl Runtime {
     /// Send a line of stdin to the live backend for `instance_id`.
     ///
     /// Returns [`StdinError::NotLive`] if the instance is not registered, or
-    /// [`StdinError::Closed`] if the backend channel has been closed.
-    ///
-    /// No production caller yet — message routing arrives in M3 — but the path
-    /// is wired and unit-tested now.
-    #[allow(dead_code)]
-    pub fn send_stdin(&self, instance_id: &str, text: String) -> Result<(), StdinError> {
+    /// [`StdinError::Closed`] if the backend channel has been closed. Takes
+    /// `&str` (the owned copy the channel needs is made here) so callers like
+    /// `commands::message::send` don't clone just to satisfy this signature.
+    pub fn send_stdin(&self, instance_id: &str, text: &str) -> Result<(), StdinError> {
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let handle = guard.get(instance_id).ok_or(StdinError::NotLive)?;
-        handle.stdin_tx.send(text).map_err(|_| StdinError::Closed)
+        handle
+            .stdin_tx
+            .send(text.to_owned())
+            .map_err(|_| StdinError::Closed)
     }
 }
 
@@ -285,12 +286,12 @@ mod tests {
         let rt = Runtime::new();
 
         // Not registered → NotLive.
-        let err = rt.send_stdin("inst-1", "hi".to_owned()).unwrap_err();
+        let err = rt.send_stdin("inst-1", "hi").unwrap_err();
         assert!(matches!(err, StdinError::NotLive));
 
         // Registered → Ok.
         assert!(rt.register("inst-1", LiveHandle::placeholder("sess-1")));
-        assert!(rt.send_stdin("inst-1", "hi".to_owned()).is_ok());
+        assert!(rt.send_stdin("inst-1", "hi").is_ok());
     }
 
     /// Bulk single-threaded registration — 16 distinct instances coexist.
