@@ -2567,12 +2567,12 @@
           },
           {
             "title": "App shell: native window (vibrancy/traffic lights) + 3-pane + Rail + Roster components",
-            "status": "todo",
+            "status": "doing",
             "priority": "high"
           },
           {
             "title": "Event bus: Tauri events channel + React subscription helper",
-            "status": "doing",
+            "status": "done",
             "priority": "normal"
           }
         ]
