@@ -168,6 +168,29 @@ impl Provider {
             }
         }
     }
+
+    /// Perform a NON-streaming completion of a single user `prompt`, returning
+    /// the full accumulated assistant text.
+    ///
+    /// Thin wrapper over [`stream_chat`]: it builds one `User` message, creates
+    /// an internal `mpsc` channel, and drains the receiver on a spawned task so a
+    /// long answer can't deadlock by filling the channel while `stream_chat` is
+    /// still producing. Reuses the existing provider plumbing — no new HTTP code.
+    pub async fn complete_chat(&self, model: &str, prompt: &str) -> Result<String, ProviderError> {
+        let msg = ChatMessage {
+            role: ChatRole::User,
+            content: prompt.to_owned(),
+        };
+        let (tx, mut rx) = mpsc::channel::<String>(1024);
+        // Drain deltas concurrently so the sender never blocks on a full channel.
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let result = self.stream_chat(model, &[msg], &tx).await;
+        drop(tx); // close the channel so the drain task terminates
+                  // The drain body can't panic, so a JoinError is unreachable here; we still
+                  // await it to guarantee the task is gone before returning (no leak).
+        let _ = drain.await;
+        result
+    }
 }
 
 /// Read an env var, returning `None` if it is unset OR empty.
