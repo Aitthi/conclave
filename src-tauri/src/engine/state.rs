@@ -14,10 +14,7 @@ pub struct AppState {
     /// Live, migration-applied SQLite connection pool.
     ///
     /// `SqlitePool` is `Clone + Send + Sync`, so no `Mutex` is needed.
-    /// Handlers that need the DB can use `&state.db` directly.
-    ///
-    /// `#[allow(dead_code)]`: no command handler reads `db` yet (M1+).
-    #[allow(dead_code)]
+    /// Handlers that need the DB pass `&state.db` to repo functions.
     pub db: SqlitePool,
 
     /// Tauri application handle, stored once during `.setup()`.

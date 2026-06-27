@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   Hexagon,
   FolderPlus,
@@ -7,22 +6,18 @@ import {
   Settings,
 } from "lucide-react";
 
-interface Workspace {
-  id: string;
-  label: string;
-  color: string;
-  title: string;
+import type { Workspace } from "../ipc";
+
+// Default color for workspaces that have no color set.
+const DEFAULT_WORKSPACE_COLOR = "#6e6e73";
+
+interface RailProps {
+  workspaces: Workspace[];
+  activeWorkspaceId: string | null;
+  onSelectWorkspace: (id: string) => void;
 }
 
-const WORKSPACES: Workspace[] = [
-  { id: "codeup", label: "C", color: "#0a84ff", title: "codeup" },
-  { id: "payments", label: "P", color: "#0fa3a3", title: "payments-svc" },
-  { id: "marketing", label: "M", color: "#5e5ce6", title: "marketing-site" },
-];
-
-export function Rail() {
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>("codeup");
-
+export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace }: RailProps) {
   return (
     <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center py-2.5 gap-1 overflow-hidden">
       {/* Brand mark */}
@@ -36,32 +31,35 @@ export function Rail() {
       {/* Divider */}
       <div className="w-7 h-px bg-black/[0.08] mb-1.5" />
 
-      {/* Workspace switcher */}
-      {WORKSPACES.map((ws) => {
+      {/* Workspace switcher — driven by real DB data from workspace.list */}
+      {workspaces.map((ws) => {
         const isActive = ws.id === activeWorkspaceId;
+        const color = ws.color ?? DEFAULT_WORKSPACE_COLOR;
+        const letter = ws.name.charAt(0).toUpperCase();
+
         return (
           <button
             key={ws.id}
             className={`relative w-9 h-9 rounded-[10px] text-white grid place-items-center text-[13px] font-bold ring-hair transition-opacity${
               isActive ? "" : " opacity-90 hover:opacity-100"
             }`}
-            style={{ backgroundColor: ws.color }}
-            title={ws.title}
-            onClick={() => setActiveWorkspaceId(ws.id)}
+            style={{ backgroundColor: color }}
+            title={ws.name}
+            onClick={() => onSelectWorkspace(ws.id)}
           >
             {/* Active selection pill */}
             {isActive && (
               <span
                 className="absolute -left-2.5 top-1/2 -translate-y-1/2 w-1 h-5 rounded-full"
-                style={{ backgroundColor: ws.color }}
+                style={{ backgroundColor: color }}
               />
             )}
-            {ws.label}
+            {letter}
           </button>
         );
       })}
 
-      {/* Link folder / new workspace */}
+      {/* Link folder / new workspace — TODO(M1.2): open link-folder flow */}
       <button
         className="w-9 h-9 rounded-[10px] border border-dashed border-black/20 text-[#6e6e73] grid place-items-center hover:border-[#0a84ff] hover:text-[#0a84ff]"
         title="Link folder as workspace"

@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { ipc } from "../ipc";
+import type { Workspace } from "../ipc";
 import { Rail } from "./Rail";
 import { Roster } from "./Roster";
 
@@ -91,6 +93,24 @@ export function AppShell() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const agent = selectedId ? (AGENT_META[selectedId] ?? null) : null;
 
+  // ── Workspace state ────────────────────────────────────────────────────
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
+
+  // Load workspaces from the DB on mount.
+  // Falls back to an empty list if Tauri is not present (plain Vite dev).
+  useEffect(() => {
+    ipc.workspace.list().then(setWorkspaces).catch(() => setWorkspaces([]));
+  }, []);
+
+  function handleSelectWorkspace(id: string) {
+    // Optimistically update selection; handler only validates on the Rust side.
+    setActiveWorkspaceId(id);
+    ipc.workspace.use({ workspaceId: id }).catch(() => {
+      // Ignore — the workspace just can't be found in the DB (stale id).
+    });
+  }
+
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
       {/*
@@ -115,7 +135,11 @@ export function AppShell() {
 
       {/* ── 3-pane layout ────────────────────────────────────────────── */}
       <div className="flex-1 flex overflow-hidden min-h-0">
-        <Rail />
+        <Rail
+          workspaces={workspaces}
+          activeWorkspaceId={activeWorkspaceId}
+          onSelectWorkspace={handleSelectWorkspace}
+        />
         <Roster selectedId={selectedId} onSelect={setSelectedId} />
 
         {/* ── Main content placeholder (M1 screens mount here) ───── */}
