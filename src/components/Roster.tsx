@@ -225,9 +225,13 @@ function AgentRow({ entry, isSelected, onSelect }: AgentRowProps) {
 interface RosterProps {
   selectedId: string | null;
   onSelect: (instanceId: string) => void;
+  /** Open the per-workspace Blackboard screen. Absent → no workspace active. */
+  onOpenBlackboard?: () => void;
+  /** Whether the Blackboard screen is currently shown (drives active styling). */
+  blackboardOpen?: boolean;
 }
 
-export function Roster({ selectedId, onSelect }: RosterProps) {
+export function Roster({ selectedId, onSelect, onOpenBlackboard, blackboardOpen }: RosterProps) {
   return (
     <aside className="w-[266px] vibrancy border-r border-black/[0.06] flex flex-col shrink-0">
       {/* Workspace header */}
@@ -325,13 +329,19 @@ export function Roster({ selectedId, onSelect }: RosterProps) {
           </div>
           <span className="text-[12.5px] font-semibold">Add agent</span>
         </button>
-        <button className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-black/[0.04]">
+        <button
+          onClick={onOpenBlackboard}
+          disabled={!onOpenBlackboard}
+          className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 ${
+            blackboardOpen ? "bg-black/[0.06]" : "hover:bg-black/[0.04]"
+          }`}
+        >
           <div className="w-7 h-7 rounded-[8px] bg-[#1d1d1f] text-white grid place-items-center ring-hair shrink-0">
             <Layers className="w-[14px] h-[14px]" />
           </div>
           <div className="flex-1 text-left leading-tight">
             <div className="text-[12.5px] font-semibold">Blackboard</div>
-            <div className="text-[10.5px] text-[#86868b]">this workspace · 12 keys</div>
+            <div className="text-[10.5px] text-[#86868b]">เปิดดู key/value ที่แชร์</div>
           </div>
         </button>
       </div>

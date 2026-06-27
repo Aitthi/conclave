@@ -7,6 +7,7 @@ import { Builder } from "./Builder";
 import { Library } from "./Library";
 import { LinkFolder } from "./LinkFolder";
 import { WorkspacePane } from "./WorkspacePane";
+import { Blackboard } from "./Blackboard";
 
 export function AppShell() {
   // Roster selection is cosmetic for now (mock data). The WorkspacePane's own
@@ -17,6 +18,9 @@ export function AppShell() {
   // ── Workspace state ────────────────────────────────────────────────────
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
+
+  // ── Blackboard state ───────────────────────────────────────────────────
+  const [showBlackboard, setShowBlackboard] = useState(false);
 
   // ── Library state ──────────────────────────────────────────────────────
   const [showLibrary, setShowLibrary] = useState(false);
@@ -52,10 +56,16 @@ export function AppShell() {
   function handleSelectWorkspace(id: string) {
     // Optimistically update selection; handler only validates on the Rust side.
     setActiveWorkspaceId(id);
+    // Switching workspace returns to that workspace's agent pane.
+    setShowBlackboard(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
       // Ignore — the workspace just can't be found in the DB (stale id).
     });
   }
+
+  const activeWorkspace = activeWorkspaceId
+    ? (workspaces.find((w) => w.id === activeWorkspaceId) ?? null)
+    : null;
 
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
@@ -85,7 +95,10 @@ export function AppShell() {
           workspaces={workspaces}
           activeWorkspaceId={activeWorkspaceId}
           onSelectWorkspace={handleSelectWorkspace}
-          onOpenLibrary={() => setShowLibrary(true)}
+          onOpenLibrary={() => {
+            setShowBlackboard(false);
+            setShowLibrary(true);
+          }}
           onOpenLinkFolder={() => setShowLinkFolder(true)}
         />
 
@@ -101,10 +114,30 @@ export function AppShell() {
           />
         ) : (
           <>
-            <Roster selectedId={selectedId} onSelect={setSelectedId} />
+            <Roster
+              selectedId={selectedId}
+              onSelect={(id) => {
+                // Selecting an agent returns from the Blackboard to the pane.
+                setShowBlackboard(false);
+                setSelectedId(id);
+              }}
+              // Blackboard needs a workspace to scope to — only toggle when one
+              // is active (else the view would fall through to "เลือก workspace").
+              onOpenBlackboard={
+                activeWorkspaceId ? () => setShowBlackboard((v) => !v) : undefined
+              }
+              blackboardOpen={showBlackboard}
+            />
 
-            {/* ── Main content: live terminal pane for the active workspace ─── */}
-            {activeWorkspaceId ? (
+            {/* ── Main content: Blackboard screen, else the live agent pane ─── */}
+            {showBlackboard && activeWorkspaceId ? (
+              <Blackboard
+                key={activeWorkspaceId}
+                workspaceId={activeWorkspaceId}
+                workspaceName={activeWorkspace?.name}
+                onClose={() => setShowBlackboard(false)}
+              />
+            ) : activeWorkspaceId ? (
               // Remount per workspace so the pane refetches its instances.
               <WorkspacePane key={activeWorkspaceId} workspaceId={activeWorkspaceId} />
             ) : (

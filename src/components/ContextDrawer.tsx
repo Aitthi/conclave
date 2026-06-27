@@ -15,6 +15,7 @@ import {
 import { ipc, useMessageInjected } from "../ipc";
 import type { AgentDefinition, InterAgentMessage, Session, WorkspaceAgent } from "../ipc";
 import type { RoutingTarget } from "./RoutingPicker";
+import { timeHint } from "../lib/timeHint";
 
 // ---------------------------------------------------------------------------
 // Right-side Context drawer — shows the ACTIVE agent's configuration. The
@@ -43,18 +44,6 @@ interface ContextDrawerProps {
 
 // How many recent inbox/outbox rows the Messages log shows.
 const MESSAGE_LOG_LIMIT = 6;
-
-// Compact relative-ish time hint from an ISO `createdAt` ("เมื่อสักครู่" / "5 น."
-// / "3 ชม." / a date). Best-effort, never throws — falls back to the raw string.
-function timeHint(iso: string): string {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso;
-  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (diffSec < 60) return "เมื่อสักครู่";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} น.`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} ชม.`;
-  return `${Math.floor(diffSec / 86400)} วัน`;
-}
 
 function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
   switch (v) {
