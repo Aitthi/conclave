@@ -6,12 +6,12 @@ import { Roster } from "./Roster";
 import { Builder } from "./Builder";
 import { Library } from "./Library";
 import { LinkFolder } from "./LinkFolder";
-import { TerminalPane } from "./TerminalPane";
+import { WorkspacePane } from "./WorkspacePane";
 
 export function AppShell() {
-  // Roster selection is cosmetic for now (mock data). The TerminalPane's own
-  // CLI tabs drive the live terminal.
-  // TODO(M3): wire Roster selection to the real instance.list data + TerminalPane.
+  // Roster selection is cosmetic for now (mock data). The WorkspacePane's own
+  // tabs drive the live terminal / chat.
+  // TODO(M3): wire Roster selection to the real instance.list data + WorkspacePane.
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // ── Workspace state ────────────────────────────────────────────────────
@@ -105,8 +105,8 @@ export function AppShell() {
 
             {/* ── Main content: live terminal pane for the active workspace ─── */}
             {activeWorkspaceId ? (
-              // Remount per workspace so the pane refetches its CLI instances.
-              <TerminalPane key={activeWorkspaceId} workspaceId={activeWorkspaceId} />
+              // Remount per workspace so the pane refetches its instances.
+              <WorkspacePane key={activeWorkspaceId} workspaceId={activeWorkspaceId} />
             ) : (
               <main className="flex-1 flex flex-col min-w-0 bg-white">
                 <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
