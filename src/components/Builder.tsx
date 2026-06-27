@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { X, Sparkles, Cpu, Waypoints, MessageSquare, Terminal } from "lucide-react";
+import { X, Sparkles, Waypoints, MessageSquare, Terminal } from "lucide-react";
 import { ipc } from "../ipc";
 import type { AgentDefinition } from "../ipc";
 
@@ -14,7 +14,6 @@ export interface BuilderProps {
 
 type AgentType = "cli" | "chat" | "orchestrator";
 type CliKind = "claude-code" | "codex" | "custom";
-type HarnessMode = "own" | "central";
 type AllowedSenders = "all" | "selected" | "none";
 
 // ── Preset color swatches ────────────────────────────────────────────────────
@@ -63,8 +62,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
   const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
   const [model, setModel] = useState(initialDef?.model ?? "");
-  const [harnessMode, setHarnessMode] = useState<HarnessMode>(initialDef?.harnessMode ?? "own");
-  const [shareBlackboard, setShareBlackboard] = useState(initialDef?.shareBlackboard ?? false);
   const [autoSubmitInjected, setAutoSubmitInjected] = useState(
     initialDef?.autoSubmitInjected ?? false,
   );
@@ -95,9 +92,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         cliKind: agentType === "cli" ? cliKind : undefined,
         color: color || undefined,
         model: model.trim() || undefined,
-        harnessMode,
-        // Send the explicit boolean — `|| undefined` would lose a deliberate `false`.
-        shareBlackboard,
+        // Harness is no longer a per-agent setting: every agent uses the shared
+        // central Conclave harness + shared blackboard. Kept in the payload as
+        // fixed constants so the backend contract is unchanged (no migration).
+        harnessMode: "central",
+        shareBlackboard: true,
         autoSubmitInjected,
         allowedSenders,
       });
@@ -271,49 +270,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   className="text-[12.5px] text-right bg-transparent outline-none w-44 placeholder:text-[#c7c7cc]"
                 />
               </div>
-            </div>
-          </section>
-
-          {/* Harness */}
-          <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
-              Harness
-            </div>
-            <div className="grid grid-cols-2 gap-2 mb-2">
-              {(
-                [
-                  { value: "own", label: "Own harness", Icon: Cpu, desc: "Runs its own loop" },
-                  {
-                    value: "central",
-                    label: "Central harness",
-                    Icon: Waypoints,
-                    desc: "Uses Conclave loop",
-                  },
-                ] as { value: HarnessMode; label: string; Icon: typeof Cpu; desc: string }[]
-              ).map(({ value, label, Icon, desc }) => {
-                const active = harnessMode === value;
-                return (
-                  <button
-                    key={value}
-                    onClick={() => setHarnessMode(value)}
-                    className={`rounded-xl p-3 text-left transition-all ${
-                      active
-                        ? "ring-1 ring-[#5e5ce6]/40 bg-[#5e5ce6]/[0.06]"
-                        : "ring-1 ring-black/[0.08] bg-white hover:bg-black/[0.02]"
-                    }`}
-                  >
-                    <Icon
-                      className={`w-4 h-4 mb-1 ${active ? "text-[#5e5ce6]" : "text-[#6e6e73]"}`}
-                    />
-                    <div className="text-[12px] font-semibold">{label}</div>
-                    <div className="text-[10.5px] text-[#86868b] mt-0.5">{desc}</div>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex items-center justify-between rounded-xl ring-1 ring-black/[0.08] bg-white px-3 py-2.5">
-              <span className="text-[12.5px]">Share central blackboard</span>
-              <Toggle on={shareBlackboard} onChange={setShareBlackboard} />
             </div>
           </section>
 

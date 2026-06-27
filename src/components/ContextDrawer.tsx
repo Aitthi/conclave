@@ -1,12 +1,8 @@
 import { useState } from "react";
 import {
   PanelRight,
-  Layers,
-  Cpu,
-  Terminal as TerminalIcon,
   Bot,
   CheckCircle2,
-  Link as LinkIcon,
   Inbox,
   Send,
   Wrench,
@@ -35,20 +31,6 @@ interface ContextDrawerProps {
   status: WorkspaceAgent["status"];
   /** The active session, when one has been spawned (for context meter). */
   session?: Session | null;
-}
-
-// Human-readable loop label for a cli agent, by `cliKind`.
-function cliLoopLabel(cliKind: AgentDefinition["cliKind"]): string {
-  switch (cliKind) {
-    case "claude-code":
-      return "Claude Code loop";
-    case "codex":
-      return "Codex loop";
-    case "custom":
-      return "Custom loop";
-    default:
-      return "CLI loop";
-  }
 }
 
 function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
@@ -104,8 +86,6 @@ export function ContextDrawer({ def, status, session }: ContextDrawerProps) {
     );
   }
 
-  const isOwn = def.harnessMode === "own";
-
   return (
     <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
       {/* Header */}
@@ -129,55 +109,6 @@ export function ContextDrawer({ def, status, session }: ContextDrawerProps) {
           </div>
         ) : (
           <>
-            {/* Harness — REAL (harnessMode + shareBlackboard) */}
-            <div>
-              <SectionLabel>Harness</SectionLabel>
-              <div className="rounded-xl ring-hair bg-white p-2.5 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[12px] font-medium flex items-center gap-1.5">
-                    {isOwn ? (
-                      <>
-                        {def.type === "cli" ? (
-                          <TerminalIcon className="w-3.5 h-3.5 text-[#ff7a45]" />
-                        ) : (
-                          <Cpu className="w-3.5 h-3.5 text-[#0a84ff]" />
-                        )}
-                        {def.type === "cli" ? cliLoopLabel(def.cliKind) : "Own loop"}
-                      </>
-                    ) : (
-                      <>
-                        <Layers className="w-3.5 h-3.5 text-[#0fa3a3]" />
-                        Central harness
-                      </>
-                    )}
-                  </span>
-                  {isOwn ? (
-                    <span className="text-[10px] text-white bg-[#ff7a45] px-1.5 py-0.5 rounded-full font-semibold">
-                      own
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-white bg-[#0fa3a3] px-1.5 py-0.5 rounded-full font-semibold">
-                      shared
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center justify-between text-[11.5px] text-[#6e6e73]">
-                  <span className="flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5" />
-                    Central blackboard
-                  </span>
-                  {def.shareBlackboard ? (
-                    <span className="flex items-center gap-1 text-[#30a14e]">
-                      <LinkIcon className="w-3 h-3" />
-                      shared
-                    </span>
-                  ) : (
-                    <span>off</span>
-                  )}
-                </div>
-              </div>
-            </div>
-
             {/* Model · API — REAL (model + providerId), chat-focused */}
             {def.type === "chat" && (
               <div>
