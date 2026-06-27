@@ -11,10 +11,11 @@ use tauri::Manager;
 /// directly, bypassing this thin wrapper.
 #[tauri::command]
 async fn ipc(
-    state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
     cmd: String,
     payload: Value,
 ) -> Result<Value, String> {
+    // `&state` coerces `&State<Arc<AppState>>` → `&AppState` via chained Deref.
     router::dispatch(&state, &cmd, payload)
         .await
         .map_err(|e| e.to_string())
@@ -23,12 +24,24 @@ async fn ipc(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState::new())
+        .manage(std::sync::Arc::new(AppState::new()))
         .setup(|app| {
             // Wire the AppHandle into AppState so that bus::emit helpers and
             // state.emit(...) can push events to the UI from any async context.
-            let state = app.state::<AppState>();
+            let state = app.state::<std::sync::Arc<AppState>>();
             state.set_app(app.handle().clone());
+
+            // Spawn the Unix-Domain-Socket server (unix only): a second
+            // front-door onto the same command router the GUI uses. Cloning the
+            // managed Arc gives the server its own owned handle to AppState.
+            #[cfg(unix)]
+            {
+                let server_state = std::sync::Arc::clone(&state);
+                tauri::async_runtime::spawn(engine::uds::serve(
+                    server_state,
+                    engine::uds::socket_path(),
+                ));
+            }
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())

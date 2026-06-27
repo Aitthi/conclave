@@ -1,0 +1,351 @@
+//! Unix-Domain-Socket server: a second front-door onto the command router.
+//!
+//! The Tauri `invoke("ipc", …)` bridge and this UDS server both funnel every
+//! request through [`crate::engine::router::dispatch`]. The socket speaks
+//! newline-delimited JSON-RPC 2.0 so the (future M5.2) `conclave` CLI and
+//! agents can drive the SAME command surface the GUI uses.
+//!
+//! The whole module is unix-only — the app targets macOS. Non-unix builds get
+//! an empty module and simply have no socket server.
+#![cfg(unix)]
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+
+use crate::engine::{router, AppError, AppState};
+
+/// Maximum bytes accepted for a single request line. A client that never sends
+/// a newline would otherwise grow the read buffer unbounded (memory DoS) — even
+/// a same-user buggy client could OOM the shared GUI process. 4 MiB dwarfs any
+/// real JSON-RPC payload.
+const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Cap on concurrent UDS connections. A bound on per-connection memory (each
+/// holds a read buffer); excess connections are dropped rather than unbounded-
+/// spawned. Generous for a single-user local socket.
+const MAX_CONNECTIONS: usize = 32;
+
+/// Resolve the socket path: `~/Library/Application Support/Conclave/conclave.sock`
+/// on macOS (the same `Conclave` data dir as the database). Creates the
+/// directory if it does not exist.
+///
+/// # Panics
+/// Panics if the user data directory cannot be resolved or the `Conclave`
+/// directory cannot be created — both unrecoverable on a supported install,
+/// and mirrored from `db::db_path()`.
+pub fn socket_path() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = dirs::data_dir()
+        .expect("could not resolve user data directory")
+        .join("Conclave");
+    std::fs::create_dir_all(&dir).expect("could not create Conclave data directory");
+    // Lock the data dir to owner-only (0700). `create_dir_all` applies the
+    // process umask, which can leave the dir world-traversable (0755); a
+    // 0700 dir closes the brief window between the socket's bind and its 0600
+    // chmod, during which the socket file itself is umask-default (e.g. 0644).
+    // With the parent dir owner-only, no other local user can even reach it.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    dir.join("conclave.sock")
+}
+
+/// Map an [`AppError`] to its JSON-RPC error code.
+///
+/// `NotFound`/`NotImplemented` → method-not-found (`-32601`),
+/// `Invalid` → invalid-params (`-32602`),
+/// `Internal` (and anything else) → internal-error (`-32603`).
+fn error_code(err: &AppError) -> i32 {
+    match err {
+        AppError::NotFound(_) | AppError::NotImplemented(_) => -32601,
+        AppError::Invalid(_) => -32602,
+        AppError::Internal(_) => -32603,
+    }
+}
+
+/// Build a single-line JSON-RPC success response.
+fn ok_response(id: &Value, result: Value) -> String {
+    // Serializing a plain object literal cannot fail.
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    }))
+    .expect("serialize ok response")
+}
+
+/// Build a single-line JSON-RPC error response.
+fn err_response(id: &Value, code: i32, message: impl Into<String>) -> String {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message.into() },
+    }))
+    .expect("serialize err response")
+}
+
+/// Handle one newline-delimited JSON-RPC request line and return the response
+/// line (a single line, no embedded newline). This is the testable core: it has
+/// no socket dependency.
+pub(crate) async fn handle_line(state: &AppState, line: &str) -> String {
+    // Parse the request envelope.
+    let req: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => return err_response(&Value::Null, -32700, format!("Parse error: {e}")),
+    };
+
+    // Preserve the id verbatim (number / string / null); default null if absent.
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+
+    // `method` must be present and a string.
+    let method = match req.get("method").and_then(Value::as_str) {
+        Some(m) => m,
+        None => return err_response(&id, -32600, "Invalid Request: missing method"),
+    };
+
+    // `params` defaults to null when absent.
+    let params = req.get("params").cloned().unwrap_or(Value::Null);
+
+    match router::dispatch(state, method, params).await {
+        Ok(value) => ok_response(&id, value),
+        Err(e) => err_response(&id, error_code(&e), e.to_string()),
+    }
+}
+
+/// Serve a single accepted connection: read request lines, dispatch each, and
+/// write back response lines. Returns when the client disconnects (EOF) or a
+/// write fails (client gone).
+async fn handle_conn(state: Arc<AppState>, stream: UnixStream) {
+    let (read, mut write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        // Bound each line read: a fresh `take(MAX_LINE_BYTES)` per iteration caps
+        // THIS line without limiting the stream, so a newline-less flood can't
+        // grow `line` unbounded.
+        let n = match (&mut reader)
+            .take(MAX_LINE_BYTES)
+            .read_line(&mut line)
+            .await
+        {
+            // EOF — client closed the connection.
+            Ok(0) => break,
+            Ok(n) => n,
+            // Read error (incl. invalid UTF-8) — treat as disconnect.
+            Err(_) => break,
+        };
+        // Hit the cap with no terminating newline → the line is over-long. Reject
+        // and close rather than try to resync a half-read frame.
+        if n as u64 == MAX_LINE_BYTES && !line.ends_with('\n') {
+            let resp = err_response(&Value::Null, -32700, "Request line exceeds 4 MiB limit");
+            let _ = write.write_all(resp.as_bytes()).await;
+            let _ = write.write_all(b"\n").await;
+            break;
+        }
+
+        // Skip blank / whitespace-only lines.
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let resp = handle_line(&state, trimmed).await;
+        if write.write_all(resp.as_bytes()).await.is_err() {
+            break;
+        }
+        if write.write_all(b"\n").await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Bind the UDS at `path` (0600), then accept connections forever, spawning a
+/// task per connection. Never panics: if the socket cannot bind, the GUI must
+/// still run, so we log and return.
+pub async fn serve(state: Arc<AppState>, path: PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Best-effort removal of a stale socket file (ignore NotFound).
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("[uds] could not remove stale socket {path:?}: {e}"),
+    }
+
+    let listener = match UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[uds] failed to bind socket {path:?}: {e}");
+            return;
+        }
+    };
+
+    // Lock the socket down to owner-only (0600). Log + continue on error.
+    if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("[uds] could not set 0600 permissions on {path:?}: {e}");
+    }
+
+    // Bound concurrent connections so a flood of opens can't spawn unbounded
+    // tasks (each with its own read buffer).
+    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                // Drop the connection if we're at the cap rather than queueing.
+                let Ok(permit) = Arc::clone(&limiter).try_acquire_owned() else {
+                    eprintln!("[uds] connection limit ({MAX_CONNECTIONS}) reached — dropping");
+                    continue;
+                };
+                let conn_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    handle_conn(conn_state, stream).await;
+                    drop(permit); // release the slot when the connection ends
+                });
+            }
+            Err(e) => {
+                eprintln!("[uds] accept error: {e}");
+                // Yield so a *persistent* accept error (e.g. EMFILE) interleaves
+                // fairly with other tasks instead of pinning a worker at 100%.
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn handle_line_valid_request_returns_result() {
+        let state = AppState::for_tests().await;
+        let resp = handle_line(
+            &state,
+            r#"{"jsonrpc":"2.0","id":1,"method":"workspace.list"}"#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&resp).expect("response is JSON");
+
+        assert_eq!(v.get("id"), Some(&json!(1)));
+        assert!(v.get("error").is_none(), "no error expected: {resp}");
+        let result = v.get("result").expect("result present");
+        assert!(result.is_array(), "workspace.list returns an array: {resp}");
+        assert_eq!(result.as_array().unwrap().len(), 0, "empty in-memory DB");
+    }
+
+    #[tokio::test]
+    async fn handle_line_unknown_method_is_method_not_found() {
+        let state = AppState::for_tests().await;
+        let resp = handle_line(&state, r#"{"jsonrpc":"2.0","id":1,"method":"nope.nope"}"#).await;
+        let v: Value = serde_json::from_str(&resp).expect("response is JSON");
+
+        assert_eq!(v.get("id"), Some(&json!(1)), "id preserved");
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_i64),
+            Some(-32601)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_line_malformed_json_is_parse_error() {
+        let state = AppState::for_tests().await;
+        let resp = handle_line(&state, "{not json").await;
+        let v: Value = serde_json::from_str(&resp).expect("response is JSON");
+
+        assert_eq!(v.get("id"), Some(&Value::Null), "id is null on parse error");
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_i64),
+            Some(-32700)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_line_missing_method_is_invalid_request() {
+        let state = AppState::for_tests().await;
+        let resp = handle_line(&state, r#"{"jsonrpc":"2.0","id":"abc"}"#).await;
+        let v: Value = serde_json::from_str(&resp).expect("response is JSON");
+
+        // String id round-trips unchanged.
+        assert_eq!(v.get("id"), Some(&json!("abc")));
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_i64),
+            Some(-32600)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_line_bad_params_is_invalid_params() {
+        let state = AppState::for_tests().await;
+        // instance.list requires `workspaceId`; an empty params object fails
+        // deserialization → AppError::Invalid → -32602.
+        let resp = handle_line(
+            &state,
+            r#"{"jsonrpc":"2.0","id":2,"method":"instance.list","params":{}}"#,
+        )
+        .await;
+        let v: Value = serde_json::from_str(&resp).expect("response is JSON");
+
+        assert_eq!(v.get("id"), Some(&json!(2)));
+        assert_eq!(
+            v.pointer("/error/code").and_then(Value::as_i64),
+            Some(-32602)
+        );
+    }
+
+    /// One real socket round-trip: bind, connect, send a request, read the
+    /// response, and assert the socket file is 0600.
+    #[tokio::test]
+    async fn socket_round_trip_and_perms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = Arc::new(AppState::for_tests().await);
+        let path = std::env::temp_dir().join("conclave-uds-test-round-trip.sock");
+        let _ = std::fs::remove_file(&path);
+
+        let server = tokio::spawn(serve(Arc::clone(&state), path.clone()));
+
+        // Bind races the spawned task — poll-connect (busy loop with yield_now,
+        // avoiding the tokio "time" feature).
+        let mut stream = None;
+        for _ in 0..5000 {
+            match UnixStream::connect(&path).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        let stream = stream.expect("could not connect to UDS within retry budget");
+
+        // Socket file must be owner-only.
+        let mode = std::fs::metadata(&path)
+            .expect("socket metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "socket must be 0600, got {:o}", mode);
+
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"workspace.list\"}\n")
+            .await
+            .expect("write request");
+
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read response");
+
+        let v: Value = serde_json::from_str(line.trim()).expect("response is JSON");
+        assert_eq!(v.get("id"), Some(&json!(7)));
+        assert!(v.get("result").is_some(), "result present: {line}");
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+}
