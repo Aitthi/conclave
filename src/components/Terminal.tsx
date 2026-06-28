@@ -82,6 +82,15 @@ export function Terminal({ sessionId }: TerminalProps) {
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
+      // xterm reflows its buffer on resize, which can strand stray cells OUTSIDE
+      // the region the child (Claude Code / Ink) manages — Ink only erases and
+      // redraws its own frame via RELATIVE cursor moves, so it never clears
+      // those leftovers. Wipe the viewport and home the cursor ourselves so the
+      // forced repaint below lands on a clean screen. This is written to xterm's
+      // DISPLAY only (the child never sees it, so its process state is intact);
+      // the immediate full re-render re-aligns xterm's cursor with the child's,
+      // and ED (\x1b[2J) keeps scrollback so history isn't lost.
+      term.write("\x1b[2J\x1b[H");
       if (rows <= 1) {
         // Degenerate height — nothing to jiggle against; send as-is.
         void ipc.session.resize({ sessionId, cols, rows }).catch(() => {});
@@ -90,7 +99,8 @@ export function Terminal({ sessionId }: TerminalProps) {
       // Step 1: one row shorter → guaranteed SIGWINCH, child clears + redraws.
       void ipc.session.resize({ sessionId, cols, rows: rows - 1 }).catch(() => {});
       // Step 2 (after a short gap so the two SIGWINCHs aren't coalesced): the
-      // real size → child redraws its full frame at the on-screen dimensions.
+      // real size → child redraws its full frame at the on-screen dimensions,
+      // onto the cleared screen.
       clearTimeout(jiggleTimer);
       jiggleTimer = setTimeout(() => {
         void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
