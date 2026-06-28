@@ -394,6 +394,42 @@ pub async fn stop(state: &AppState, payload: Value) -> Result<Value, AppError> {
     Ok(Value::Null)
 }
 
+/// Payload for `session.resize` — the frontend terminal's current size.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResizeReq {
+    session_id: String,
+    cols: u16,
+    rows: u16,
+}
+
+/// Resize a live CLI session's PTY to match the frontend xterm `(cols, rows)`.
+///
+/// Payload `{ sessionId, cols, rows }`. Resolves the session to its owning
+/// instance and forwards the size to the PTY so a full-screen TUI lays out at
+/// the real on-screen size. Best-effort: a no-op (`null`) when the session
+/// isn't running or has no PTY (chat), or when the size is degenerate.
+pub async fn resize(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: ResizeReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    // A collapsed/hidden pane can report 0×0 — ignore rather than shrink the PTY.
+    if req.cols == 0 || req.rows == 0 {
+        return Ok(Value::Null);
+    }
+
+    let session = repo::session::get(&state.db, &req.session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session id={} not found", req.session_id)))?;
+
+    // Not-live just means there's no PTY to resize yet — best-effort.
+    let _ = state
+        .runtime
+        .resize(&session.workspace_agent_id, req.cols, req.rows);
+
+    Ok(Value::Null)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

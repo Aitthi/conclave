@@ -79,6 +79,8 @@ pub fn spawn_chat(session_id: &str, provider: Provider, model: String) -> ChatBa
         session_id: session_id.to_owned(),
         stdin_tx,
         shutdown: Box::new(move || loop_abort.abort()),
+        // Chat backends have no PTY — resize is a no-op.
+        resize: Box::new(|_, _| {}),
     };
     ChatBackend { handle, output_rx }
 }

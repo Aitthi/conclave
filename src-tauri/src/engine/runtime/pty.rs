@@ -71,8 +71,10 @@ pub fn spawn_cli(
 
     let mut reader = pair.master.try_clone_reader().map_err(to_io_err)?;
     let mut writer = pair.master.take_writer().map_err(to_io_err)?;
-    // Keep the master alive for the lifetime of the backend (moved into shutdown).
-    let master = pair.master;
+    // Keep the master alive for the lifetime of the backend, behind Arc<Mutex>
+    // so the resize closure (below) and the shutdown closure can both hold it.
+    // `MasterPty::resize` only needs `&self`; the Mutex guards concurrent access.
+    let master = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
 
     let (output_tx, output_rx) = mpsc::channel::<String>(OUTPUT_CHANNEL_CAP);
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
@@ -116,6 +118,22 @@ pub fn spawn_cli(
     });
     let writer_abort = writer_task.abort_handle();
 
+    // ── Resize ────────────────────────────────────────────────────────────────
+    // Forward (cols, rows) from the frontend's xterm fit to the PTY master so a
+    // full-screen TUI (Claude Code, etc.) lays out at the real on-screen size
+    // instead of the 80×24 default — without a matching size the redraws garble.
+    let resize_master = std::sync::Arc::clone(&master);
+    let resize: Box<dyn Fn(u16, u16) + Send> = Box::new(move |cols, rows| {
+        if let Ok(m) = resize_master.lock() {
+            let _ = m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
+    });
+
     // ── Teardown ────────────────────────────────────────────────────────────
     // Killing the child makes the reader hit EOF and exit its thread on its own;
     // aborting the writer task stops stdin. We deliberately do NOT join the
@@ -138,6 +156,7 @@ pub fn spawn_cli(
         session_id: session_id.to_owned(),
         stdin_tx,
         shutdown,
+        resize,
     };
     Ok(CliBackend { handle, output_rx })
 }

@@ -49,6 +49,22 @@ export function Terminal({ sessionId }: TerminalProps) {
     term.focus();
     termRef.current = term;
 
+    // Push the terminal's real (cols, rows) to the PTY so a full-screen TUI
+    // lays out at the on-screen size instead of the 80×24 default. Without this
+    // the child's redraws garble. Best-effort + deduped (skip if unchanged).
+    let lastCols = 0;
+    let lastRows = 0;
+    const pushSize = () => {
+      const { cols, rows } = term;
+      if (cols === lastCols && rows === lastRows) return;
+      lastCols = cols;
+      lastRows = rows;
+      void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
+        // Session not running yet / no PTY — harmless.
+      });
+    };
+    pushSize();
+
     // Forward every keystroke (raw, including control sequences) to the PTY
     // stdin. `sessionId` is stable for this mount (the component is keyed by it),
     // so capturing it here is safe.
@@ -63,6 +79,7 @@ export function Terminal({ sessionId }: TerminalProps) {
     const observer = new ResizeObserver(() => {
       try {
         fitAddon.fit();
+        pushSize();
       } catch {
         // fit() can throw if the element is detached mid-teardown — ignore.
       }

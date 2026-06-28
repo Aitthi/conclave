@@ -69,6 +69,10 @@ export interface Commands {
     req: { workspaceAgentId: string };
     res: Session;
   };
+  "session.resize": {
+    req: { sessionId: string; cols: number; rows: number };
+    res: void;
+  };
   "message.send": {
     req: { sessionId: string; text: string };
     res: Message;
@@ -182,6 +186,9 @@ export const ipc = {
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
+  },
+  session: {
+    resize: (req: Commands["session.resize"]["req"]) => call("session.resize", req),
   },
   message: {
     send: (req: Commands["message.send"]["req"]) => call("message.send", req),

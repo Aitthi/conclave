@@ -69,6 +69,10 @@ pub struct LiveHandle {
     /// Teardown closure run exactly once on `unregister` / `Drop`. Kills the
     /// child / aborts the backend task and drops any owned channels.
     shutdown: Box<dyn FnOnce() + Send>,
+    /// Resize the backing PTY to `(cols, rows)`. A no-op for backends without a
+    /// PTY (chat / placeholder). Built in `pty.rs` so this module stays free of
+    /// any `portable-pty` dependency (mirrors `shutdown`).
+    resize: Box<dyn Fn(u16, u16) + Send>,
 }
 
 impl LiveHandle {
@@ -86,6 +90,7 @@ impl LiveHandle {
             session_id: session_id.to_owned(),
             stdin_tx,
             shutdown: Box::new(move || abort.abort()),
+            resize: Box::new(|_, _| {}),
         }
     }
 }
@@ -203,6 +208,17 @@ impl Runtime {
             .stdin_tx
             .send(text.to_owned())
             .map_err(|_| StdinError::Closed)
+    }
+
+    /// Resize the live session's PTY to `(cols, rows)`. A no-op for backends
+    /// without a PTY (chat / placeholder). Returns [`StdinError::NotLive`] if
+    /// the instance is not registered. The resize runs under the registry lock,
+    /// which is fine — `MasterPty::resize` is a fast, non-blocking ioctl.
+    pub fn resize(&self, instance_id: &str, cols: u16, rows: u16) -> Result<(), StdinError> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = guard.get(instance_id).ok_or(StdinError::NotLive)?;
+        (handle.resize)(cols, rows);
+        Ok(())
     }
 }
 

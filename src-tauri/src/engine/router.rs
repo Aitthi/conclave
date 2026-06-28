@@ -23,6 +23,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         // ── instance ──────────────────────────────────────────────────────
         "instance.list" => instance::list(state, payload).await,
         "instance.spawn" => instance::spawn(state, payload).await,
+        "session.resize" => instance::resize(state, payload).await,
 
         // ── message ───────────────────────────────────────────────────────
         "message.send" => message::send(state, payload).await,
