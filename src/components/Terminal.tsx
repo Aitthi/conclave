@@ -2,14 +2,21 @@ import { useEffect, useRef } from "react";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { useSessionOutput } from "../ipc";
+import { ipc, useSessionOutput } from "../ipc";
 
 interface TerminalProps {
   sessionId: string;
 }
 
 /**
- * One live, output-only xterm.js terminal bound to a single session.
+ * One live, INTERACTIVE xterm.js terminal bound to a single session.
+ *
+ * Output (PTY → xterm) streams in via `useSessionOutput`. Input (xterm → PTY)
+ * goes through `term.onData`: every keystroke — including control sequences
+ * (arrows, Enter as `\r`, Shift-Tab as `\x1b[Z`, Ctrl-C, etc.) — is forwarded
+ * VERBATIM to the live PTY stdin via `message.send` (the backend writes the
+ * bytes without appending a newline). This is what lets a full TUI like Claude
+ * Code be driven directly in the pane.
  *
  * The instance is created ONCE per mount. Because the terminal is tied to a
  * `sessionId`, the call site passes `key={sessionId}` so a session switch
@@ -33,14 +40,24 @@ export function Terminal({ sessionId }: TerminalProps) {
       fontSize: 12,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: { background: "#1e1e1e", foreground: "#e5e5e5" },
-      cursorBlink: false,
-      disableStdin: true,
+      cursorBlink: true,
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(el);
     fitAddon.fit();
+    term.focus();
     termRef.current = term;
+
+    // Forward every keystroke (raw, including control sequences) to the PTY
+    // stdin. `sessionId` is stable for this mount (the component is keyed by it),
+    // so capturing it here is safe.
+    const dataSub = term.onData((data) => {
+      void ipc.message.send({ sessionId, text: data }).catch(() => {
+        // Session not running / backend gone — the output stream will surface
+        // the state; dropping the keystroke is the right behavior.
+      });
+    });
 
     // Re-fit on container resize (and window resize as a fallback).
     const observer = new ResizeObserver(() => {
@@ -54,12 +71,13 @@ export function Terminal({ sessionId }: TerminalProps) {
 
     return () => {
       observer.disconnect();
+      dataSub.dispose();
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
       // touch a disposed terminal.
       termRef.current = null;
       term.dispose();
     };
-  }, []);
+  }, [sessionId]);
 
   // Stream output chunks for this session into the terminal. The hook already
   // filters by sessionId, so we write every delivered chunk verbatim.
