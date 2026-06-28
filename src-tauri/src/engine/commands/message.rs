@@ -108,19 +108,30 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
     } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
     // Validate BOTH instances exist — name which one is missing for clarity.
-    if !repo::workspace_agent::exists(&state.db, &from_instance_id).await? {
-        return Err(AppError::NotFound(format!(
-            "sender instance id={from_instance_id} not found"
-        )));
-    }
+    // Resolving the sender row here doubles as its existence check AND yields the
+    // display name for the `[from …]` tag, so we don't query the sender twice.
+    let sender = match repo::workspace_agent::get(&state.db, &from_instance_id).await? {
+        Some(inst) => repo::agent_definition::get(&state.db, &inst.agent_def_id)
+            .await?
+            .map(|d| d.name)
+            .unwrap_or_else(|| "another agent".to_string()),
+        None => {
+            return Err(AppError::NotFound(format!(
+                "sender instance id={from_instance_id} not found"
+            )))
+        }
+    };
     if !repo::workspace_agent::exists(&state.db, &to_instance_id).await? {
         return Err(AppError::NotFound(format!(
             "target instance id={to_instance_id} not found"
         )));
     }
 
-    // Auto-submit = append a newline, then route to the target's live backend.
-    let line = format!("{text}\n");
+    // Prefix the delivered input with the sender's name so the receiving agent
+    // knows who it's from (the persisted row + UI carry origin separately, so we
+    // keep `text` RAW for those and only tag the stdin line). Auto-submit =
+    // append a newline, then route to the target's live backend.
+    let line = format!("[from {sender}] {text}\n");
     let status = match state.runtime.send_stdin(&to_instance_id, &line) {
         // Delivered to a live backend.
         Ok(()) => "delivered",

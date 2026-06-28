@@ -138,10 +138,21 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // `[1m]`); POSIX-escape any embedded quote so it can't break out.
             let shell_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
 
+            // Awareness briefing — injected via each harness's system-prompt layer
+            // (NOT a chat turn), so it survives `/clear`. See engine::agentctx.
+            let preamble = crate::engine::agentctx::bootstrap_preamble(
+                &def.name,
+                def.role.as_deref(),
+                &ws.name,
+                &ws.id,
+            );
+
             let mut launch = String::from(base);
             if base == "claude" {
                 if let Some(mode) = def.permission_mode.as_deref() {
-                    launch.push_str(&format!(" --permission-mode {mode}"));
+                    // Validated to an allowlist at save time, but quote anyway so a
+                    // future bypass can't inject a second shell command here.
+                    launch.push_str(&format!(" --permission-mode {}", shell_quote(mode)));
                 }
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     let eff = if def.context_window.as_deref() == Some("1m") {
@@ -151,6 +162,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     };
                     launch.push_str(&format!(" --model {}", shell_quote(&eff)));
                 }
+                // Persistent system-prompt append → survives /clear.
+                launch.push_str(&format!(
+                    " --append-system-prompt {}",
+                    shell_quote(&preamble)
+                ));
             } else if base == "codex" {
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
@@ -165,15 +181,41 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     Some("bypassPermissions") => launch.push_str(" --yolo"),
                     _ => {}
                 }
+                // Codex has no --append-system-prompt; its developer-instructions
+                // config key is the equivalent persistent layer (survives /clear).
+                // The value parses as TOML if it can, else as a literal string —
+                // the preamble is one line with no '=', so it lands as a literal.
+                launch.push_str(&format!(
+                    " -c {}",
+                    shell_quote(&format!("developer_instructions={preamble}"))
+                ));
             }
             if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {
                 launch.push(' ');
                 launch.push_str(extra.trim());
             }
 
+            // Put `conclave` on the agent's PATH so the briefing's commands
+            // resolve. The login+interactive shell sources its rc files BEFORE
+            // running this `-c` command, so prepending the export here wins over
+            // whatever PATH the rc files set. Best-effort: if the CLI binary isn't
+            // found beside the app, skip it and launch without `conclave`.
+            if let Some(bin) = crate::engine::agentctx::ensure_conclave_shim() {
+                launch = format!(
+                    "export PATH={}:\"$PATH\"; {}",
+                    shell_quote(&bin.to_string_lossy()),
+                    launch
+                );
+            }
+
             // Env overrides: non-secret vars from the DB JSON object + secret
             // values fetched back from the Keychain by their recorded names.
             let mut extra_env: Vec<(String, String)> = Vec::new();
+            // Identity the conclave CLI reads: CONCLAVE_INSTANCE_ID is the sender
+            // `conclave tell` fills in (server then tags the message [from <name>]);
+            // CONCLAVE_WORKSPACE_ID saves the agent repeating its id on every call.
+            extra_env.push(("CONCLAVE_WORKSPACE_ID".to_string(), ws.id.clone()));
+            extra_env.push(("CONCLAVE_INSTANCE_ID".to_string(), id.clone()));
             if let Some(text) = def.custom_env.as_deref() {
                 if let Ok(serde_json::Value::Object(map)) =
                     serde_json::from_str::<serde_json::Value>(text)

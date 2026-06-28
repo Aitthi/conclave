@@ -38,6 +38,7 @@ Subcommands:
   ws use <workspaceId>
   agent list <workspaceId>
   send <sessionId> <text...>
+  tell <agentId> <text...>          (agent→agent; inside a spawned agent)
   bb list <workspaceId>
   bb get <workspaceId> <key>
   bb set <workspaceId> <key> <value>
@@ -50,6 +51,32 @@ Subcommands:
 Requires the Conclave app to be running.
 ";
 
+/// Expand the agent-friendly `tell <toInstanceId> <text...>` form into the wire
+/// form `tell <fromInstanceId> <toInstanceId> <text...>` the server allowlist
+/// expects, filling `<fromInstanceId>` from the spawned agent's
+/// `CONCLAVE_INSTANCE_ID`. The server tags the delivered message `[from <name>]`,
+/// so no client-side tagging is needed. Non-`tell` argv passes through untouched.
+///
+/// Errors (as a user-facing string) when `tell` is used without a known instance
+/// id (i.e. run outside a spawned agent) or with no target/text.
+fn expand_tell_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Vec<String>, String> {
+    if argv.first().map(String::as_str) != Some("tell") {
+        return Ok(argv);
+    }
+    let from = self_instance.filter(|s| !s.is_empty()).ok_or_else(|| {
+        "conclave: `tell` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
+            .to_string()
+    })?;
+    if argv.len() < 3 {
+        return Err("conclave: tell <agentId> <text...>".to_string());
+    }
+    let mut out = Vec::with_capacity(argv.len() + 1);
+    out.push("tell".to_string()); // subcommand
+    out.push(from.to_string()); // fromInstanceId (injected from env)
+    out.extend_from_slice(&argv[1..]); // toInstanceId + text...
+    Ok(out)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -59,6 +86,16 @@ async fn main() -> ExitCode {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+
+    // Expand `tell <agentId> <text>` to its wire form, filling the sender from
+    // CONCLAVE_INSTANCE_ID (set on spawned agents).
+    let argv = match expand_tell_args(argv, std::env::var("CONCLAVE_INSTANCE_ID").ok().as_deref()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let path = match socket_path() {
         Some(p) => p,
@@ -143,4 +180,38 @@ async fn main() -> ExitCode {
     // Neither `result` nor `error` — malformed response from the server.
     eprintln!("conclave: malformed response (no result or error field)");
     ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_tell_args;
+
+    fn v(words: &[&str]) -> Vec<String> {
+        words.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tell_injects_sender_from_env() {
+        let out = expand_tell_args(v(&["tell", "to1", "hello", "there"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["tell", "self1", "to1", "hello", "there"]));
+    }
+
+    #[test]
+    fn tell_without_instance_id_errors() {
+        assert!(expand_tell_args(v(&["tell", "to1", "hi"]), None).is_err());
+        assert!(expand_tell_args(v(&["tell", "to1", "hi"]), Some("")).is_err());
+    }
+
+    #[test]
+    fn tell_without_text_errors() {
+        assert!(expand_tell_args(v(&["tell", "to1"]), Some("self1")).is_err());
+    }
+
+    #[test]
+    fn non_tell_passes_through_untouched() {
+        let args = v(&["send", "sess1", "hello"]);
+        assert_eq!(expand_tell_args(args.clone(), Some("self1")).unwrap(), args);
+        let list = v(&["agent", "list", "ws1"]);
+        assert_eq!(expand_tell_args(list.clone(), None).unwrap(), list);
+    }
 }

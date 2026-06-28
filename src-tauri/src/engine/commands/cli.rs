@@ -111,6 +111,31 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             ))
         }
 
+        // ── tell (agent→agent injection) ──────────────────────────────────
+        // `tell <fromInstanceId> <toInstanceId> <text...>` → message.inject.
+        // The `conclave-cli` client fills <fromInstanceId> from CONCLAVE_INSTANCE_ID
+        // so a spawned agent only types `conclave tell <agentId> <text>`. Identity
+        // is client-supplied; consistent with the same-user UDS trust model (a
+        // local process can already reach `send`).
+        "tell" => {
+            let from = argv.get(1).ok_or_else(|| {
+                AppError::Invalid("cli: tell <fromInstanceId> <toInstanceId> <text...>".into())
+            })?;
+            let to = argv.get(2).ok_or_else(|| {
+                AppError::Invalid("cli: tell <fromInstanceId> <toInstanceId> <text...>".into())
+            })?;
+            if argv.len() < 4 {
+                return Err(AppError::Invalid(
+                    "cli: tell <fromInstanceId> <toInstanceId> <text...>".into(),
+                ));
+            }
+            let text = argv[3..].join(" ");
+            Ok((
+                "message.inject",
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": text }),
+            ))
+        }
+
         // ── bb ────────────────────────────────────────────────────────────
         "bb" => match argv.get(1).map(String::as_str) {
             Some("list") => {
@@ -227,7 +252,7 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
 
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, bb, snapshot, run)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, run)"
         ))),
     }
 }
@@ -343,6 +368,33 @@ mod tests {
     #[test]
     fn send_missing_session_is_invalid() {
         assert!(is_invalid(&["send"]));
+    }
+
+    // ── tell ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tell_maps_to_inject() {
+        assert_eq!(ok_method(&["tell", "from1", "to1", "hi"]), "message.inject");
+        assert_eq!(
+            ok_params(&["tell", "from1", "to1", "hi"]),
+            json!({ "fromInstanceId": "from1", "toInstanceId": "to1", "text": "hi" })
+        );
+    }
+
+    #[test]
+    fn tell_joins_multiword_text() {
+        let params = ok_params(&["tell", "from1", "to1", "hello", "there", "peer"]);
+        assert_eq!(params["text"], json!("hello there peer"));
+    }
+
+    #[test]
+    fn tell_missing_text_is_invalid() {
+        assert!(is_invalid(&["tell", "from1", "to1"]));
+    }
+
+    #[test]
+    fn tell_missing_target_is_invalid() {
+        assert!(is_invalid(&["tell", "from1"]));
     }
 
     // ── bb ────────────────────────────────────────────────────────────────

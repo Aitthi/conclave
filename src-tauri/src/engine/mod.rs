@@ -1,3 +1,4 @@
+pub mod agentctx;
 pub mod bus;
 pub mod commands;
 pub mod db;
