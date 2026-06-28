@@ -45,6 +45,11 @@ export function Terminal({ sessionId }: TerminalProps) {
       cursorBlink: true,
       // Required by the Unicode 11 addon (it uses xterm's proposed API).
       allowProposedApi: true,
+      // Rescale any glyph that renders wider than its cell back into the cell
+      // (VS Code enables this by default). Without it a slightly-too-wide glyph
+      // bleeds into the next cell and the bleed survives as a stray fragment —
+      // the orange leftovers seen after a resize.
+      rescaleOverlappingGlyphs: true,
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -67,7 +72,11 @@ export function Terminal({ sessionId }: TerminalProps) {
     // the canvas). Fall back to the DOM renderer if WebGL is unavailable or its
     // GPU context is lost, so the terminal always renders something.
     try {
-      const webgl = new WebglAddon();
+      // `customGlyphs` makes the renderer draw box-drawing and block characters
+      // itself — crisp and exactly cell-sized — instead of relying on the font.
+      // Claude Code's frame is built from those (the box borders + the block
+      // mascot), so this is what keeps them aligned. VS Code enables it too.
+      const webgl = new WebglAddon({ customGlyphs: true });
       webgl.onContextLoss(() => webgl.dispose());
       term.loadAddon(webgl);
     } catch {
