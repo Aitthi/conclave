@@ -251,7 +251,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
             the window / double-clicks to zoom. */}
         <div
           data-tauri-drag-region
-          className="h-12 flex items-center gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin"
+          className="h-12 flex items-center gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin bg-[#f5f5f7]"
         >
           {tabs.map((tab) => {
             const isActive = tab.instanceId === activeInstanceId;

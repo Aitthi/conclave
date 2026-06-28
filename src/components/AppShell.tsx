@@ -91,12 +91,14 @@ export function AppShell() {
         className="h-7 shrink-0 flex"
         aria-hidden="true"
       >
+        {/* One continuous toolbar tint across all columns (macOS unified
+            titlebar). The column dividers carry through from the panes below. */}
         {/* Rail column bg */}
-        <div className="w-[56px] bg-[#ebebed] border-r border-black/[0.06] pointer-events-none" />
+        <div className="w-[56px] bg-[#f5f5f7] border-r border-black/[0.06] pointer-events-none" />
         {/* Roster column bg */}
         <div className="w-[266px] bg-[#f5f5f7] border-r border-black/[0.06] pointer-events-none" />
         {/* Main content bg */}
-        <div className="flex-1 bg-white pointer-events-none" />
+        <div className="flex-1 bg-[#f5f5f7] pointer-events-none" />
       </div>
 
       {/* ── 3-pane layout ────────────────────────────────────────────── */}

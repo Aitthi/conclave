@@ -2702,22 +2702,22 @@
           },
           {
             "title": "conclave CLI binary: subcommands (ws/agent/send/bb/snapshot/run) → cli.exec",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           },
           {
             "title": "Expose conclave เป็น built-in agent tool (core, ลบไม่ได้)",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {
             "title": "HTML artifact: iframe sandbox render + Preview/Code + Open in canvas",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {
             "title": "Settings: providers + API key → Keychain (Security.framework)",
-            "status": "todo",
+            "status": "done",
             "priority": "high"
           }
         ]
@@ -2732,7 +2732,7 @@
           },
           {
             "title": "Error/empty/loading states ทุกจอ",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {

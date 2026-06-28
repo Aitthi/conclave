@@ -26,7 +26,7 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
       {/* Brand mark — sits in a 48px header zone so it lines up with the Roster
           and Context headers; its bottom border continues the toolbar rule
           across the Rail column. */}
-      <div className="h-12 w-full shrink-0 grid place-items-center border-b border-black/[0.06]">
+      <div className="h-12 w-full shrink-0 grid place-items-center border-b border-black/[0.06] bg-[#f5f5f7]">
         <button
           className="w-8 h-8 rounded-[9px] grid place-items-center"
           title="Conclave"
