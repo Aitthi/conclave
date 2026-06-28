@@ -14,7 +14,6 @@ export interface BuilderProps {
 
 type AgentType = "cli" | "chat" | "orchestrator";
 type CliKind = "claude-code" | "codex" | "custom";
-type AllowedSenders = "all" | "selected" | "none";
 type PermissionMode = "auto" | "bypassPermissions";
 type ContextWindow = "1m" | "200k";
 
@@ -128,12 +127,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
   const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
   const [model, setModel] = useState(initialDef?.model ?? "");
-  const [autoSubmitInjected, setAutoSubmitInjected] = useState(
-    initialDef?.autoSubmitInjected ?? false,
-  );
-  const [allowedSenders, setAllowedSenders] = useState<AllowedSenders>(
-    initialDef?.allowedSenders ?? "all",
-  );
   // ── Claude Code launch config ──────────────────────────────────────────────
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     initialDef?.permissionMode ?? "auto",
@@ -216,8 +209,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         // fixed constants so the backend contract is unchanged (no migration).
         harnessMode: "central",
         shareBlackboard: true,
-        autoSubmitInjected,
-        allowedSenders,
+        // Messaging is no longer a per-agent setting: every agent can message
+        // every other agent, and injected messages always auto-submit (the
+        // backend already behaves this way). Sent as fixed constants.
+        autoSubmitInjected: true,
+        allowedSenders: "all",
         // Claude Code config (omitted for other kinds).
         permissionMode: isClaudeCode ? permissionMode : undefined,
         contextWindow: isClaudeCode ? contextWindow : undefined,
@@ -630,35 +626,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             {/* TODO(M5): skill picker wired to agent_skill join table */}
             <div className="rounded-xl ring-1 ring-black/[0.08] bg-black/[0.02] px-3 py-3 text-[12px] text-[#a1a1a6] text-center">
               Skill assignment — available in M5
-            </div>
-          </section>
-
-          {/* Messaging */}
-          <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
-              Messaging
-            </div>
-            <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
-              <div className="flex items-center justify-between px-3 py-2.5">
-                <span className="text-[12.5px] text-[#6e6e73]">Allowed senders</span>
-                <select
-                  value={allowedSenders}
-                  onChange={(e) => setAllowedSenders(e.target.value as AllowedSenders)}
-                  className="text-[12.5px] bg-transparent outline-none text-right"
-                >
-                  <option value="all">All agents</option>
-                  <option value="selected">Selected</option>
-                  <option value="none">None</option>
-                </select>
-              </div>
-              <div className="flex items-center justify-between px-3 py-2.5">
-                <span className="text-[12.5px]">Auto-submit injected messages</span>
-                <Toggle
-                  on={autoSubmitInjected}
-                  onChange={setAutoSubmitInjected}
-                  label="Auto-submit injected messages"
-                />
-              </div>
             </div>
           </section>
 
