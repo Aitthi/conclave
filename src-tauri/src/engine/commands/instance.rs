@@ -157,8 +157,10 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 }
                 // Codex's mode flags differ from claude's; map the shared
                 // permission_mode value (auto / bypassPermissions) to them.
+                // Codex only offers --yolo and the explicit long form (there is
+                // no --full-auto).
                 match def.permission_mode.as_deref() {
-                    Some("auto") => launch.push_str(" --full-auto"),
+                    Some("auto") => launch.push_str(" --yolo"),
                     Some("bypassPermissions") => {
                         launch.push_str(" --dangerously-bypass-approvals-and-sandbox")
                     }

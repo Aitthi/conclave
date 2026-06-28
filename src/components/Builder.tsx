@@ -501,7 +501,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                           title={
                             isCodex
                               ? value === "auto"
-                                ? "codex --full-auto"
+                                ? "codex --yolo"
                                 : "codex --dangerously-bypass-approvals-and-sandbox"
                               : `claude --permission-mode ${value}`
                           }
