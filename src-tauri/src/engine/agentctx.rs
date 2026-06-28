@@ -38,11 +38,12 @@ pub fn bootstrap_preamble(name: &str, role: Option<&str>, ws_name: &str, ws_id: 
         None => format!("\"{name}\""),
     };
     format!(
-        "You are {who} in the Conclave workspace \"{ws_name}\". Other AI agents share this \
-workspace with you. Run `conclave agent list {ws_id}` to see them (each entry has an id). \
-Use `conclave tell <id> <text>` to message an agent — they receive it tagged with your name. \
-Use `conclave bb set {ws_id} <key> <value>` / `conclave bb get {ws_id} <key>` for the shared \
-blackboard. Messages from other agents arrive in your input prefixed with [from <name>]."
+        "You are {who} in the Conclave workspace \"{ws_name}\", which you share with other AI \
+agents. A line that begins [from <name> · <id>] is a message FROM another agent, NOT from the \
+human user: answering in your own terminal does NOT reach them. To reply you MUST run `conclave \
+tell <id> <your message>`, using the id shown in that tag. To start a conversation, run `conclave \
+agent list {ws_id}` for the agents and their ids, then `conclave tell <id> <text>`. Shared notes \
+live on the blackboard: `conclave bb set {ws_id} <key> <value>` and `conclave bb get {ws_id} <key>`."
     )
 }
 
@@ -129,10 +130,11 @@ mod tests {
 
     #[test]
     fn preamble_trims_blank_role() {
+        // A blank role collapses to the bare-name who-clause ("Sol" in the …),
+        // not "Sol", a  agent,". Assert the who-clause directly so the check is
+        // robust to the surrounding briefing wording.
         let p = bootstrap_preamble("Sol", Some("   "), "Repo", "ws_1");
-        assert!(
-            !p.contains("agent,"),
-            "blank role collapses to bare name form"
-        );
+        assert!(p.contains("\"Sol\" in the"), "{p}");
+        assert!(!p.contains("\"Sol\", a"), "no role clause: {p}");
     }
 }

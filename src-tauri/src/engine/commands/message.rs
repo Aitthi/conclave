@@ -127,10 +127,11 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
         )));
     }
 
-    // Prefix the delivered input with the sender's name so the receiving agent
-    // knows who it's from (the persisted row + UI carry origin separately, so we
-    // keep `text` RAW for those and only tag the stdin line).
-    let body = format!("[from {sender}] {text}");
+    // Prefix the delivered input with the sender's name AND id so the receiving
+    // agent knows who it's from and can reply directly with `conclave tell <id>`
+    // (no roster lookup needed). The persisted row + UI carry origin separately,
+    // so `text` stays RAW for those — only the stdin line is tagged.
+    let body = format!("[from {sender} · {from_instance_id}] {text}");
     let status = match state.runtime.send_stdin(&to_instance_id, &body) {
         // Delivered to a live backend — now SUBMIT it. A TUI's Enter is CR (\r),
         // not LF; and sending the CR in the SAME write as the text makes Codex's
