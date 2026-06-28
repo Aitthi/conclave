@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CornerUpRight } from "lucide-react";
+import { CornerUpRight, CornerDownLeft } from "lucide-react";
 import { ipc } from "../ipc";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
 
@@ -136,31 +136,46 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
           )}
         </div>
       )}
-      <div className="flex items-center gap-2 px-3 py-2">
-        <RoutingPicker
-          selfId={instanceId}
-          roster={roster}
-          value={targetId}
-          onChange={setTargetId}
-          disabled={sending}
-        />
-        <span className="text-[13px] text-[#a1a1a6] font-mono select-none">›</span>
-        <input
-          value={value}
-          disabled={disabled}
-          onChange={(e) => {
-            setValue(e.target.value);
-            if (outbox) setOutbox(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              void handleSend();
-            }
-          }}
-          placeholder={placeholder}
-          className="flex-1 bg-transparent outline-none text-[13px] font-mono placeholder:text-[#a1a1a6] disabled:opacity-50"
-        />
+      <div className="px-3 py-2.5">
+        {/* Composer field — rounded box matching ChatView's composer so the CLI
+            stdin and the chat input read as the same control. */}
+        <div className="flex items-center gap-2 rounded-xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-2 py-1.5 transition-shadow">
+          <RoutingPicker
+            selfId={instanceId}
+            roster={roster}
+            value={targetId}
+            onChange={setTargetId}
+            disabled={sending}
+          />
+          <span className="text-[13px] text-[#a1a1a6] font-mono select-none shrink-0">›</span>
+          <input
+            value={value}
+            disabled={disabled}
+            onChange={(e) => {
+              setValue(e.target.value);
+              if (outbox) setOutbox(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void handleSend();
+              }
+            }}
+            placeholder={placeholder}
+            className="flex-1 min-w-0 bg-transparent outline-none text-[13px] font-mono placeholder:text-[#a1a1a6] disabled:opacity-50"
+          />
+          {/* Send — Enter also submits; the button mirrors that for discoverability. */}
+          <button
+            type="button"
+            onClick={() => void handleSend()}
+            disabled={disabled || value.length === 0}
+            title="Send (Enter)"
+            aria-label="Send"
+            className="w-7 h-7 rounded-lg bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
+          >
+            <CornerDownLeft className="w-[15px] h-[15px]" />
+          </button>
+        </div>
       </div>
     </div>
   );
