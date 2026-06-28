@@ -157,6 +157,23 @@ export function Terminal({ sessionId }: TerminalProps) {
       });
     });
 
+    // Mouse-wheel scrolling for full-screen TUIs. The "alternate" screen buffer
+    // a TUI runs in has NO terminal-level scrollback — the history lives inside
+    // the app — so the wheel does nothing by default and you're stuck on the
+    // current frame. Mirror iTerm's "alternate scroll": translate a wheel notch
+    // into arrow-key presses sent to the PTY, so the app scrolls its own
+    // transcript (Codex's ↑/↓, Claude Code's pager). Skip it when the app is
+    // tracking the mouse itself (xterm already forwards the wheel as mouse events
+    // there) and on the normal buffer (xterm scrolls that natively).
+    const wheelHandler = (e: WheelEvent) => {
+      if (term.buffer.active.type !== "alternate") return;
+      if (term.modes.mouseTrackingMode !== "none") return;
+      e.preventDefault();
+      const seq = e.deltaY < 0 ? "\x1b[A" : "\x1b[B"; // arrow up / down
+      void ipc.message.send({ sessionId, text: seq.repeat(3) }).catch(() => {});
+    };
+    el.addEventListener("wheel", wheelHandler, { passive: false });
+
     // Re-fit on container resize (and window resize as a fallback), debounced so
     // a continuous drag-resize coalesces into one settle-time fit + PTY resize.
     const observer = new ResizeObserver(() => {
@@ -184,6 +201,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       clearTimeout(resizeTimer);
       clearTimeout(jiggleTimer);
       observer.disconnect();
+      el.removeEventListener("wheel", wheelHandler);
       dataSub.dispose();
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
       // touch a disposed terminal.
