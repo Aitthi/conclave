@@ -120,7 +120,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
         "cli" => {
             // Map the configured CLI kind to a concrete launcher command.
             // `custom` and unset both defer to M5 settings.
-            let command = match def.cli_kind.as_deref() {
+            let cli_command = match def.cli_kind.as_deref() {
                 Some("claude-code") => "claude",
                 Some("codex") => "codex",
                 _ => {
@@ -130,8 +130,29 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 }
             };
 
-            let backend = runtime::pty::spawn_cli(&session.id, command, &[], &ws.folder_path)
-                .map_err(|e| AppError::Internal(format!("spawn {command}: {e}")))?;
+            // Launch the CLI INSIDE the user's login + interactive shell, the way
+            // VS Code's integrated terminal does (it spawns the shell, not the
+            // program). A Tauri app started from Finder has only a bare
+            // environment; running `claude` directly from it both hides tools the
+            // user has on their PATH and leaves the TUI mis-rendering (it never
+            // sees the real terminal setup the user's rc files establish). `-l -i`
+            // sources ~/.zprofile + ~/.zshrc so the child gets the exact
+            // environment a normal terminal would, then `-c <cli>` runs it; the
+            // shell exits when the CLI does, so the forwarder still sees EOF for
+            // idle cleanup. `$SHELL` honors the user's chosen shell (zsh default).
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let shell_args = [
+                "-l".to_string(),
+                "-i".to_string(),
+                "-c".to_string(),
+                cli_command.to_string(),
+            ];
+
+            let backend =
+                runtime::pty::spawn_cli(&session.id, &shell, &shell_args, &ws.folder_path)
+                    .map_err(|e| {
+                        AppError::Internal(format!("spawn {shell} -c {cli_command}: {e}"))
+                    })?;
 
             // Register; if we lost a race with a concurrent spawn, the handle is
             // dropped (its shutdown closure tears down the just-spawned child)
