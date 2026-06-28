@@ -74,12 +74,17 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
       return;
     }
 
-    // ── Self send (own PTY) — unchanged behavior (trailing newline submits) ──
+    // ── Self send (own PTY) — submit the line ──
+    // Append a CARRIAGE RETURN (\r), not a newline (\n): that is the byte the
+    // Enter key actually emits in a terminal (xterm's onData sends \r too). A
+    // full-screen TUI like Claude Code treats \r as "submit" but \n as "insert a
+    // newline in the input field" — sending \n made `/clear` drop to a new line
+    // instead of running.
     if (sessionId === null) return;
     setError(null);
     setSending(true);
     try {
-      await ipc.message.send({ sessionId, text: text + "\n" });
+      await ipc.message.send({ sessionId, text: text + "\r" });
       if (mounted.current) setValue("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
