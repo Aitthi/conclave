@@ -45,16 +45,30 @@ export function Terminal({ sessionId }: TerminalProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(el);
-    fitAddon.fit();
     term.focus();
     termRef.current = term;
 
-    // Push the terminal's real (cols, rows) to the PTY so a full-screen TUI
-    // lays out at the on-screen size instead of the 80×24 default. Without this
-    // the child's redraws garble. Best-effort + deduped (skip if unchanged).
+    // Fit the xterm grid to the container, then push the real (cols, rows) to
+    // the PTY so a full-screen TUI lays out at the on-screen size instead of the
+    // 80×24 default. Best-effort + deduped (skip if unchanged).
+    //
+    // DEBOUNCED: a window drag-resize or zoom fires the ResizeObserver many
+    // times in quick succession. Running fit()+resize on every frame spams the
+    // PTY child (e.g. Claude Code) with SIGWINCH; its incremental redraws pile
+    // up faster than they can settle and the TUI art ends up garbled and never
+    // clears. Coalescing the gesture into a single fit + one resize once the
+    // size stops changing makes the child repaint exactly once, cleanly, at the
+    // final dimensions.
     let lastCols = 0;
     let lastRows = 0;
-    const pushSize = () => {
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const applyResize = () => {
+      try {
+        fitAddon.fit();
+      } catch {
+        // fit() can throw if the element is detached mid-teardown — ignore.
+        return;
+      }
       const { cols, rows } = term;
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
@@ -63,7 +77,8 @@ export function Terminal({ sessionId }: TerminalProps) {
         // Session not running yet / no PTY — harmless.
       });
     };
-    pushSize();
+    // Initial sizing is immediate so the first paint is at the right size.
+    applyResize();
 
     // Forward every keystroke (raw, including control sequences) to the PTY
     // stdin. `sessionId` is stable for this mount (the component is keyed by it),
@@ -75,18 +90,16 @@ export function Terminal({ sessionId }: TerminalProps) {
       });
     });
 
-    // Re-fit on container resize (and window resize as a fallback).
+    // Re-fit on container resize (and window resize as a fallback), debounced so
+    // a continuous drag-resize coalesces into one settle-time fit + PTY resize.
     const observer = new ResizeObserver(() => {
-      try {
-        fitAddon.fit();
-        pushSize();
-      } catch {
-        // fit() can throw if the element is detached mid-teardown — ignore.
-      }
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applyResize, 120);
     });
     observer.observe(el);
 
     return () => {
+      clearTimeout(resizeTimer);
       observer.disconnect();
       dataSub.dispose();
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
