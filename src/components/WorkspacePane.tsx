@@ -305,36 +305,55 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
           })}
         </div>
 
-        {/* Active body — dispatched by the focused tab's agent type */}
+        {/* CLI terminals — VSCode-style persistence. Every cli tab keeps its xterm
+            MOUNTED; we only toggle visibility (`hidden`) instead of rendering just
+            the active one. Switching tabs therefore never remounts the terminal,
+            so its scrollback and the app's alt-screen / mouse modes survive — which
+            is exactly what keeps wheel-scroll working after a tab switch (a fresh
+            xterm forgets the app is mid-TUI, and the wheel goes dead). This mirrors
+            VSCode's TerminalInstance, which reparents one long-lived xterm wrapper
+            and flips a `.active` class rather than recreating it. */}
+        {tabs
+          .filter((t) => t.type === "cli")
+          .map((tab) => {
+            const isActive = tab.instanceId === activeInstanceId;
+            const sid = sessions[tab.instanceId] ?? null;
+            const err = spawnErrors[tab.instanceId] ?? null;
+            return (
+              <div
+                key={tab.instanceId}
+                className={isActive ? "flex-1 flex flex-col min-h-0" : "hidden"}
+              >
+                {err ? (
+                  <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-danger px-6 text-center">
+                    Couldn't open session: {err}
+                  </div>
+                ) : sid ? (
+                  <>
+                    {/* keyed by sessionId so a RESPAWN (new session) remounts, but a
+                        tab switch (same sessionId) does NOT. */}
+                    <Terminal key={sid} sessionId={sid} />
+                    <StdinBar sessionId={sid} instanceId={tab.instanceId} roster={roster} />
+                  </>
+                ) : (
+                  <>
+                    <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-text-tertiary">
+                      Opening session…
+                    </div>
+                    <StdinBar sessionId={null} instanceId={tab.instanceId} roster={roster} />
+                  </>
+                )}
+              </div>
+            );
+          })}
+
+        {/* Non-cli active body — chat / orchestrator / nothing selected. (cli is
+            handled by the always-mounted layer above.) */}
         {activeTab === null ? (
           <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
             Select an agent
           </div>
-        ) : activeTab.type === "cli" ? (
-          // CLI → live terminal + stdin bar.
-          activeError ? (
-            <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-danger px-6 text-center">
-              Couldn't open session: {activeError}
-            </div>
-          ) : activeSessionId ? (
-            <>
-              <Terminal key={activeSessionId} sessionId={activeSessionId} />
-              <StdinBar
-                sessionId={activeSessionId}
-                instanceId={activeTab.instanceId}
-                roster={roster}
-              />
-            </>
-          ) : (
-            <>
-              <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-text-tertiary">
-                Opening session…
-              </div>
-              <StdinBar sessionId={null} instanceId={activeTab.instanceId} roster={roster} />
-            </>
-          )
         ) : activeTab.type === "chat" ? (
-          // Chat → custom chat UI.
           activeError ? (
             <div className="flex-1 grid place-items-center text-[13px] text-danger px-6 text-center">
               Couldn't open session: {activeError}
@@ -353,15 +372,11 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
               Opening session…
             </div>
           )
-        ) : (
+        ) : activeTab.type === "orchestrator" ? (
           // Orchestrator → Fusion pipeline UI (drives the real M4.3 backend via
           // the instance id; it doesn't need the placeholder session object).
-          <FusionView
-            instanceId={activeTab.instanceId}
-            def={activeTab.def}
-            roster={roster}
-          />
-        )}
+          <FusionView instanceId={activeTab.instanceId} def={activeTab.def} roster={roster} />
+        ) : null}
       </main>
 
       {/* Right Context drawer — renders only when a tab is active. The active

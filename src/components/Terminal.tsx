@@ -125,6 +125,12 @@ export function Terminal({ sessionId }: TerminalProps) {
         return;
       }
       const { cols, rows } = term;
+      // A hidden tab (display:none) or an element detached mid-teardown fits to
+      // 0 — never push a zero-dimension resize to the PTY (it would wedge the
+      // child's layout). Leave `firstSizing` unconsumed: when the tab becomes
+      // visible the ResizeObserver fires again with real dims (0 → real is a
+      // genuine change) and the normal first-sizing jiggle repaints the child.
+      if (cols === 0 || rows === 0) return;
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
