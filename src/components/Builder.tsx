@@ -210,7 +210,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       <div className="w-[560px] max-h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-black/[0.08]">
 
         {/* ── Header ── */}
-        <div className="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+        <div className="h-11 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-[#0a84ff]" />
             <span className="text-[13px] font-semibold tracking-tight">
@@ -230,16 +230,16 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         </div>
 
         {/* ── Scrollable body ── */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5 min-h-0">
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3.5 min-h-0">
 
           {/* Identity */}
           <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
+            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
               Identity
             </div>
-            <div className="flex items-center gap-3 mb-3">
+            <div className="flex items-center gap-3 mb-2.5">
               <div
-                className="w-12 h-12 rounded-[12px] text-white grid place-items-center text-[18px] font-bold ring-1 ring-black/[0.06] shrink-0"
+                className="w-11 h-11 rounded-[11px] text-white grid place-items-center text-[16px] font-bold ring-1 ring-black/[0.06] shrink-0"
                 style={{ backgroundColor: color }}
               >
                 {letter}
@@ -285,7 +285,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
           {/* Type */}
           <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
+            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
               Type
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -305,7 +305,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     onClick={() => !soon && setAgentType(value)}
                     disabled={soon}
                     aria-disabled={soon}
-                    className={`relative rounded-xl p-2.5 text-left transition-all ${
+                    className={`relative rounded-xl p-2 text-left transition-all ${
                       soon
                         ? "ring-1 ring-black/[0.06] bg-black/[0.02] opacity-60 cursor-not-allowed"
                         : active
@@ -319,7 +319,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                       </span>
                     )}
                     <Icon
-                      className={`w-4 h-4 mb-1.5 ${
+                      className={`w-4 h-4 mb-1 ${
                         soon ? "text-[#a1a1a6]" : active ? "text-[#0a84ff]" : "text-[#6e6e73]"
                       }`}
                     />
@@ -331,7 +331,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
             {/* CLI Kind (only when type = cli) */}
             {agentType === "cli" && (
-              <div className="mt-2.5 rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
+              <div className="mt-2 rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
                 {(
                   [
                     { value: "claude-code", label: "Claude Code" },
@@ -363,11 +363,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               disconnected model fields. */}
           {!(agentType === "cli" && cliKind === "claude-code") && (
             <section>
-              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
+              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
                 Model
               </div>
               <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
-                <div className="flex items-center justify-between px-3 py-2.5">
+                <div className="flex items-center justify-between px-3 py-2">
                   <span className="text-[12.5px] text-[#6e6e73]">Provider</span>
                   {/* TODO(M5): real provider picker wired to provider.upsert */}
                   <span className="text-[12.5px] text-[#a1a1a6]">Configure in Settings</span>
@@ -388,13 +388,13 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
           {/* Claude Code launch config — only for a claude-code CLI agent */}
           {agentType === "cli" && cliKind === "claude-code" && (
             <section>
-              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
+              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
                 Claude Code
               </div>
               <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
                 {/* Model — field + quick-presets together so picking a preset
                     visibly fills the same field. */}
-                <div className="px-3 py-2.5">
+                <div className="px-3 py-2">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-[12.5px] text-[#6e6e73] shrink-0">Model</span>
                     <input
@@ -422,7 +422,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 </div>
 
                 {/* Permission mode */}
-                <div className="px-3 py-2.5">
+                <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-[#6e6e73]">Permission mode</span>
                     <div
@@ -461,7 +461,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 </div>
 
                 {/* Context window */}
-                <div className="px-3 py-2.5">
+                <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-[#6e6e73]">Context window</span>
                     <div
@@ -510,7 +510,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 </div>
 
                 {/* Custom env (opt-in) */}
-                <div className="px-3 py-2.5">
+                <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-[#6e6e73]">Custom environment</span>
                     <Toggle
@@ -548,7 +548,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         </div>
 
         {/* ── Footer actions ── */}
-        <div className="border-t border-black/[0.07] px-6 py-3 bg-white shrink-0 flex items-center justify-end gap-2">
+        <div className="border-t border-black/[0.07] px-5 py-2.5 bg-white shrink-0 flex items-center justify-end gap-2">
           <button
             onClick={onClose}
             className="text-[12.5px] font-medium text-[#6e6e73] px-3.5 py-1.5 rounded-lg hover:bg-black/[0.05]"
