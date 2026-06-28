@@ -212,12 +212,18 @@ export function Roster({
 
   return (
     <aside className="w-[266px] vibrancy border-r border-black/[0.06] flex flex-col shrink-0">
-      {/* Workspace header — real workspaceName + folderPath; plain non-interactive display */}
-      <div className="h-12 flex items-center gap-2 px-3.5 border-b border-black/[0.06] shrink-0">
-        <div className="w-6 h-6 rounded-[7px] bg-[#0a84ff] text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0">
+      {/* Workspace header — real workspaceName + folderPath; plain non-interactive
+          display. Doubles as a window drag region (it has no controls): the
+          `pointer-events-none` children let clicks fall through to the
+          attributed container so dragging / double-click-zoom work here too. */}
+      <div
+        data-tauri-drag-region
+        className="h-12 flex items-center gap-2 px-3.5 border-b border-black/[0.06] shrink-0"
+      >
+        <div className="w-6 h-6 rounded-[7px] bg-[#0a84ff] text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0 pointer-events-none">
           {wsLetter}
         </div>
-        <div className="leading-tight text-left min-w-0">
+        <div className="leading-tight text-left min-w-0 pointer-events-none">
           <div className="text-[12.5px] font-semibold tracking-tight truncate">
             {workspaceName ?? "—"}
           </div>

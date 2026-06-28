@@ -78,9 +78,13 @@ export function AppShell() {
       {/*
        * ── Overlay titlebar drag region (28 px) ──────────────────────────
        * Tauri titleBarStyle "Overlay" floats the macOS traffic lights over
-       * our content. This 28 px bar acts as the drag handle for the window
-       * and is visually split to match each column's background color so
-       * nothing looks misaligned behind the traffic lights.
+       * our content. This 28 px bar is the native-feeling title bar: it drags
+       * the window and double-clicks to zoom (Tauri's drag-region handler).
+       *
+       * `data-tauri-drag-region` only fires when the CLICKED element carries
+       * the attribute. The colored column-background children would otherwise
+       * sit on top and swallow every click, so they are `pointer-events-none`
+       * — that lets the hit-test fall through to this attributed parent.
        */}
       <div
         data-tauri-drag-region
@@ -88,11 +92,11 @@ export function AppShell() {
         aria-hidden="true"
       >
         {/* Rail column bg */}
-        <div className="w-[56px] bg-[#ebebed] border-r border-black/[0.06]" />
+        <div className="w-[56px] bg-[#ebebed] border-r border-black/[0.06] pointer-events-none" />
         {/* Roster column bg */}
-        <div className="w-[266px] bg-[#f5f5f7] border-r border-black/[0.06]" />
+        <div className="w-[266px] bg-[#f5f5f7] border-r border-black/[0.06] pointer-events-none" />
         {/* Main content bg */}
-        <div className="flex-1 bg-white" />
+        <div className="flex-1 bg-white pointer-events-none" />
       </div>
 
       {/* ── 3-pane layout ────────────────────────────────────────────── */}

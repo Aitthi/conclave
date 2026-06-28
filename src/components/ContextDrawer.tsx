@@ -274,9 +274,17 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
         <Timeline def={def} session={session} onClose={() => setShowTimeline(false)} />
       )}
       <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
-      {/* Header */}
-      <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
-        <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight">Context</span>
+      {/* Header — also a window drag region. The "Context" label is
+          `pointer-events-none` so clicks fall through to the attributed
+          container (drag / double-click-zoom); the collapse button keeps its
+          own click. */}
+      <div
+        data-tauri-drag-region
+        className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0"
+      >
+        <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight pointer-events-none">
+          Context
+        </span>
         <button
           title="Hide Context"
           onClick={() => {

@@ -245,8 +245,14 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
       <main className="flex-1 flex flex-col min-w-0">
         {/* Tab strip — one tab per instance, with a per-type glyph. 48px tall to
             line up with the Roster and Context headers so the three column
-            dividers form one continuous macOS-style toolbar rule. */}
-        <div className="h-12 flex items-center gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin">
+            dividers form one continuous macOS-style toolbar rule. The strip is
+            also a window drag region: the tab buttons keep their own clicks
+            (they don't carry the drag attribute), while the empty space drags
+            the window / double-clicks to zoom. */}
+        <div
+          data-tauri-drag-region
+          className="h-12 flex items-center gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin"
+        >
           {tabs.map((tab) => {
             const isActive = tab.instanceId === activeInstanceId;
             return (
