@@ -138,9 +138,6 @@ export function Terminal({ sessionId }: TerminalProps) {
         });
       }, 60);
     };
-    // Initial sizing is immediate so the first paint is at the right size.
-    applyResize();
-
     // Forward every keystroke (raw, including control sequences) to the PTY
     // stdin. `sessionId` is stable for this mount (the component is keyed by it),
     // so capturing it here is safe.
@@ -157,9 +154,24 @@ export function Terminal({ sessionId }: TerminalProps) {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(applyResize, 120);
     });
-    observer.observe(el);
+
+    // Defer the first sizing+jiggle a beat, THEN start observing. The
+    // session-output listener (useSessionOutput) registers via Tauri's ASYNC
+    // `listen()`, so on a page reload — where the PTY and its already-painted
+    // frame persist — firing the jiggle synchronously makes the child repaint
+    // before the listener is in place; that frame reaches no one and the pane
+    // stays black until a manual resize. Waiting lets the listener attach first,
+    // so the forced repaint is actually received (the buffer is empty/black
+    // until then anyway, so this delay is invisible). We only `observe()` after
+    // the initial sizing so the observer's own first callback can't pre-empt the
+    // deferred jiggle. Cleared on teardown.
+    const initialTimer = setTimeout(() => {
+      applyResize();
+      observer.observe(el);
+    }, 200);
 
     return () => {
+      clearTimeout(initialTimer);
       clearTimeout(resizeTimer);
       clearTimeout(jiggleTimer);
       observer.disconnect();
