@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CornerUpRight, CornerDownLeft } from "lucide-react";
 import { ipc } from "../ipc";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
+import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
 
 interface StdinBarProps {
   /** The focused session to send input to, or null when none is live. */
@@ -119,6 +120,18 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     }
   }
 
+  // Drag a file onto the composer → insert its shell-quoted path at the end, the
+  // way a normal terminal does (a CLI like Claude Code reads the path from the
+  // line). Multiple files are space-separated; a trailing space readies the next
+  // token. The field re-focuses so the user can keep typing.
+  const inputRef = useRef<HTMLInputElement>(null);
+  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
+    const insert = paths.map(shellQuotePath).join(" ");
+    setValue((v) => (v.length === 0 || v.endsWith(" ") ? v : v + " ") + insert + " ");
+    setOutbox(null);
+    inputRef.current?.focus();
+  });
+
   const placeholder = routingToOther
     ? "Type to inject into the target session…"
     : sessionId === null
@@ -144,7 +157,14 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
       <div className="px-3 py-3">
         {/* Composer field — rounded box matching ChatView's composer so the CLI
             stdin and the chat input read as the same control. */}
-        <div className="flex items-center gap-2.5 rounded-2xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-3 py-2.5 transition-shadow">
+        <div
+          ref={dropRef}
+          className={`flex items-center gap-2.5 rounded-2xl ring-1 bg-[#f7f7f8] px-3 py-2.5 transition-shadow${
+            isOver
+              ? " ring-2 ring-[#0a84ff] bg-[#0a84ff]/[0.06]"
+              : " ring-black/[0.1] focus-within:ring-[#0a84ff]/50"
+          }`}
+        >
           <RoutingPicker
             selfId={instanceId}
             roster={roster}
@@ -154,6 +174,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
           />
           <span className="text-[15px] text-[#a1a1a6] font-mono select-none shrink-0">›</span>
           <input
+            ref={inputRef}
             value={value}
             disabled={disabled}
             onChange={(e) => {

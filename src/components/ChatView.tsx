@@ -6,6 +6,7 @@ import { ToolCallCard } from "./ToolCallCard";
 import { SkillRunningCard } from "./SkillRunningCard";
 import { ArtifactView, splitMessageArtifacts } from "./ArtifactView";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
+import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
 
 // ---------------------------------------------------------------------------
 // IMPORTANT — backend capability note
@@ -87,6 +88,16 @@ export function ChatView({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  // Drag a file onto the composer → insert its shell-quoted path (same behavior
+  // as the CLI stdin bar). Space-separated for multiple files, trailing space to
+  // ready the next token; re-focus so typing can continue.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
+    const insert = paths.map(shellQuotePath).join(" ");
+    setDraft((v) => (v.length === 0 || v.endsWith(" ") ? v : v + " ") + insert + " ");
+    textareaRef.current?.focus();
+  });
 
   // Append a streamed chunk to the LAST assistant message's trailing text part.
   // If the last message is not an open assistant message (e.g. unsolicited
@@ -280,9 +291,17 @@ export function ChatView({
               <span className="text-[11px] text-[#a1a1a6]">injects into the target agent's input · auto-submit</span>
             )}
           </div>
-          <div className="rounded-2xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-3 pt-2.5 pb-2">
+          <div
+            ref={dropRef}
+            className={`rounded-2xl ring-1 bg-[#f7f7f8] px-3 pt-2.5 pb-2 transition-shadow${
+              isOver
+                ? " ring-2 ring-[#0a84ff] bg-[#0a84ff]/[0.06]"
+                : " ring-black/[0.1] focus-within:ring-[#0a84ff]/50"
+            }`}
+          >
             <div className="flex items-end gap-2">
               <textarea
+                ref={textareaRef}
                 rows={1}
                 value={draft}
                 disabled={sending}
