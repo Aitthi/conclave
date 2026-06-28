@@ -97,14 +97,24 @@ pub fn spawn_cli(
     // `blocking_send` (this is a plain OS thread, never inside the async runtime)
     // applies backpressure when the forwarder lags. When the loop ends, output_tx
     // is dropped at scope exit — that close signals EOF to the forwarder.
+    //
+    // UTF-8 BOUNDARY CARRY: a multi-byte character (box-drawing, block elements,
+    // the TUI mascot — all 3-byte UTF-8) can straddle the 4 KB read boundary.
+    // Decoding each read independently with `from_utf8_lossy` would replace the
+    // split halves with U+FFFD, corrupting the glyph AND its cell width, which
+    // drifts the grid and strands stray cells (the fragments seen after a
+    // full-screen repaint on resize). Instead we hold back an incomplete
+    // trailing sequence and prepend it to the next read, so xterm only ever
+    // receives whole characters. `carry` is ≤3 bytes (max UTF-8 continuation).
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    if output_tx.blocking_send(chunk).is_err() {
+                    let chunk = decode_with_carry(&mut carry, &buf[..n]);
+                    if !chunk.is_empty() && output_tx.blocking_send(chunk).is_err() {
                         break; // receiver gone
                     }
                 }
@@ -174,6 +184,31 @@ pub fn spawn_cli(
     Ok(CliBackend { handle, output_rx })
 }
 
+/// Decode a freshly-read byte slice into UTF-8 text, carrying any incomplete
+/// trailing multi-byte sequence in `carry` to be prepended to the next read.
+///
+/// The PTY reader fills a fixed 4 KB buffer, so a multi-byte character can be
+/// split across two reads. Decoding each read with `from_utf8_lossy` would turn
+/// the split halves into U+FFFD — corrupting the glyph and (worse) its cell
+/// width, which drifts the terminal grid and strands stray cells. Holding the
+/// incomplete tail back until its continuation bytes arrive keeps every emitted
+/// chunk whole. A genuinely invalid byte mid-stream (rare on a TTY) falls back
+/// to lossy decoding so the reader never stalls. `carry` stays ≤3 bytes.
+fn decode_with_carry(carry: &mut Vec<u8>, read: &[u8]) -> String {
+    let mut bytes = std::mem::take(carry);
+    bytes.extend_from_slice(read);
+    match std::str::from_utf8(&bytes) {
+        Ok(s) => s.to_owned(),
+        Err(e) if e.error_len().is_none() => {
+            let valid = e.valid_up_to();
+            carry.extend_from_slice(&bytes[valid..]);
+            // SAFETY: `valid_up_to()` bounds a verified UTF-8 prefix.
+            unsafe { std::str::from_utf8_unchecked(&bytes[..valid]) }.to_owned()
+        }
+        Err(_) => String::from_utf8_lossy(&bytes).into_owned(),
+    }
+}
+
 /// Map a `portable-pty` error (boxed `anyhow`/`std::error::Error`) into an
 /// `io::Error` so `spawn_cli` exposes a `std::io::Result`.
 fn to_io_err<E: std::fmt::Display>(e: E) -> std::io::Error {
@@ -217,5 +252,45 @@ mod tests {
     async fn spawn_cli_bad_command_errors() {
         let result = spawn_cli("s2", "definitely-not-a-real-binary-xyz", &[], "/tmp");
         assert!(result.is_err(), "bogus command should fail to spawn");
+    }
+
+    /// A 3-byte glyph split across two reads must reassemble intact — the bug
+    /// behind the post-resize fragments. "─" (U+2500) is `E2 94 80`; feeding the
+    /// first two bytes then the last must yield exactly "─", never U+FFFD.
+    #[test]
+    fn decode_with_carry_reassembles_split_multibyte() {
+        let mut carry = Vec::new();
+        let first = decode_with_carry(&mut carry, &[0xE2, 0x94]);
+        assert_eq!(first, "", "incomplete sequence must emit nothing yet");
+        assert_eq!(carry, vec![0xE2, 0x94], "tail must be carried forward");
+
+        let second = decode_with_carry(&mut carry, &[0x80]);
+        assert_eq!(second, "─", "the continuation byte completes the glyph");
+        assert!(
+            carry.is_empty(),
+            "carry must drain once the glyph completes"
+        );
+    }
+
+    /// ASCII and whole multi-byte chars pass straight through with no carry.
+    #[test]
+    fn decode_with_carry_passes_complete_input() {
+        let mut carry = Vec::new();
+        assert_eq!(decode_with_carry(&mut carry, b"hi \x1b[0m"), "hi \x1b[0m");
+        assert!(carry.is_empty());
+        // The block char the mascot/borders use, whole in one read.
+        assert_eq!(decode_with_carry(&mut carry, "█".as_bytes()), "█");
+        assert!(carry.is_empty());
+    }
+
+    /// A boundary split across THREE reads (one byte at a time) still reassembles
+    /// — the worst case for a 3-byte sequence.
+    #[test]
+    fn decode_with_carry_handles_byte_at_a_time() {
+        let mut carry = Vec::new();
+        assert_eq!(decode_with_carry(&mut carry, &[0xE2]), "");
+        assert_eq!(decode_with_carry(&mut carry, &[0x94]), "");
+        assert_eq!(decode_with_carry(&mut carry, &[0x80]), "─");
+        assert!(carry.is_empty());
     }
 }
