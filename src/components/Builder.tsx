@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { X, Sparkles, Waypoints, MessageSquare, Terminal } from "lucide-react";
 import { ipc } from "../ipc";
-import type { AgentDefinition, Tool } from "../ipc";
+import type { AgentDefinition } from "../ipc";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -143,31 +143,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [envText, setEnvText] = useState(() => buildEnvText(initialDef));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tools, setTools] = useState<Tool[]>([]);
-  const [toolsStatus, setToolsStatus] = useState<"loading" | "ready" | "error">("loading");
-
-  // Fetch the tool list on mount. StrictMode-safe via a per-invocation `mounted`
-  // flag captured in the effect closure (NOT a shared ref — a ref is reset to
-  // true by the second StrictMode invocation, so the first fetch's resolve would
-  // still fire). Track an explicit status so an IPC failure shows an error rather
-  // than a permanent "loading".
-  useEffect(() => {
-    let mounted = true;
-    ipc.tool
-      .list()
-      .then((list) => {
-        if (mounted) {
-          setTools(list);
-          setToolsStatus("ready");
-        }
-      })
-      .catch(() => {
-        if (mounted) setToolsStatus("error");
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const letter = name.trim().charAt(0).toUpperCase() || "?";
@@ -565,69 +540,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               </div>
             </section>
           )}
-
-          {/* Tools */}
-          <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
-              Tools
-            </div>
-            <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
-              {tools.map((tool) => (
-                <div key={tool.id} className="flex items-center gap-3 px-3 py-2.5">
-                  {/* Per-tool icons are deferred — every tool renders the generic
-                      Terminal glyph until icon mapping lands in a later milestone. */}
-                  <Terminal className="w-4 h-4 text-[#6e6e73] shrink-0" />
-                  <span className="flex-1 text-[12.5px]">{tool.name}</span>
-                  {tool.isCore && (
-                    <>
-                      <span className="text-[10px] font-semibold text-[#0a84ff] bg-[#0a84ff]/[0.08] px-1.5 py-px rounded-md">
-                        Core
-                      </span>
-                      {/* Core tools are always enabled and cannot be removed. */}
-                      <input
-                        type="checkbox"
-                        checked
-                        disabled
-                        aria-label={`${tool.name} is always enabled`}
-                        className="accent-[#0a84ff] opacity-50 cursor-not-allowed"
-                      />
-                    </>
-                  )}
-                </div>
-              ))}
-              {toolsStatus === "loading" && (
-                <div className="px-3 py-3 text-[12px] text-[#a1a1a6] text-center">
-                  Loading tools…
-                </div>
-              )}
-              {toolsStatus === "error" && (
-                <div className="px-3 py-3 text-[12px] text-[#a1a1a6] text-center">
-                  Could not load tools — try reopening this panel.
-                </div>
-              )}
-              {toolsStatus === "ready" && tools.length === 0 && (
-                <div className="px-3 py-3 text-[12px] text-[#a1a1a6] text-center">
-                  No tools available.
-                </div>
-              )}
-            </div>
-            {/* Custom (non-core) tool selection arrives in a later milestone.
-                No per-agent tool persistence exists yet, so no picker is shown. */}
-            <p className="text-[11px] text-[#a1a1a6] mt-1.5 px-1">
-              Custom tool selection arrives in a later milestone.
-            </p>
-          </section>
-
-          {/* Skills placeholder (M5) */}
-          <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
-              Custom skills
-            </div>
-            {/* TODO(M5): skill picker wired to agent_skill join table */}
-            <div className="rounded-xl ring-1 ring-black/[0.08] bg-black/[0.02] px-3 py-3 text-[12px] text-[#a1a1a6] text-center">
-              Skill assignment — available in M5
-            </div>
-          </section>
 
           {/* Error */}
           {error && (
