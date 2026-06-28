@@ -38,6 +38,9 @@ const CLAUDE_MODELS = [
   "claude-haiku-4-5",
 ];
 
+/** Quick-fill Codex model presets. */
+const CODEX_MODELS = ["gpt-5.5-codex", "gpt-5.5", "o4-mini"];
+
 /**
  * Sentinel shown for a secret env var already stored in the Keychain. Sending
  * it back unchanged means "keep the stored secret" (must match
@@ -148,6 +151,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const letter = name.trim().charAt(0).toUpperCase() || "?";
+  // CLI launch config applies to claude-code + codex (custom isn't wired yet).
+  const isClaudeCode = agentType === "cli" && cliKind === "claude-code";
+  const isCodex = agentType === "cli" && cliKind === "codex";
+  const showCliConfig = isClaudeCode || isCodex;
+  const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
 
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave() {
@@ -155,12 +163,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       setError("Name is required");
       return;
     }
-    // Claude Code launch config only applies to a claude-code CLI agent.
-    const isClaudeCode = agentType === "cli" && cliKind === "claude-code";
-
     // Parse the custom env up front so a JSON error is reported before saving.
     let customEnv: Record<string, string> | undefined;
-    if (isClaudeCode && useCustomEnv) {
+    if (showCliConfig && useCustomEnv) {
       try {
         customEnv = parseEnvText(envText);
       } catch (e) {
@@ -191,10 +196,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         // backend already behaves this way). Sent as fixed constants.
         autoSubmitInjected: true,
         allowedSenders: "all",
-        // Claude Code config (omitted for other kinds).
-        permissionMode: isClaudeCode ? permissionMode : undefined,
+        // CLI launch config (claude-code + codex; omitted for other kinds).
+        // contextWindow is Claude-only ([1m] suffix); Codex has no equivalent.
+        permissionMode: showCliConfig ? permissionMode : undefined,
         contextWindow: isClaudeCode ? contextWindow : undefined,
-        customArgs: isClaudeCode && customArgs.trim() ? customArgs.trim() : undefined,
+        customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
       });
       onSaved?.(def);
@@ -404,10 +410,10 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             )}
           </section>
 
-          {/* Model / API — for claude-code the model lives in the Claude Code
-              section below (with its presets), so it's hidden here to avoid two
-              disconnected model fields. */}
-          {!(agentType === "cli" && cliKind === "claude-code") && (
+          {/* Model / API — for claude-code / codex the model lives in the CLI
+              config section below (with its presets), so it's hidden here to
+              avoid two disconnected model fields. */}
+          {!showCliConfig && (
             <section>
               <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
                 Model
@@ -431,11 +437,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             </section>
           )}
 
-          {/* Claude Code launch config — only for a claude-code CLI agent */}
-          {agentType === "cli" && cliKind === "claude-code" && (
+          {/* CLI launch config — for claude-code + codex */}
+          {showCliConfig && (
             <section>
               <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
-                Claude Code
+                {isCodex ? "Codex" : "Claude Code"}
               </div>
               <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
                 {/* Model — field + quick-presets together so picking a preset
@@ -446,12 +452,12 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     <input
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      placeholder="claude-opus-4-8"
+                      placeholder={isCodex ? "gpt-5.5-codex" : "claude-opus-4-8"}
                       className="text-[12.5px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-[#c7c7cc]"
                     />
                   </div>
                   <div className="flex flex-wrap gap-1.5 mt-2">
-                    {CLAUDE_MODELS.map((m) => (
+                    {modelPresets.map((m) => (
                       <button
                         key={m}
                         onClick={() => setModel(m)}
@@ -492,7 +498,13 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                               ? "bg-white shadow-sm font-semibold"
                               : "text-[#6e6e73]"
                           }`}
-                          title={`claude --permission-mode ${value}`}
+                          title={
+                            isCodex
+                              ? value === "auto"
+                                ? "codex --full-auto"
+                                : "codex --dangerously-bypass-approvals-and-sandbox"
+                              : `claude --permission-mode ${value}`
+                          }
                         >
                           {label}
                         </button>
@@ -506,7 +518,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   )}
                 </div>
 
-                {/* Context window */}
+                {/* Context window — Claude only (the [1m] suffix is
+                    Claude-specific; Codex has no equivalent flag). */}
+                {isClaudeCode && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-[#6e6e73]">Context window</span>
@@ -543,6 +557,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     </p>
                   )}
                 </div>
+                )}
 
                 {/* Custom args */}
                 <div className="flex items-center justify-between px-3 py-2.5 gap-3">

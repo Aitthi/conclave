@@ -134,6 +134,10 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // 1M-context variant of a model is its id with a `[1m]` suffix —
             // single-quoted so the shell doesn't try to glob the brackets.
             // Claude-specific flags are gated to claude; custom args apply to any.
+            // Single-quote a value so the shell doesn't glob it (e.g. claude's
+            // `[1m]`); POSIX-escape any embedded quote so it can't break out.
+            let shell_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+
             let mut launch = String::from(base);
             if base == "claude" {
                 if let Some(mode) = def.permission_mode.as_deref() {
@@ -145,10 +149,20 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     } else {
                         model.to_string()
                     };
-                    // Single-quote so the shell doesn't glob `[1m]`; POSIX-escape
-                    // any embedded quote so the quoting can't be broken out of.
-                    let safe = eff.replace('\'', "'\\''");
-                    launch.push_str(&format!(" --model '{safe}'"));
+                    launch.push_str(&format!(" --model {}", shell_quote(&eff)));
+                }
+            } else if base == "codex" {
+                if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
+                    launch.push_str(&format!(" --model {}", shell_quote(model)));
+                }
+                // Codex's mode flags differ from claude's; map the shared
+                // permission_mode value (auto / bypassPermissions) to them.
+                match def.permission_mode.as_deref() {
+                    Some("auto") => launch.push_str(" --full-auto"),
+                    Some("bypassPermissions") => {
+                        launch.push_str(" --dangerously-bypass-approvals-and-sandbox")
+                    }
+                    _ => {}
                 }
             }
             if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {
