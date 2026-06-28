@@ -331,28 +331,41 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
             {/* CLI Kind (only when type = cli) */}
             {agentType === "cli" && (
-              <div className="mt-2 rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
+              // Segmented control (matches the Permission/Context pickers). Custom
+              // CLI isn't wired in the backend yet, so it's shown disabled.
+              <div
+                role="radiogroup"
+                aria-label="CLI kind"
+                className="mt-2 flex gap-1 rounded-xl bg-black/[0.04] p-1"
+              >
                 {(
                   [
-                    { value: "claude-code", label: "Claude Code" },
-                    { value: "codex", label: "Codex" },
-                    { value: "custom", label: "Custom" },
-                  ] as { value: CliKind; label: string }[]
-                ).map(({ value, label }) => (
-                  <label
+                    { value: "claude-code", label: "Claude Code", soon: false },
+                    { value: "codex", label: "Codex", soon: false },
+                    { value: "custom", label: "Custom", soon: true },
+                  ] as { value: CliKind; label: string; soon: boolean }[]
+                ).map(({ value, label, soon }) => (
+                  <button
                     key={value}
-                    className="flex items-center justify-between px-3 py-2 cursor-pointer"
+                    role="radio"
+                    aria-checked={cliKind === value}
+                    disabled={soon}
+                    onClick={() => !soon && setCliKind(value)}
+                    className={`flex-1 flex items-center justify-center gap-1 text-[12.5px] py-1.5 rounded-lg transition-colors ${
+                      soon
+                        ? "text-[#a1a1a6] cursor-not-allowed"
+                        : cliKind === value
+                          ? "bg-white shadow-sm font-semibold"
+                          : "text-[#6e6e73] hover:bg-black/[0.03]"
+                    }`}
                   >
-                    <span className="text-[12.5px]">{label}</span>
-                    <input
-                      type="radio"
-                      name="cliKind"
-                      value={value}
-                      checked={cliKind === value}
-                      onChange={() => setCliKind(value)}
-                      className="accent-[#0a84ff]"
-                    />
-                  </label>
+                    {label}
+                    {soon && (
+                      <span className="text-[8.5px] font-bold tracking-wide text-[#86868b] bg-black/[0.06] px-1 py-px rounded uppercase">
+                        Soon
+                      </span>
+                    )}
+                  </button>
                 ))}
               </div>
             )}
