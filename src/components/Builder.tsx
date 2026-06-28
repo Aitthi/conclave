@@ -237,9 +237,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
               Identity
             </div>
-            <div className="flex items-center gap-3 mb-2.5">
+            <div className="flex items-center gap-2.5 mb-2">
               <div
-                className="w-11 h-11 rounded-[11px] text-white grid place-items-center text-[16px] font-bold ring-1 ring-black/[0.06] shrink-0"
+                className="w-10 h-10 rounded-[10px] text-white grid place-items-center text-[15px] font-bold ring-1 ring-black/[0.06] shrink-0"
                 style={{ backgroundColor: color }}
               >
                 {letter}
@@ -261,16 +261,13 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             </div>
 
             {/* Color swatches */}
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-[#86868b] mr-1">Color</span>
+            <div className="flex items-center gap-1.5 pl-[50px]">
               {COLOR_SWATCHES.map((swatch) => (
                 <button
                   key={swatch}
                   onClick={() => setColor(swatch)}
-                  className={`w-5 h-5 rounded-full transition-all ${
-                    color === swatch
-                      ? "ring-2 ring-offset-2"
-                      : ""
+                  className={`w-[18px] h-[18px] rounded-full transition-all ${
+                    color === swatch ? "ring-2 ring-offset-1" : "hover:scale-110"
                   }`}
                   style={{
                     backgroundColor: swatch,
