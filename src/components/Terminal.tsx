@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { ipc, useSessionOutput } from "../ipc";
 
@@ -42,9 +43,20 @@ export function Terminal({ sessionId }: TerminalProps) {
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: { background: "#1e1e1e", foreground: "#e5e5e5" },
       cursorBlink: true,
+      // Required by the Unicode 11 addon (it uses xterm's proposed API).
+      allowProposedApi: true,
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+
+    // Unicode 11 width tables (like VS Code). xterm's built-in tables are
+    // Unicode 6, which mis-measures the width of modern wide glyphs/emoji — a
+    // 2-cell glyph counted as 1 cell leaves a trailing stray cell in the buffer
+    // (the leftover fragments that survived even the GPU renderer). Activating
+    // version 11 makes the buffer geometry match what the child emits.
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
+
     term.open(el);
 
     // Use the GPU (WebGL) renderer, like VS Code's terminal. xterm's default DOM

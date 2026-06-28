@@ -14,6 +14,7 @@
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
     "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-unicode11": "0.10.0-beta.287",
     "@xterm/addon-webgl": "0.20.0-beta.286",
     "@xterm/xterm": "6.1.0-beta.287",
     "lucide-react": "^1.21.0",
