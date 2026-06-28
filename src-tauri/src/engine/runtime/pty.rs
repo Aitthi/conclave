@@ -63,6 +63,19 @@ pub fn spawn_cli(
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
     cmd.cwd(cwd);
+    // We ARE the terminal emulator, so — exactly like iTerm or VS Code's
+    // integrated terminal — we must advertise terminal capabilities to the child
+    // via the environment. A Tauri app launched from Finder inherits no `TERM`,
+    // and without it a TUI such as Claude Code falls back to a degraded
+    // rendering mode that doesn't repaint cleanly on resize (the source of the
+    // stray cells after a window resize). Declaring the xterm-256color profile +
+    // truecolor matches what a real terminal provides; set a UTF-8 locale only
+    // when the environment lacks one so box-drawing / the mascot render right.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    if std::env::var_os("LANG").is_none() {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
 
     let child = pair.slave.spawn_command(cmd).map_err(to_io_err)?;
     // The slave is no longer needed once the child owns it; dropping it lets the
