@@ -328,10 +328,11 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
             AppError::NotFound(format!("no session for instance id={}", req.instance_id))
         })?;
 
-    let tokens = session.context_tokens;
-    let limit = session
-        .context_limit
-        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT);
+    // A handoff's size is its OWN saved text, not the session context meter —
+    // which reads 0 for CLI agents (they track context themselves). Estimate it
+    // from the handoff length (~4 chars/token, rounded up so any non-empty
+    // handoff is ≥1) so the row shows "~N tok" of real saved content, not ~0.
+    let saved_tokens = req.text.chars().count().div_ceil(4) as i64;
 
     let row = persist_and_emit(
         &state.db,
@@ -340,9 +341,9 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
             session_id: session.id,
             kind: "handoff".to_owned(),
             label: None,
-            summary: Some(honest_summary("handoff", tokens.unwrap_or(0), limit)),
-            tokens,
-            trigger_pct: tokens.and_then(|t| pct_of(t, limit)),
+            summary: Some(format!("handoff · ~{saved_tokens} tokens saved")),
+            tokens: Some(saved_tokens),
+            trigger_pct: None, // a handoff is saved content, not a context-window %
             prev_snapshot_id: None, // resolved inside persist_and_emit
             carried_forward: Some(req.text),
         },
@@ -673,6 +674,14 @@ mod tests {
         assert_eq!(
             out.get("carriedForward").and_then(Value::as_str),
             Some(text)
+        );
+        // tokens reflect the handoff's OWN size (not the 0 session meter), so the
+        // UI never shows "~0 tok" for a handoff that actually has content.
+        assert!(
+            out.get("tokens")
+                .and_then(Value::as_i64)
+                .is_some_and(|t| t > 0),
+            "handoff tokens must be > 0 for non-empty content"
         );
 
         let got = last(&state, json!({ "instanceId": inst }))
