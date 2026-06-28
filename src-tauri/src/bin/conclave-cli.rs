@@ -97,6 +97,11 @@ async fn main() -> ExitCode {
         }
     };
 
+    // `tell` echoes the full message back in its result row. Printing that into
+    // the agent's context would double the token cost of every message it sends,
+    // so we collapse a successful `tell` to a one-line confirmation below.
+    let is_tell = argv.first().map(String::as_str) == Some("tell");
+
     let path = match socket_path() {
         Some(p) => p,
         None => {
@@ -172,8 +177,22 @@ async fn main() -> ExitCode {
     }
 
     if let Some(result) = response.get("result") {
-        let pretty = serde_json::to_string_pretty(result).expect("serialize result cannot fail");
-        println!("{pretty}");
+        if is_tell {
+            // Terse confirmation — never echo the message text back to the sender.
+            let status = result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("sent");
+            let to = result
+                .get("toInstanceId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            println!("{status} -> {to}");
+        } else {
+            let pretty =
+                serde_json::to_string_pretty(result).expect("serialize result cannot fail");
+            println!("{pretty}");
+        }
         return ExitCode::SUCCESS;
     }
 
