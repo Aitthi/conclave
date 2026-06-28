@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type { AgentDefinition, Session, WorkspaceAgent, SessionStatusEvent } from "../ipc";
@@ -161,9 +161,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
     }
   }, [focusInstanceId, tabs]);
 
-  // Spawn the active instance's session lazily (once) when it becomes active.
-  // The "already attempted" guard lives in a ref, so this effect depends ONLY
-  // on activeInstanceId — it never re-fires for an in-flight spawn.
+  // Spawn one instance's session, at most once (the attempt is marked in a ref).
   //
   // NOTE: the result setState calls are intentionally NOT guarded by an
   // `active`/mounted flag. Under React 19 StrictMode the effect runs as
@@ -172,9 +170,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
   // leaving the session id never recorded (stuck on "Opening session…").
   // setState on an unmounted component is a no-op in React 18+, so resolving
   // unconditionally is safe and avoids that StrictMode trap.
-  useEffect(() => {
-    if (activeInstanceId === null) return;
-    const id = activeInstanceId;
+  const spawnInstance = useCallback((id: string) => {
     if (spawnAttempted.current.has(id)) return;
     spawnAttempted.current.add(id);
 
@@ -192,7 +188,20 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
         const msg = err instanceof Error ? err.message : String(err);
         setSpawnErrors((prev) => ({ ...prev, [id]: msg }));
       });
-  }, [activeInstanceId]);
+  }, []);
+
+  // Eager-spawn EVERY agent in the workspace as soon as the roster loads — so an
+  // agent can RECEIVE `conclave tell` / injected messages even if a human never
+  // clicked its tab. Previously only the active tab spawned, so an unopened agent
+  // stayed offline and messages to it merely queued. Idempotent via the ref guard.
+  useEffect(() => {
+    for (const t of tabs) spawnInstance(t.instanceId);
+  }, [tabs, spawnInstance]);
+
+  // Fallback: also spawn whatever becomes active (e.g. a tab added after load).
+  useEffect(() => {
+    if (activeInstanceId !== null) spawnInstance(activeInstanceId);
+  }, [activeInstanceId, spawnInstance]);
 
   // Live status dots on the tab strip. Spawning a session flips the
   // workspace_agent to "running" and emits `session:status`, but the tabs were
