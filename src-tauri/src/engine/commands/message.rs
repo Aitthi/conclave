@@ -129,12 +129,20 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
 
     // Prefix the delivered input with the sender's name so the receiving agent
     // knows who it's from (the persisted row + UI carry origin separately, so we
-    // keep `text` RAW for those and only tag the stdin line). Auto-submit =
-    // append a newline, then route to the target's live backend.
-    let line = format!("[from {sender}] {text}\n");
-    let status = match state.runtime.send_stdin(&to_instance_id, &line) {
-        // Delivered to a live backend.
-        Ok(()) => "delivered",
+    // keep `text` RAW for those and only tag the stdin line).
+    let body = format!("[from {sender}] {text}");
+    let status = match state.runtime.send_stdin(&to_instance_id, &body) {
+        // Delivered to a live backend — now SUBMIT it. A TUI's Enter is CR (\r),
+        // not LF; and sending the CR in the SAME write as the text makes Codex's
+        // paste-burst detection treat it as literal paste content (cursor drops to
+        // a new line, nothing submits). Send the CR as a separate keystroke after
+        // a short beat so it registers as a real Enter. Mirrors the StdinBar
+        // self-send fix (text, pause, then \r).
+        Ok(()) => {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let _ = state.runtime.send_stdin(&to_instance_id, "\r");
+            "delivered"
+        }
         // Target isn't running: RECORD the message as queued but do NOT error and
         // do NOT emit the delivered event.
         // TODO(M3.x): deliver-on-spawn — drain queued messages when the target
