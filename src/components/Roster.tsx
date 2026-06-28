@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Waypoints, Terminal, Search, Folder, Plus, Layers, X } from "lucide-react";
-import { ipc } from "../ipc";
-import type { AgentDefinition, WorkspaceAgent } from "../ipc";
+import { ipc, useEvent, EVENT_NAMES } from "../ipc";
+import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
 
 // ---------------------------------------------------------------------------
 // View model for one agent row — derived from ipc.instance.list ⨝ ipc.agentDef.list.
@@ -258,6 +258,30 @@ export function Roster({
       active = false;
     };
   }, [workspaceId, agentsVersion]);
+
+  // Live status dots. A newly-added agent is "idle" until the WorkspacePane
+  // lazily spawns its session, which flips the workspace_agent to "running" and
+  // emits `session:status`. The roster fetched its statuses BEFORE that spawn,
+  // so without this the dot stays stale at idle until a reload. On any status
+  // event, re-read instance.list and patch the dots in place (no loading flash).
+  // The event carries only sessionId, so we refetch rather than map directly.
+  useEvent<SessionStatusEvent>(EVENT_NAMES.sessionStatus, () => {
+    if (workspaceId === null) return;
+    ipc.instance
+      .list({ workspaceId })
+      .then((instances) => {
+        const byId = new Map(instances.map((i) => [i.id, i.status]));
+        setEntries((prev) =>
+          prev.map((e) => {
+            const next = byId.get(e.instanceId);
+            return next && next !== e.status ? { ...e, status: next } : e;
+          }),
+        );
+      })
+      .catch(() => {
+        // Transient failure — the dot just stays at its last value.
+      });
+  });
 
   // Client-side search filter — case-insensitive match on name and meta.
   const q = search.trim().toLowerCase();
