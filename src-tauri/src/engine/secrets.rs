@@ -50,9 +50,8 @@ pub fn get_key(account: &str) -> Result<Option<String>, SecretError> {
 /// Delete the Keychain entry for `account`. Missing entries are treated as
 /// success (idempotent) so callers can clean up unconditionally.
 ///
-/// Called by a future "remove provider" flow; present here for completeness
-/// of the Keychain CRUD surface.
-#[allow(dead_code)]
+/// Called when an agent's secret env var is removed (to prune stale entries)
+/// and by a future "remove provider" flow.
 pub fn delete_key(account: &str) -> Result<(), SecretError> {
     match keyring::Entry::new(SERVICE, account)?.delete_credential() {
         Ok(()) => Ok(()),

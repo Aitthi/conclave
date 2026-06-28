@@ -15,6 +15,8 @@ export interface BuilderProps {
 type AgentType = "cli" | "chat" | "orchestrator";
 type CliKind = "claude-code" | "codex" | "custom";
 type AllowedSenders = "all" | "selected" | "none";
+type PermissionMode = "auto" | "bypassPermissions";
+type ContextWindow = "1m" | "200k";
 
 // ── Preset color swatches ────────────────────────────────────────────────────
 
@@ -28,18 +30,82 @@ const COLOR_SWATCHES = [
   "#ff3b30",
 ];
 
+// ── Claude Code config presets ───────────────────────────────────────────────
+
+/** Quick-fill model presets (the user can still type any value). */
+const CLAUDE_MODELS = [
+  "claude-opus-4-8",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5",
+];
+
+/**
+ * Sentinel shown for a secret env var already stored in the Keychain. Sending
+ * it back unchanged means "keep the stored secret" (must match
+ * `SECRET_PLACEHOLDER` in `src-tauri/src/engine/commands/agent.rs`).
+ */
+const SECRET_PLACEHOLDER = "••••••••";
+
+/** Starter custom-env JSON, matching Claude Code's settings.json `env` shape. */
+const DEFAULT_ENV_TEMPLATE = `{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+    "ANTHROPIC_AUTH_TOKEN": "sk-or-...",
+    "ANTHROPIC_MODEL": "...",
+    "ANTHROPIC_SMALL_FAST_MODEL": "..."
+  }
+}`;
+
+/** Build the env-editor text from a saved definition (or the starter template). */
+function buildEnvText(def?: AgentDefinition): string {
+  const env: Record<string, string> = { ...(def?.customEnv ?? {}) };
+  // Secret values aren't returned — show their NAMES with a masked placeholder.
+  for (const k of def?.secretEnvKeys ?? []) env[k] = SECRET_PLACEHOLDER;
+  if (Object.keys(env).length === 0) return DEFAULT_ENV_TEMPLATE;
+  return JSON.stringify({ env }, null, 2);
+}
+
+/**
+ * Parse the env-editor text into a flat string→string map. Accepts either a
+ * bare object or Claude's `{ "env": { … } }` wrapper. Throws on invalid JSON
+ * (the caller surfaces it). Returns undefined when empty.
+ */
+function parseEnvText(text: string): Record<string, string> | undefined {
+  const t = text.trim();
+  if (!t) return undefined;
+  const parsed: unknown = JSON.parse(t);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Custom environment must be a JSON object");
+  }
+  const obj = parsed as Record<string, unknown>;
+  const inner =
+    obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)
+      ? (obj.env as Record<string, unknown>)
+      : obj;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(inner)) {
+    if (typeof v !== "string") {
+      throw new Error(`Env value for "${k}" must be a string (got ${typeof v})`);
+    }
+    out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 // ── Sub-components ───────────────────────────────────────────────────────────
 
 interface ToggleProps {
   on: boolean;
   onChange: (v: boolean) => void;
+  label?: string;
 }
 
-function Toggle({ on, onChange }: ToggleProps) {
+function Toggle({ on, onChange, label }: ToggleProps) {
   return (
     <button
       role="switch"
       aria-checked={on}
+      aria-label={label}
       onClick={() => onChange(!on)}
       className={`w-9 h-5 rounded-full relative transition-colors ${on ? "bg-[#30d158]" : "bg-black/20"}`}
     >
@@ -68,6 +134,20 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [allowedSenders, setAllowedSenders] = useState<AllowedSenders>(
     initialDef?.allowedSenders ?? "all",
   );
+  // ── Claude Code launch config ──────────────────────────────────────────────
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
+    initialDef?.permissionMode ?? "auto",
+  );
+  const [contextWindow, setContextWindow] = useState<ContextWindow>(
+    initialDef?.contextWindow ?? "200k",
+  );
+  const [customArgs, setCustomArgs] = useState(initialDef?.customArgs ?? "");
+  // Custom env is opt-in so the starter template isn't saved by accident.
+  const [useCustomEnv, setUseCustomEnv] = useState(
+    Object.keys(initialDef?.customEnv ?? {}).length > 0 ||
+      (initialDef?.secretEnvKeys?.length ?? 0) > 0,
+  );
+  const [envText, setEnvText] = useState(() => buildEnvText(initialDef));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tools, setTools] = useState<Tool[]>([]);
@@ -105,6 +185,20 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       setError("Name is required");
       return;
     }
+    // Claude Code launch config only applies to a claude-code CLI agent.
+    const isClaudeCode = agentType === "cli" && cliKind === "claude-code";
+
+    // Parse the custom env up front so a JSON error is reported before saving.
+    let customEnv: Record<string, string> | undefined;
+    if (isClaudeCode && useCustomEnv) {
+      try {
+        customEnv = parseEnvText(envText);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Invalid custom environment JSON");
+        return;
+      }
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -124,6 +218,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         shareBlackboard: true,
         autoSubmitInjected,
         allowedSenders,
+        // Claude Code config (omitted for other kinds).
+        permissionMode: isClaudeCode ? permissionMode : undefined,
+        contextWindow: isClaudeCode ? contextWindow : undefined,
+        customArgs: isClaudeCode && customArgs.trim() ? customArgs.trim() : undefined,
+        customEnv,
       });
       onSaved?.(def);
       onClose();
@@ -298,6 +397,143 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             </div>
           </section>
 
+          {/* Claude Code launch config — only for a claude-code CLI agent */}
+          {agentType === "cli" && cliKind === "claude-code" && (
+            <section>
+              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
+                Claude Code
+              </div>
+              <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
+                {/* Permission mode */}
+                <div className="flex items-center justify-between px-3 py-2.5">
+                  <span className="text-[12.5px] text-[#6e6e73]">Permission mode</span>
+                  <div
+                    role="radiogroup"
+                    aria-label="Permission mode"
+                    className="flex rounded-lg bg-black/[0.04] p-0.5"
+                  >
+                    {(
+                      [
+                        { value: "auto", label: "Auto" },
+                        { value: "bypassPermissions", label: "Bypass" },
+                      ] as { value: PermissionMode; label: string }[]
+                    ).map(({ value, label }) => (
+                      <button
+                        key={value}
+                        role="radio"
+                        aria-checked={permissionMode === value}
+                        onClick={() => setPermissionMode(value)}
+                        className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                          permissionMode === value
+                            ? "bg-white shadow-sm font-semibold"
+                            : "text-[#6e6e73]"
+                        }`}
+                        title={`claude --permission-mode ${value}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Context window */}
+                <div className="flex items-center justify-between px-3 py-2.5">
+                  <span className="text-[12.5px] text-[#6e6e73]">Context window</span>
+                  <div
+                    role="radiogroup"
+                    aria-label="Context window"
+                    className="flex rounded-lg bg-black/[0.04] p-0.5"
+                  >
+                    {(
+                      [
+                        { value: "200k", label: "200K" },
+                        { value: "1m", label: "1M" },
+                      ] as { value: ContextWindow; label: string }[]
+                    ).map(({ value, label }) => (
+                      <button
+                        key={value}
+                        role="radio"
+                        aria-checked={contextWindow === value}
+                        onClick={() => setContextWindow(value)}
+                        className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                          contextWindow === value
+                            ? "bg-white shadow-sm font-semibold"
+                            : "text-[#6e6e73]"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Model quick-presets (fill the Model field above) */}
+                <div className="px-3 py-2.5">
+                  <div className="text-[12.5px] text-[#6e6e73] mb-1.5">Model presets</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {CLAUDE_MODELS.map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setModel(m)}
+                        className={`text-[11.5px] font-mono px-2 py-1 rounded-md ring-1 transition-colors ${
+                          model === m
+                            ? "ring-[#0a84ff]/40 bg-[#0a84ff]/[0.08] text-[#0a84ff]"
+                            : "ring-black/[0.08] text-[#6e6e73] hover:bg-black/[0.03]"
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10.5px] text-[#a1a1a6] mt-1.5">
+                    1M context appends a <span className="font-mono">[1m]</span> suffix to the
+                    model id.
+                  </p>
+                </div>
+
+                {/* Custom args */}
+                <div className="flex items-center justify-between px-3 py-2 gap-3">
+                  <span className="text-[12.5px] text-[#6e6e73] shrink-0">Custom args</span>
+                  <input
+                    value={customArgs}
+                    onChange={(e) => setCustomArgs(e.target.value)}
+                    placeholder="e.g. --verbose --mcp-config ./mcp.json"
+                    className="text-[12px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-[#c7c7cc]"
+                  />
+                </div>
+
+                {/* Custom env (opt-in) */}
+                <div className="px-3 py-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12.5px] text-[#6e6e73]">Custom environment</span>
+                    <Toggle
+                      on={useCustomEnv}
+                      onChange={setUseCustomEnv}
+                      label="Use custom environment"
+                    />
+                  </div>
+                  {useCustomEnv && (
+                    <>
+                      <textarea
+                        value={envText}
+                        onChange={(e) => setEnvText(e.target.value)}
+                        spellCheck={false}
+                        rows={8}
+                        className="mt-2 w-full rounded-lg ring-1 ring-black/[0.1] bg-[#f7f7f8] focus:ring-[#0a84ff]/50 outline-none px-2.5 py-2 text-[11.5px] font-mono leading-relaxed resize-y"
+                      />
+                      <p className="text-[10.5px] text-[#a1a1a6] mt-1.5">
+                        Secrets (AUTH_TOKEN / API_KEY / …) are stored in the macOS Keychain, never
+                        in the database. Leave a value as{" "}
+                        <span className="font-mono">{SECRET_PLACEHOLDER}</span> to keep the stored
+                        secret.
+                      </p>
+                    </>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* Tools */}
           <section>
             <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
@@ -381,7 +617,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               </div>
               <div className="flex items-center justify-between px-3 py-2.5">
                 <span className="text-[12.5px]">Auto-submit injected messages</span>
-                <Toggle on={autoSubmitInjected} onChange={setAutoSubmitInjected} />
+                <Toggle
+                  on={autoSubmitInjected}
+                  onChange={setAutoSubmitInjected}
+                  label="Auto-submit injected messages"
+                />
               </div>
             </div>
           </section>

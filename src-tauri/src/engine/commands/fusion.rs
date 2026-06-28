@@ -529,6 +529,7 @@ mod tests {
             share_blackboard: None,
             auto_submit_injected: None,
             allowed_senders: None,
+            ..Default::default()
         }
     }
 

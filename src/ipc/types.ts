@@ -32,6 +32,17 @@ export interface AgentDefinition {
   shareBlackboard?: boolean;
   autoSubmitInjected?: boolean;
   allowedSenders?: "all" | "selected" | "none";
+  // ── Claude Code / CLI launch config ────────────────────────────────────────
+  /** `--permission-mode` value passed to the CLI. */
+  permissionMode?: "auto" | "bypassPermissions";
+  /** Extra CLI args appended verbatim to the launch command. */
+  customArgs?: string;
+  /** NON-secret env overrides; secret values live in the Keychain, not here. */
+  customEnv?: Record<string, string>;
+  /** Names of env vars whose VALUES are stored in the Keychain (not the values). */
+  secretEnvKeys?: string[];
+  /** Model context window: "1m" appends the [1m] suffix, "200k" is standard. */
+  contextWindow?: "1m" | "200k";
   createdAt: string;
   /** Annotated by list views: how many workspaces this agent belongs to. */
   inWorkspaces?: number;

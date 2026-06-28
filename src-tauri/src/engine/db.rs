@@ -86,6 +86,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 3 {
+        sqlx::raw_sql(include_str!("migrations/0003_agent_cli_config.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 3;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -132,7 +141,7 @@ mod tests {
         assert_eq!(count, 19, "expected 19 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 2.
+    /// Running migrate twice must not error and must leave user_version == 3.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -165,7 +174,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 2, "user_version should be 2");
+        assert_eq!(version, 3, "user_version should be 3");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =

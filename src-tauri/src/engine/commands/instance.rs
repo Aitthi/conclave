@@ -120,7 +120,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
         "cli" => {
             // Map the configured CLI kind to a concrete launcher command.
             // `custom` and unset both defer to M5 settings.
-            let cli_command = match def.cli_kind.as_deref() {
+            let base = match def.cli_kind.as_deref() {
                 Some("claude-code") => "claude",
                 Some("codex") => "codex",
                 _ => {
@@ -129,6 +129,59 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     ))
                 }
             };
+
+            // Build the launch command with the agent's configured flags. The
+            // 1M-context variant of a model is its id with a `[1m]` suffix —
+            // single-quoted so the shell doesn't try to glob the brackets.
+            // Claude-specific flags are gated to claude; custom args apply to any.
+            let mut launch = String::from(base);
+            if base == "claude" {
+                if let Some(mode) = def.permission_mode.as_deref() {
+                    launch.push_str(&format!(" --permission-mode {mode}"));
+                }
+                if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
+                    let eff = if def.context_window.as_deref() == Some("1m") {
+                        format!("{model}[1m]")
+                    } else {
+                        model.to_string()
+                    };
+                    // Single-quote so the shell doesn't glob `[1m]`; POSIX-escape
+                    // any embedded quote so the quoting can't be broken out of.
+                    let safe = eff.replace('\'', "'\\''");
+                    launch.push_str(&format!(" --model '{safe}'"));
+                }
+            }
+            if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {
+                launch.push(' ');
+                launch.push_str(extra.trim());
+            }
+
+            // Env overrides: non-secret vars from the DB JSON object + secret
+            // values fetched back from the Keychain by their recorded names.
+            let mut extra_env: Vec<(String, String)> = Vec::new();
+            if let Some(text) = def.custom_env.as_deref() {
+                if let Ok(serde_json::Value::Object(map)) =
+                    serde_json::from_str::<serde_json::Value>(text)
+                {
+                    for (k, v) in map {
+                        if let Some(s) = v.as_str() {
+                            extra_env.push((k, s.to_owned()));
+                        }
+                    }
+                }
+            }
+            if let Some(text) = def.secret_env_keys.as_deref() {
+                if let Ok(serde_json::Value::Array(names)) =
+                    serde_json::from_str::<serde_json::Value>(text)
+                {
+                    for name in names.iter().filter_map(|n| n.as_str()) {
+                        let account = format!("agent_env:{}:{}", def.id, name);
+                        if let Ok(Some(val)) = crate::engine::secrets::get_key(&account) {
+                            extra_env.push((name.to_owned(), val));
+                        }
+                    }
+                }
+            }
 
             // Launch the CLI INSIDE the user's login + interactive shell, the way
             // VS Code's integrated terminal does (it spawns the shell, not the
@@ -145,14 +198,17 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 "-l".to_string(),
                 "-i".to_string(),
                 "-c".to_string(),
-                cli_command.to_string(),
+                launch.clone(),
             ];
 
-            let backend =
-                runtime::pty::spawn_cli(&session.id, &shell, &shell_args, &ws.folder_path)
-                    .map_err(|e| {
-                        AppError::Internal(format!("spawn {shell} -c {cli_command}: {e}"))
-                    })?;
+            let backend = runtime::pty::spawn_cli(
+                &session.id,
+                &shell,
+                &shell_args,
+                &ws.folder_path,
+                &extra_env,
+            )
+            .map_err(|e| AppError::Internal(format!("spawn {shell} -c {launch}: {e}")))?;
 
             // Register; if we lost a race with a concurrent spawn, the handle is
             // dropped (its shutdown closure tears down the just-spawned child)
@@ -523,6 +579,7 @@ mod tests {
                 share_blackboard: None,
                 auto_submit_injected: None,
                 allowed_senders: None,
+                ..Default::default()
             },
         )
         .await

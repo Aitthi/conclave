@@ -52,6 +52,14 @@ export interface Commands {
       shareBlackboard?: boolean;
       autoSubmitInjected?: boolean;
       allowedSenders?: "all" | "selected" | "none";
+      // Claude Code / CLI launch config. `customEnv` is the FULL env map as
+      // entered (may include secret values); the backend splits secret-looking
+      // keys out to the Keychain and persists only the rest. `secretEnvKeys` is
+      // derived server-side, so it is not sent here.
+      permissionMode?: "auto" | "bypassPermissions";
+      customArgs?: string;
+      customEnv?: Record<string, string>;
+      contextWindow?: "1m" | "200k";
       toolIds?: string[];
       skillIds?: string[];
     };

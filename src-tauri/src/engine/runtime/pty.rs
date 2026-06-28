@@ -49,6 +49,7 @@ pub fn spawn_cli(
     command: &str,
     args: &[String],
     cwd: &str,
+    extra_env: &[(String, String)],
 ) -> std::io::Result<CliBackend> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -75,6 +76,12 @@ pub fn spawn_cli(
     cmd.env("COLORTERM", "truecolor");
     if std::env::var_os("LANG").is_none() {
         cmd.env("LANG", "en_US.UTF-8");
+    }
+    // Per-agent env overrides (custom_env + Keychain secrets). Applied AFTER the
+    // terminal-capability vars so an agent could override them if it really
+    // wanted; the child shell inherits these and passes them to the CLI.
+    for (k, v) in extra_env {
+        cmd.env(k, v);
     }
 
     let child = pair.slave.spawn_command(cmd).map_err(to_io_err)?;
@@ -230,6 +237,7 @@ mod tests {
             "sh",
             &["-c".into(), "printf 'hello-pty'".into()],
             "/tmp",
+            &[],
         )
         .expect("spawn_cli failed");
 
@@ -246,11 +254,34 @@ mod tests {
         );
     }
 
+    /// `extra_env` entries must reach the child's environment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_cli_applies_extra_env() {
+        let mut backend = spawn_cli(
+            "s-env",
+            "sh",
+            &["-c".into(), "printf '%s' \"$CONCLAVE_TEST_VAR\"".into()],
+            "/tmp",
+            &[("CONCLAVE_TEST_VAR".into(), "env-made-it".into())],
+        )
+        .expect("spawn_cli failed");
+
+        let mut collected = String::new();
+        while let Some(c) = backend.output_rx.recv().await {
+            collected.push_str(&c);
+        }
+
+        assert!(
+            collected.contains("env-made-it"),
+            "expected child to see the extra env var, got: {collected:?}"
+        );
+    }
+
     /// A bogus command must fail to spawn with an `Err` (binary not found),
     /// deterministically and without any external dependency.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_cli_bad_command_errors() {
-        let result = spawn_cli("s2", "definitely-not-a-real-binary-xyz", &[], "/tmp");
+        let result = spawn_cli("s2", "definitely-not-a-real-binary-xyz", &[], "/tmp", &[]);
         assert!(result.is_err(), "bogus command should fail to spawn");
     }
 

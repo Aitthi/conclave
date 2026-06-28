@@ -27,6 +27,22 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// Serialize a column that stores JSON text (an object or array) by parsing it
+/// back into structured JSON, so the IPC payload carries `customEnv` as an
+/// object and `secretEnvKeys` as an array instead of as an opaque string. A
+/// malformed value degrades to `null` rather than failing the whole response.
+fn serialize_json_text<S>(opt: &Option<String>, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match opt {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text)
+            .unwrap_or(serde_json::Value::Null)
+            .serialize(ser),
+        None => ser.serialize_none(),
+    }
+}
+
 // ── Row structs ─────────────────────────────────────────────────────────────
 
 /// Decoded row from the `agent_definition` table.
@@ -63,6 +79,25 @@ pub struct AgentDefRow {
     pub auto_submit_injected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_senders: Option<String>,
+    // ── Claude Code / CLI launch config (M-CLI-config) ───────────────────────
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_args: Option<String>,
+    /// JSON object of NON-secret env vars; serialized back to an object.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub custom_env: Option<String>,
+    /// JSON array of env var NAMES whose values live in the Keychain.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub secret_env_keys: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<String>,
     pub created_at: String,
 }
 
@@ -92,6 +127,23 @@ pub struct AgentDefListItem {
     pub auto_submit_injected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_senders: Option<String>,
+    // ── Claude Code / CLI launch config (M-CLI-config) ───────────────────────
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_args: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub custom_env: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub secret_env_keys: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<String>,
     pub created_at: String,
     /// How many workspaces this definition has been added to.
     pub in_workspaces: i64,
@@ -99,7 +151,7 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 13] = [
+const COLS: [&str; 18] = [
     "id",
     "name",
     "role",
@@ -112,6 +164,11 @@ const COLS: [&str; 13] = [
     "share_blackboard",
     "auto_submit_injected",
     "allowed_senders",
+    "permission_mode",
+    "custom_args",
+    "custom_env",
+    "secret_env_keys",
+    "context_window",
     "created_at",
 ];
 
@@ -121,7 +178,7 @@ const COLS: [&str; 13] = [
 /// single self-documenting struct instead of a long positional argument list.
 /// `id` and `created_at` are NOT part of this struct — `create` generates them,
 /// and `update` preserves `created_at` and takes `id` separately.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentDefinitionInput {
     pub name: String,
     pub role: Option<String>,
@@ -134,6 +191,16 @@ pub struct AgentDefinitionInput {
     pub share_blackboard: Option<bool>,
     pub auto_submit_injected: Option<bool>,
     pub allowed_senders: Option<String>,
+    /// `--permission-mode` value (e.g. "auto" / "bypassPermissions").
+    pub permission_mode: Option<String>,
+    /// Extra CLI args appended verbatim to the launch command.
+    pub custom_args: Option<String>,
+    /// JSON object of NON-secret env vars (secrets are split to the Keychain).
+    pub custom_env: Option<String>,
+    /// JSON array of env var NAMES whose values are stored in the Keychain.
+    pub secret_env_keys: Option<String>,
+    /// "1m" / "200k" — selects the model's context window.
+    pub context_window: Option<String>,
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -164,6 +231,7 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
     sqlx::query_as::<_, AgentDefListItem>(
         "SELECT d.id, d.name, d.role, d.type, d.cli_kind, d.color, d.provider_id, d.model, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
+         d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
          d.created_at, \
          (SELECT COUNT(*) FROM workspace_agent wa WHERE wa.agent_def_id = d.id) AS in_workspaces \
          FROM agent_definition d \
@@ -251,6 +319,46 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
                     .map(Bind::Text)
                     .unwrap_or(Bind::Null),
             ),
+            (
+                "permission_mode",
+                input
+                    .permission_mode
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
+            (
+                "custom_args",
+                input
+                    .custom_args
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
+            (
+                "custom_env",
+                input
+                    .custom_env
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
+            (
+                "secret_env_keys",
+                input
+                    .secret_env_keys
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
+            (
+                "context_window",
+                input
+                    .context_window
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
             ("created_at", Bind::Text(created_at.clone())),
         ])
         .execute(pool)
@@ -270,6 +378,11 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         share_blackboard: input.share_blackboard,
         auto_submit_injected: input.auto_submit_injected,
         allowed_senders: input.allowed_senders,
+        permission_mode: input.permission_mode,
+        custom_args: input.custom_args,
+        custom_env: input.custom_env,
+        secret_env_keys: input.secret_env_keys,
+        context_window: input.context_window,
         created_at,
     })
 }
@@ -316,6 +429,26 @@ pub async fn update(
                 "allowed_senders",
                 input.allowed_senders.map(Bind::Text).unwrap_or(Bind::Null),
             ),
+            (
+                "permission_mode",
+                input.permission_mode.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "custom_args",
+                input.custom_args.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "custom_env",
+                input.custom_env.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "secret_env_keys",
+                input.secret_env_keys.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "context_window",
+                input.context_window.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
         ])
         .where_eq("id", id)
         .execute(pool)
@@ -346,6 +479,11 @@ mod tests {
             share_blackboard: None,
             auto_submit_injected: None,
             allowed_senders: None,
+            permission_mode: None,
+            custom_args: None,
+            custom_env: None,
+            secret_env_keys: None,
+            context_window: None,
         }
     }
 
@@ -370,12 +508,28 @@ mod tests {
                 share_blackboard: Some(true),
                 auto_submit_injected: Some(false),
                 allowed_senders: Some("all".into()),
+                permission_mode: Some("bypassPermissions".into()),
+                custom_args: Some("--verbose".into()),
+                custom_env: Some(r#"{"ANTHROPIC_BASE_URL":"https://openrouter.ai/api"}"#.into()),
+                secret_env_keys: Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#.into()),
+                context_window: Some("1m".into()),
             },
         )
         .await
         .expect("create with all fields failed");
 
         assert_eq!(row.name, "Atlas");
+        assert_eq!(row.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(row.custom_args.as_deref(), Some("--verbose"));
+        assert_eq!(row.context_window.as_deref(), Some("1m"));
+        assert_eq!(
+            row.custom_env.as_deref(),
+            Some(r#"{"ANTHROPIC_BASE_URL":"https://openrouter.ai/api"}"#)
+        );
+        assert_eq!(
+            row.secret_env_keys.as_deref(),
+            Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#)
+        );
         assert_eq!(row.r#type, "cli");
         assert_eq!(row.harness_mode, "own");
         assert_eq!(row.role.as_deref(), Some("Code runner"));
@@ -406,6 +560,11 @@ mod tests {
         assert!(minimal.share_blackboard.is_none());
         assert!(minimal.auto_submit_injected.is_none());
         assert!(minimal.allowed_senders.is_none());
+        assert!(minimal.permission_mode.is_none());
+        assert!(minimal.custom_args.is_none());
+        assert!(minimal.custom_env.is_none());
+        assert!(minimal.secret_env_keys.is_none());
+        assert!(minimal.context_window.is_none());
 
         let fetched2 = get(&pool, &minimal.id)
             .await
@@ -438,6 +597,11 @@ mod tests {
                 share_blackboard: Some(true),
                 auto_submit_injected: Some(true),
                 allowed_senders: Some("selected".into()),
+                permission_mode: Some("auto".into()),
+                custom_args: None,
+                custom_env: Some(r#"{"ANTHROPIC_MODEL":"gpt-5.5"}"#.into()),
+                secret_env_keys: None,
+                context_window: Some("200k".into()),
             },
         )
         .await
@@ -445,6 +609,12 @@ mod tests {
         .expect("row should exist after update");
 
         assert_eq!(updated.name, "Nova-v2");
+        assert_eq!(updated.permission_mode.as_deref(), Some("auto"));
+        assert_eq!(updated.context_window.as_deref(), Some("200k"));
+        assert_eq!(
+            updated.custom_env.as_deref(),
+            Some(r#"{"ANTHROPIC_MODEL":"gpt-5.5"}"#)
+        );
         assert_eq!(updated.r#type, "orchestrator");
         assert_eq!(updated.harness_mode, "central");
         assert_eq!(updated.role.as_deref(), Some("Planner"));
@@ -507,12 +677,44 @@ mod tests {
                 share_blackboard: Some(true),
                 auto_submit_injected: Some(true),
                 allowed_senders: Some("all".into()),
+                permission_mode: Some("auto".into()),
+                custom_args: Some("--foo".into()),
+                custom_env: Some(r#"{"ANTHROPIC_BASE_URL":"https://x"}"#.into()),
+                secret_env_keys: Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#.into()),
+                context_window: Some("1m".into()),
             },
         )
         .await
         .expect("create failed");
 
         let json = serde_json::to_value(&row).expect("serialize failed");
+
+        // JSON-text columns serialize to STRUCTURED JSON, not opaque strings.
+        assert!(
+            json.get("customEnv")
+                .and_then(|v| v.get("ANTHROPIC_BASE_URL"))
+                .is_some(),
+            "customEnv must serialize as an object"
+        );
+        assert!(
+            json.get("secretEnvKeys")
+                .and_then(|v| v.as_array())
+                .is_some(),
+            "secretEnvKeys must serialize as an array"
+        );
+        assert!(
+            json.get("permissionMode").is_some(),
+            "must have permissionMode"
+        );
+        assert!(
+            json.get("contextWindow").is_some(),
+            "must have contextWindow"
+        );
+        assert!(json.get("custom_env").is_none(), "must NOT have custom_env");
+        assert!(
+            json.get("secret_env_keys").is_none(),
+            "must NOT have secret_env_keys"
+        );
 
         // camelCase keys present
         assert!(json.get("harnessMode").is_some(), "must have harnessMode");
