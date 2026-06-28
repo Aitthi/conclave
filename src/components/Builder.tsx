@@ -165,8 +165,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       return;
     }
     // Parse the custom env up front so a JSON error is reported before saving.
+    // Claude Code only — Codex doesn't use ANTHROPIC_* env config.
     let customEnv: Record<string, string> | undefined;
-    if (showCliConfig && useCustomEnv) {
+    if (isClaudeCode && useCustomEnv) {
       try {
         customEnv = parseEnvText(envText);
       } catch (e) {
@@ -571,7 +572,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   />
                 </div>
 
-                {/* Custom env (opt-in) */}
+                {/* Custom env (opt-in) — Claude Code only. Codex is configured
+                    via its own config.toml / -c flags, not ANTHROPIC_* env. */}
+                {isClaudeCode && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-[#6e6e73]">Custom environment</span>
@@ -599,6 +602,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     </>
                   )}
                 </div>
+                )}
               </div>
             </section>
           )}
