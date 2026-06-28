@@ -38,8 +38,9 @@ const CLAUDE_MODELS = [
   "claude-haiku-4-5",
 ];
 
-/** Quick-fill Codex model presets. */
-const CODEX_MODELS = ["gpt-5.5-codex", "gpt-5.5", "o4-mini"];
+/** Quick-fill Codex model presets (context window is fixed per model: gpt-5.5
+ *  / gpt-5.4 = 1M, gpt-5.4-mini = 400K — not separately selectable). */
+const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 
 /**
  * Sentinel shown for a secret env var already stored in the Keychain. Sending
@@ -452,7 +453,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     <input
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      placeholder={isCodex ? "gpt-5.5-codex" : "claude-opus-4-8"}
+                      placeholder={isCodex ? "gpt-5.5" : "claude-opus-4-8"}
                       className="text-[12.5px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-[#c7c7cc]"
                     />
                   </div>
