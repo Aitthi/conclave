@@ -156,14 +156,13 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
                 }
                 // Codex's mode flags differ from claude's; map the shared
-                // permission_mode value (auto / bypassPermissions) to them.
-                // Codex only offers --yolo and the explicit long form (there is
-                // no --full-auto).
+                // permission_mode value to them. "auto" = never pause for
+                // approval but keep the sandbox; "bypass" = --yolo (alias of
+                // --dangerously-bypass-approvals-and-sandbox: no approvals AND no
+                // sandbox).
                 match def.permission_mode.as_deref() {
-                    Some("auto") => launch.push_str(" --yolo"),
-                    Some("bypassPermissions") => {
-                        launch.push_str(" --dangerously-bypass-approvals-and-sandbox")
-                    }
+                    Some("auto") => launch.push_str(" --ask-for-approval never"),
+                    Some("bypassPermissions") => launch.push_str(" --yolo"),
                     _ => {}
                 }
             }
