@@ -243,15 +243,17 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
   return (
     <div className="flex-1 flex min-w-0 bg-white">
       <main className="flex-1 flex flex-col min-w-0">
-        {/* Tab strip — one tab per instance, with a per-type glyph */}
-        <div className="h-10 flex items-stretch gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin">
+        {/* Tab strip — one tab per instance, with a per-type glyph. 48px tall to
+            line up with the Roster and Context headers so the three column
+            dividers form one continuous macOS-style toolbar rule. */}
+        <div className="h-12 flex items-center gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin">
           {tabs.map((tab) => {
             const isActive = tab.instanceId === activeInstanceId;
             return (
               <button
                 key={tab.instanceId}
                 onClick={() => setActiveInstanceId(tab.instanceId)}
-                className={`flex items-center gap-2 px-3 my-1.5 rounded-md text-[13px] transition-colors${
+                className={`flex items-center gap-2 px-3 h-7 rounded-md text-[13px] transition-colors${
                   isActive ? " bg-black/[0.06] font-semibold" : " hover:bg-black/[0.04] text-[#6e6e73]"
                 }`}
               >

@@ -22,18 +22,21 @@ interface RailProps {
 
 export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder, onOpenSettings }: RailProps) {
   return (
-    <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center py-2.5 gap-1 overflow-hidden">
-      {/* Brand mark */}
-      <button
-        className="w-8 h-8 rounded-[9px] grid place-items-center mb-1"
-        title="Conclave"
-      >
-        <Hexagon className="w-[18px] h-[18px] text-[#0a84ff]" />
-      </button>
+    <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center overflow-hidden">
+      {/* Brand mark — sits in a 48px header zone so it lines up with the Roster
+          and Context headers; its bottom border continues the toolbar rule
+          across the Rail column. */}
+      <div className="h-12 w-full shrink-0 grid place-items-center border-b border-black/[0.06]">
+        <button
+          className="w-8 h-8 rounded-[9px] grid place-items-center"
+          title="Conclave"
+        >
+          <Hexagon className="w-[18px] h-[18px] text-[#0a84ff]" />
+        </button>
+      </div>
 
-      {/* Divider */}
-      <div className="w-7 h-px bg-black/[0.08] mb-1.5" />
-
+      {/* Switcher + actions, below the brand header zone */}
+      <div className="flex-1 w-full flex flex-col items-center gap-1 pt-2.5 pb-2.5 overflow-hidden">
       {/* Workspace switcher — driven by real DB data from workspace.list */}
       {workspaces.map((ws) => {
         const isActive = ws.id === activeWorkspaceId;
@@ -93,6 +96,7 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
         >
           <Settings className="w-[17px] h-[17px]" />
         </button>
+      </div>
       </div>
     </nav>
   );
