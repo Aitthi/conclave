@@ -136,10 +136,10 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
           )}
         </div>
       )}
-      <div className="px-3 py-2.5">
+      <div className="px-3 py-3">
         {/* Composer field — rounded box matching ChatView's composer so the CLI
             stdin and the chat input read as the same control. */}
-        <div className="flex items-center gap-2 rounded-xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-2 py-1.5 transition-shadow">
+        <div className="flex items-center gap-2.5 rounded-2xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-3 py-2.5 transition-shadow">
           <RoutingPicker
             selfId={instanceId}
             roster={roster}
@@ -147,7 +147,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             onChange={setTargetId}
             disabled={sending}
           />
-          <span className="text-[13px] text-[#a1a1a6] font-mono select-none shrink-0">›</span>
+          <span className="text-[15px] text-[#a1a1a6] font-mono select-none shrink-0">›</span>
           <input
             value={value}
             disabled={disabled}
@@ -162,7 +162,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
               }
             }}
             placeholder={placeholder}
-            className="flex-1 min-w-0 bg-transparent outline-none text-[13px] font-mono placeholder:text-[#a1a1a6] disabled:opacity-50"
+            className="flex-1 min-w-0 bg-transparent outline-none text-[14.5px] font-mono placeholder:text-[#a1a1a6] disabled:opacity-50"
           />
           {/* Send — Enter also submits; the button mirrors that for discoverability. */}
           <button
@@ -171,9 +171,9 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             disabled={disabled || value.length === 0}
             title="Send (Enter)"
             aria-label="Send"
-            className="w-7 h-7 rounded-lg bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
+            className="w-9 h-9 rounded-xl bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
           >
-            <CornerDownLeft className="w-[15px] h-[15px]" />
+            <CornerDownLeft className="w-[18px] h-[18px]" />
           </button>
         </div>
       </div>
