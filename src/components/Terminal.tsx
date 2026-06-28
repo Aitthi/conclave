@@ -53,16 +53,24 @@ export function Terminal({ sessionId }: TerminalProps) {
     // 80×24 default. Best-effort + deduped (skip if unchanged).
     //
     // DEBOUNCED: a window drag-resize or zoom fires the ResizeObserver many
-    // times in quick succession. Running fit()+resize on every frame spams the
-    // PTY child (e.g. Claude Code) with SIGWINCH; its incremental redraws pile
-    // up faster than they can settle and the TUI art ends up garbled and never
-    // clears. Coalescing the gesture into a single fit + one resize once the
-    // size stops changing makes the child repaint exactly once, cleanly, at the
-    // final dimensions.
+    // times in quick succession. Coalescing the gesture into one settle-time
+    // fit + resize lets the child repaint once, cleanly, at the final size.
+    //
+    // JIGGLE (the load-bearing part): the PTY lives in the Rust runtime and
+    // OUTLIVES this component, so a fresh mount (tab switch / reload) very often
+    // fits to the SAME dimensions the PTY already has. The kernel only raises
+    // SIGWINCH when the size actually CHANGES, so an unchanged resize is a
+    // no-op: the child (Claude Code) never repaints and the pane stays BLACK
+    // until the user manually resizes the window. The same root cause leaves
+    // stale cells after a real resize — one SIGWINCH yields one partial repaint.
+    // So we never send the target size alone: we send `rows - 1` then `rows`,
+    // forcing two guaranteed SIGWINCHs that end at the right size and make the
+    // child clear and fully redraw. `lastRows` is tracked so the dedupe still
+    // suppresses redundant work when nothing changed.
     let lastCols = 0;
     let lastRows = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let jiggleTimer: ReturnType<typeof setTimeout> | undefined;
     const applyResize = () => {
       try {
         fitAddon.fit();
@@ -74,23 +82,21 @@ export function Terminal({ sessionId }: TerminalProps) {
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
-      void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
-        // Session not running yet / no PTY — harmless.
-      });
-      // Force a full viewport repaint shortly after the child's SIGWINCH redraw
-      // has had time to land. xterm's DOM renderer updates rows incrementally,
-      // so a resize can leave stale glyphs in cells the new frame doesn't
-      // overwrite (the scattered orange fragments seen on a TUI after zoom).
-      // `refresh()` re-renders every visible row from the (now-correct) buffer,
-      // clearing those leftovers. Re-armed on every resize; cleared on teardown.
-      clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(() => {
-        try {
-          term.refresh(0, term.rows - 1);
-        } catch {
-          // Terminal disposed mid-timeout — ignore.
-        }
-      }, 200);
+      if (rows <= 1) {
+        // Degenerate height — nothing to jiggle against; send as-is.
+        void ipc.session.resize({ sessionId, cols, rows }).catch(() => {});
+        return;
+      }
+      // Step 1: one row shorter → guaranteed SIGWINCH, child clears + redraws.
+      void ipc.session.resize({ sessionId, cols, rows: rows - 1 }).catch(() => {});
+      // Step 2 (after a short gap so the two SIGWINCHs aren't coalesced): the
+      // real size → child redraws its full frame at the on-screen dimensions.
+      clearTimeout(jiggleTimer);
+      jiggleTimer = setTimeout(() => {
+        void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
+          // Session not running yet / no PTY — harmless.
+        });
+      }, 60);
     };
     // Initial sizing is immediate so the first paint is at the right size.
     applyResize();
@@ -115,7 +121,7 @@ export function Terminal({ sessionId }: TerminalProps) {
 
     return () => {
       clearTimeout(resizeTimer);
-      clearTimeout(refreshTimer);
+      clearTimeout(jiggleTimer);
       observer.disconnect();
       dataSub.dispose();
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
