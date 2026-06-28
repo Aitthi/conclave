@@ -194,6 +194,21 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
       });
   }, [activeInstanceId]);
 
+  // Routing roster — ALL agents (the picker shows self + others; consumers
+  // exclude self where needed). Derived straight from the tab view-models.
+  // Memoised so its identity is stable across renders. MUST be declared before
+  // any early return so the hook order is unconditional (Rules of Hooks).
+  const roster: RoutingTarget[] = useMemo(
+    () =>
+      tabs.map((t) => ({
+        instanceId: t.instanceId,
+        name: t.name,
+        color: t.color,
+        type: t.type,
+      })),
+    [tabs],
+  );
+
   // Loading state: don't flash "no agents" during the initial fetch.
   if (loading) {
     return (
@@ -217,21 +232,6 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
       </main>
     );
   }
-
-  // Routing roster — ALL agents (the picker shows self + others; consumers
-  // exclude self where needed). Derived straight from the tab view-models.
-  // Memoised so its identity is stable across renders (safe when consumers
-  // become memoised later; harmless today).
-  const roster: RoutingTarget[] = useMemo(
-    () =>
-      tabs.map((t) => ({
-        instanceId: t.instanceId,
-        name: t.name,
-        color: t.color,
-        type: t.type,
-      })),
-    [tabs],
-  );
 
   const activeTab = activeInstanceId
     ? (tabs.find((t) => t.instanceId === activeInstanceId) ?? null)
