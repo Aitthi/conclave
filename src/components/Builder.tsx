@@ -374,28 +374,32 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             )}
           </section>
 
-          {/* Model / API */}
-          <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
-              Model
-            </div>
-            <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
-              <div className="flex items-center justify-between px-3 py-2.5">
-                <span className="text-[12.5px] text-[#6e6e73]">Provider</span>
-                {/* TODO(M5): real provider picker wired to provider.upsert */}
-                <span className="text-[12.5px] text-[#a1a1a6]">Configure in Settings</span>
+          {/* Model / API — for claude-code the model lives in the Claude Code
+              section below (with its presets), so it's hidden here to avoid two
+              disconnected model fields. */}
+          {!(agentType === "cli" && cliKind === "claude-code") && (
+            <section>
+              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2.5">
+                Model
               </div>
-              <div className="flex items-center justify-between px-3 py-2">
-                <span className="text-[12.5px] text-[#6e6e73]">Model</span>
-                <input
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="e.g. claude-opus-4-8"
-                  className="text-[12.5px] text-right bg-transparent outline-none w-44 placeholder:text-[#c7c7cc]"
-                />
+              <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
+                <div className="flex items-center justify-between px-3 py-2.5">
+                  <span className="text-[12.5px] text-[#6e6e73]">Provider</span>
+                  {/* TODO(M5): real provider picker wired to provider.upsert */}
+                  <span className="text-[12.5px] text-[#a1a1a6]">Configure in Settings</span>
+                </div>
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-[12.5px] text-[#6e6e73]">Model</span>
+                  <input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="e.g. claude-opus-4-8"
+                    className="text-[12.5px] text-right bg-transparent outline-none w-44 placeholder:text-[#c7c7cc]"
+                  />
+                </div>
               </div>
-            </div>
-          </section>
+            </section>
+          )}
 
           {/* Claude Code launch config — only for a claude-code CLI agent */}
           {agentType === "cli" && cliKind === "claude-code" && (
@@ -404,95 +408,114 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 Claude Code
               </div>
               <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
-                {/* Permission mode */}
-                <div className="flex items-center justify-between px-3 py-2.5">
-                  <span className="text-[12.5px] text-[#6e6e73]">Permission mode</span>
-                  <div
-                    role="radiogroup"
-                    aria-label="Permission mode"
-                    className="flex rounded-lg bg-black/[0.04] p-0.5"
-                  >
-                    {(
-                      [
-                        { value: "auto", label: "Auto" },
-                        { value: "bypassPermissions", label: "Bypass" },
-                      ] as { value: PermissionMode; label: string }[]
-                    ).map(({ value, label }) => (
-                      <button
-                        key={value}
-                        role="radio"
-                        aria-checked={permissionMode === value}
-                        onClick={() => setPermissionMode(value)}
-                        className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
-                          permissionMode === value
-                            ? "bg-white shadow-sm font-semibold"
-                            : "text-[#6e6e73]"
-                        }`}
-                        title={`claude --permission-mode ${value}`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Context window */}
-                <div className="flex items-center justify-between px-3 py-2.5">
-                  <span className="text-[12.5px] text-[#6e6e73]">Context window</span>
-                  <div
-                    role="radiogroup"
-                    aria-label="Context window"
-                    className="flex rounded-lg bg-black/[0.04] p-0.5"
-                  >
-                    {(
-                      [
-                        { value: "200k", label: "200K" },
-                        { value: "1m", label: "1M" },
-                      ] as { value: ContextWindow; label: string }[]
-                    ).map(({ value, label }) => (
-                      <button
-                        key={value}
-                        role="radio"
-                        aria-checked={contextWindow === value}
-                        onClick={() => setContextWindow(value)}
-                        className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
-                          contextWindow === value
-                            ? "bg-white shadow-sm font-semibold"
-                            : "text-[#6e6e73]"
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Model quick-presets (fill the Model field above) */}
+                {/* Model — field + quick-presets together so picking a preset
+                    visibly fills the same field. */}
                 <div className="px-3 py-2.5">
-                  <div className="text-[12.5px] text-[#6e6e73] mb-1.5">Model presets</div>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[12.5px] text-[#6e6e73] shrink-0">Model</span>
+                    <input
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder="claude-opus-4-8"
+                      className="text-[12.5px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-[#c7c7cc]"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mt-2">
                     {CLAUDE_MODELS.map((m) => (
                       <button
                         key={m}
                         onClick={() => setModel(m)}
-                        className={`text-[11.5px] font-mono px-2 py-1 rounded-md ring-1 transition-colors ${
+                        className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
                           model === m
                             ? "ring-[#0a84ff]/40 bg-[#0a84ff]/[0.08] text-[#0a84ff]"
                             : "ring-black/[0.08] text-[#6e6e73] hover:bg-black/[0.03]"
                         }`}
                       >
-                        {m}
+                        {m.replace("claude-", "")}
                       </button>
                     ))}
                   </div>
-                  <p className="text-[10.5px] text-[#a1a1a6] mt-1.5">
-                    1M context appends a <span className="font-mono">[1m]</span> suffix to the
-                    model id.
-                  </p>
+                </div>
+
+                {/* Permission mode */}
+                <div className="px-3 py-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12.5px] text-[#6e6e73]">Permission mode</span>
+                    <div
+                      role="radiogroup"
+                      aria-label="Permission mode"
+                      className="flex rounded-lg bg-black/[0.04] p-0.5"
+                    >
+                      {(
+                        [
+                          { value: "auto", label: "Auto" },
+                          { value: "bypassPermissions", label: "Bypass" },
+                        ] as { value: PermissionMode; label: string }[]
+                      ).map(({ value, label }) => (
+                        <button
+                          key={value}
+                          role="radio"
+                          aria-checked={permissionMode === value}
+                          onClick={() => setPermissionMode(value)}
+                          className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                            permissionMode === value
+                              ? "bg-white shadow-sm font-semibold"
+                              : "text-[#6e6e73]"
+                          }`}
+                          title={`claude --permission-mode ${value}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {permissionMode === "bypassPermissions" && (
+                    <p className="text-[10.5px] text-[#ff9f0a] mt-1.5">
+                      Skips every permission prompt — use only in workspaces you trust.
+                    </p>
+                  )}
+                </div>
+
+                {/* Context window */}
+                <div className="px-3 py-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12.5px] text-[#6e6e73]">Context window</span>
+                    <div
+                      role="radiogroup"
+                      aria-label="Context window"
+                      className="flex rounded-lg bg-black/[0.04] p-0.5"
+                    >
+                      {(
+                        [
+                          { value: "200k", label: "200K" },
+                          { value: "1m", label: "1M" },
+                        ] as { value: ContextWindow; label: string }[]
+                      ).map(({ value, label }) => (
+                        <button
+                          key={value}
+                          role="radio"
+                          aria-checked={contextWindow === value}
+                          onClick={() => setContextWindow(value)}
+                          className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                            contextWindow === value
+                              ? "bg-white shadow-sm font-semibold"
+                              : "text-[#6e6e73]"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {contextWindow === "1m" && (
+                    <p className="text-[10.5px] text-[#a1a1a6] mt-1.5">
+                      Launches as <span className="font-mono">{model || "model"}[1m]</span>.
+                    </p>
+                  )}
                 </div>
 
                 {/* Custom args */}
-                <div className="flex items-center justify-between px-3 py-2 gap-3">
+                <div className="flex items-center justify-between px-3 py-2.5 gap-3">
                   <span className="text-[12.5px] text-[#6e6e73] shrink-0">Custom args</span>
                   <input
                     value={customArgs}
