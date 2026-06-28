@@ -320,24 +320,37 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             <div className="grid grid-cols-3 gap-2">
               {(
                 [
-                  { value: "cli", label: "CLI agent", Icon: Terminal },
-                  { value: "chat", label: "Chat agent", Icon: MessageSquare },
-                  { value: "orchestrator", label: "Orchestrator", Icon: Waypoints },
-                ] as { value: AgentType; label: string; Icon: typeof Terminal }[]
-              ).map(({ value, label, Icon }) => {
+                  { value: "cli", label: "CLI agent", Icon: Terminal, soon: false },
+                  { value: "chat", label: "Chat agent", Icon: MessageSquare, soon: true },
+                  { value: "orchestrator", label: "Orchestrator", Icon: Waypoints, soon: true },
+                ] as { value: AgentType; label: string; Icon: typeof Terminal; soon: boolean }[]
+              ).map(({ value, label, Icon, soon }) => {
                 const active = agentType === value;
+                // Chat / Orchestrator aren't ready yet — shown disabled with a
+                // "Soon" badge so only CLI agents can be created for now.
                 return (
                   <button
                     key={value}
-                    onClick={() => setAgentType(value)}
-                    className={`rounded-xl p-2.5 text-left transition-all ${
-                      active
-                        ? "ring-1 ring-[#0a84ff]/40 bg-[#0a84ff]/[0.06]"
-                        : "ring-1 ring-black/[0.08] bg-white hover:bg-black/[0.02]"
+                    onClick={() => !soon && setAgentType(value)}
+                    disabled={soon}
+                    aria-disabled={soon}
+                    className={`relative rounded-xl p-2.5 text-left transition-all ${
+                      soon
+                        ? "ring-1 ring-black/[0.06] bg-black/[0.02] opacity-60 cursor-not-allowed"
+                        : active
+                          ? "ring-1 ring-[#0a84ff]/40 bg-[#0a84ff]/[0.06]"
+                          : "ring-1 ring-black/[0.08] bg-white hover:bg-black/[0.02]"
                     }`}
                   >
+                    {soon && (
+                      <span className="absolute top-1.5 right-1.5 text-[9px] font-bold tracking-wide text-[#86868b] bg-black/[0.06] px-1.5 py-px rounded-full uppercase">
+                        Soon
+                      </span>
+                    )}
                     <Icon
-                      className={`w-4 h-4 mb-1.5 ${active ? "text-[#0a84ff]" : "text-[#6e6e73]"}`}
+                      className={`w-4 h-4 mb-1.5 ${
+                        soon ? "text-[#a1a1a6]" : active ? "text-[#0a84ff]" : "text-[#6e6e73]"
+                      }`}
                     />
                     <div className="text-[12px] font-semibold">{label}</div>
                   </button>

@@ -1,10 +1,4 @@
-import {
-  Hexagon,
-  FolderPlus,
-  SquareTerminal,
-  UsersRound,
-  Settings,
-} from "lucide-react";
+import { Hexagon, FolderPlus, UsersRound } from "lucide-react";
 
 import type { Workspace } from "../ipc";
 
@@ -20,7 +14,7 @@ interface RailProps {
   onOpenSettings?: () => void;
 }
 
-export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder, onOpenSettings }: RailProps) {
+export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder }: RailProps) {
   return (
     <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center overflow-hidden">
       {/* Brand mark — sits in a 48px header zone so it lines up with the Roster
@@ -74,27 +68,15 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
         <FolderPlus className="w-[17px] h-[17px]" />
       </button>
 
-      {/* Bottom actions */}
+      {/* Bottom actions. Conclave CLI + Settings are hidden for now until they
+          have real behavior. */}
       <div className="mt-auto flex flex-col items-center gap-1.5">
-        <button
-          className="w-9 h-9 rounded-[10px] text-[#6e6e73] grid place-items-center hover:bg-black/[0.05]"
-          title="Conclave CLI"
-        >
-          <SquareTerminal className="w-[17px] h-[17px]" />
-        </button>
         <button
           className="w-9 h-9 rounded-[10px] bg-white ring-hair text-[#3a3a3c] grid place-items-center hover:bg-black/[0.03]"
           title="Agent Library"
           onClick={onOpenLibrary}
         >
           <UsersRound className="w-[17px] h-[17px]" />
-        </button>
-        <button
-          className="w-9 h-9 rounded-[10px] text-[#6e6e73] grid place-items-center hover:bg-black/[0.05]"
-          title="Settings"
-          onClick={onOpenSettings}
-        >
-          <Settings className="w-[17px] h-[17px]" />
         </button>
       </div>
       </div>
