@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { ipc, useSessionOutput } from "../ipc";
 
@@ -45,6 +46,22 @@ export function Terminal({ sessionId }: TerminalProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(el);
+
+    // Use the GPU (WebGL) renderer, like VS Code's terminal. xterm's default DOM
+    // renderer repaints rows incrementally and leaves stray cells behind when a
+    // resize reflows the buffer (the orange fragments seen at certain widths);
+    // the WebGL renderer repaints the whole grid each frame from the buffer, so
+    // those artifacts can't survive. `open()` must run first (the renderer needs
+    // the canvas). Fall back to the DOM renderer if WebGL is unavailable or its
+    // GPU context is lost, so the terminal always renders something.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch {
+      // No WebGL in this webview — the DOM renderer stays active.
+    }
+
     term.focus();
     termRef.current = term;
 
