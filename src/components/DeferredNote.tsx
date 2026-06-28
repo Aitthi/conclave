@@ -4,7 +4,7 @@
 // rows (this repo forbids fake data — a deferred note is the sanctioned filler).
 export function DeferredNote({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-xl ring-hair bg-white px-2.5 py-2 text-[11.5px] text-[#a1a1a6]">
+    <div className="rounded-xl ring-hair bg-surface px-2.5 py-2 text-[11.5px] text-text-tertiary">
       {children}
     </div>
   );

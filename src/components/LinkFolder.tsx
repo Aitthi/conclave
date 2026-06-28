@@ -123,17 +123,17 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="w-[520px] max-h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-black/[0.08]">
+      <div className="w-[520px] max-h-[90vh] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]">
 
         {/* ── Header ── */}
-        <div className="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+        <div className="h-12 flex items-center justify-between px-5 border-b border-overlay/[0.06] shrink-0">
           <div className="flex items-center gap-2">
-            <FolderPlus className="w-4 h-4 text-[#0a84ff]" />
+            <FolderPlus className="w-4 h-4 text-accent" />
             <span className="text-[13px] font-semibold tracking-tight">New workspace</span>
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
+            className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary"
             aria-label="Close"
           >
             <X className="w-[15px] h-[15px]" />
@@ -146,32 +146,32 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
 
             {/* Icon + headline */}
             <div className="text-center mb-5">
-              <div className="w-12 h-12 rounded-[14px] bg-[#0a84ff]/10 grid place-items-center mx-auto mb-2.5">
-                <FolderPlus className="w-6 h-6 text-[#0a84ff]" />
+              <div className="w-12 h-12 rounded-[14px] bg-accent/10 grid place-items-center mx-auto mb-2.5">
+                <FolderPlus className="w-6 h-6 text-accent" />
               </div>
               <div className="text-[16px] font-bold tracking-tight">
                 Link a folder as workspace
               </div>
-              <div className="text-[12px] text-[#86868b] mt-0.5">
+              <div className="text-[12px] text-text-muted mt-0.5">
                 Each workspace is bound to one folder with its own roster and blackboard.
               </div>
             </div>
 
             {/* ── Folder picker ── */}
             <div className="mb-4">
-              <div className="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5">
+              <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
                 Folder
               </div>
-              <div className="flex items-center gap-2 rounded-lg ring-1 ring-black/[0.10] bg-[#f7f7f8] px-3 h-10">
-                <Folder className="w-4 h-4 text-[#ff9f0a] shrink-0" />
-                <span className="flex-1 font-mono text-[12.5px] text-[#3a3a3c] truncate">
+              <div className="flex items-center gap-2 rounded-lg ring-1 ring-overlay/[0.10] bg-fill-softer px-3 h-10">
+                <Folder className="w-4 h-4 text-warning shrink-0" />
+                <span className="flex-1 font-mono text-[12.5px] text-text-body truncate">
                   {displayPath ?? (
-                    <span className="text-[#a1a1a6]">No folder chosen</span>
+                    <span className="text-text-tertiary">No folder chosen</span>
                   )}
                 </span>
                 <button
                   onClick={handleBrowse}
-                  className="text-[11.5px] font-semibold text-[#0a84ff] bg-white ring-1 ring-black/[0.08] px-2.5 py-1 rounded-md hover:bg-black/[0.02] shrink-0"
+                  className="text-[11.5px] font-semibold text-accent bg-surface ring-1 ring-overlay/[0.08] px-2.5 py-1 rounded-md hover:bg-overlay/[0.02] shrink-0"
                 >
                   Browse…
                 </button>
@@ -181,7 +181,7 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
             {/* ── Name + Color ── */}
             <div className="grid grid-cols-[1fr_auto] gap-3 mb-4">
               <div>
-                <div className="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5">
+                <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
                   Name
                 </div>
                 <input
@@ -190,11 +190,11 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
                   placeholder={
                     folderPath ? basename(folderPath) : "Workspace name"
                   }
-                  className="w-full rounded-lg ring-1 ring-black/[0.10] bg-white px-3 h-10 text-[13px] outline-none focus:ring-[#0a84ff]/50"
+                  className="w-full rounded-lg ring-1 ring-overlay/[0.10] bg-surface px-3 h-10 text-[13px] outline-none focus:ring-accent/50"
                 />
               </div>
               <div>
-                <div className="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5">
+                <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
                   Color
                 </div>
                 <div className="flex items-center gap-1.5 h-10">
@@ -221,9 +221,9 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
             {/* ── Initial agents ── */}
             {agentDefs.length > 0 && (
               <div className="mb-5">
-                <div className="text-[11px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 flex items-center justify-between">
+                <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5 flex items-center justify-between">
                   <span>Add agents from Library</span>
-                  <span className="text-[10px] text-[#86868b] normal-case tracking-normal font-medium">
+                  <span className="text-[10px] text-text-muted normal-case tracking-normal font-medium">
                     each gets its own session
                   </span>
                 </div>
@@ -238,16 +238,16 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
                         onClick={() => toggleDef(def.id)}
                         className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-all ${
                           checked
-                            ? "ring-1 ring-[#0a84ff]/30 bg-[#0a84ff]/[0.05]"
-                            : "ring-1 ring-black/[0.08] bg-white hover:bg-black/[0.02]"
+                            ? "ring-1 ring-accent/30 bg-accent/[0.05]"
+                            : "ring-1 ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
                         }`}
                       >
                         {/* Checkbox */}
                         <span
                           className={`w-4 h-4 rounded-[5px] shrink-0 grid place-items-center ${
                             checked
-                              ? "bg-[#0a84ff]"
-                              : "ring-1 ring-black/[0.15]"
+                              ? "bg-accent"
+                              : "ring-1 ring-overlay/[0.15]"
                           }`}
                         >
                           {checked && (
@@ -273,23 +273,23 @@ export function LinkFolder({ onClose, onLinked }: LinkFolderProps) {
 
             {/* ── Error ── */}
             {error && (
-              <p className="text-[12px] text-[#ff3b30] mb-3 px-1">{error}</p>
+              <p className="text-[12px] text-danger mb-3 px-1">{error}</p>
             )}
           </div>
         </div>
 
         {/* ── Footer actions ── */}
-        <div className="border-t border-black/[0.07] px-6 py-3 bg-white shrink-0 flex items-center gap-2">
+        <div className="border-t border-overlay/[0.07] px-6 py-3 bg-surface shrink-0 flex items-center gap-2">
           <button
             onClick={onClose}
-            className="flex-1 text-[12.5px] font-medium text-[#6e6e73] bg-white ring-1 ring-black/[0.08] rounded-lg py-2.5 hover:bg-black/[0.02]"
+            className="flex-1 text-[12.5px] font-medium text-text-secondary bg-surface ring-1 ring-overlay/[0.08] rounded-lg py-2.5 hover:bg-overlay/[0.02]"
           >
             Cancel
           </button>
           <button
             onClick={handleLink}
             disabled={saving || !folderPath}
-            className="flex-[1.4] text-[12.5px] font-semibold text-white bg-[#0a84ff] rounded-lg py-2.5 hover:brightness-105 disabled:opacity-50 flex items-center justify-center gap-1.5"
+            className="flex-[1.4] text-[12.5px] font-semibold text-white bg-accent rounded-lg py-2.5 hover:brightness-105 disabled:opacity-50 flex items-center justify-center gap-1.5"
           >
             <FolderPlus className="w-4 h-4" />
             {saving ? "Creating…" : "Create workspace"}

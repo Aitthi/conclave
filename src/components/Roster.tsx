@@ -91,7 +91,7 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
     // Not a <button> (it now nests buttons) — a div with a role for the a11y tree.
     <div
       className={`group w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors cursor-pointer${
-        isSelected ? " bg-[#0a84ff]/10 ring-1 ring-[#0a84ff]/30" : " hover:bg-black/[0.04]"
+        isSelected ? " bg-accent/10 ring-1 ring-accent/30" : " hover:bg-overlay/[0.04]"
       }`}
       role="button"
       tabIndex={0}
@@ -109,9 +109,9 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
       <div className="flex-1 text-left leading-tight min-w-0">
         <div className="text-[12.5px] font-semibold flex items-center gap-1.5 truncate">
           {entry.name}
-          {isCli && <Terminal className="w-3 h-3 text-[#86868b] shrink-0" />}
+          {isCli && <Terminal className="w-3 h-3 text-text-muted shrink-0" />}
         </div>
-        <div className="text-[10.5px] text-[#86868b] truncate">{entry.meta}</div>
+        <div className="text-[10.5px] text-text-muted truncate">{entry.meta}</div>
       </div>
 
       {confirming ? (
@@ -122,7 +122,7 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
             onRemove();
           }}
           disabled={removing}
-          className="text-[10.5px] font-semibold text-white bg-[#ff3b30] px-2 py-0.5 rounded-md shrink-0 disabled:opacity-50"
+          className="text-[10.5px] font-semibold text-white bg-danger px-2 py-0.5 rounded-md shrink-0 disabled:opacity-50"
           title="Confirm removal from this workspace"
         >
           {removing ? "Removing…" : "Remove"}
@@ -141,7 +141,7 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
               e.stopPropagation();
               setConfirming(true);
             }}
-            className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md text-[#86868b] hover:bg-black/[0.06] hover:text-[#ff3b30] shrink-0"
+            className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md text-text-muted hover:bg-overlay/[0.06] hover:text-danger shrink-0"
             title="Remove from workspace"
             aria-label={`Remove ${entry.name} from workspace`}
           >
@@ -299,16 +299,16 @@ export function Roster({
   const wsLetter = workspaceName ? workspaceName[0].toUpperCase() : "—";
 
   return (
-    <aside className="w-[266px] vibrancy border-r border-black/[0.06] flex flex-col shrink-0">
+    <aside className="w-[266px] vibrancy border-r border-overlay/[0.06] flex flex-col shrink-0">
       {/* Workspace header — real workspaceName + folderPath; plain non-interactive
           display. Doubles as a window drag region (it has no controls): the
           `pointer-events-none` children let clicks fall through to the
           attributed container so dragging / double-click-zoom work here too. */}
       <div
         data-tauri-drag-region
-        className="h-12 flex items-center gap-2 px-3.5 border-b border-black/[0.06] shrink-0"
+        className="h-12 flex items-center gap-2 px-3.5 border-b border-overlay/[0.06] shrink-0"
       >
-        <div className="w-6 h-6 rounded-[7px] bg-[#0a84ff] text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0 pointer-events-none">
+        <div className="w-6 h-6 rounded-[7px] bg-accent text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0 pointer-events-none">
           {wsLetter}
         </div>
         <div className="leading-tight text-left min-w-0 pointer-events-none">
@@ -316,7 +316,7 @@ export function Roster({
             {workspaceName ?? "—"}
           </div>
           {folderPath && (
-            <div className="text-[10px] text-[#86868b] truncate flex items-center gap-1">
+            <div className="text-[10px] text-text-muted truncate flex items-center gap-1">
               <Folder className="w-2.5 h-2.5 shrink-0" />
               <span className="font-mono">{folderPath}</span>
             </div>
@@ -326,45 +326,45 @@ export function Roster({
 
       {/* Search — functional client-side filter */}
       <div className="px-3 pt-3 pb-2 shrink-0">
-        <div className="flex items-center gap-2 bg-black/[0.05] rounded-lg px-2.5 h-7">
-          <Search className="w-[13px] h-[13px] text-[#86868b] shrink-0" />
+        <div className="flex items-center gap-2 bg-overlay/[0.05] rounded-lg px-2.5 h-7">
+          <Search className="w-[13px] h-[13px] text-text-muted shrink-0" />
           <input
             type="search"
             aria-label="Search agents"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search agents"
-            className="bg-transparent outline-none text-[12px] placeholder:text-[#a1a1a6] w-full"
+            className="bg-transparent outline-none text-[12px] placeholder:text-text-tertiary w-full"
           />
         </div>
       </div>
 
       {/* Agent list — state messages or grouped sections */}
       {workspaceId === null ? (
-        <div className="flex-1 grid place-items-center text-[12px] text-[#a1a1a6] px-4 text-center">
+        <div className="flex-1 grid place-items-center text-[12px] text-text-tertiary px-4 text-center">
           Select a workspace
         </div>
       ) : loading ? (
-        <div className="flex-1 grid place-items-center text-[12px] text-[#a1a1a6]">
+        <div className="flex-1 grid place-items-center text-[12px] text-text-tertiary">
           Loading agents…
         </div>
       ) : loadError ? (
-        <div className="flex-1 grid place-items-center text-[12px] text-[#a1a1a6]">
+        <div className="flex-1 grid place-items-center text-[12px] text-text-tertiary">
           Failed to load agents
         </div>
       ) : entries.length === 0 ? (
-        <div className="flex-1 grid place-items-center text-[12px] text-[#a1a1a6] px-4 text-center">
+        <div className="flex-1 grid place-items-center text-[12px] text-text-tertiary px-4 text-center">
           No agents in this workspace yet
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto scroll-thin px-2 pb-2 space-y-3">
           {filtered.length === 0 ? (
-            <div className="px-2 py-2 text-[12px] text-[#a1a1a6]">No matching agents</div>
+            <div className="px-2 py-2 text-[12px] text-text-tertiary">No matching agents</div>
           ) : (
             <>
               {orchestrators.length > 0 && (
                 <div>
-                  <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase">
+                  <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
                     Orchestrator
                   </div>
                   {orchestrators.map((entry) => (
@@ -382,7 +382,7 @@ export function Roster({
 
               {cliAgents.length > 0 && (
                 <div>
-                  <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase">
+                  <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
                     CLI agents
                   </div>
                   <div className="space-y-0.5">
@@ -402,7 +402,7 @@ export function Roster({
 
               {chatAgents.length > 0 && (
                 <div>
-                  <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase">
+                  <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
                     Chat agents
                   </div>
                   <div className="space-y-0.5">
@@ -425,13 +425,13 @@ export function Roster({
       )}
 
       {/* Footer */}
-      <div className="border-t border-black/[0.06] p-2 space-y-0.5 shrink-0">
+      <div className="border-t border-overlay/[0.06] p-2 space-y-0.5 shrink-0">
         <button
           onClick={() => setShowPicker(true)}
           disabled={workspaceId === null}
-          className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-[#0a84ff] hover:bg-[#0a84ff]/10 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-accent hover:bg-accent/10 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          <div className="w-7 h-7 rounded-[8px] border border-dashed border-[#0a84ff]/50 grid place-items-center shrink-0">
+          <div className="w-7 h-7 rounded-[8px] border border-dashed border-accent/50 grid place-items-center shrink-0">
             <Plus className="w-[15px] h-[15px]" />
           </div>
           <span className="text-[12.5px] font-semibold">Add agent</span>
@@ -440,15 +440,15 @@ export function Roster({
           onClick={onOpenBlackboard}
           disabled={!onOpenBlackboard}
           className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-            blackboardOpen ? "bg-black/[0.06]" : "hover:bg-black/[0.04]"
+            blackboardOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
           }`}
         >
-          <div className="w-7 h-7 rounded-[8px] bg-[#1d1d1f] text-white grid place-items-center ring-hair shrink-0">
+          <div className="w-7 h-7 rounded-[8px] bg-text-primary text-white grid place-items-center ring-hair shrink-0">
             <Layers className="w-[14px] h-[14px]" />
           </div>
           <div className="flex-1 text-left leading-tight">
             <div className="text-[12.5px] font-semibold">Blackboard</div>
-            <div className="text-[10.5px] text-[#86868b]">Shared key/value store</div>
+            <div className="text-[10.5px] text-text-muted">Shared key/value store</div>
           </div>
         </button>
       </div>
@@ -526,14 +526,14 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
       onClick={onClose}
     >
       <div
-        className="w-[420px] max-h-[70vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-black/[0.08]"
+        className="w-[420px] max-h-[70vh] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+        <div className="h-12 flex items-center justify-between px-5 border-b border-overlay/[0.06] shrink-0">
           <span className="text-[13px] font-semibold tracking-tight">Add agent to workspace</span>
           <button
             onClick={onClose}
-            className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
+            className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary"
             aria-label="Close"
           >
             <X className="w-[15px] h-[15px]" />
@@ -542,13 +542,13 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
 
         <div className="flex-1 overflow-y-auto scroll-thin p-2 min-h-0">
           {available === null && !error ? (
-            <div className="grid place-items-center py-8 text-[12px] text-[#a1a1a6]">Loading…</div>
+            <div className="grid place-items-center py-8 text-[12px] text-text-tertiary">Loading…</div>
           ) : error ? (
-            <div className="grid place-items-center py-8 text-[12px] text-[#a1a1a6]">
+            <div className="grid place-items-center py-8 text-[12px] text-text-tertiary">
               Failed to load agents
             </div>
           ) : available && available.length === 0 ? (
-            <div className="grid place-items-center py-8 text-[12px] text-[#a1a1a6] px-6 text-center">
+            <div className="grid place-items-center py-8 text-[12px] text-text-tertiary px-6 text-center">
               Every agent in your Library is already in this workspace.
             </div>
           ) : (
@@ -557,7 +557,7 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
                 key={def.id}
                 onClick={() => handleAdd(def)}
                 disabled={addingId !== null}
-                className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-black/[0.04] disabled:opacity-50 text-left"
+                className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-overlay/[0.04] disabled:opacity-50 text-left"
               >
                 <div
                   className="w-7 h-7 rounded-[8px] text-white grid place-items-center text-[12px] font-bold ring-hair shrink-0"
@@ -571,9 +571,9 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
                 </div>
                 <div className="flex-1 min-w-0 leading-tight">
                   <div className="text-[12.5px] font-semibold truncate">{def.name}</div>
-                  <div className="text-[10.5px] text-[#86868b] truncate">{deriveMeta(def)}</div>
+                  <div className="text-[10.5px] text-text-muted truncate">{deriveMeta(def)}</div>
                 </div>
-                <span className="text-[11px] font-semibold text-[#0a84ff] shrink-0">
+                <span className="text-[11px] font-semibold text-accent shrink-0">
                   {addingId === def.id ? "Adding…" : "Add"}
                 </span>
               </button>
@@ -582,12 +582,12 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
         </div>
 
         {onCreateAgent && (
-          <div className="border-t border-black/[0.06] p-2 shrink-0">
+          <div className="border-t border-overlay/[0.06] p-2 shrink-0">
             <button
               onClick={onCreateAgent}
-              className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-[#0a84ff] hover:bg-[#0a84ff]/10"
+              className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-accent hover:bg-accent/10"
             >
-              <div className="w-7 h-7 rounded-[8px] border border-dashed border-[#0a84ff]/50 grid place-items-center shrink-0">
+              <div className="w-7 h-7 rounded-[8px] border border-dashed border-accent/50 grid place-items-center shrink-0">
                 <Plus className="w-[15px] h-[15px]" />
               </div>
               <span className="text-[12.5px] font-semibold">Create new agent…</span>

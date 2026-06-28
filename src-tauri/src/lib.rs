@@ -1,8 +1,17 @@
 mod engine;
+mod menu;
+mod sysaccent;
 
 use engine::{router, AppState};
 use serde_json::Value;
 use tauri::Manager;
+
+/// GUI-only host concern (the live macOS accent color), deliberately kept out of
+/// the IPC router — the UDS/CLI front-door has no business reading it.
+#[tauri::command]
+fn system_accent() -> Option<String> {
+    sysaccent::system_accent()
+}
 
 /// Single IPC entry-point for the Tauri invoke bridge.
 ///
@@ -24,6 +33,8 @@ async fn ipc(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .menu(menu::build)
+        .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .manage(std::sync::Arc::new(AppState::new()))
         .setup(|app| {
             // Wire the AppHandle into AppState so that bus::emit helpers and
@@ -46,7 +57,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![ipc])
+        .invoke_handler(tauri::generate_handler![ipc, system_accent])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

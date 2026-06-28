@@ -206,13 +206,13 @@ export function FusionView({ instanceId, def, roster }: FusionViewProps) {
   }
 
   return (
-    <main className="flex-1 flex flex-col min-w-0 bg-white">
+    <main className="flex-1 flex flex-col min-w-0 bg-surface">
       {/* Transcript */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-thin px-8 py-6">
         {/* Slightly wider than ChatView's 720px — pipeline cards need the room. */}
         <div className="max-w-[760px] mx-auto space-y-6">
           {turns.length === 0 ? (
-            <div className="text-center text-[13px] text-[#a1a1a6] pt-16">
+            <div className="text-center text-[13px] text-text-tertiary pt-16">
               Ask the orchestrator to fuse your workspace panel into one answer.
             </div>
           ) : (
@@ -231,14 +231,14 @@ export function FusionView({ instanceId, def, roster }: FusionViewProps) {
       </div>
 
       {/* Composer */}
-      <div className="border-t border-black/[0.07] px-8 py-3 bg-white shrink-0">
+      <div className="border-t border-overlay/[0.07] px-8 py-3 bg-surface shrink-0">
         <div className="max-w-[760px] mx-auto">
           {/* Honest derived cost hint. */}
-          <div className="mb-2 text-[11px] text-[#a1a1a6]">
-            <span className="font-medium text-[#6e6e73]">Fusion: on</span> · {panelCount}{" "}
+          <div className="mb-2 text-[11px] text-text-tertiary">
+            <span className="font-medium text-text-secondary">Fusion: on</span> · {panelCount}{" "}
             {panelCount === 1 ? "agent" : "agents"} → judge → synthesize · ~{costMult}× cost
           </div>
-          <div className="rounded-2xl ring-1 ring-black/[0.1] bg-[#f7f7f8] focus-within:ring-[#0a84ff]/50 px-3 pt-2.5 pb-2">
+          <div className="rounded-2xl ring-1 ring-overlay/[0.1] bg-fill-softer focus-within:ring-accent/50 px-3 pt-2.5 pb-2">
             <div className="flex items-end gap-2">
               <textarea
                 rows={1}
@@ -252,12 +252,12 @@ export function FusionView({ instanceId, def, roster }: FusionViewProps) {
                   }
                 }}
                 placeholder={`Ask ${def.name}…  (fuses a panel of workspace agents into one answer)`}
-                className="flex-1 bg-transparent outline-none resize-none text-[13.5px] leading-relaxed placeholder:text-[#a1a1a6] py-1 max-h-40 disabled:opacity-50"
+                className="flex-1 bg-transparent outline-none resize-none text-[13.5px] leading-relaxed placeholder:text-text-tertiary py-1 max-h-40 disabled:opacity-50"
               />
               <button
                 onClick={() => void handleSend()}
                 disabled={running || draft.trim().length === 0}
-                className="w-8 h-8 rounded-full bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"
+                className="w-8 h-8 rounded-full bg-accent text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"
               >
                 <ArrowUp className="w-4 h-4" />
               </button>
@@ -285,23 +285,23 @@ function TurnView({ turn, stage, def, roster }: TurnViewProps) {
     <div className="space-y-3">
       {/* User prompt bubble — right-aligned, accent fill (mirrors ChatView). */}
       <div className="flex justify-end">
-        <div className="max-w-[82%] bg-[#0a84ff] text-white rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
+        <div className="max-w-[82%] bg-accent text-white rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
           {turn.prompt}
         </div>
       </div>
 
       {turn.status === "running" && (
-        <div className="rounded-2xl ring-hair bg-[#fafafa] px-3.5 py-3 flex items-center gap-2.5">
-          <span className="w-2 h-2 rounded-full bg-[#0a84ff] animate-pulse shrink-0" />
-          <span className="text-[12.5px] text-[#6e6e73]">
+        <div className="rounded-2xl ring-hair bg-fill-softer px-3.5 py-3 flex items-center gap-2.5">
+          <span className="w-2 h-2 rounded-full bg-accent animate-pulse shrink-0" />
+          <span className="text-[12.5px] text-text-secondary">
             Running fusion…
-            {stage ? <span className="text-[#a1a1a6]"> · {STAGE_LABEL[stage]}</span> : null}
+            {stage ? <span className="text-text-tertiary"> · {STAGE_LABEL[stage]}</span> : null}
           </span>
         </div>
       )}
 
       {turn.status === "error" && (
-        <div className="rounded-2xl ring-1 ring-[#ff3b30]/30 bg-[#fff1f0] px-3.5 py-2.5 text-[12.5px] text-[#ff3b30] flex items-start gap-2">
+        <div className="rounded-2xl ring-1 ring-danger/30 bg-danger-soft px-3.5 py-2.5 text-[12.5px] text-danger flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="break-words">Fusion failed: {turn.error}</span>
         </div>
@@ -331,14 +331,14 @@ function CompletedTurn({ run, responses, def, roster }: CompletedTurnProps) {
   return (
     <div className="space-y-3">
       {/* Pipeline card — panel + judge. */}
-      <div className="ring-hair bg-[#fafafa] rounded-2xl overflow-hidden">
+      <div className="ring-hair bg-fill-softer rounded-2xl overflow-hidden">
         {/* Panel section */}
         <div className="p-3.5">
-          <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
+          <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
             Panel · {n} {n === 1 ? "agent" : "agents"}
           </div>
           {responses.length === 0 ? (
-            <div className="text-[11.5px] text-[#a1a1a6]">
+            <div className="text-[11.5px] text-text-tertiary">
               No panel members were available to answer.
             </div>
           ) : (
@@ -351,14 +351,14 @@ function CompletedTurn({ run, responses, def, roster }: CompletedTurnProps) {
         </div>
 
         {/* Judge section */}
-        <div className="border-t border-black/[0.06] p-3.5">
-          <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
+        <div className="border-t border-overlay/[0.06] p-3.5">
+          <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
             Judge analysis
           </div>
           {judge.ok ? (
             <JudgeRows analysis={judge.analysis} />
           ) : (
-            <div className="text-[11.5px] text-[#86868b] break-words whitespace-pre-wrap">
+            <div className="text-[11.5px] text-text-muted break-words whitespace-pre-wrap">
               {judge.fallback}
             </div>
           )}
@@ -374,15 +374,15 @@ function CompletedTurn({ run, responses, def, roster }: CompletedTurnProps) {
           <Waypoints className="w-[14px] h-[14px]" />
         </div>
         <div className="max-w-[82%] space-y-1.5">
-          <div className="text-[10.5px] font-medium text-[#a1a1a6]">
+          <div className="text-[10.5px] font-medium text-text-tertiary">
             fused · {n} {n === 1 ? "agent" : "agents"} + judge
           </div>
           {synthesized ? (
-            <div className="bg-[#f2f2f4] rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
+            <div className="bg-fill-soft rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
               {synthesized}
             </div>
           ) : (
-            <div className="bg-[#f2f2f4] rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[12.5px] text-[#a1a1a6]">
+            <div className="bg-fill-soft rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[12.5px] text-text-tertiary">
               No synthesized answer.
             </div>
           )}
@@ -410,7 +410,7 @@ function PanelMemberCard({
   const isDone = resp.status === "done";
 
   return (
-    <div className="rounded-xl ring-hair bg-white p-2.5">
+    <div className="rounded-xl ring-hair bg-surface p-2.5">
       <div className="flex items-center gap-1.5 mb-1.5">
         <span
           className="w-4 h-4 rounded-[5px] text-white grid place-items-center text-[9px] font-bold shrink-0"
@@ -420,25 +420,25 @@ function PanelMemberCard({
         </span>
         <span className="text-[11.5px] font-medium truncate flex-1 min-w-0">{name}</span>
         {isDone ? (
-          <CheckCircle2 className="w-3.5 h-3.5 text-[#30a14e] shrink-0" />
+          <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" />
         ) : isError ? (
-          <AlertTriangle className="w-3.5 h-3.5 text-[#ff9f0a] shrink-0" />
+          <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0" />
         ) : (
-          <span className="w-2 h-2 rounded-full bg-[#0a84ff] animate-pulse shrink-0" />
+          <span className="w-2 h-2 rounded-full bg-accent animate-pulse shrink-0" />
         )}
       </div>
       {isError ? (
         // `answer` holds the honest error string on an error row — clearly not
         // an answer.
-        <div className="text-[11px] text-[#ff3b30] break-words whitespace-pre-wrap">
+        <div className="text-[11px] text-danger break-words whitespace-pre-wrap">
           Couldn't run: {resp.answer ?? "unknown error"}
         </div>
       ) : resp.answer ? (
-        <div className="text-[11.5px] text-[#6e6e73] break-words whitespace-pre-wrap line-clamp-6">
+        <div className="text-[11.5px] text-text-secondary break-words whitespace-pre-wrap line-clamp-6">
           {resp.answer}
         </div>
       ) : (
-        <div className="text-[11px] text-[#a1a1a6]">No answer recorded.</div>
+        <div className="text-[11px] text-text-tertiary">No answer recorded.</div>
       )}
     </div>
   );
@@ -455,29 +455,29 @@ function JudgeRows({ analysis }: { analysis: JudgeAnalysis }) {
 
   if (!hasAny) {
     return (
-      <div className="text-[11.5px] text-[#86868b]">Judge returned no analysis fields.</div>
+      <div className="text-[11.5px] text-text-muted">Judge returned no analysis fields.</div>
     );
   }
 
   return (
     <div className="space-y-2">
       {analysis.consensus != null && (
-        <JudgeRow label="consensus" labelClass="bg-[#30a14e]/12 text-[#1e7d39]">
+        <JudgeRow label="consensus" labelClass="bg-success/12 text-success">
           <span className="whitespace-pre-wrap break-words">{analysis.consensus}</span>
         </JudgeRow>
       )}
       {analysis.disagreements != null && (
-        <JudgeRow label="disagree" labelClass="bg-[#ff9f0a]/15 text-[#b06f00]">
+        <JudgeRow label="disagree" labelClass="bg-warning/15 text-warning">
           <JudgeList items={analysis.disagreements} />
         </JudgeRow>
       )}
       {analysis.insights != null && (
-        <JudgeRow label="insight" labelClass="bg-[#0a84ff]/12 text-[#0a6cd6]">
+        <JudgeRow label="insight" labelClass="bg-accent/12 text-accent-hover">
           <JudgeList items={analysis.insights} />
         </JudgeRow>
       )}
       {analysis.blindSpots != null && (
-        <JudgeRow label="blind spot" labelClass="bg-[#ff3b30]/12 text-[#d62a1f]">
+        <JudgeRow label="blind spot" labelClass="bg-danger/12 text-danger">
           <JudgeList items={analysis.blindSpots} />
         </JudgeRow>
       )}
@@ -501,7 +501,7 @@ function JudgeRow({
       >
         {label}
       </span>
-      <div className="flex-1 min-w-0 text-[#3a3a3c]">{children}</div>
+      <div className="flex-1 min-w-0 text-text-body">{children}</div>
     </div>
   );
 }

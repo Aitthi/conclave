@@ -1,31 +1,62 @@
 @import "tailwindcss";
 
-/* ─── Design Tokens ──────────────────────────────────────────────── */
-@theme {
-  /* Colors */
-  --color-accent: #0a84ff;
-  --color-bg-canvas: #ececed;
-  --color-surface: #ffffff;
-  --color-sidebar: #f5f5f7;
-  --color-fill-soft: #f2f2f4;
+/* Enable the `dark:` variant on a class strategy (we toggle `.dark` on <html>
+   from the theme manager, driven by system `prefers-color-scheme` + override). */
+@custom-variant dark (&:where(.dark, .dark *));
 
-  --color-text-primary: #1d1d1f;
-  --color-text-secondary: #6e6e73;
-  --color-text-tertiary: #a1a1a6;
+/* ─── Design Tokens ──────────────────────────────────────────────────
+   Flipping tokens reference an underlying `--c-*` var so the SAME utility
+   (e.g. `bg-surface`) resolves to the light value under `:root` and the dark
+   value under `.dark`. `inline` makes the utilities emit `var(--c-*)` rather
+   than baking the literal, which is what lets the `.dark` override take hold.
+   Non-flipping tokens (agent identity colors, radii, fonts, shadows) carry
+   literal values — they look the same in both themes. */
+@theme inline {
+  /* Accent — `--mac-accent` is injected by the Rust side from the live macOS
+     system accent color; falls back to Apple blue when unavailable. */
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
 
+  /* Surfaces */
+  --color-bg-canvas: var(--c-bg-canvas);
+  --color-surface: var(--c-surface);
+  --color-surface-raised: var(--c-surface-raised);
+  --color-sidebar: var(--c-sidebar);
+  --color-fill-soft: var(--c-fill-soft);
+  --color-fill-softer: var(--c-fill-softer);
+
+  /* Text tiers */
+  --color-text-primary: var(--c-text-primary);
+  --color-text-body: var(--c-text-body);
+  --color-text-secondary: var(--c-text-secondary);
+  --color-text-muted: var(--c-text-muted);
+  --color-text-tertiary: var(--c-text-tertiary);
+  --color-text-quaternary: var(--c-text-quaternary);
+
+  /* Overlay — black in light, white in dark. Drives every `*-overlay/<a>`
+     hairline / tint utility so they invert automatically. */
+  --color-overlay: var(--c-overlay);
+
+  /* Semantic status (the bright dot colors are theme-stable; the soft tints
+     behind badges flip so they stay legible on a dark surface). */
+  --color-danger: var(--c-danger);
+  --color-danger-soft: var(--c-danger-soft);
+  --color-success: var(--c-success);
+  --color-success-soft: var(--c-success-soft);
+  --color-warning: #ff9f0a;
+  --color-warning-soft: var(--c-warning-soft);
+
+  --color-status-running: #30d158;
+  --color-status-waiting: #ff9f0a;
+  --color-status-idle: #c7c7cc;
+
+  /* Agent identity colors — stable across themes */
   --color-agent-maestro: #5e5ce6;
   --color-agent-atlas: #ff7a45;
   --color-agent-vega: #0fa3a3;
   --color-agent-iris: #d6409f;
   --color-agent-sol: #ff9f0a;
   --color-agent-echo: #32ade6;
-
-  --color-status-running: #30d158;
-  --color-status-waiting: #ff9f0a;
-  --color-status-idle: #c7c7cc;
-
-  --color-danger: #ff3b30;
-  --color-success: #30a14e;
 
   /* Fonts */
   --font-sans: -apple-system, "SF Pro Text", "Helvetica Neue", Inter, system-ui,
@@ -40,11 +71,74 @@
   --radius-pill: 9999px;
 
   /* Shadows */
-  --shadow-hairline: inset 0 0 0 0.5px rgba(0, 0, 0, 0.1);
   --shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.16);
 }
 
-/* ─── Arta Prototype Custom Classes (verbatim port) ──────────────── */
+/* ─── Light palette (default) ───────────────────────────────────────── */
+:root {
+  --c-accent: var(--mac-accent, #0a84ff);
+  --c-accent-hover: #0070e0;
+
+  --c-bg-canvas: #ececed;
+  --c-surface: #ffffff;
+  --c-surface-raised: #ffffff;
+  --c-sidebar: #f5f5f7;
+  --c-fill-soft: #f2f2f4;
+  --c-fill-softer: #fafafa;
+
+  --c-text-primary: #1d1d1f;
+  --c-text-body: #3a3a3c;
+  --c-text-secondary: #6e6e73;
+  --c-text-muted: #86868b;
+  --c-text-tertiary: #a1a1a6;
+  --c-text-quaternary: #c7c7cc;
+
+  --c-overlay: #000000;
+
+  --c-danger: #ff3b30;
+  --c-danger-soft: #fff1f0;
+  --c-success: #30a14e;
+  --c-success-soft: #e8f8ef;
+  --c-warning-soft: #fff7e6;
+
+  /* hairline ring tone (driven into .ring-hair / .vibrancy below) */
+  --c-hairline: rgba(0, 0, 0, 0.1);
+  --c-vibrancy: #f5f5f7;
+}
+
+/* ─── Dark palette ──────────────────────────────────────────────────── */
+.dark {
+  --c-accent-hover: #3a9bff;
+
+  --c-bg-canvas: #161618;
+  --c-surface: #232325;
+  --c-surface-raised: #2d2d30;
+  --c-sidebar: #1c1c1e;
+  --c-fill-soft: #2a2a2d;
+  --c-fill-softer: #202022;
+
+  --c-text-primary: #f5f5f7;
+  --c-text-body: #d8d8da;
+  --c-text-secondary: #9a9aa0;
+  --c-text-muted: #8a8a90;
+  --c-text-tertiary: #6e6e74;
+  --c-text-quaternary: #525256;
+
+  --c-overlay: #ffffff;
+
+  --c-danger: #ff453a;
+  --c-danger-soft: rgba(255, 69, 58, 0.16);
+  --c-success: #30d158;
+  --c-success-soft: rgba(48, 209, 88, 0.16);
+  --c-warning-soft: rgba(255, 159, 10, 0.16);
+
+  --c-hairline: rgba(255, 255, 255, 0.12);
+  --c-vibrancy: #1c1c1e;
+
+  color-scheme: dark;
+}
+
+/* ─── Base + helper classes ─────────────────────────────────────────── */
 
 :root {
   --mac-accent: #0a84ff;
@@ -54,9 +148,9 @@
   -webkit-font-smoothing: antialiased;
 }
 
-/* macOS sidebar/drawer panels — solid light, screenshot-safe (no backdrop-filter, no dark flip) */
+/* macOS sidebar/drawer panels */
 .vibrancy {
-  background: #f5f5f7;
+  background: var(--c-vibrancy);
 }
 
 /* SF Mono stack */
@@ -65,9 +159,9 @@
   font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
 }
 
-/* hairline inner ring used on cards */
+/* hairline inner ring used on cards — tone flips with theme */
 .ring-hair {
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+  box-shadow: inset 0 0 0 0.5px var(--c-hairline);
 }
 
 /* thin native scrollbars */

@@ -110,10 +110,10 @@ function Toggle({ on, onChange, label }: ToggleProps) {
       aria-checked={on}
       aria-label={label}
       onClick={() => onChange(!on)}
-      className={`w-9 h-5 rounded-full relative transition-colors ${on ? "bg-[#30d158]" : "bg-black/20"}`}
+      className={`w-9 h-5 rounded-full relative transition-colors ${on ? "bg-status-running" : "bg-black/20"}`}
     >
       <span
-        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${on ? "right-0.5" : "left-0.5"}`}
+        className={`absolute top-0.5 w-4 h-4 rounded-full bg-surface shadow-sm transition-transform ${on ? "right-0.5" : "left-0.5"}`}
       />
     </button>
   );
@@ -217,22 +217,22 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="w-[560px] max-h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-black/[0.08]">
+      <div className="w-[560px] max-h-[90vh] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]">
 
         {/* ── Header ── */}
-        <div className="h-11 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0">
+        <div className="h-11 flex items-center justify-between px-4 border-b border-overlay/[0.06] shrink-0">
           <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-[#0a84ff]" />
+            <Sparkles className="w-4 h-4 text-accent" />
             <span className="text-[13px] font-semibold tracking-tight">
               {isEditing ? "Edit agent" : "New agent"}
             </span>
-            <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md">
+            <span className="text-[10px] font-medium text-text-muted bg-overlay/[0.04] px-1.5 py-px rounded-md">
               {isEditing ? "update definition" : "saved to Library"}
             </span>
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
+            className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary"
             aria-label="Close builder"
           >
             <X className="w-[15px] h-[15px]" />
@@ -244,7 +244,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
           {/* Identity */}
           <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
+            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
               Identity
             </div>
             <div className="flex items-center gap-2.5">
@@ -253,7 +253,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 <button
                   type="button"
                   onClick={() => setShowColors((v) => !v)}
-                  className="w-10 h-10 rounded-[10px] text-white grid place-items-center text-[15px] font-bold ring-1 ring-black/[0.06] hover:brightness-105"
+                  className="w-10 h-10 rounded-[10px] text-white grid place-items-center text-[15px] font-bold ring-1 ring-overlay/[0.06] hover:brightness-105"
                   style={{ backgroundColor: color }}
                   title="Change color"
                   aria-label="Change color"
@@ -264,7 +264,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   <>
                     {/* Click-away backdrop. */}
                     <div className="fixed inset-0 z-10" onClick={() => setShowColors(false)} />
-                    <div className="absolute z-20 top-full left-0 mt-1.5 flex items-center gap-1.5 bg-white rounded-xl ring-1 ring-black/[0.1] shadow-lg p-2">
+                    <div className="absolute z-20 top-full left-0 mt-1.5 flex items-center gap-1.5 bg-surface rounded-xl ring-1 ring-overlay/[0.1] shadow-lg p-2">
                       {COLOR_SWATCHES.map((swatch) => (
                         <button
                           key={swatch}
@@ -287,7 +287,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                       {/* Custom color — opens the OS color picker. The popover
                           stays open so the avatar preview updates live. */}
                       <label
-                        className="w-[18px] h-[18px] rounded-full cursor-pointer ring-1 ring-black/15 relative overflow-hidden shrink-0"
+                        className="w-[18px] h-[18px] rounded-full cursor-pointer ring-1 ring-overlay/15 relative overflow-hidden shrink-0"
                         title="Custom color"
                         style={{
                           background:
@@ -311,13 +311,13 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Agent name"
-                  className="w-full text-[14px] font-semibold tracking-tight bg-transparent outline-none border-b border-black/10 focus:border-[#0a84ff] pb-0.5"
+                  className="w-full text-[14px] font-semibold tracking-tight bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
                 />
                 <input
                   value={role}
                   onChange={(e) => setRole(e.target.value)}
                   placeholder="Role (optional)"
-                  className="w-full text-[11.5px] text-[#86868b] bg-transparent outline-none"
+                  className="w-full text-[11.5px] text-text-muted bg-transparent outline-none"
                 />
               </div>
             </div>
@@ -326,7 +326,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
           {/* Type */}
           <section>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
+            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
               Type
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -348,20 +348,20 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     aria-disabled={soon}
                     className={`relative rounded-xl p-2 text-left transition-all ${
                       soon
-                        ? "ring-1 ring-black/[0.06] bg-black/[0.02] opacity-60 cursor-not-allowed"
+                        ? "ring-1 ring-overlay/[0.06] bg-overlay/[0.02] opacity-60 cursor-not-allowed"
                         : active
-                          ? "ring-1 ring-[#0a84ff]/40 bg-[#0a84ff]/[0.06]"
-                          : "ring-1 ring-black/[0.08] bg-white hover:bg-black/[0.02]"
+                          ? "ring-1 ring-accent/40 bg-accent/[0.06]"
+                          : "ring-1 ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
                     }`}
                   >
                     {soon && (
-                      <span className="absolute top-1.5 right-1.5 text-[9px] font-bold tracking-wide text-[#86868b] bg-black/[0.06] px-1.5 py-px rounded-full uppercase">
+                      <span className="absolute top-1.5 right-1.5 text-[9px] font-bold tracking-wide text-text-muted bg-overlay/[0.06] px-1.5 py-px rounded-full uppercase">
                         Soon
                       </span>
                     )}
                     <Icon
                       className={`w-4 h-4 mb-1 ${
-                        soon ? "text-[#a1a1a6]" : active ? "text-[#0a84ff]" : "text-[#6e6e73]"
+                        soon ? "text-text-tertiary" : active ? "text-accent" : "text-text-secondary"
                       }`}
                     />
                     <div className="text-[12px] font-semibold">{label}</div>
@@ -377,7 +377,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               <div
                 role="radiogroup"
                 aria-label="CLI kind"
-                className="mt-2 flex gap-1 rounded-xl bg-black/[0.04] p-1"
+                className="mt-2 flex gap-1 rounded-xl bg-overlay/[0.04] p-1"
               >
                 {(
                   [
@@ -394,15 +394,15 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     onClick={() => !soon && setCliKind(value)}
                     className={`flex-1 flex items-center justify-center gap-1 text-[12.5px] py-1.5 rounded-lg transition-colors ${
                       soon
-                        ? "text-[#a1a1a6] cursor-not-allowed"
+                        ? "text-text-tertiary cursor-not-allowed"
                         : cliKind === value
-                          ? "bg-white shadow-sm font-semibold"
-                          : "text-[#6e6e73] hover:bg-black/[0.03]"
+                          ? "bg-surface shadow-sm font-semibold"
+                          : "text-text-secondary hover:bg-overlay/[0.03]"
                     }`}
                   >
                     {label}
                     {soon && (
-                      <span className="text-[8.5px] font-bold tracking-wide text-[#86868b] bg-black/[0.06] px-1 py-px rounded uppercase">
+                      <span className="text-[8.5px] font-bold tracking-wide text-text-muted bg-overlay/[0.06] px-1 py-px rounded uppercase">
                         Soon
                       </span>
                     )}
@@ -417,22 +417,22 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               avoid two disconnected model fields. */}
           {!showCliConfig && (
             <section>
-              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
+              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
                 Model
               </div>
-              <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
+              <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
                 <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-[12.5px] text-[#6e6e73]">Provider</span>
+                  <span className="text-[12.5px] text-text-secondary">Provider</span>
                   {/* TODO(M5): real provider picker wired to provider.upsert */}
-                  <span className="text-[12.5px] text-[#a1a1a6]">Configure in Settings</span>
+                  <span className="text-[12.5px] text-text-tertiary">Configure in Settings</span>
                 </div>
                 <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-[12.5px] text-[#6e6e73]">Model</span>
+                  <span className="text-[12.5px] text-text-secondary">Model</span>
                   <input
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
                     placeholder="e.g. claude-opus-4-8"
-                    className="text-[12.5px] text-right bg-transparent outline-none w-44 placeholder:text-[#c7c7cc]"
+                    className="text-[12.5px] text-right bg-transparent outline-none w-44 placeholder:text-text-quaternary"
                   />
                 </div>
               </div>
@@ -442,20 +442,20 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
           {/* CLI launch config — for claude-code + codex */}
           {showCliConfig && (
             <section>
-              <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
+              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
                 {isCodex ? "Codex" : "Claude Code"}
               </div>
-              <div className="rounded-xl ring-1 ring-black/[0.08] bg-white divide-y divide-black/[0.06]">
+              <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
                 {/* Model — field + quick-presets together so picking a preset
                     visibly fills the same field. */}
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-[12.5px] text-[#6e6e73] shrink-0">Model</span>
+                    <span className="text-[12.5px] text-text-secondary shrink-0">Model</span>
                     <input
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
                       placeholder={isCodex ? "gpt-5.5" : "claude-opus-4-8"}
-                      className="text-[12.5px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-[#c7c7cc]"
+                      className="text-[12.5px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-text-quaternary"
                     />
                   </div>
                   <div className="flex flex-wrap gap-1.5 mt-2">
@@ -465,8 +465,8 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                         onClick={() => setModel(m)}
                         className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
                           model === m
-                            ? "ring-[#0a84ff]/40 bg-[#0a84ff]/[0.08] text-[#0a84ff]"
-                            : "ring-black/[0.08] text-[#6e6e73] hover:bg-black/[0.03]"
+                            ? "ring-accent/40 bg-accent/[0.08] text-accent"
+                            : "ring-overlay/[0.08] text-text-secondary hover:bg-overlay/[0.03]"
                         }`}
                       >
                         {m.replace("claude-", "")}
@@ -478,11 +478,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 {/* Permission mode */}
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[12.5px] text-[#6e6e73]">Permission mode</span>
+                    <span className="text-[12.5px] text-text-secondary">Permission mode</span>
                     <div
                       role="radiogroup"
                       aria-label="Permission mode"
-                      className="flex rounded-lg bg-black/[0.04] p-0.5"
+                      className="flex rounded-lg bg-overlay/[0.04] p-0.5"
                     >
                       {(
                         [
@@ -497,8 +497,8 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                           onClick={() => setPermissionMode(value)}
                           className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
                             permissionMode === value
-                              ? "bg-white shadow-sm font-semibold"
-                              : "text-[#6e6e73]"
+                              ? "bg-surface shadow-sm font-semibold"
+                              : "text-text-secondary"
                           }`}
                           title={
                             isCodex
@@ -514,7 +514,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     </div>
                   </div>
                   {permissionMode === "bypassPermissions" && (
-                    <p className="text-[10.5px] text-[#ff9f0a] mt-1.5">
+                    <p className="text-[10.5px] text-warning mt-1.5">
                       Skips every permission prompt — use only in workspaces you trust.
                     </p>
                   )}
@@ -525,11 +525,11 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 {isClaudeCode && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[12.5px] text-[#6e6e73]">Context window</span>
+                    <span className="text-[12.5px] text-text-secondary">Context window</span>
                     <div
                       role="radiogroup"
                       aria-label="Context window"
-                      className="flex rounded-lg bg-black/[0.04] p-0.5"
+                      className="flex rounded-lg bg-overlay/[0.04] p-0.5"
                     >
                       {(
                         [
@@ -544,8 +544,8 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                           onClick={() => setContextWindow(value)}
                           className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
                             contextWindow === value
-                              ? "bg-white shadow-sm font-semibold"
-                              : "text-[#6e6e73]"
+                              ? "bg-surface shadow-sm font-semibold"
+                              : "text-text-secondary"
                           }`}
                         >
                           {label}
@@ -554,7 +554,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                     </div>
                   </div>
                   {contextWindow === "1m" && (
-                    <p className="text-[10.5px] text-[#a1a1a6] mt-1.5">
+                    <p className="text-[10.5px] text-text-tertiary mt-1.5">
                       Launches as <span className="font-mono">{model || "model"}[1m]</span>.
                     </p>
                   )}
@@ -563,12 +563,12 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
                 {/* Custom args */}
                 <div className="flex items-center justify-between px-3 py-2.5 gap-3">
-                  <span className="text-[12.5px] text-[#6e6e73] shrink-0">Custom args</span>
+                  <span className="text-[12.5px] text-text-secondary shrink-0">Custom args</span>
                   <input
                     value={customArgs}
                     onChange={(e) => setCustomArgs(e.target.value)}
                     placeholder="e.g. --verbose --mcp-config ./mcp.json"
-                    className="text-[12px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-[#c7c7cc]"
+                    className="text-[12px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-text-quaternary"
                   />
                 </div>
 
@@ -577,7 +577,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 {isClaudeCode && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[12.5px] text-[#6e6e73]">Custom environment</span>
+                    <span className="text-[12.5px] text-text-secondary">Custom environment</span>
                     <Toggle
                       on={useCustomEnv}
                       onChange={setUseCustomEnv}
@@ -591,9 +591,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                         onChange={(e) => setEnvText(e.target.value)}
                         spellCheck={false}
                         rows={8}
-                        className="mt-2 w-full rounded-lg ring-1 ring-black/[0.1] bg-[#f7f7f8] focus:ring-[#0a84ff]/50 outline-none px-2.5 py-2 text-[11.5px] font-mono leading-relaxed resize-y"
+                        className="mt-2 w-full rounded-lg ring-1 ring-overlay/[0.1] bg-fill-softer focus:ring-accent/50 outline-none px-2.5 py-2 text-[11.5px] font-mono leading-relaxed resize-y"
                       />
-                      <p className="text-[10.5px] text-[#a1a1a6] mt-1.5">
+                      <p className="text-[10.5px] text-text-tertiary mt-1.5">
                         Secrets (AUTH_TOKEN / API_KEY / …) are stored in the macOS Keychain, never
                         in the database. Leave a value as{" "}
                         <span className="font-mono">{SECRET_PLACEHOLDER}</span> to keep the stored
@@ -609,22 +609,22 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
           {/* Error */}
           {error && (
-            <p className="text-[12px] text-[#ff3b30] px-1">{error}</p>
+            <p className="text-[12px] text-danger px-1">{error}</p>
           )}
         </div>
 
         {/* ── Footer actions ── */}
-        <div className="border-t border-black/[0.07] px-5 py-2.5 bg-white shrink-0 flex items-center justify-end gap-2">
+        <div className="border-t border-overlay/[0.07] px-5 py-2.5 bg-surface shrink-0 flex items-center justify-end gap-2">
           <button
             onClick={onClose}
-            className="text-[12.5px] font-medium text-[#6e6e73] px-3.5 py-1.5 rounded-lg hover:bg-black/[0.05]"
+            className="text-[12.5px] font-medium text-text-secondary px-3.5 py-1.5 rounded-lg hover:bg-overlay/[0.05]"
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
             disabled={saving}
-            className="text-[12.5px] font-semibold text-white bg-[#0a84ff] px-4 py-1.5 rounded-lg hover:brightness-105 disabled:opacity-60 flex items-center gap-1.5"
+            className="text-[12.5px] font-semibold text-white bg-accent px-4 py-1.5 rounded-lg hover:brightness-105 disabled:opacity-60 flex items-center gap-1.5"
           >
             <Sparkles className="w-3.5 h-3.5" />
             {saving ? "Saving…" : isEditing ? "Save changes" : "Create agent"}

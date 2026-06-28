@@ -202,7 +202,7 @@ export function Terminal({ sessionId }: TerminalProps) {
     <div
       ref={dropRef}
       className={`flex-1 min-h-0 overflow-hidden bg-[#1e1e1e] p-1.5 transition-shadow${
-        isOver ? " ring-2 ring-inset ring-[#0a84ff]" : ""
+        isOver ? " ring-2 ring-inset ring-accent" : ""
       }`}
     >
       <div ref={divRef} className="h-full w-full overflow-hidden" />

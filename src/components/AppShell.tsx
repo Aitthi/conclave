@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { ipc } from "../ipc";
+import { useEvent } from "../ipc/events";
+import { setThemePref } from "../lib/theme";
 import type { Workspace, AgentDefinition } from "../ipc";
 import { Rail } from "./Rail";
 import { Roster } from "./Roster";
@@ -61,6 +63,33 @@ export function AppShell() {
       });
   }, []);
 
+  // Native menu / accelerator events from the Rust menu bar (⌘N, ⌘L, ⌘B, the
+  // Appearance submenu). Each carries the clicked item's id.
+  useEvent<string>("menu", (id) => {
+    switch (id) {
+      case "new_agent":
+        setBuilderInitialDef(undefined);
+        setShowBuilder(true);
+        break;
+      case "library":
+        setShowBlackboard(false);
+        setShowLibrary(true);
+        break;
+      case "toggle_blackboard":
+        if (activeWorkspaceId) setShowBlackboard((v) => !v);
+        break;
+      case "theme_system":
+        setThemePref("system");
+        break;
+      case "theme_light":
+        setThemePref("light");
+        break;
+      case "theme_dark":
+        setThemePref("dark");
+        break;
+    }
+  });
+
   function handleSelectWorkspace(id: string) {
     // Optimistically update selection; handler only validates on the Rust side.
     setActiveWorkspaceId(id);
@@ -99,11 +128,11 @@ export function AppShell() {
         {/* One continuous toolbar tint across all columns (macOS unified
             titlebar). The column dividers carry through from the panes below. */}
         {/* Rail column bg */}
-        <div className="w-[56px] bg-[#f5f5f7] border-r border-black/[0.06] pointer-events-none" />
+        <div className="w-[56px] bg-sidebar border-r border-overlay/[0.06] pointer-events-none" />
         {/* Roster column bg */}
-        <div className="w-[266px] bg-[#f5f5f7] border-r border-black/[0.06] pointer-events-none" />
+        <div className="w-[266px] bg-sidebar border-r border-overlay/[0.06] pointer-events-none" />
         {/* Main content bg */}
-        <div className="flex-1 bg-[#f5f5f7] pointer-events-none" />
+        <div className="flex-1 bg-sidebar pointer-events-none" />
       </div>
 
       {/* ── 3-pane layout ────────────────────────────────────────────── */}
@@ -169,8 +198,8 @@ export function AppShell() {
                 focusInstanceId={selectedId}
               />
             ) : (
-              <main className="flex-1 flex flex-col min-w-0 bg-white">
-                <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
+              <main className="flex-1 flex flex-col min-w-0 bg-surface">
+                <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
                   Select a workspace to start
                 </div>
               </main>

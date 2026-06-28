@@ -125,7 +125,7 @@ function ArtifactFrame({ html, title }: { html: string; title: string }) {
       // origin + null-origin ACL rejection is the expected guard.
       sandbox="allow-scripts"
       referrerPolicy="no-referrer"
-      className="w-full h-full border-0 bg-white"
+      className="w-full h-full border-0 bg-surface"
     />
   );
 }
@@ -142,14 +142,14 @@ function ViewToggle({
   onChange: (v: ViewMode) => void;
 }) {
   return (
-    <div className="flex items-center rounded-md overflow-hidden ring-1 ring-black/[0.08] bg-black/[0.03]">
+    <div className="flex items-center rounded-md overflow-hidden ring-1 ring-overlay/[0.08] bg-overlay/[0.03]">
       <button
         onClick={() => onChange("preview")}
         aria-pressed={view === "preview"}
         className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium transition-colors ${
           view === "preview"
-            ? "bg-white text-[#0a84ff] shadow-sm"
-            : "text-[#6e6e73] hover:text-[#3a3a3c]"
+            ? "bg-surface text-accent shadow-sm"
+            : "text-text-secondary hover:text-text-body"
         }`}
       >
         <Eye className="w-3 h-3" />
@@ -160,8 +160,8 @@ function ViewToggle({
         aria-pressed={view === "code"}
         className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium transition-colors ${
           view === "code"
-            ? "bg-white text-[#0a84ff] shadow-sm"
-            : "text-[#6e6e73] hover:text-[#3a3a3c]"
+            ? "bg-surface text-accent shadow-sm"
+            : "text-text-secondary hover:text-text-body"
         }`}
       >
         <Code className="w-3 h-3" />
@@ -204,17 +204,17 @@ export function ArtifactView({ html, filename }: { html: string; filename?: stri
   return (
     <>
       {/* ── Inline card ───────────────────────────────────────────────────── */}
-      <div className="ring-1 ring-black/[0.08] rounded-xl overflow-hidden bg-white">
+      <div className="ring-1 ring-overlay/[0.08] rounded-xl overflow-hidden bg-surface">
         {/* Header */}
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-black/[0.06] bg-[#fafafa]">
-          <FileCode2 className="w-3.5 h-3.5 text-[#6e6e73] shrink-0" />
-          <span className="text-[12.5px] font-medium text-[#3a3a3c] truncate flex-1 min-w-0">
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-overlay/[0.06] bg-fill-softer">
+          <FileCode2 className="w-3.5 h-3.5 text-text-secondary shrink-0" />
+          <span className="text-[12.5px] font-medium text-text-body truncate flex-1 min-w-0">
             {label}
           </span>
           <ViewToggle view={view} onChange={setView} />
           <button
             onClick={openCanvas}
-            className="ml-1 w-6 h-6 grid place-items-center rounded-md hover:bg-black/[0.06] text-[#6e6e73] shrink-0"
+            className="ml-1 w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.06] text-text-secondary shrink-0"
             aria-label="Open in canvas"
           >
             <Maximize2 className="w-3.5 h-3.5" />
@@ -225,13 +225,13 @@ export function ArtifactView({ html, filename }: { html: string; filename?: stri
             (a placeholder) so only ONE artifact iframe runs at a time. */}
         <div className="h-72">
           {canvasOpen ? (
-            <div className="h-full grid place-items-center text-[12px] text-[#a1a1a6] bg-[#fafafa]">
+            <div className="h-full grid place-items-center text-[12px] text-text-tertiary bg-fill-softer">
               Open in canvas — close it to preview here.
             </div>
           ) : view === "preview" ? (
             <ArtifactFrame html={html} title={label} />
           ) : (
-            <pre className="h-full overflow-auto p-3 m-0 bg-[#f8f8f8] text-[11.5px] font-mono leading-relaxed text-[#3a3a3c]">
+            <pre className="h-full overflow-auto p-3 m-0 bg-fill-softer text-[11.5px] font-mono leading-relaxed text-text-body">
               <code>{html}</code>
             </pre>
           )}
@@ -241,15 +241,15 @@ export function ArtifactView({ html, filename }: { html: string; filename?: stri
       {/* ── Canvas overlay (mirrors Timeline: fixed inset-0 z-50) ─────────── */}
       {canvasOpen && (
         <div
-          className="fixed inset-0 z-50 flex flex-col bg-[#f5f5f7]"
+          className="fixed inset-0 z-50 flex flex-col bg-sidebar"
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
         >
           {/* Canvas header */}
-          <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] bg-white shrink-0">
+          <div className="h-12 flex items-center justify-between px-4 border-b border-overlay/[0.06] bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
-              <FileCode2 className="w-4 h-4 text-[#6e6e73] shrink-0" />
+              <FileCode2 className="w-4 h-4 text-text-secondary shrink-0" />
               <span id={titleId} className="text-[13px] font-semibold tracking-tight truncate">
                 {label}
               </span>
@@ -259,7 +259,7 @@ export function ArtifactView({ html, filename }: { html: string; filename?: stri
               <button
                 ref={closeBtnRef}
                 onClick={() => setCanvasOpen(false)}
-                className="ml-1 w-7 h-7 grid place-items-center rounded-lg hover:bg-black/[0.06] text-[#6e6e73]"
+                className="ml-1 w-7 h-7 grid place-items-center rounded-lg hover:bg-overlay/[0.06] text-text-secondary"
                 aria-label="Close canvas"
               >
                 <X className="w-4 h-4" />
@@ -272,7 +272,7 @@ export function ArtifactView({ html, filename }: { html: string; filename?: stri
             {canvasView === "preview" ? (
               <ArtifactFrame html={html} title={label} />
             ) : (
-              <pre className="h-full overflow-auto p-6 m-0 bg-white text-[12px] font-mono leading-relaxed text-[#3a3a3c]">
+              <pre className="h-full overflow-auto p-6 m-0 bg-surface text-[12px] font-mono leading-relaxed text-text-body">
                 <code>{html}</code>
               </pre>
             )}

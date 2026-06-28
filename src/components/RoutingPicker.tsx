@@ -84,31 +84,31 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         title="Send to…"
-        className="flex items-center gap-1.5 px-2 py-1 rounded-full ring-1 ring-black/[0.08] bg-white text-[11.5px] text-[#6e6e73] hover:bg-black/[0.03] disabled:opacity-50 max-w-[180px]"
+        className="flex items-center gap-1.5 px-2 py-1 rounded-full ring-1 ring-overlay/[0.08] bg-surface text-[11.5px] text-text-secondary hover:bg-overlay/[0.03] disabled:opacity-50 max-w-[180px]"
       >
-        <CornerUpRight className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
+        <CornerUpRight className="w-3 h-3 shrink-0 text-text-tertiary" />
         {selected ? (
           <>
             <span
               className="w-2 h-2 rounded-full shrink-0"
               style={{ backgroundColor: selected.color }}
             />
-            <span className="truncate font-medium text-[#1d1d1f]">{selected.name}</span>
+            <span className="truncate font-medium text-text-primary">{selected.name}</span>
             {isSelf ? (
-              <span className="text-[#a1a1a6]">· self</span>
+              <span className="text-text-tertiary">· self</span>
             ) : hint ? (
-              <span className="text-[#a1a1a6]">· {hint.label}</span>
+              <span className="text-text-tertiary">· {hint.label}</span>
             ) : null}
           </>
         ) : (
-          <span className="text-[#a1a1a6]">Send to…</span>
+          <span className="text-text-tertiary">Send to…</span>
         )}
-        <ChevronDown className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
+        <ChevronDown className="w-3 h-3 shrink-0 text-text-tertiary" />
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 mb-1.5 w-[240px] rounded-xl ring-1 ring-black/[0.1] bg-white shadow-lg shadow-black/[0.08] p-1 z-20">
-          <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase px-2 pt-1 pb-1">
+        <div className="absolute bottom-full left-0 mb-1.5 w-[240px] rounded-xl ring-1 ring-overlay/[0.1] bg-surface shadow-lg shadow-overlay/[0.08] p-1 z-20">
+          <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase px-2 pt-1 pb-1">
             Send to
           </div>
           {roster.map((t) => {
@@ -123,7 +123,7 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
                   onChange(t.instanceId);
                   setOpen(false);
                 }}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12.5px] hover:bg-black/[0.04] text-left"
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12.5px] hover:bg-overlay/[0.04] text-left"
               >
                 <span
                   className="w-2.5 h-2.5 rounded-full shrink-0"
@@ -131,13 +131,13 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
                 />
                 <span className="truncate flex-1 min-w-0 font-medium">
                   {t.name}
-                  {self && <span className="text-[#a1a1a6] font-normal"> · self</span>}
+                  {self && <span className="text-text-tertiary font-normal"> · self</span>}
                 </span>
-                <span className="flex items-center gap-1 text-[10.5px] text-[#a1a1a6] shrink-0">
+                <span className="flex items-center gap-1 text-[10.5px] text-text-tertiary shrink-0">
                   <tHint.Icon className="w-3 h-3" />
                   {tHint.label}
                 </span>
-                {isActive && <Check className="w-3.5 h-3.5 text-[#0a84ff] shrink-0" />}
+                {isActive && <Check className="w-3.5 h-3.5 text-accent shrink-0" />}
               </button>
             );
           })}

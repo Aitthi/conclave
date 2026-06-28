@@ -16,16 +16,16 @@ interface RailProps {
 
 export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder }: RailProps) {
   return (
-    <nav className="w-[56px] shrink-0 bg-[#ebebed] border-r border-black/[0.06] flex flex-col items-center overflow-hidden">
+    <nav className="w-[56px] shrink-0 bg-fill-soft border-r border-overlay/[0.06] flex flex-col items-center overflow-hidden">
       {/* Brand mark — sits in a 48px header zone so it lines up with the Roster
           and Context headers; its bottom border continues the toolbar rule
           across the Rail column. */}
-      <div className="h-12 w-full shrink-0 grid place-items-center border-b border-black/[0.06] bg-[#f5f5f7]">
+      <div className="h-12 w-full shrink-0 grid place-items-center border-b border-overlay/[0.06] bg-sidebar">
         <button
           className="w-8 h-8 rounded-[9px] grid place-items-center"
           title="Conclave"
         >
-          <Hexagon className="w-[18px] h-[18px] text-[#0a84ff]" />
+          <Hexagon className="w-[18px] h-[18px] text-accent" />
         </button>
       </div>
 
@@ -61,7 +61,7 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
 
       {/* Link folder / new workspace */}
       <button
-        className="w-9 h-9 rounded-[10px] border border-dashed border-black/20 text-[#6e6e73] grid place-items-center hover:border-[#0a84ff] hover:text-[#0a84ff]"
+        className="w-9 h-9 rounded-[10px] border border-dashed border-overlay/20 text-text-secondary grid place-items-center hover:border-accent hover:text-accent"
         title="Link folder as workspace"
         onClick={onOpenLinkFolder}
       >
@@ -72,7 +72,7 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
           have real behavior. */}
       <div className="mt-auto flex flex-col items-center gap-1.5">
         <button
-          className="w-9 h-9 rounded-[10px] bg-white ring-hair text-[#3a3a3c] grid place-items-center hover:bg-black/[0.03]"
+          className="w-9 h-9 rounded-[10px] bg-surface ring-hair text-text-body grid place-items-center hover:bg-overlay/[0.03]"
           title="Agent Library"
           onClick={onOpenLibrary}
         >

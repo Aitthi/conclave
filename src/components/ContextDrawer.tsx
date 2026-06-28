@@ -76,7 +76,7 @@ function allowedSendersLabel(v: AgentDefinition["allowedSenders"]): string {
 // Small section header, matching the prototype's uppercase label rows.
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5 flex items-center justify-between">
+    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5 px-0.5 flex items-center justify-between">
       {children}
     </div>
   );
@@ -236,11 +236,11 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
 
   if (!open) {
     return (
-      <aside className="w-9 vibrancy border-l border-black/[0.06] flex flex-col items-center shrink-0">
+      <aside className="w-9 vibrancy border-l border-overlay/[0.06] flex flex-col items-center shrink-0">
         <button
           title="Show Context"
           onClick={() => setOpen(true)}
-          className="w-7 h-7 mt-2.5 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
+          className="w-7 h-7 mt-2.5 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary"
         >
           <PanelRight className="w-[15px] h-[15px]" />
         </button>
@@ -273,16 +273,16 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
       {showTimeline && session && (
         <Timeline def={def} session={session} onClose={() => setShowTimeline(false)} />
       )}
-      <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
+      <aside className="w-[306px] vibrancy border-l border-overlay/[0.06] flex flex-col shrink-0">
       {/* Header — also a window drag region. The "Context" label is
           `pointer-events-none` so clicks fall through to the attributed
           container (drag / double-click-zoom); the collapse button keeps its
           own click. */}
       <div
         data-tauri-drag-region
-        className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] shrink-0"
+        className="h-12 flex items-center justify-between px-4 border-b border-overlay/[0.06] shrink-0"
       >
-        <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight pointer-events-none">
+        <span className="text-[12px] font-semibold text-text-secondary tracking-tight pointer-events-none">
           Context
         </span>
         <button
@@ -294,7 +294,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
             setOpen(false);
             setShowTimeline(false);
           }}
-          className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
+          className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary"
         >
           <PanelRight className="w-[15px] h-[15px]" />
         </button>
@@ -312,14 +312,14 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
             <div>
               <SectionLabel>
                 <span>Panel agents</span>
-                <span className="normal-case tracking-normal text-[10.5px] font-medium text-[#86868b]">
+                <span className="normal-case tracking-normal text-[10.5px] font-medium text-text-muted">
                   {fusionPanel.length} / 8
                 </span>
               </SectionLabel>
               {fusionPanel.length === 0 ? (
                 <DeferredNote>No chat agents in this workspace to fuse.</DeferredNote>
               ) : (
-                <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1.5">
+                <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1.5">
                   {fusionPanel.map((t) => (
                     <div key={t.instanceId} className="flex items-center gap-2">
                       <span
@@ -340,13 +340,13 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
             {/* Judge — the orchestrator's own model (matches the M4.3 backend). */}
             <div>
               <SectionLabel>Judge</SectionLabel>
-              <div className="rounded-xl ring-hair bg-white px-2.5 py-2 flex items-center gap-2">
-                <div className="w-6 h-6 rounded-md bg-[#5e5ce6] grid place-items-center text-white shrink-0">
+              <div className="rounded-xl ring-hair bg-surface px-2.5 py-2 flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-agent-maestro grid place-items-center text-white shrink-0">
                   <Scale className="w-3.5 h-3.5" />
                 </div>
                 <div className="leading-tight flex-1 min-w-0">
                   <div className="text-[12px] font-medium truncate">{def.model ?? "—"}</div>
-                  <div className="text-[10.5px] text-[#86868b] truncate">structured JSON</div>
+                  <div className="text-[10.5px] text-text-muted truncate">structured JSON</div>
                 </div>
               </div>
             </div>
@@ -354,13 +354,13 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
             {/* Est. cost — honest derived estimate (panel + judge + synth). */}
             <div>
               <SectionLabel>Est. cost</SectionLabel>
-              <div className="rounded-xl ring-hair bg-white px-2.5 py-2 flex items-center gap-2">
-                <div className="w-6 h-6 rounded-md bg-[#0a84ff] grid place-items-center text-white shrink-0">
+              <div className="rounded-xl ring-hair bg-surface px-2.5 py-2 flex items-center gap-2">
+                <div className="w-6 h-6 rounded-md bg-accent grid place-items-center text-white shrink-0">
                   <Gauge className="w-3.5 h-3.5" />
                 </div>
                 <div className="leading-tight flex-1 min-w-0">
                   <div className="text-[12px] font-medium">~{fusionCostMult}×</div>
-                  <div className="text-[10.5px] text-[#86868b] truncate">
+                  <div className="text-[10.5px] text-text-muted truncate">
                     panel runs in parallel; judge + synthesize add 2 stages
                   </div>
                 </div>
@@ -380,7 +380,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
               <div>
                 <SectionLabel>Model · API</SectionLabel>
                 {def.model ? (
-                  <div className="rounded-xl ring-hair bg-white px-2.5 py-2 flex items-center gap-2">
+                  <div className="rounded-xl ring-hair bg-surface px-2.5 py-2 flex items-center gap-2">
                     <div className="w-6 h-6 rounded-md bg-[#10a37f] grid place-items-center text-white shrink-0">
                       <Bot className="w-3.5 h-3.5" />
                     </div>
@@ -389,12 +389,12 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                         {def.model}
                         {def.role ? ` · ${def.role}` : ""}
                       </div>
-                      <div className="text-[10.5px] text-[#86868b] truncate">
+                      <div className="text-[10.5px] text-text-muted truncate">
                         {def.providerId ? `provider · ${def.providerId}` : "—"}
                       </div>
                     </div>
                     {/* Static "configured" affordance — only because `model` is set. */}
-                    <CheckCircle2 className="w-4 h-4 text-[#30a14e] shrink-0" />
+                    <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
                   </div>
                 ) : (
                   <DeferredNote>No model configured</DeferredNote>
@@ -439,33 +439,33 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                     onClick={doSnapshot}
                     disabled={snapshotBusy}
                     title="Create a manual snapshot"
-                    className="normal-case tracking-normal text-[10.5px] font-medium text-[#0a84ff] hover:underline disabled:opacity-40 disabled:hover:no-underline flex items-center gap-1"
+                    className="normal-case tracking-normal text-[10.5px] font-medium text-accent hover:underline disabled:opacity-40 disabled:hover:no-underline flex items-center gap-1"
                   >
                     <Camera className="w-3 h-3" />
                     {snapshotBusy ? "Saving…" : "Snapshot now"}
                   </button>
                 </SectionLabel>
-                <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1 text-[11.5px]">
+                <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1 text-[11.5px]">
                   {snapshotError && (
-                    <div className="text-[10.5px] text-[#ff3b30]">Couldn't save snapshot</div>
+                    <div className="text-[10.5px] text-danger">Couldn't save snapshot</div>
                   )}
                   {snapshots.length === 0 ? (
-                    <div className="text-[10.5px] text-[#a1a1a6] py-0.5">No snapshots yet</div>
+                    <div className="text-[10.5px] text-text-tertiary py-0.5">No snapshots yet</div>
                   ) : (
                     snapshots.map((s) => (
                       <div key={s.id} className="flex items-center gap-1.5">
                         {s.type === "auto" ? (
-                          <Clock className="w-3 h-3 shrink-0 text-[#ff9f0a]" />
+                          <Clock className="w-3 h-3 shrink-0 text-warning" />
                         ) : (
-                          <Camera className="w-3 h-3 shrink-0 text-[#0a84ff]" />
+                          <Camera className="w-3 h-3 shrink-0 text-accent" />
                         )}
                         <span className="font-medium shrink-0">{s.type}</span>
                         {s.tokens != null && (
-                          <span className="text-[#6e6e73] truncate flex-1 min-w-0">
+                          <span className="text-text-secondary truncate flex-1 min-w-0">
                             ~{s.tokens.toLocaleString()} tok
                           </span>
                         )}
-                        <span className="text-[10px] text-[#a1a1a6] shrink-0 ml-auto">
+                        <span className="text-[10px] text-text-tertiary shrink-0 ml-auto">
                           {timeHint(s.createdAt)}
                         </span>
                       </div>
@@ -475,7 +475,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                 {/* Entry point to the full memory-timeline screen (M4.2). */}
                 <button
                   onClick={() => setShowTimeline(true)}
-                  className="mt-1.5 text-[10.5px] font-medium text-[#6e6e73] hover:text-[#0a84ff] flex items-center gap-1"
+                  className="mt-1.5 text-[10.5px] font-medium text-text-secondary hover:text-accent flex items-center gap-1"
                 >
                   <History className="w-3 h-3" />
                   Open timeline
@@ -487,16 +487,16 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                 REAL recent inbox/outbox log from `message.list`. */}
             <div>
               <SectionLabel>Messages</SectionLabel>
-              <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1.5 text-[11.5px]">
+              <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1.5 text-[11.5px]">
                 <div className="flex items-center justify-between">
-                  <span className="text-[#6e6e73] flex items-center gap-1.5">
+                  <span className="text-text-secondary flex items-center gap-1.5">
                     <Inbox className="w-3.5 h-3.5" />
                     Accepts from
                   </span>
                   <span className="font-medium">{allowedSendersLabel(def.allowedSenders)}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-[#6e6e73] flex items-center gap-1.5">
+                  <span className="text-text-secondary flex items-center gap-1.5">
                     <Send className="w-3.5 h-3.5" />
                     Auto-submit on inject
                   </span>
@@ -504,9 +504,9 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                 </div>
 
                 {/* Recent inbox/outbox — newest first. Honest empty state. */}
-                <div className="pt-1.5 mt-0.5 border-t border-black/[0.06] space-y-1">
+                <div className="pt-1.5 mt-0.5 border-t border-overlay/[0.06] space-y-1">
                   {messages.length === 0 ? (
-                    <div className="text-[10.5px] text-[#a1a1a6] py-0.5">No messages yet</div>
+                    <div className="text-[10.5px] text-text-tertiary py-0.5">No messages yet</div>
                   ) : (
                     messages.map((m) => {
                       const inbound = m.toInstanceId === instanceId;
@@ -514,20 +514,20 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                       return (
                         <div key={m.id} className="flex items-center gap-1.5">
                           {inbound ? (
-                            <CornerDownLeft className="w-3 h-3 shrink-0 text-[#30a14e]" />
+                            <CornerDownLeft className="w-3 h-3 shrink-0 text-success" />
                           ) : (
-                            <CornerUpRight className="w-3 h-3 shrink-0 text-[#0a84ff]" />
+                            <CornerUpRight className="w-3 h-3 shrink-0 text-accent" />
                           )}
-                          <span className="text-[#6e6e73] shrink-0">
+                          <span className="text-text-secondary shrink-0">
                             {inbound ? "from" : "to"}
                           </span>
                           <span className="font-medium truncate flex-1 min-w-0">
                             {nameOf(counterpart)}
                           </span>
                           {m.status === "queued" && (
-                            <span className="text-[10px] text-[#ff9f0a] shrink-0">queued</span>
+                            <span className="text-[10px] text-warning shrink-0">queued</span>
                           )}
-                          <span className="text-[10px] text-[#a1a1a6] shrink-0">
+                          <span className="text-[10px] text-text-tertiary shrink-0">
                             {timeHint(m.createdAt)}
                           </span>
                         </div>
@@ -547,21 +547,21 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
         {showMeter && meterTokens != null && meterLimit != null && (
           <div>
             <SectionLabel>Context</SectionLabel>
-            <div className="rounded-xl ring-hair bg-white p-2.5 space-y-1.5 text-[11.5px]">
-              <div className="flex items-center justify-between text-[#6e6e73]">
+            <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1.5 text-[11.5px]">
+              <div className="flex items-center justify-between text-text-secondary">
                 <span className="flex items-center gap-1">
                   tokens
                   {meterEstimated && (
-                    <span className="text-[9.5px] text-[#a1a1a6] font-normal">estimate</span>
+                    <span className="text-[9.5px] text-text-tertiary font-normal">estimate</span>
                   )}
                 </span>
                 <span className="font-mono">
                   {meterTokens.toLocaleString()} / {meterLimit.toLocaleString()}
                 </span>
               </div>
-              <div className="h-1.5 rounded-full bg-black/[0.06] overflow-hidden">
+              <div className="h-1.5 rounded-full bg-overlay/[0.06] overflow-hidden">
                 <div
-                  className="h-full bg-[#0a84ff]"
+                  className="h-full bg-accent"
                   style={{
                     width: `${Math.min(100, Math.round((meterTokens / meterLimit) * 100))}%`,
                   }}
@@ -573,7 +573,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
       </div>
 
       {/* Footer — agent identity (real: name/color/status). */}
-      <div className="border-t border-black/[0.06] px-3 py-2 shrink-0 flex items-center gap-2">
+      <div className="border-t border-overlay/[0.06] px-3 py-2 shrink-0 flex items-center gap-2">
         <div
           className="w-6 h-6 rounded-[7px] text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0"
           style={{ backgroundColor: def.color ?? "#6e6e73" }}
@@ -586,7 +586,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
         </div>
         <div className="leading-tight flex-1 min-w-0">
           <div className="text-[12px] font-semibold truncate">{def.name}</div>
-          <div className="text-[10.5px] text-[#86868b] truncate">{status}</div>
+          <div className="text-[10.5px] text-text-muted truncate">{status}</div>
         </div>
       </div>
       </aside>

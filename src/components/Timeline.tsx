@@ -220,9 +220,9 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
   }, [sessionId, refetchSnapshots]);
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[#f5f5f7]">
+    <div className="fixed inset-0 z-50 flex flex-col bg-sidebar">
       {/* ── Header bar ─────────────────────────────────────────────────── */}
-      <div className="h-12 flex items-center justify-between px-4 border-b border-black/[0.06] bg-white shrink-0">
+      <div className="h-12 flex items-center justify-between px-4 border-b border-overlay/[0.06] bg-surface shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
           <div
             className="w-6 h-6 rounded-[7px] text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0"
@@ -235,7 +235,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
             )}
           </div>
           <span className="text-[13px] font-semibold tracking-tight truncate">{def.name}</span>
-          <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md shrink-0">
+          <span className="text-[10px] font-medium text-text-muted bg-overlay/[0.04] px-1.5 py-px rounded-md shrink-0">
             Memory timeline
           </span>
         </div>
@@ -243,34 +243,34 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
         <div className="flex items-center gap-3 shrink-0">
           {/* Live context meter — ESTIMATE, labelled. */}
           {meterPct != null && (
-            <div className="flex items-center gap-1.5 text-[11px] text-[#6e6e73]">
-              <Gauge className="w-3.5 h-3.5 text-[#86868b]" />
+            <div className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+              <Gauge className="w-3.5 h-3.5 text-text-muted" />
               <span>
                 context {meterPct}%
-                <span className="ml-1 text-[9.5px] text-[#a1a1a6]">estimate</span>
+                <span className="ml-1 text-[9.5px] text-text-tertiary">estimate</span>
               </span>
-              <div className="h-1.5 w-20 rounded-full bg-black/[0.06] overflow-hidden">
-                <div className="h-full bg-[#0a84ff]" style={{ width: `${meterPct}%` }} />
+              <div className="h-1.5 w-20 rounded-full bg-overlay/[0.06] overflow-hidden">
+                <div className="h-full bg-accent" style={{ width: `${meterPct}%` }} />
               </div>
             </div>
           )}
 
           {snapshotError && (
-            <span className="text-[10.5px] text-[#ff3b30]">Couldn't save snapshot</span>
+            <span className="text-[10.5px] text-danger">Couldn't save snapshot</span>
           )}
 
           <button
             onClick={doSnapshot}
             disabled={snapshotBusy}
             title="Create a manual snapshot"
-            className="text-[12px] font-semibold text-white bg-[#0a84ff] px-3 h-7 rounded-lg hover:brightness-105 disabled:opacity-40 flex items-center gap-1.5"
+            className="text-[12px] font-semibold text-white bg-accent px-3 h-7 rounded-lg hover:brightness-105 disabled:opacity-40 flex items-center gap-1.5"
           >
             <Camera className="w-3.5 h-3.5" />
             {snapshotBusy ? "Saving…" : "Snapshot now"}
           </button>
           <button
             onClick={onClose}
-            className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.06] text-[#86868b] shrink-0"
+            className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.06] text-text-muted shrink-0"
             aria-label="Close timeline"
           >
             <X className="w-[15px] h-[15px]" />
@@ -287,27 +287,27 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
             <TimelineRow
               dot={
                 <span className="relative grid place-items-center">
-                  <Radio className="w-3.5 h-3.5 text-[#30a14e]" />
+                  <Radio className="w-3.5 h-3.5 text-success" />
                 </span>
               }
               connector
             >
-              <div className="rounded-xl ring-hair bg-white px-3 py-2.5">
+              <div className="rounded-xl ring-hair bg-surface px-3 py-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[12.5px] font-semibold">Now · live context</span>
-                  <span className="text-[10px] font-medium text-[#30a14e] bg-[#30a14e]/[0.12] px-1.5 py-px rounded-md">
+                  <span className="text-[10px] font-medium text-success bg-success/[0.12] px-1.5 py-px rounded-md">
                     live
                   </span>
                 </div>
-                <div className="mt-0.5 text-[11.5px] text-[#6e6e73]">
+                <div className="mt-0.5 text-[11.5px] text-text-secondary">
                   {meterTokens != null && meterLimit != null ? (
                     <>
                       ~{meterTokens.toLocaleString()} / {meterLimit.toLocaleString()} tokens
                       {meterPct != null ? ` · ${meterPct}%` : ""}
-                      <span className="ml-1 text-[10px] text-[#a1a1a6]">estimate</span>
+                      <span className="ml-1 text-[10px] text-text-tertiary">estimate</span>
                     </>
                   ) : (
-                    <span className="text-[#a1a1a6]">No context estimate yet</span>
+                    <span className="text-text-tertiary">No context estimate yet</span>
                   )}
                 </div>
               </div>
@@ -317,7 +317,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                 `loaded` so it can't flash before the first list settles. */}
             {snapshots.length === 0 ? (
               <TimelineRow
-                dot={<span className="w-2.5 h-2.5 rounded-full bg-black/[0.12]" />}
+                dot={<span className="w-2.5 h-2.5 rounded-full bg-overlay/[0.12]" />}
                 connector
               >
                 <DeferredNote>
@@ -344,10 +344,10 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                     }
                   >
                     <div
-                      className={`rounded-xl bg-white px-3 py-2.5 ${
+                      className={`rounded-xl bg-surface px-3 py-2.5 ${
                         isSelected
-                          ? "ring-2 ring-[#0a84ff]/50"
-                          : "ring-hair hover:bg-black/[0.01]"
+                          ? "ring-2 ring-accent/50"
+                          : "ring-hair hover:bg-overlay/[0.01]"
                       }`}
                     >
                       <div className="flex items-center gap-2">
@@ -355,7 +355,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                           {snapTitle(s)}
                         </span>
                         <TypePill type={s.type} />
-                        <span className="ml-auto text-[10.5px] text-[#a1a1a6] shrink-0 flex items-center gap-1.5">
+                        <span className="ml-auto text-[10.5px] text-text-tertiary shrink-0 flex items-center gap-1.5">
                           <span>{timeHint(s.createdAt)}</span>
                           {s.tokens != null && (
                             <span className="font-mono">~{s.tokens.toLocaleString()} tok</span>
@@ -363,12 +363,12 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                         </span>
                       </div>
                       {s.summary && (
-                        <div className="mt-1 text-[11.5px] text-[#6e6e73]">{s.summary}</div>
+                        <div className="mt-1 text-[11.5px] text-text-secondary">{s.summary}</div>
                       )}
                       <div className="mt-1.5">
                         <button
                           onClick={() => openDetail(s)}
-                          className="text-[11px] font-medium text-[#0a84ff] hover:underline flex items-center gap-1"
+                          className="text-[11px] font-medium text-accent hover:underline flex items-center gap-1"
                         >
                           <BookOpen className="w-3 h-3" />
                           Read
@@ -381,11 +381,11 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
             )}
 
             {/* Session start (synthetic structural marker — real startedAt). */}
-            <TimelineRow dot={<Flag className="w-3.5 h-3.5 text-[#86868b]" />}>
-              <div className="rounded-xl ring-hair bg-white px-3 py-2.5">
+            <TimelineRow dot={<Flag className="w-3.5 h-3.5 text-text-muted" />}>
+              <div className="rounded-xl ring-hair bg-surface px-3 py-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[12.5px] font-semibold">Session start</span>
-                  <span className="text-[10.5px] text-[#a1a1a6]">
+                  <span className="text-[10.5px] text-text-tertiary">
                     {timeHint(session.startedAt)}
                   </span>
                 </div>
@@ -395,9 +395,9 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
         </div>
 
         {/* Right — snapshot detail aside */}
-        <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
-          <div className="h-12 flex items-center px-4 border-b border-black/[0.06] shrink-0">
-            <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight">
+        <aside className="w-[306px] vibrancy border-l border-overlay/[0.06] flex flex-col shrink-0">
+          <div className="h-12 flex items-center px-4 border-b border-overlay/[0.06] shrink-0">
+            <span className="text-[12px] font-semibold text-text-secondary tracking-tight">
               Snapshot detail
             </span>
             {detail && (
@@ -407,7 +407,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                 </span>
                 <button
                   onClick={clearDetail}
-                  className="ml-auto w-6 h-6 grid place-items-center rounded-md hover:bg-black/[0.06] text-[#86868b]"
+                  className="ml-auto w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.06] text-text-muted"
                   aria-label="Close snapshot detail"
                   title="Close detail"
                 >
@@ -427,7 +427,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                   <div className="text-[13px] font-semibold tracking-tight">
                     {snapTitle(detail)}
                   </div>
-                  <div className="mt-0.5 text-[11px] text-[#86868b]">
+                  <div className="mt-0.5 text-[11px] text-text-muted">
                     {[
                       timeHint(detail.createdAt),
                       detail.tokens != null
@@ -442,14 +442,14 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
 
                 {/* Summary — REAL when present (deterministic honest string). */}
                 {detail.summary && (
-                  <div className="rounded-xl ring-hair bg-white px-2.5 py-2 text-[11.5px] text-[#3a3a3c]">
+                  <div className="rounded-xl ring-hair bg-surface px-2.5 py-2 text-[11.5px] text-text-body">
                     {detail.summary}
                   </div>
                 )}
 
                 {/* Carried forward — DEFERRED (always null until history persisted). */}
                 <div>
-                  <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5">
+                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5 px-0.5">
                     Carried forward
                   </div>
                   <DeferredNote>{DEFERRED_REASON}</DeferredNote>
@@ -458,7 +458,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                 {/* Diff vs previous — only when a previous snapshot exists. */}
                 {detail.prevSnapshotId && (
                   <div>
-                    <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5">
+                    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5 px-0.5">
                       Diff vs previous
                     </div>
                     <DeferredNote>{DEFERRED_REASON}</DeferredNote>
@@ -470,7 +470,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                   <button
                     disabled
                     title="You're viewing this snapshot's detail"
-                    className="text-[11.5px] font-medium text-[#6e6e73] bg-black/[0.05] px-2.5 h-7 rounded-lg flex items-center gap-1.5 cursor-default"
+                    className="text-[11.5px] font-medium text-text-secondary bg-overlay/[0.05] px-2.5 h-7 rounded-lg flex items-center gap-1.5 cursor-default"
                   >
                     <BookOpen className="w-3.5 h-3.5" />
                     Viewing
@@ -478,7 +478,7 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                   <button
                     disabled
                     title="Fork needs persisted conversation history (deferred)"
-                    className="text-[11.5px] font-medium text-[#a1a1a6] ring-hair px-2.5 h-7 rounded-lg flex items-center gap-1.5 opacity-50 cursor-not-allowed"
+                    className="text-[11.5px] font-medium text-text-tertiary ring-hair px-2.5 h-7 rounded-lg flex items-center gap-1.5 opacity-50 cursor-not-allowed"
                   >
                     <GitFork className="w-3.5 h-3.5" />
                     Fork
@@ -486,13 +486,13 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
                   <button
                     disabled
                     title="Restore needs persisted conversation history (deferred)"
-                    className="text-[11.5px] font-medium text-[#a1a1a6] ring-hair px-2.5 h-7 rounded-lg flex items-center gap-1.5 opacity-50 cursor-not-allowed"
+                    className="text-[11.5px] font-medium text-text-tertiary ring-hair px-2.5 h-7 rounded-lg flex items-center gap-1.5 opacity-50 cursor-not-allowed"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     Restore
                   </button>
                 </div>
-                <p className="text-[10.5px] text-[#a1a1a6] leading-snug px-0.5">
+                <p className="text-[10.5px] text-text-tertiary leading-snug px-0.5">
                   Fork and Restore need persisted conversation history — deferred.
                 </p>
               </>
@@ -519,7 +519,7 @@ function TimelineRow({
     <div className="flex gap-3">
       <div className="flex flex-col items-center w-4 shrink-0">
         <div className="h-5 grid place-items-center">{dot}</div>
-        {connector && <div className="w-px flex-1 bg-black/[0.1] min-h-4" />}
+        {connector && <div className="w-px flex-1 bg-overlay/[0.1] min-h-4" />}
       </div>
       <div className={`flex-1 min-w-0 ${connector ? "pb-3" : ""}`}>{children}</div>
     </div>

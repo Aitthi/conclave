@@ -18,26 +18,26 @@ interface ToolCallCardProps {
  */
 export function ToolCallCard({ name, status, detail }: ToolCallCardProps) {
   return (
-    <div className="rounded-xl ring-hair bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-3 h-8 bg-[#fafafa] border-b border-black/[0.05]">
-        <Wrench className="w-3.5 h-3.5 text-[#6e6e73] shrink-0" />
-        <span className="text-[11.5px] font-semibold text-[#3a3a3c]">tool</span>
-        <span className="font-mono text-[10.5px] text-[#86868b] truncate">{name}</span>
+    <div className="rounded-xl ring-hair bg-surface overflow-hidden">
+      <div className="flex items-center gap-2 px-3 h-8 bg-fill-softer border-b border-overlay/[0.05]">
+        <Wrench className="w-3.5 h-3.5 text-text-secondary shrink-0" />
+        <span className="text-[11.5px] font-semibold text-text-body">tool</span>
+        <span className="font-mono text-[10.5px] text-text-muted truncate">{name}</span>
         <span className="ml-auto shrink-0">
           {status === "running" && (
-            <span className="text-[10.5px] text-[#6e6e73] flex items-center gap-1">
+            <span className="text-[10.5px] text-text-secondary flex items-center gap-1">
               <LoaderCircle className="w-3 h-3 animate-spin" />
               running
             </span>
           )}
           {status === "done" && (
-            <span className="text-[10.5px] text-[#30a14e] flex items-center gap-1">
+            <span className="text-[10.5px] text-success flex items-center gap-1">
               <Check className="w-3 h-3" />
               done
             </span>
           )}
           {status === "error" && (
-            <span className="text-[10.5px] text-[#b62324] flex items-center gap-1">
+            <span className="text-[10.5px] text-danger flex items-center gap-1">
               <CircleAlert className="w-3 h-3" />
               error
             </span>
@@ -45,7 +45,7 @@ export function ToolCallCard({ name, status, detail }: ToolCallCardProps) {
         </span>
       </div>
       {detail !== undefined && detail.length > 0 && (
-        <div className="px-3 py-1.5 font-mono text-[11.5px] leading-[1.6] text-[#3a3a3c] whitespace-pre-wrap break-words">
+        <div className="px-3 py-1.5 font-mono text-[11.5px] leading-[1.6] text-text-body whitespace-pre-wrap break-words">
           {detail}
         </div>
       )}

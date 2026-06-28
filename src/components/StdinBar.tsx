@@ -145,18 +145,18 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
       : "Message the agent…";
 
   return (
-    <div className="shrink-0 border-t border-black/[0.06] bg-white">
+    <div className="shrink-0 border-t border-overlay/[0.06] bg-surface">
       {error && (
-        <div className="px-3 pt-1.5 text-[11px] text-[#ff3b30]">{error}</div>
+        <div className="px-3 pt-1.5 text-[11px] text-danger">{error}</div>
       )}
       {outbox && (
-        <div className="px-3 pt-1.5 text-[11px] flex items-center gap-1.5 text-[#6e6e73]">
-          <CornerUpRight className="w-3 h-3 shrink-0 text-[#a1a1a6]" />
-          <span className="font-medium text-[#1d1d1f]">→ sent to {outbox.toName}</span>
+        <div className="px-3 pt-1.5 text-[11px] flex items-center gap-1.5 text-text-secondary">
+          <CornerUpRight className="w-3 h-3 shrink-0 text-text-tertiary" />
+          <span className="font-medium text-text-primary">→ sent to {outbox.toName}</span>
           {outbox.status === "delivered" ? (
             <span>· auto-submit</span>
           ) : (
-            <span className="text-[#ff9f0a]">· target agent isn't running — queued</span>
+            <span className="text-warning">· target agent isn't running — queued</span>
           )}
         </div>
       )}
@@ -165,10 +165,10 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             stdin and the chat input read as the same control. */}
         <div
           ref={dropRef}
-          className={`flex items-center gap-2.5 rounded-2xl ring-1 bg-[#f7f7f8] px-3 py-2.5 transition-shadow${
+          className={`flex items-center gap-2.5 rounded-2xl ring-1 bg-fill-softer px-3 py-2.5 transition-shadow${
             isOver
-              ? " ring-2 ring-[#0a84ff] bg-[#0a84ff]/[0.06]"
-              : " ring-black/[0.1] focus-within:ring-[#0a84ff]/50"
+              ? " ring-2 ring-accent bg-accent/[0.06]"
+              : " ring-overlay/[0.1] focus-within:ring-accent/50"
           }`}
         >
           <RoutingPicker
@@ -178,7 +178,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             onChange={setTargetId}
             disabled={sending}
           />
-          <span className="text-[15px] text-[#a1a1a6] font-mono select-none shrink-0">›</span>
+          <span className="text-[15px] text-text-tertiary font-mono select-none shrink-0">›</span>
           <input
             ref={inputRef}
             value={value}
@@ -194,7 +194,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
               }
             }}
             placeholder={placeholder}
-            className="flex-1 min-w-0 bg-transparent outline-none text-[14.5px] font-mono placeholder:text-[#a1a1a6] disabled:opacity-50"
+            className="flex-1 min-w-0 bg-transparent outline-none text-[14.5px] font-mono placeholder:text-text-tertiary disabled:opacity-50"
           />
           {/* Send — Enter also submits; the button mirrors that for discoverability. */}
           <button
@@ -203,7 +203,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             disabled={disabled || value.length === 0}
             title="Send (Enter)"
             aria-label="Send"
-            className="w-9 h-9 rounded-xl bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
+            className="w-9 h-9 rounded-xl bg-accent text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
           >
             <CornerDownLeft className="w-[18px] h-[18px]" />
           </button>

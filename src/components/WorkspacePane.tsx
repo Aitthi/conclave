@@ -42,7 +42,7 @@ const STATUS_COLOR: Record<WorkspaceAgent["status"], string> = {
 
 // Small per-type glyph so cli vs chat vs orchestrator is distinguishable.
 function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
-  const cls = "w-3 h-3 text-[#86868b] shrink-0";
+  const cls = "w-3 h-3 text-text-muted shrink-0";
   switch (type) {
     case "cli":
       return <TerminalIcon className={cls} />;
@@ -234,8 +234,8 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
   // Loading state: don't flash "no agents" during the initial fetch.
   if (loading) {
     return (
-      <main className="flex-1 flex flex-col min-w-0 bg-white">
-        <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
+      <main className="flex-1 flex flex-col min-w-0 bg-surface">
+        <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
           Loading…
         </div>
       </main>
@@ -245,8 +245,8 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
   // Empty / load-error state.
   if (tabs.length === 0) {
     return (
-      <main className="flex-1 flex flex-col min-w-0 bg-white">
-        <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6] px-6 text-center">
+      <main className="flex-1 flex flex-col min-w-0 bg-surface">
+        <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary px-6 text-center">
           {loadError
             ? "Failed to load agents"
             : "No agents in this workspace yet"}
@@ -263,7 +263,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
   const activeError = activeInstanceId ? (spawnErrors[activeInstanceId] ?? null) : null;
 
   return (
-    <div className="flex-1 flex min-w-0 bg-white">
+    <div className="flex-1 flex min-w-0 bg-surface">
       <main className="flex-1 flex flex-col min-w-0">
         {/* Tab strip — one tab per instance, with a per-type glyph. 48px tall to
             line up with the Roster and Context headers so the three column
@@ -273,7 +273,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
             the window / double-clicks to zoom. */}
         <div
           data-tauri-drag-region
-          className="h-12 flex items-center gap-1 px-2 border-b border-black/[0.06] shrink-0 overflow-x-auto scroll-thin bg-[#f5f5f7]"
+          className="h-12 flex items-center gap-1 px-2 border-b border-overlay/[0.06] shrink-0 overflow-x-auto scroll-thin bg-sidebar"
         >
           {tabs.map((tab) => {
             const isActive = tab.instanceId === activeInstanceId;
@@ -282,7 +282,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
                 key={tab.instanceId}
                 onClick={() => setActiveInstanceId(tab.instanceId)}
                 className={`flex items-center gap-2 px-3 h-7 rounded-md text-[13px] transition-colors${
-                  isActive ? " bg-black/[0.06] font-semibold" : " hover:bg-black/[0.04] text-[#6e6e73]"
+                  isActive ? " bg-overlay/[0.06] font-semibold" : " hover:bg-overlay/[0.04] text-text-secondary"
                 }`}
               >
                 <span
@@ -298,13 +298,13 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
 
         {/* Active body — dispatched by the focused tab's agent type */}
         {activeTab === null ? (
-          <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
+          <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
             Select an agent
           </div>
         ) : activeTab.type === "cli" ? (
           // CLI → live terminal + stdin bar.
           activeError ? (
-            <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#ff453a] px-6 text-center">
+            <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-danger px-6 text-center">
               Couldn't open session: {activeError}
             </div>
           ) : activeSessionId ? (
@@ -318,7 +318,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
             </>
           ) : (
             <>
-              <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-[#a1a1a6]">
+              <div className="flex-1 grid place-items-center bg-[#1e1e1e] text-[13px] text-text-tertiary">
                 Opening session…
               </div>
               <StdinBar sessionId={null} instanceId={activeTab.instanceId} roster={roster} />
@@ -327,7 +327,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
         ) : activeTab.type === "chat" ? (
           // Chat → custom chat UI.
           activeError ? (
-            <div className="flex-1 grid place-items-center text-[13px] text-[#ff3b30] px-6 text-center">
+            <div className="flex-1 grid place-items-center text-[13px] text-danger px-6 text-center">
               Couldn't open session: {activeError}
             </div>
           ) : activeSessionId ? (
@@ -340,7 +340,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
               agentColor={activeTab.color}
             />
           ) : (
-            <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
+            <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
               Opening session…
             </div>
           )

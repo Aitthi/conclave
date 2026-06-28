@@ -70,27 +70,27 @@ function AgentCard({ def, onEdit, onDelete, deleting }: AgentCardProps) {
     inCount === 0 ? "Not in any workspace" : `in ${inCount} workspace${inCount !== 1 ? "s" : ""}`;
 
   return (
-    <div className="rounded-xl p-3.5 ring-hair bg-white">
+    <div className="rounded-xl p-3.5 ring-hair bg-surface">
       <div className="flex items-start gap-3">
         <AgentAvatar def={def} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <span className="text-[13.5px] font-semibold">{def.name}</span>
-            <span className="text-[9.5px] font-medium text-[#86868b] bg-black/[0.05] px-1.5 py-px rounded">
+            <span className="text-[9.5px] font-medium text-text-muted bg-overlay/[0.05] px-1.5 py-px rounded">
               {TYPE_BADGE[def.type]}
             </span>
           </div>
-          <div className="text-[11px] text-[#86868b] truncate">
+          <div className="text-[11px] text-text-muted truncate">
             {[def.role, def.model].filter(Boolean).join(" · ") || def.type}
           </div>
-          <div className="text-[10.5px] text-[#86868b] mt-1">{countLabel}</div>
+          <div className="text-[10.5px] text-text-muted mt-1">{countLabel}</div>
         </div>
       </div>
 
       <div className="flex items-center gap-1.5 mt-3">
         <button
           onClick={onEdit}
-          className="flex-1 text-[11.5px] font-medium text-[#3a3a3c] bg-white ring-hair rounded-lg py-1.5 hover:bg-black/[0.02] flex items-center justify-center gap-1"
+          className="flex-1 text-[11.5px] font-medium text-text-body bg-surface ring-hair rounded-lg py-1.5 hover:bg-overlay/[0.02] flex items-center justify-center gap-1"
         >
           <Pencil className="w-3.5 h-3.5" />
           Edit
@@ -100,7 +100,7 @@ function AgentCard({ def, onEdit, onDelete, deleting }: AgentCardProps) {
             onClick={onDelete}
             disabled={deleting}
             onMouseLeave={() => setConfirming(false)}
-            className="flex-1 text-[11.5px] font-semibold text-white bg-[#ff3b30] rounded-lg py-1.5 hover:brightness-105 disabled:opacity-50 flex items-center justify-center gap-1"
+            className="flex-1 text-[11.5px] font-semibold text-white bg-danger rounded-lg py-1.5 hover:brightness-105 disabled:opacity-50 flex items-center justify-center gap-1"
           >
             <Trash2 className="w-3.5 h-3.5" />
             {deleting ? "Deleting…" : "Confirm"}
@@ -108,7 +108,7 @@ function AgentCard({ def, onEdit, onDelete, deleting }: AgentCardProps) {
         ) : (
           <button
             onClick={() => setConfirming(true)}
-            className="flex-1 text-[11.5px] font-medium text-[#ff3b30] bg-[#ff3b30]/[0.06] rounded-lg py-1.5 hover:bg-[#ff3b30]/10 flex items-center justify-center gap-1"
+            className="flex-1 text-[11.5px] font-medium text-danger bg-danger/[0.06] rounded-lg py-1.5 hover:bg-danger/10 flex items-center justify-center gap-1"
           >
             <Trash2 className="w-3.5 h-3.5" />
             Delete
@@ -172,14 +172,14 @@ export function Library({ onClose, onOpenBuilder, refreshKey, onAgentsChanged }:
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
 
       {/* Sheet panel. */}
-      <div className="relative w-[440px] max-w-full h-full bg-[#f5f5f7] shadow-2xl flex flex-col ring-1 ring-black/[0.08]">
+      <div className="relative w-[440px] max-w-full h-full bg-sidebar shadow-2xl flex flex-col ring-1 ring-overlay/[0.08]">
         {/* Header */}
-        <div className="h-12 flex items-center gap-2 px-4 border-b border-black/[0.06] shrink-0">
-          <UsersRound className="w-[15px] h-[15px] text-[#0a84ff] shrink-0" />
+        <div className="h-12 flex items-center gap-2 px-4 border-b border-overlay/[0.06] shrink-0">
+          <UsersRound className="w-[15px] h-[15px] text-accent shrink-0" />
           <span className="text-[13px] font-semibold tracking-tight">Agent Library</span>
           <button
             onClick={onClose}
-            className="ml-auto w-6 h-6 grid place-items-center rounded-md hover:bg-black/[0.06] text-[#86868b] shrink-0"
+            className="ml-auto w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.06] text-text-muted shrink-0"
             aria-label="Close Agent Library"
           >
             <X className="w-3.5 h-3.5" />
@@ -188,13 +188,13 @@ export function Library({ onClose, onOpenBuilder, refreshKey, onAgentsChanged }:
 
         {/* Search */}
         <div className="px-3 pt-3 pb-2 shrink-0">
-          <div className="flex items-center gap-2 bg-black/[0.05] rounded-lg px-2.5 h-7">
-            <Search className="w-[13px] h-[13px] text-[#86868b] shrink-0" />
+          <div className="flex items-center gap-2 bg-overlay/[0.05] rounded-lg px-2.5 h-7">
+            <Search className="w-[13px] h-[13px] text-text-muted shrink-0" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search agents"
-              className="bg-transparent outline-none text-[12px] placeholder:text-[#a1a1a6] w-full"
+              className="bg-transparent outline-none text-[12px] placeholder:text-text-tertiary w-full"
             />
           </div>
         </div>
@@ -203,15 +203,15 @@ export function Library({ onClose, onOpenBuilder, refreshKey, onAgentsChanged }:
         <div className="flex-1 overflow-y-auto scroll-thin px-3 pb-3 space-y-2">
           {filteredDefs.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
-              <UsersRound className="w-9 h-9 text-[#c7c7cc]" />
-              <p className="text-[13px] font-semibold text-[#6e6e73]">
+              <UsersRound className="w-9 h-9 text-text-quaternary" />
+              <p className="text-[13px] font-semibold text-text-secondary">
                 {loadError
                   ? "Failed to load agents"
                   : defs.length === 0
                     ? "No agents yet"
                     : "No matching agents"}
               </p>
-              <p className="text-[11.5px] text-[#a1a1a6]">
+              <p className="text-[11.5px] text-text-tertiary">
                 {loadError
                   ? "Check the app is running and try again"
                   : defs.length === 0
@@ -233,10 +233,10 @@ export function Library({ onClose, onOpenBuilder, refreshKey, onAgentsChanged }:
         </div>
 
         {/* New agent */}
-        <div className="border-t border-black/[0.06] p-2 shrink-0">
+        <div className="border-t border-overlay/[0.06] p-2 shrink-0">
           <button
             onClick={() => onOpenBuilder()}
-            className="w-full flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg bg-[#0a84ff] text-white hover:brightness-105"
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg bg-accent text-white hover:brightness-105"
           >
             <Plus className="w-4 h-4" />
             <span className="text-[12.5px] font-semibold">New agent</span>

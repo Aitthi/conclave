@@ -250,12 +250,12 @@ export function ChatView({
   }
 
   return (
-    <main className="flex-1 flex flex-col min-w-0 bg-white">
+    <main className="flex-1 flex flex-col min-w-0 bg-surface">
       {/* Message list */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-thin px-8 py-6">
         <div className="max-w-[720px] mx-auto space-y-5">
           {messages.length === 0 ? (
-            <div className="text-center text-[13px] text-[#a1a1a6] pt-10">
+            <div className="text-center text-[13px] text-text-tertiary pt-10">
               Start chatting with the agent
             </div>
           ) : (
@@ -276,7 +276,7 @@ export function ChatView({
       </div>
 
       {/* Composer */}
-      <div className="border-t border-black/[0.07] px-8 py-3 bg-white shrink-0">
+      <div className="border-t border-overlay/[0.07] px-8 py-3 bg-surface shrink-0">
         <div className="max-w-[720px] mx-auto">
           {/* Route reply into… — default self, choose another agent to inject. */}
           <div className="mb-2 flex items-center gap-2">
@@ -288,15 +288,15 @@ export function ChatView({
               disabled={sending}
             />
             {targetId !== instanceId && (
-              <span className="text-[11px] text-[#a1a1a6]">injects into the target agent's input · auto-submit</span>
+              <span className="text-[11px] text-text-tertiary">injects into the target agent's input · auto-submit</span>
             )}
           </div>
           <div
             ref={dropRef}
-            className={`rounded-2xl ring-1 bg-[#f7f7f8] px-3 pt-2.5 pb-2 transition-shadow${
+            className={`rounded-2xl ring-1 bg-fill-softer px-3 pt-2.5 pb-2 transition-shadow${
               isOver
-                ? " ring-2 ring-[#0a84ff] bg-[#0a84ff]/[0.06]"
-                : " ring-black/[0.1] focus-within:ring-[#0a84ff]/50"
+                ? " ring-2 ring-accent bg-accent/[0.06]"
+                : " ring-overlay/[0.1] focus-within:ring-accent/50"
             }`}
           >
             <div className="flex items-end gap-2">
@@ -313,12 +313,12 @@ export function ChatView({
                   }
                 }}
                 placeholder="Message…  (Enter to send · Shift+Enter for newline)"
-                className="flex-1 bg-transparent outline-none resize-none text-[13.5px] leading-relaxed placeholder:text-[#a1a1a6] py-1 max-h-40 disabled:opacity-50"
+                className="flex-1 bg-transparent outline-none resize-none text-[13.5px] leading-relaxed placeholder:text-text-tertiary py-1 max-h-40 disabled:opacity-50"
               />
               <button
                 onClick={() => void handleSend()}
                 disabled={sending || draft.trim().length === 0}
-                className="w-8 h-8 rounded-full bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"
+                className="w-8 h-8 rounded-full bg-accent text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"
               >
                 <ArrowUp className="w-4 h-4" />
               </button>
@@ -352,7 +352,7 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
             return (
               <div
                 key={key}
-                className="rounded-2xl rounded-tl-md px-3.5 py-2.5 bg-[#fafafa]"
+                className="rounded-2xl rounded-tl-md px-3.5 py-2.5 bg-fill-softer"
                 style={{ boxShadow: `inset 0 0 0 1px ${part.tint}59` }}
               >
                 <div className="flex items-center gap-1.5 text-[10.5px] font-medium mb-1" style={{ color: part.tint }}>
@@ -360,7 +360,7 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
                   injected from {part.fromName}
                   {part.autoSubmitted ? " · auto-submit" : ""}
                 </div>
-                <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words text-[#1d1d1f]">
+                <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words text-text-primary">
                   {part.text}
                 </div>
               </div>
@@ -369,13 +369,13 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
           if (part.kind === "outbox") {
             return (
               <div key={key} className="flex justify-center">
-                <div className="max-w-[90%] rounded-full bg-[#f2f2f4] px-3 py-1.5 text-[11.5px] text-[#6e6e73] flex items-center gap-1.5">
+                <div className="max-w-[90%] rounded-full bg-fill-soft px-3 py-1.5 text-[11.5px] text-text-secondary flex items-center gap-1.5">
                   <CornerUpRight className="w-3 h-3 shrink-0" style={{ color: part.tint }} />
-                  <span className="font-medium text-[#1d1d1f]">→ sent to {part.toName}</span>
+                  <span className="font-medium text-text-primary">→ sent to {part.toName}</span>
                   {part.status === "delivered" ? (
                     <span>· auto-submit</span>
                   ) : (
-                    <span className="text-[#ff9f0a]">· target agent isn't running — queued</span>
+                    <span className="text-warning">· target agent isn't running — queued</span>
                   )}
                 </div>
               </div>
@@ -385,7 +385,7 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
           if (part.kind === "text") {
             return (
               <div key={key} className="flex justify-center">
-                <div className="max-w-[90%] rounded-full bg-[#fff1f0] px-3 py-1.5 text-[11.5px] text-[#ff3b30]">
+                <div className="max-w-[90%] rounded-full bg-danger-soft px-3 py-1.5 text-[11.5px] text-danger">
                   {part.text}
                 </div>
               </div>
@@ -408,7 +408,7 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
             part.kind === "text" ? (
               <div
                 key={`${msg.id}-${i}`}
-                className="bg-[#0a84ff] text-white rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words"
+                className="bg-accent text-white rounded-2xl rounded-tr-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words"
               >
                 {part.text}
               </div>
@@ -486,7 +486,7 @@ function AssistantTextPart({ text, showTyping }: { text: string; showTyping: boo
         ) : (
           <div
             key={segIndex}
-            className="bg-[#f2f2f4] rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words"
+            className="bg-fill-soft rounded-2xl rounded-tl-md px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap break-words"
           >
             {seg.text}
           </div>
@@ -498,10 +498,10 @@ function AssistantTextPart({ text, showTyping }: { text: string; showTyping: boo
 
 function TypingDots() {
   return (
-    <div className="bg-[#f2f2f4] rounded-2xl rounded-tl-md px-3.5 py-3 inline-flex items-center gap-1">
-      <span className="w-1.5 h-1.5 rounded-full bg-[#a1a1a6] animate-bounce [animation-delay:-0.3s]" />
-      <span className="w-1.5 h-1.5 rounded-full bg-[#a1a1a6] animate-bounce [animation-delay:-0.15s]" />
-      <span className="w-1.5 h-1.5 rounded-full bg-[#a1a1a6] animate-bounce" />
+    <div className="bg-fill-soft rounded-2xl rounded-tl-md px-3.5 py-3 inline-flex items-center gap-1">
+      <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-bounce [animation-delay:-0.3s]" />
+      <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-bounce [animation-delay:-0.15s]" />
+      <span className="w-1.5 h-1.5 rounded-full bg-text-tertiary animate-bounce" />
     </div>
   );
 }

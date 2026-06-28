@@ -199,28 +199,28 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
   return (
     <div className="flex flex-1 min-w-0 overflow-hidden">
       {/* ── Center: blackboard table ─────────────────────────────────── */}
-      <main className="flex-1 flex flex-col min-w-0 bg-white">
+      <main className="flex-1 flex flex-col min-w-0 bg-surface">
         {/* Header */}
-        <div className="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+        <div className="h-12 flex items-center justify-between px-5 border-b border-overlay/[0.06] shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded-[7px] bg-[#1d1d1f] text-white grid place-items-center ring-hair shrink-0">
+            <div className="w-6 h-6 rounded-[7px] bg-text-primary text-white grid place-items-center ring-hair shrink-0">
               <Layers className="w-[13px] h-[13px]" />
             </div>
             <div className="text-[13px] font-semibold tracking-tight flex items-center gap-1.5">
               Blackboard
-              <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.04] px-1.5 py-px rounded-md">
+              <span className="text-[10px] font-medium text-text-muted bg-overlay/[0.04] px-1.5 py-px rounded-md">
                 {wsLabel} · shared
               </span>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 bg-black/[0.05] rounded-lg px-2.5 h-7 w-44">
-              <Search className="w-[13px] h-[13px] text-[#86868b] shrink-0" />
+            <div className="flex items-center gap-2 bg-overlay/[0.05] rounded-lg px-2.5 h-7 w-44">
+              <Search className="w-[13px] h-[13px] text-text-muted shrink-0" />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search keys"
-                className="bg-transparent outline-none text-[12px] placeholder:text-[#a1a1a6] w-full"
+                className="bg-transparent outline-none text-[12px] placeholder:text-text-tertiary w-full"
               />
             </div>
             <button
@@ -228,7 +228,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                 setShowForm((v) => !v);
                 setFormError(null);
               }}
-              className="text-[12px] font-semibold text-white bg-[#0a84ff] px-3 h-7 rounded-lg hover:brightness-105 flex items-center gap-1.5"
+              className="text-[12px] font-semibold text-white bg-accent px-3 h-7 rounded-lg hover:brightness-105 flex items-center gap-1.5"
             >
               <Plus className="w-3.5 h-3.5" />
               New key
@@ -236,7 +236,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
             {onClose && (
               <button
                 onClick={onClose}
-                className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.06] text-[#86868b] shrink-0"
+                className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.06] text-text-muted shrink-0"
                 aria-label="Close Blackboard"
               >
                 <X className="w-3.5 h-3.5" />
@@ -247,13 +247,13 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
 
         {/* New-key inline form */}
         {showForm && (
-          <div className="px-5 py-3 border-b border-black/[0.06] bg-[#f5f5f7] shrink-0 space-y-2">
+          <div className="px-5 py-3 border-b border-overlay/[0.06] bg-sidebar shrink-0 space-y-2">
             <div className="flex items-center gap-2">
               <input
                 value={newKey}
                 onChange={(e) => setNewKey(e.target.value)}
                 placeholder="key (e.g. plan/tasks)"
-                className="flex-1 bg-white ring-hair rounded-lg px-2.5 h-8 text-[12px] font-mono outline-none placeholder:text-[#a1a1a6] focus:ring-[#0a84ff]/40"
+                className="flex-1 bg-surface ring-hair rounded-lg px-2.5 h-8 text-[12px] font-mono outline-none placeholder:text-text-tertiary focus:ring-accent/40"
               />
             </div>
             <textarea
@@ -261,14 +261,14 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
               onChange={(e) => setNewValue(e.target.value)}
               placeholder='value — JSON or plain text (e.g. { "ci": "green" })'
               rows={3}
-              className="w-full bg-white ring-hair rounded-lg px-2.5 py-2 text-[12px] font-mono outline-none placeholder:text-[#a1a1a6] focus:ring-[#0a84ff]/40 resize-y scroll-thin"
+              className="w-full bg-surface ring-hair rounded-lg px-2.5 py-2 text-[12px] font-mono outline-none placeholder:text-text-tertiary focus:ring-accent/40 resize-y scroll-thin"
             />
-            {formError && <p className="text-[11px] text-[#ff3b30] px-0.5">{formError}</p>}
+            {formError && <p className="text-[11px] text-danger px-0.5">{formError}</p>}
             <div className="flex items-center gap-2">
               <button
                 onClick={handleCreate}
                 disabled={saving}
-                className="text-[12px] font-semibold text-white bg-[#0a84ff] px-3 h-7 rounded-lg hover:brightness-105 disabled:opacity-40 flex items-center gap-1.5"
+                className="text-[12px] font-semibold text-white bg-accent px-3 h-7 rounded-lg hover:brightness-105 disabled:opacity-40 flex items-center gap-1.5"
               >
                 <Plus className="w-3.5 h-3.5" />
                 {saving ? "Saving…" : "Save"}
@@ -278,11 +278,11 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                   setShowForm(false);
                   setFormError(null);
                 }}
-                className="text-[12px] font-medium text-[#6e6e73] px-3 h-7 rounded-lg hover:bg-black/[0.05]"
+                className="text-[12px] font-medium text-text-secondary px-3 h-7 rounded-lg hover:bg-overlay/[0.05]"
               >
                 Cancel
               </button>
-              <span className="text-[10.5px] text-[#a1a1a6]">
+              <span className="text-[10.5px] text-text-tertiary">
                 User writes aren't attributed to an agent
               </span>
             </div>
@@ -292,7 +292,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
         {/* Table */}
         <div className="flex-1 overflow-y-auto scroll-thin">
           {/* Column head */}
-          <div className="grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 h-8 items-center text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase border-b border-black/[0.06] sticky top-0 bg-white/90 backdrop-blur z-10">
+          <div className="grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 h-8 items-center text-[10px] font-bold tracking-wider text-text-tertiary uppercase border-b border-overlay/[0.06] sticky top-0 bg-surface/90 backdrop-blur z-10">
             <span>Key</span>
             <span>Value</span>
             <span>Last writer</span>
@@ -300,11 +300,11 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
           </div>
 
           {loading ? (
-            <div className="grid place-items-center py-16 text-[13px] text-[#a1a1a6]">
+            <div className="grid place-items-center py-16 text-[13px] text-text-tertiary">
               Loading…
             </div>
           ) : visibleEntries.length === 0 ? (
-            <div className="grid place-items-center py-16 text-[13px] text-[#a1a1a6] px-6 text-center">
+            <div className="grid place-items-center py-16 text-[13px] text-text-tertiary px-6 text-center">
               {loadError
                 ? "Failed to load the blackboard"
                 : entries.length === 0
@@ -312,7 +312,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                   : "No keys match your search"}
             </div>
           ) : (
-            <div className="divide-y divide-black/[0.05] text-[12.5px]">
+            <div className="divide-y divide-overlay/[0.05] text-[12.5px]">
               {visibleEntries.map((entry) => {
                 const writer = entry.lastWriterId
                   ? agents.get(entry.lastWriterId)
@@ -324,38 +324,38 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                       onClick={() =>
                         setExpandedKey((k) => (k === entry.key ? null : entry.key))
                       }
-                      className="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-black/[0.02]"
+                      className="w-full grid grid-cols-[1.4fr_2fr_1fr_0.8fr] gap-3 px-5 py-2.5 items-center text-left hover:bg-overlay/[0.02]"
                     >
-                      <span className="font-mono text-[12px] text-[#3a3a3c] truncate flex items-center gap-1.5">
+                      <span className="font-mono text-[12px] text-text-body truncate flex items-center gap-1.5">
                         {isExpanded ? (
-                          <ChevronDown className="w-3 h-3 text-[#a1a1a6] shrink-0" />
+                          <ChevronDown className="w-3 h-3 text-text-tertiary shrink-0" />
                         ) : (
-                          <ChevronRight className="w-3 h-3 text-[#a1a1a6] shrink-0" />
+                          <ChevronRight className="w-3 h-3 text-text-tertiary shrink-0" />
                         )}
                         {entry.key}
                       </span>
-                      <span className="text-[#6e6e73] truncate">
+                      <span className="text-text-secondary truncate">
                         {previewValue(entry.value)}
                       </span>
                       <span className="flex items-center gap-1.5 min-w-0">
                         {writer ? (
                           <>
                             <WriterAvatar identity={writer} />
-                            <span className="text-[#3a3a3c] truncate">{writer.name}</span>
+                            <span className="text-text-body truncate">{writer.name}</span>
                           </>
                         ) : (
-                          <span className="text-[10px] font-medium text-[#86868b] bg-black/[0.05] px-1.5 py-px rounded">
+                          <span className="text-[10px] font-medium text-text-muted bg-overlay/[0.05] px-1.5 py-px rounded">
                             You
                           </span>
                         )}
                       </span>
-                      <span className="text-[#86868b] text-[11.5px]">
+                      <span className="text-text-muted text-[11.5px]">
                         {timeHint(entry.updatedAt)}
                       </span>
                     </button>
                     {isExpanded && (
                       <div className="px-5 pb-3 pt-0.5">
-                        <pre className="font-mono text-[11px] whitespace-pre-wrap break-words rounded-lg ring-hair bg-[#f5f5f7] p-2.5 text-[#3a3a3c]">
+                        <pre className="font-mono text-[11px] whitespace-pre-wrap break-words rounded-lg ring-hair bg-sidebar p-2.5 text-text-body">
                           {prettyValue(entry.value)}
                         </pre>
                       </div>
@@ -369,20 +369,20 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
       </main>
 
       {/* ── Right: activity / access ─────────────────────────────────── */}
-      <aside className="w-[306px] vibrancy border-l border-black/[0.06] flex flex-col shrink-0">
-        <div className="h-12 flex items-center px-4 border-b border-black/[0.06] shrink-0">
-          <span className="text-[12px] font-semibold text-[#6e6e73] tracking-tight">
+      <aside className="w-[306px] vibrancy border-l border-overlay/[0.06] flex flex-col shrink-0">
+        <div className="h-12 flex items-center px-4 border-b border-overlay/[0.06] shrink-0">
+          <span className="text-[12px] font-semibold text-text-secondary tracking-tight">
             Activity
           </span>
         </div>
         <div className="flex-1 overflow-y-auto scroll-thin p-3 space-y-4">
           {/* Recent writes / reads — REAL activity, newest first. */}
           <div>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5">
+            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5 px-0.5">
               Recent writes
             </div>
             {activity.length === 0 ? (
-              <div className="rounded-xl ring-hair bg-white px-2.5 py-2 text-[11.5px] text-[#a1a1a6]">
+              <div className="rounded-xl ring-hair bg-surface px-2.5 py-2 text-[11.5px] text-text-tertiary">
                 No activity yet
               </div>
             ) : (
@@ -407,9 +407,9 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
                         >
                           {who?.name ?? act.instanceId}
                         </span>{" "}
-                        <span className="text-[#6e6e73]">{verb}</span>{" "}
+                        <span className="text-text-secondary">{verb}</span>{" "}
                         <span className="font-mono text-[11px]">{key ?? "—"}</span>
-                        <div className="text-[10px] text-[#86868b]">{timeHint(act.at)}</div>
+                        <div className="text-[10px] text-text-muted">{timeHint(act.at)}</div>
                       </div>
                     </div>
                   );
@@ -421,35 +421,35 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
           {/* Access — STATIC but HONEST (M3.3 model: any agent in the ws can
               read/write; cross-workspace is blocked). No per-key ACLs exist. */}
           <div>
-            <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-1.5 px-0.5">
+            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5 px-0.5">
               Access
             </div>
-            <div className="rounded-xl ring-hair bg-white p-2.5 space-y-2 text-[11.5px]">
+            <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-2 text-[11.5px]">
               <div className="flex items-center justify-between">
-                <span className="text-[#6e6e73] flex items-center gap-1.5">
+                <span className="text-text-secondary flex items-center gap-1.5">
                   <Eye className="w-3.5 h-3.5" />
                   Readers
                 </span>
                 <span className="font-medium">All agents</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-[#6e6e73] flex items-center gap-1.5">
+                <span className="text-text-secondary flex items-center gap-1.5">
                   <Pencil className="w-3.5 h-3.5" />
                   Writers
                 </span>
                 <span className="font-medium">All agents</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-[#6e6e73] flex items-center gap-1.5">
+                <span className="text-text-secondary flex items-center gap-1.5">
                   <Lock className="w-3.5 h-3.5" />
                   Scope
                 </span>
                 <span className="font-medium">This workspace</span>
               </div>
             </div>
-            <div className="mt-1.5 text-[10.5px] text-[#86868b] leading-snug px-0.5">
+            <div className="mt-1.5 text-[10.5px] text-text-muted leading-snug px-0.5">
               This blackboard is shared only within the{" "}
-              <span className="font-medium text-[#3a3a3c]">{wsLabel}</span> workspace — other workspaces have their own.
+              <span className="font-medium text-text-body">{wsLabel}</span> workspace — other workspaces have their own.
             </div>
           </div>
         </div>
