@@ -7,8 +7,14 @@
 
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
+
+/// How long a compact stays armed. A never-saving agent must not leave a stale
+/// arm that later hijacks an unrelated manual `snapshot save` into a `/clear`.
+const COMPACT_PENDING_TTL: Duration = Duration::from_secs(300);
 
 pub struct AppState {
     /// Live, migration-applied SQLite connection pool.
@@ -33,6 +39,14 @@ pub struct AppState {
     /// reference and clean up the registry when the child self-terminates
     /// (M2.2), independent of the `AppState`'s lifetime.
     pub runtime: std::sync::Arc<crate::engine::runtime::Runtime>,
+
+    /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
+    /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
+    /// time. This is what makes `/clear` run strictly AFTER the save completes
+    /// (the save handler consumes the arm), instead of racing a poll. A TTL
+    /// (`COMPACT_PENDING_TTL`) guards against a never-saving agent leaving a stale
+    /// arm that a later unrelated manual save would trip.
+    compact_pending: Mutex<HashMap<String, Instant>>,
 }
 
 impl AppState {
@@ -48,6 +62,7 @@ impl AppState {
             db: pool,
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
+            compact_pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -93,6 +108,26 @@ impl AppState {
             }
         }
     }
+
+    /// Arm a compact for `instance_id`: the agent's next handoff save triggers
+    /// `/clear` + restore (see `commands::snapshot`). Overwrites any prior arm.
+    pub fn mark_compact_pending(&self, instance_id: &str) {
+        if let Ok(mut m) = self.compact_pending.lock() {
+            m.insert(instance_id.to_owned(), Instant::now());
+        }
+    }
+
+    /// Consume a pending compact for `instance_id`. Returns `true` iff one was
+    /// armed AND is still within [`COMPACT_PENDING_TTL`]; always removes the entry
+    /// (so a stale, expired arm is cleared rather than lingering).
+    pub fn take_compact_pending(&self, instance_id: &str) -> bool {
+        if let Ok(mut m) = self.compact_pending.lock() {
+            if let Some(armed) = m.remove(instance_id) {
+                return armed.elapsed() < COMPACT_PENDING_TTL;
+            }
+        }
+        false
+    }
 }
 
 /// Test-only constructor: builds an `AppState` backed by an in-memory
@@ -105,6 +140,7 @@ impl AppState {
             db: crate::engine::db::connect_in_memory().await,
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
+            compact_pending: Mutex::new(HashMap::new()),
         }
     }
 }
