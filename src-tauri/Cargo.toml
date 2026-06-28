@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Conclave — multi-agent terminal + AI chat workspace for macOS"
 edition = "2021"
 rust-version = "1.77"
+# Two bin targets exist (the GUI app `conclave` + the `conclave-cli` client),
+# so `cargo run` / `tauri dev` would otherwise be ambiguous. The GUI is the
+# default; build the CLI explicitly with `cargo build --bin conclave-cli`.
+default-run = "conclave"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
