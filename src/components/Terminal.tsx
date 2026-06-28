@@ -94,19 +94,18 @@ export function Terminal({ sessionId }: TerminalProps) {
     // times in quick succession. Coalescing the gesture into one settle-time
     // fit + resize lets the child repaint once, cleanly, at the final size.
     //
-    // JIGGLE (the load-bearing part): the PTY lives in the Rust runtime and
-    // OUTLIVES this component, so a fresh mount (tab switch / reload) very often
-    // fits to the SAME dimensions the PTY already has. The kernel only raises
-    // SIGWINCH when the size actually CHANGES, so an unchanged resize is a
-    // no-op: the child (Claude Code) never repaints and the pane stays BLACK
-    // until the user manually resizes the window. The same root cause leaves
-    // stale cells after a real resize — one SIGWINCH yields one partial repaint.
-    // So we never send the target size alone: we send `rows - 1` then `rows`,
-    // forcing two guaranteed SIGWINCHs that end at the right size and make the
-    // child clear and fully redraw. `lastRows` is tracked so the dedupe still
-    // suppresses redundant work when nothing changed.
+    // A genuine resize changes the size, so a single PTY resize raises SIGWINCH
+    // and the child repaints itself — no jiggle, no flicker.
+    //
+    // The one exception is the FIRST sizing after mount: the PTY lives in the
+    // Rust runtime and OUTLIVES this component, so a fresh mount (tab switch /
+    // reload) often fits to the SAME dimensions the PTY already has. The kernel
+    // raises SIGWINCH only on an actual change, so that unchanged resize is a
+    // no-op and the pane stays BLACK until a manual resize. Only there do we
+    // jiggle (send `rows - 1` then `rows`) to force a guaranteed SIGWINCH.
     let lastCols = 0;
     let lastRows = 0;
+    let firstSizing = true;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     let jiggleTimer: ReturnType<typeof setTimeout> | undefined;
     const applyResize = () => {
@@ -120,16 +119,18 @@ export function Terminal({ sessionId }: TerminalProps) {
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
-      if (rows <= 1) {
-        // Degenerate height — nothing to jiggle against; send as-is.
+
+      const isFirst = firstSizing;
+      firstSizing = false;
+      // Real resize (or a degenerate 1-row pane): one resize, natural SIGWINCH.
+      if (!isFirst || rows <= 1) {
         void ipc.session.resize({ sessionId, cols, rows }).catch(() => {});
         return;
       }
-      // Step 1: one row shorter → guaranteed SIGWINCH, child clears + redraws.
+      // Mount: jiggle so the child repaints even if the persistent PTY already
+      // has this size. `rows - 1` then `rows`, with a gap so the two SIGWINCHs
+      // aren't coalesced into one.
       void ipc.session.resize({ sessionId, cols, rows: rows - 1 }).catch(() => {});
-      // Step 2 (after a short gap so the two SIGWINCHs aren't coalesced): the
-      // real size → child redraws its full frame at the on-screen dimensions,
-      // onto the cleared screen.
       clearTimeout(jiggleTimer);
       jiggleTimer = setTimeout(() => {
         void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
