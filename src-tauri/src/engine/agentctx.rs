@@ -29,21 +29,32 @@ fn sanitize_field(s: &str) -> String {
 /// `=` so it survives Codex's `-c key=value` parsing as a literal string. Every
 /// interpolated user field (name, role, workspace name/id) is sanitized so a
 /// crafted name like `"x=y"` or one with a newline can't break that invariant.
-pub fn bootstrap_preamble(name: &str, role: Option<&str>, ws_name: &str, ws_id: &str) -> String {
+///
+/// `self_id` is the agent's OWN instance id — baked in so it can tell which entry
+/// in `conclave agent list` is itself (the rest are peers).
+pub fn bootstrap_preamble(
+    name: &str,
+    role: Option<&str>,
+    ws_name: &str,
+    ws_id: &str,
+    self_id: &str,
+) -> String {
     let name = sanitize_field(name);
     let ws_name = sanitize_field(ws_name);
     let ws_id = sanitize_field(ws_id);
+    let self_id = sanitize_field(self_id);
     let who = match role.map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => format!("\"{name}\", a {} agent,", sanitize_field(r)),
         None => format!("\"{name}\""),
     };
     format!(
-        "You are {who} in the Conclave workspace \"{ws_name}\", which you share with other AI \
-agents. A line that begins [from <name> · <id>] is a message FROM another agent, NOT from the \
-human user: answering in your own terminal does NOT reach them. To reply you MUST run `conclave \
-tell <id> <your message>`, using the id shown in that tag. To start a conversation, run `conclave \
-agent list {ws_id}` for the agents and their ids, then `conclave tell <id> <text>`. Shared notes \
-live on the blackboard: `conclave bb set {ws_id} <key> <value>` and `conclave bb get {ws_id} <key>`."
+        "You are {who} and your own agent id is {self_id}. You share the Conclave workspace \
+\"{ws_name}\" with other AI agents. A line that begins [from <name> · <id>] is a message FROM \
+another agent, NOT from the human user: answering in your own terminal does NOT reach them. To \
+reply you MUST run `conclave tell <id> <your message>`, using the id shown in that tag. To start a \
+conversation, run `conclave agent list {ws_id}`: every entry whose id is NOT {self_id} is a peer, \
+so `conclave tell <peerId> <text>` messages it. Shared notes live on the blackboard: `conclave bb \
+set {ws_id} <key> <value>` and `conclave bb get {ws_id} <key>`."
     )
 }
 
@@ -96,24 +107,26 @@ mod tests {
 
     #[test]
     fn preamble_is_single_line_with_no_equals() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123");
+        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
         assert!(!p.contains('\n'), "must be one line (Codex -c literal)");
         assert!(!p.contains('='), "no '=' so Codex doesn't split it");
     }
 
     #[test]
-    fn preamble_includes_identity_and_workspace_id() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123");
+    fn preamble_includes_identity_workspace_and_self_id() {
+        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
         assert!(p.contains("Atlas"));
         assert!(p.contains("builder"));
         assert!(p.contains("My Repo"));
         // The workspace id must appear so `conclave agent list <id>` is runnable.
         assert!(p.contains("ws_123"));
+        // The agent's own id must appear so it can pick itself out of the roster.
+        assert!(p.contains("inst_a"));
     }
 
     #[test]
     fn preamble_handles_missing_role() {
-        let p = bootstrap_preamble("Vega", None, "Repo", "ws_9");
+        let p = bootstrap_preamble("Vega", None, "Repo", "ws_9", "inst_v");
         assert!(p.contains("Vega"));
         assert!(!p.contains("a  agent")); // no empty-role artifact
         assert!(p.contains("ws_9"));
@@ -121,20 +134,18 @@ mod tests {
 
     #[test]
     fn preamble_stays_single_line_and_equals_free_with_hostile_input() {
-        // A crafted name/role/workspace must not be able to introduce `=` or a
-        // newline that would break Codex's `-c developer_instructions=…` parsing.
-        let p = bootstrap_preamble("a=b\nc", Some("r=1"), "ws=prod\nx", "id\n1");
+        // A crafted name/role/workspace/self-id must not be able to introduce `=`
+        // or a newline that would break Codex's `-c developer_instructions=…`.
+        let p = bootstrap_preamble("a=b\nc", Some("r=1"), "ws=prod\nx", "id\n1", "self=x\ny");
         assert!(!p.contains('\n'), "no newline: {p}");
         assert!(!p.contains('='), "no '=': {p}");
     }
 
     #[test]
     fn preamble_trims_blank_role() {
-        // A blank role collapses to the bare-name who-clause ("Sol" in the …),
-        // not "Sol", a  agent,". Assert the who-clause directly so the check is
-        // robust to the surrounding briefing wording.
-        let p = bootstrap_preamble("Sol", Some("   "), "Repo", "ws_1");
-        assert!(p.contains("\"Sol\" in the"), "{p}");
+        // A blank role collapses to the bare-name who-clause, not "Sol", a  agent,".
+        let p = bootstrap_preamble("Sol", Some("   "), "Repo", "ws_1", "inst_s");
+        assert!(p.contains("\"Sol\" and your own"), "{p}");
         assert!(!p.contains("\"Sol\", a"), "no role clause: {p}");
     }
 }

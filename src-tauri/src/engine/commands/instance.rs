@@ -145,6 +145,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 def.role.as_deref(),
                 &ws.name,
                 &ws.id,
+                &id,
             );
 
             let mut launch = String::from(base);
