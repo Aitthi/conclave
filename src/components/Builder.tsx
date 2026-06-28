@@ -126,6 +126,8 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [agentType, setAgentType] = useState<AgentType>(initialDef?.type ?? "cli");
   const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
   const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
+  // Color picker popover (anchored to the avatar).
+  const [showColors, setShowColors] = useState(false);
   const [model, setModel] = useState(initialDef?.model ?? "");
   // ── Claude Code launch config ──────────────────────────────────────────────
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
@@ -237,12 +239,46 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
             <div className="text-[10px] font-bold tracking-wider text-[#a1a1a6] uppercase mb-2">
               Identity
             </div>
-            <div className="flex items-center gap-2.5 mb-2">
-              <div
-                className="w-10 h-10 rounded-[10px] text-white grid place-items-center text-[15px] font-bold ring-1 ring-black/[0.06] shrink-0"
-                style={{ backgroundColor: color }}
-              >
-                {letter}
+            <div className="flex items-center gap-2.5">
+              {/* Avatar doubles as the color picker — click to choose. */}
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowColors((v) => !v)}
+                  className="w-10 h-10 rounded-[10px] text-white grid place-items-center text-[15px] font-bold ring-1 ring-black/[0.06] hover:brightness-105"
+                  style={{ backgroundColor: color }}
+                  title="Change color"
+                  aria-label="Change color"
+                >
+                  {letter}
+                </button>
+                {showColors && (
+                  <>
+                    {/* Click-away backdrop. */}
+                    <div className="fixed inset-0 z-10" onClick={() => setShowColors(false)} />
+                    <div className="absolute z-20 top-full left-0 mt-1.5 flex items-center gap-1.5 bg-white rounded-xl ring-1 ring-black/[0.1] shadow-lg p-2">
+                      {COLOR_SWATCHES.map((swatch) => (
+                        <button
+                          key={swatch}
+                          onClick={() => {
+                            setColor(swatch);
+                            setShowColors(false);
+                          }}
+                          className={`w-[18px] h-[18px] rounded-full transition-all ${
+                            color === swatch ? "ring-2 ring-offset-1" : "hover:scale-110"
+                          }`}
+                          style={
+                            {
+                              backgroundColor: swatch,
+                              "--tw-ring-color": swatch,
+                            } as React.CSSProperties
+                          }
+                          aria-label={`Color ${swatch}`}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
               <div className="flex-1 space-y-1">
                 <input
@@ -260,24 +296,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               </div>
             </div>
 
-            {/* Color swatches */}
-            <div className="flex items-center gap-1.5 pl-[50px]">
-              {COLOR_SWATCHES.map((swatch) => (
-                <button
-                  key={swatch}
-                  onClick={() => setColor(swatch)}
-                  className={`w-[18px] h-[18px] rounded-full transition-all ${
-                    color === swatch ? "ring-2 ring-offset-1" : "hover:scale-110"
-                  }`}
-                  style={{
-                    backgroundColor: swatch,
-                    // Tailwind ring color lives in this custom property — not `ringColor`.
-                    "--tw-ring-color": swatch,
-                  } as React.CSSProperties}
-                  aria-label={`Color ${swatch}`}
-                />
-              ))}
-            </div>
           </section>
 
           {/* Type */}
