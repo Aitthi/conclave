@@ -2664,6 +2664,11 @@
             "title": "Blackboard screen: key/value table + last-writer + activity",
             "status": "done",
             "priority": "normal"
+          },
+          {
+            "title": "Agent awareness: spawn briefing + [from] sender tags + conclave tell/PATH",
+            "status": "done",
+            "priority": "high"
           }
         ]
       },
@@ -2727,7 +2732,7 @@
         "tasks": [
           {
             "title": "Light/dark + system accent + native menus/shortcuts",
-            "status": "todo",
+            "status": "done",
             "priority": "normal"
           },
           {
