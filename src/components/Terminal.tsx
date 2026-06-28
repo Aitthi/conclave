@@ -5,6 +5,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { ipc, useSessionOutput } from "../ipc";
+import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
 
 interface TerminalProps {
   sessionId: string;
@@ -32,6 +33,14 @@ interface TerminalProps {
 export function Terminal({ sessionId }: TerminalProps) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XtermTerminal | null>(null);
+
+  // Drag a file onto the terminal → type its shell-quoted path into the PTY at
+  // the cursor (no submit), exactly like dropping a file into a real terminal.
+  // Written straight to stdin via message.send; the running TUI echoes it.
+  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
+    const insert = paths.map(shellQuotePath).join(" ") + " ";
+    void ipc.message.send({ sessionId, text: insert }).catch(() => {});
+  });
 
   useEffect(() => {
     const el = divRef.current;
@@ -190,7 +199,12 @@ export function Terminal({ sessionId }: TerminalProps) {
   });
 
   return (
-    <div className="flex-1 min-h-0 overflow-hidden bg-[#1e1e1e] p-1.5">
+    <div
+      ref={dropRef}
+      className={`flex-1 min-h-0 overflow-hidden bg-[#1e1e1e] p-1.5 transition-shadow${
+        isOver ? " ring-2 ring-inset ring-[#0a84ff]" : ""
+      }`}
+    >
       <div ref={divRef} className="h-full w-full overflow-hidden" />
     </div>
   );
