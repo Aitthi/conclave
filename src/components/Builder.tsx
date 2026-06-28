@@ -276,6 +276,24 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                           aria-label={`Color ${swatch}`}
                         />
                       ))}
+                      {/* Custom color — opens the OS color picker. The popover
+                          stays open so the avatar preview updates live. */}
+                      <label
+                        className="w-[18px] h-[18px] rounded-full cursor-pointer ring-1 ring-black/15 relative overflow-hidden shrink-0"
+                        title="Custom color"
+                        style={{
+                          background:
+                            "conic-gradient(red, yellow, lime, aqua, blue, magenta, red)",
+                        }}
+                      >
+                        <input
+                          type="color"
+                          value={color}
+                          onChange={(e) => setColor(e.target.value)}
+                          className="absolute inset-0 opacity-0 cursor-pointer"
+                          aria-label="Custom color"
+                        />
+                      </label>
                     </div>
                   </>
                 )}
