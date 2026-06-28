@@ -1,21 +1,23 @@
-//! Snapshot command handlers — the snapshot manager (M4.1).
+//! Snapshot command handlers — the snapshot manager.
 //!
 //! Snapshots mark a point on a session's rolling context window. A `manual`
 //! snapshot is created from the UI / CLI; an `auto` snapshot is created by the
-//! output forwarder when the context estimate crosses the auto-compact
-//! threshold (≈90%); a `handoff` snapshot is reserved for agent→agent context
-//! transfer (not created from the UI).
+//! output forwarder when the context estimate crosses the auto-compact threshold
+//! (≈90%); a `handoff` snapshot carries the agent's own self-written context and
+//! is created by the strategic-compact loop (`save` / `compact`).
 //!
-//! # honesty seams (M4.1)
+//! Handlers: `create` (manual marker) · `list` · `read` · `save` (agent writes a
+//! handoff) · `last` (read the latest handoff back) · `compact` (the full
+//! save→clear→restore loop) · `delete` / `send` (the Memory list's row actions).
+//!
+//! # honesty seams
 //!
 //! - `tokens` is a labelled ESTIMATE from streamed output bytes — there is no
 //!   real provider token-usage telemetry yet (see `commands::instance`).
-//! - `summary` is a deterministic honest string; real LLM summarisation /
-//!   context carry-forward is out of scope (NULL `carried_forward` / `diff`).
-//! - `read` is the by-id detail read (M4.2 Timeline) — it returns the real
-//!   persisted `SnapshotRow`. Fork/Restore remain deferred because they need
-//!   persisted conversation history, which does not exist yet, so they are NOT
-//!   backend operations here (the Timeline renders them as honestly disabled).
+//! - `summary` is a deterministic honest string. For `auto`/`manual` markers
+//!   `carried_forward` is NULL; a `handoff` carries REAL content (the agent's
+//!   self-written handoff text). `diff` is still always NULL — real diffing is
+//!   out of scope.
 
 use crate::engine::runtime::Runtime;
 use crate::engine::{agentctx, bus, repo, AppError, AppState};
@@ -212,6 +214,65 @@ pub async fn read(state: &AppState, payload: Value) -> Result<Value, AppError> {
         .ok_or_else(|| AppError::NotFound(format!("snapshot id={} not found", req.snapshot_id)))?;
 
     serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Delete a snapshot by id (the Memory list's row delete). Maps to
+/// `snapshot.delete`; returns `{ deleted: <id> }`, or `NotFound` for an unknown
+/// id. A child snapshot chained to it is re-linked in the repo (no dangling FK).
+pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: ReadReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    let removed = repo::snapshot::delete(&state.db, &req.snapshot_id).await?;
+    if !removed {
+        return Err(AppError::NotFound(format!(
+            "snapshot id={} not found",
+            req.snapshot_id
+        )));
+    }
+    Ok(json!({ "deleted": req.snapshot_id }))
+}
+
+/// Payload for `snapshot.send` — inject a chosen snapshot's content into a live
+/// agent's terminal ("ref → send to agent").
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendReq {
+    instance_id: String,
+    snapshot_id: String,
+}
+
+/// Submit a snapshot's content into a live agent's input — the "send to agent"
+/// row action. Sends the handoff text (`carried_forward`) when present, else the
+/// honest `summary` marker line; auto-submitted like an injection. Maps to
+/// `snapshot.send`.
+///
+/// Errors: unknown snapshot → NotFound; agent not running → NotFound; a snapshot
+/// with no content at all → Invalid (nothing to send).
+pub async fn send(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: SendReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    if !state.runtime.is_live(&req.instance_id) {
+        return Err(AppError::NotFound(format!(
+            "instance {} is not running — spawn it first",
+            req.instance_id
+        )));
+    }
+
+    let snap = repo::snapshot::get(&state.db, &req.snapshot_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("snapshot id={} not found", req.snapshot_id)))?;
+
+    let content = snap.carried_forward.or(snap.summary).ok_or_else(|| {
+        AppError::Invalid(format!(
+            "snapshot id={} has no content to send",
+            req.snapshot_id
+        ))
+    })?;
+
+    submit_line(&state.runtime, &req.instance_id, &content).await;
+    Ok(json!({ "status": "sent", "instanceId": req.instance_id }))
 }
 
 // ── Strategic-compact loop (agent self-handoff) ───────────────────────────────
@@ -693,6 +754,42 @@ mod tests {
         let err = compact(&state, json!({ "instanceId": inst }))
             .await
             .expect_err("compact must fail when the agent is not live");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// delete removes a snapshot; an unknown id → NotFound.
+    #[tokio::test]
+    async fn delete_removes_then_not_found() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        let saved = save(&state, json!({ "instanceId": inst, "text": "hand off" }))
+            .await
+            .expect("save failed");
+        let id = saved.get("id").and_then(Value::as_str).unwrap().to_owned();
+
+        let out = delete(&state, json!({ "snapshotId": id }))
+            .await
+            .expect("delete failed");
+        assert_eq!(
+            out.get("deleted").and_then(Value::as_str),
+            Some(id.as_str())
+        );
+
+        // Second delete of the same id → NotFound (already gone).
+        let err = delete(&state, json!({ "snapshotId": id }))
+            .await
+            .expect_err("delete of a removed id must NotFound");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// send to a non-running agent → NotFound (no stdin to write to).
+    #[tokio::test]
+    async fn send_to_not_running_not_found() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        let err = send(&state, json!({ "instanceId": inst, "snapshotId": "x" }))
+            .await
+            .expect_err("send must fail when the agent is not live");
         assert!(matches!(err, AppError::NotFound(_)));
     }
 

@@ -140,6 +140,16 @@ export interface Commands {
     // the agent's terminal. `status` is a fixed acknowledgement, not progress.
     res: { status: "compacting"; instanceId: string };
   };
+  // Memory-list row actions (replacing the timeline screen).
+  "snapshot.delete": {
+    req: { snapshotId: string };
+    res: { deleted: string };
+  };
+  "snapshot.send": {
+    // Submit a snapshot's content into a live agent's terminal ("send to agent").
+    req: { instanceId: string; snapshotId: string };
+    res: { status: "sent"; instanceId: string };
+  };
   "fusion.run": {
     req: { orchestratorId: string; prompt: string };
     res: FusionRun;
@@ -233,6 +243,8 @@ export const ipc = {
     list: (req: Commands["snapshot.list"]["req"]) => call("snapshot.list", req),
     read: (req: Commands["snapshot.read"]["req"]) => call("snapshot.read", req),
     compact: (req: Commands["snapshot.compact"]["req"]) => call("snapshot.compact", req),
+    delete: (req: Commands["snapshot.delete"]["req"]) => call("snapshot.delete", req),
+    send: (req: Commands["snapshot.send"]["req"]) => call("snapshot.send", req),
   },
   fusion: {
     run: (req: Commands["fusion.run"]["req"]) => call("fusion.run", req),

@@ -12,7 +12,8 @@ import {
   Waypoints,
   CornerDownLeft,
   CornerUpRight,
-  History,
+  ChevronDown,
+  Trash2,
   Scale,
   Gauge,
 } from "lucide-react";
@@ -26,7 +27,6 @@ import type {
 } from "../ipc";
 import type { RoutingTarget } from "./RoutingPicker";
 import { timeHint } from "../lib/timeHint";
-import { Timeline } from "./Timeline";
 import { DeferredNote } from "./DeferredNote";
 
 // ---------------------------------------------------------------------------
@@ -158,6 +158,8 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
     setSnapshotBusy(false);
     setConfirming(false);
     setCompacting(false);
+    setSelectedSnap(null);
+    setRowBusy(null);
     // `session` is intentionally read but excluded from deps — we re-seed only on
     // identity change of the session id, not on every new session object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -176,9 +178,11 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   // backend drives save → clear → restore in the agent's terminal.
   const [confirming, setConfirming] = useState(false);
   const [compacting, setCompacting] = useState(false);
-  // Full-screen memory-timeline overlay (M4.2). Local visibility flag; only
-  // openable when a real `session` exists (the button is gated below).
-  const [showTimeline, setShowTimeline] = useState(false);
+  // Inline snapshot detail: the id of the expanded row (click a row to view its
+  // saved content + per-row actions), and the id of a row with a delete/send in
+  // flight (to disable its buttons).
+  const [selectedSnap, setSelectedSnap] = useState<string | null>(null);
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
   const snapSeq = useRef(0);
   const refetchSnapshots = useCallback(() => {
     if (!sessionId) {
@@ -271,6 +275,52 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
     return () => clearTimeout(t);
   }, [compacting]);
 
+  // Row action — delete a snapshot, then refetch. Collapses the row if it was
+  // expanded. Errors surface via the inline note (never swallowed).
+  const doDeleteSnapshot = useCallback(
+    (snapshotId: string) => {
+      setRowBusy(snapshotId);
+      setSnapshotError(false);
+      ipc.snapshot
+        .delete({ snapshotId })
+        .then(() => {
+          if (!mounted.current) return;
+          setSelectedSnap((cur) => (cur === snapshotId ? null : cur));
+          refetchSnapshots();
+        })
+        .catch((err: unknown) => {
+          if (import.meta.env.DEV) {
+            console.error("ContextDrawer: snapshot.delete failed", err);
+          }
+          if (mounted.current) setSnapshotError(true);
+        })
+        .finally(() => {
+          if (mounted.current) setRowBusy(null);
+        });
+    },
+    [refetchSnapshots],
+  );
+
+  // Row action — submit a snapshot's content into the live agent's terminal.
+  const doSendSnapshot = useCallback(
+    (snapshotId: string) => {
+      setRowBusy(snapshotId);
+      setSnapshotError(false);
+      ipc.snapshot
+        .send({ instanceId, snapshotId })
+        .catch((err: unknown) => {
+          if (import.meta.env.DEV) {
+            console.error("ContextDrawer: snapshot.send failed", err);
+          }
+          if (mounted.current) setSnapshotError(true);
+        })
+        .finally(() => {
+          if (mounted.current) setRowBusy(null);
+        });
+    },
+    [instanceId],
+  );
+
   // Resolve a counterpart instance id → display name via the roster.
   const nameOf = (id: string): string =>
     roster.find((t) => t.instanceId === id)?.name ?? id;
@@ -320,10 +370,6 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
     meterLimit > 0;
 
   return (
-    <>
-      {showTimeline && session && (
-        <Timeline def={def} session={session} onClose={() => setShowTimeline(false)} />
-      )}
       <aside className="w-[306px] vibrancy border-l border-overlay/[0.06] flex flex-col shrink-0">
       {/* Header — also a window drag region. The "Context" label is
           `pointer-events-none` so clicks fall through to the attributed
@@ -338,13 +384,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
         </span>
         <button
           title="Hide Context"
-          onClick={() => {
-            // Collapsing the drawer unmounts the Timeline overlay (it lives in
-            // this return); clear the flag too so reopening the drawer doesn't
-            // silently re-surface the overlay the user never re-requested.
-            setOpen(false);
-            setShowTimeline(false);
-          }}
+          onClick={() => setOpen(false)}
           className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary"
         >
           <PanelRight className="w-[15px] h-[15px]" />
@@ -543,34 +583,79 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
                   {snapshots.length === 0 ? (
                     <div className="text-[10.5px] text-text-tertiary py-0.5">No snapshots yet</div>
                   ) : (
-                    snapshots.map((s) => (
-                      <div key={s.id} className="flex items-center gap-1.5">
-                        {s.type === "auto" ? (
-                          <Clock className="w-3 h-3 shrink-0 text-warning" />
-                        ) : (
-                          <Camera className="w-3 h-3 shrink-0 text-accent" />
-                        )}
-                        <span className="font-medium shrink-0">{s.type}</span>
-                        {s.tokens != null && (
-                          <span className="text-text-secondary truncate flex-1 min-w-0">
-                            ~{s.tokens.toLocaleString()} tok
-                          </span>
-                        )}
-                        <span className="text-[10px] text-text-tertiary shrink-0 ml-auto">
-                          {timeHint(s.createdAt)}
-                        </span>
-                      </div>
-                    ))
+                    snapshots.map((s) => {
+                      const isOpen = selectedSnap === s.id;
+                      const busy = rowBusy === s.id;
+                      const content =
+                        typeof s.carriedForward === "string" ? s.carriedForward : null;
+                      return (
+                        <div key={s.id} className="rounded-md">
+                          {/* Click a row to expand its saved content + actions. */}
+                          <button
+                            onClick={() =>
+                              setSelectedSnap((cur) => (cur === s.id ? null : s.id))
+                            }
+                            className="w-full flex items-center gap-1.5 py-0.5 px-0.5 rounded-md hover:bg-overlay/[0.05] text-left"
+                          >
+                            {s.type === "auto" ? (
+                              <Clock className="w-3 h-3 shrink-0 text-warning" />
+                            ) : (
+                              <Camera className="w-3 h-3 shrink-0 text-accent" />
+                            )}
+                            <span className="font-medium shrink-0">{s.type}</span>
+                            {s.tokens != null && (
+                              <span className="text-text-secondary truncate min-w-0">
+                                ~{s.tokens.toLocaleString()} tok
+                              </span>
+                            )}
+                            <span className="text-[10px] text-text-tertiary shrink-0 ml-auto">
+                              {timeHint(s.createdAt)}
+                            </span>
+                            <ChevronDown
+                              className={`w-3 h-3 shrink-0 text-text-tertiary transition-transform${
+                                isOpen ? " rotate-180" : ""
+                              }`}
+                            />
+                          </button>
+                          {isOpen && (
+                            <div className="px-0.5 pb-1 pt-0.5 space-y-1.5">
+                              {/* View — the saved content (handoff text), or an honest
+                                  note for a marker snapshot that has none. */}
+                              <div className="text-[10.5px] leading-snug text-text-secondary whitespace-pre-wrap break-words max-h-40 overflow-y-auto scroll-thin rounded-md bg-overlay/[0.04] p-1.5">
+                                {content ?? (
+                                  <span className="italic text-text-tertiary">
+                                    Marker only — no saved content.
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3">
+                                {def.type === "cli" && (
+                                  <button
+                                    onClick={() => doSendSnapshot(s.id)}
+                                    disabled={busy}
+                                    title="Type this snapshot's content into the agent's terminal"
+                                    className="text-[10.5px] font-medium text-accent hover:underline disabled:opacity-40 flex items-center gap-1"
+                                  >
+                                    <Send className="w-3 h-3" />
+                                    Send to agent
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => doDeleteSnapshot(s.id)}
+                                  disabled={busy}
+                                  className="text-[10.5px] font-medium text-danger hover:underline disabled:opacity-40 flex items-center gap-1 ml-auto"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
-                {/* Entry point to the full memory-timeline screen (M4.2). */}
-                <button
-                  onClick={() => setShowTimeline(true)}
-                  className="mt-1.5 text-[10.5px] font-medium text-text-secondary hover:text-accent flex items-center gap-1"
-                >
-                  <History className="w-3 h-3" />
-                  Open timeline
-                </button>
               </div>
             )}
 
@@ -681,6 +766,5 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
         </div>
       </div>
       </aside>
-    </>
   );
 }

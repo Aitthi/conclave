@@ -201,6 +201,34 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SnapshotRow
         .map_err(cb_err)
 }
 
+/// Delete a snapshot by id. Returns `true` if a row was removed, `false` if no
+/// such id existed.
+///
+/// Before deleting, any snapshot that chained to this one (`prev_snapshot_id =
+/// id`) is re-linked to THIS node's predecessor, so removing a middle node
+/// doesn't dangle a foreign key (the `prev_snapshot_id` FK has no ON DELETE) or
+/// break the timeline chain. Wrapped in a transaction so the relink + delete are
+/// atomic.
+pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    // Re-point children at this node's predecessor (NULL if it had none).
+    sqlx::query(
+        "UPDATE snapshot SET prev_snapshot_id = \
+         (SELECT prev_snapshot_id FROM snapshot WHERE id = ?) \
+         WHERE prev_snapshot_id = ?",
+    )
+    .bind(id)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    let res = sqlx::query("DELETE FROM snapshot WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// Fetch the newest snapshot for a session, or `None` if it has none yet.
 ///
 /// `#[allow(dead_code)]`: `create` chains `prev_snapshot_id` atomically in-SQL,
@@ -389,6 +417,40 @@ mod tests {
         assert_eq!(
             ho.carried_forward.as_deref(),
             Some("goal: ship; next: tests")
+        );
+    }
+
+    /// delete removes the row and re-links a child's prev to the deleted node's
+    /// predecessor (chain A←B←C, delete B ⇒ C.prev becomes A); unknown id → false.
+    #[tokio::test]
+    async fn delete_relinks_child_and_reports_missing() {
+        let pool = connect_in_memory().await;
+        let sid = fixture_session(&pool).await;
+
+        let a = create(&pool, new_input(&sid, "manual", 10, 1))
+            .await
+            .expect("create A");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let b = create(&pool, new_input(&sid, "manual", 20, 1))
+            .await
+            .expect("create B");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let c = create(&pool, new_input(&sid, "manual", 30, 1))
+            .await
+            .expect("create C");
+        assert_eq!(b.prev_snapshot_id.as_deref(), Some(a.id.as_str()));
+        assert_eq!(c.prev_snapshot_id.as_deref(), Some(b.id.as_str()));
+
+        assert!(delete(&pool, &b.id).await.expect("delete B"), "B existed");
+        assert!(get(&pool, &b.id).await.unwrap().is_none(), "B is gone");
+
+        // C was chained to B → now re-linked to A (B's predecessor).
+        let c2 = get(&pool, &c.id).await.unwrap().expect("C still exists");
+        assert_eq!(c2.prev_snapshot_id.as_deref(), Some(a.id.as_str()));
+
+        assert!(
+            !delete(&pool, "no-such-id").await.expect("delete missing"),
+            "deleting an unknown id reports false"
         );
     }
 
