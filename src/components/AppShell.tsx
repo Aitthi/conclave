@@ -120,18 +120,9 @@ export function AppShell() {
           onOpenSettings={() => setShowSettings(true)}
         />
 
-        {showLibrary ? (
-          /* ── Library view: replaces Roster + main while open ─── */
-          <Library
-            onClose={() => setShowLibrary(false)}
-            onOpenBuilder={(def) => {
-              setBuilderInitialDef(def);
-              setShowBuilder(true);
-            }}
-            refreshKey={libraryRefreshKey}
-          />
-        ) : (
-          <>
+        {/* Roster + main stay mounted; the Library opens as an overlay sheet
+            on top so the workspace refreshes live underneath a delete. */}
+        <>
             <Roster
               workspaceId={activeWorkspaceId}
               workspaceName={activeWorkspace?.name}
@@ -184,9 +175,24 @@ export function AppShell() {
                 </div>
               </main>
             )}
-          </>
-        )}
+        </>
       </div>
+
+      {/* ── Agent Library overlay (sheet) ─────────────────────────────── */}
+      {showLibrary && (
+        <Library
+          onClose={() => setShowLibrary(false)}
+          onOpenBuilder={(def) => {
+            setBuilderInitialDef(def);
+            setShowBuilder(true);
+          }}
+          refreshKey={libraryRefreshKey}
+          onAgentsChanged={() => {
+            setAgentsVersion((v) => v + 1);
+            setSelectedId(null);
+          }}
+        />
+      )}
 
       {/* ── Agent builder overlay ─────────────────────────────────────── */}
       {showBuilder && (

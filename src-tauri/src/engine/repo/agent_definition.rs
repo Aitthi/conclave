@@ -458,6 +458,21 @@ pub async fn update(
     get(pool, id).await
 }
 
+/// Delete an agent definition. Returns `true` if a row was deleted.
+///
+/// The caller MUST first remove the definition's `workspace_agent` instances —
+/// `workspace_agent.agent_def_id` is `NOT NULL` with the default `NO ACTION`,
+/// so this DELETE aborts while any instance exists. The `agent_tool`,
+/// `agent_skill`, and `fusion_config` rows that reference the definition cascade
+/// away automatically. Raw sqlx (not chain-builder) for a plain DELETE-by-id.
+pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
+    let res = sqlx::query("DELETE FROM agent_definition WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -625,6 +640,20 @@ mod tests {
         assert_eq!(updated.allowed_senders.as_deref(), Some("selected"));
         // created_at preserved
         assert_eq!(updated.created_at, row.created_at);
+    }
+
+    /// delete() removes the row and returns true; deleting again returns false.
+    #[tokio::test]
+    async fn delete_removes_definition() {
+        let pool = connect_in_memory().await;
+        let row = create(&pool, &minimal_input("Gone", "cli", "own"))
+            .await
+            .expect("create failed");
+
+        assert!(delete(&pool, &row.id).await.expect("delete failed"));
+        assert!(get(&pool, &row.id).await.expect("get failed").is_none());
+        // Second delete is a no-op.
+        assert!(!delete(&pool, &row.id).await.expect("second delete failed"));
     }
 
     /// exists() returns true for a known id, false for an unknown one.

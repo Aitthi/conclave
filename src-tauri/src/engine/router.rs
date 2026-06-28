@@ -18,6 +18,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         // ── agentDef ──────────────────────────────────────────────────────
         "agentDef.list" => agent::list(state, payload).await,
         "agentDef.save" => agent::save(state, payload).await,
+        "agentDef.delete" => agent::delete(state, payload).await,
         "agentDef.addToWorkspace" => agent::add_to_workspace(state, payload).await,
 
         // ── instance ──────────────────────────────────────────────────────

@@ -65,6 +65,10 @@ export interface Commands {
     };
     res: AgentDefinition;
   };
+  "agentDef.delete": {
+    req: { id: string };
+    res: void;
+  };
   "agentDef.addToWorkspace": {
     req: { agentDefId: string; workspaceIds: string[] };
     res: WorkspaceAgent[];
@@ -192,6 +196,7 @@ export const ipc = {
   agentDef: {
     list: () => call("agentDef.list"),
     save: (req: Commands["agentDef.save"]["req"]) => call("agentDef.save", req),
+    delete: (req: Commands["agentDef.delete"]["req"]) => call("agentDef.delete", req),
     addToWorkspace: (req: Commands["agentDef.addToWorkspace"]["req"]) =>
       call("agentDef.addToWorkspace", req),
   },

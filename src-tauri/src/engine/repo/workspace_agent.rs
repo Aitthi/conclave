@@ -114,6 +114,22 @@ pub async fn list_by_workspace(
         .map_err(cb_err)
 }
 
+/// All instances of a given agent definition, across every workspace.
+///
+/// Used when deleting an agent definition: each instance must be removed
+/// (FK-safe) before the definition row can be deleted.
+pub async fn list_by_agent_def(
+    pool: &SqlitePool,
+    agent_def_id: &str,
+) -> sqlx::Result<Vec<WorkspaceAgentRow>> {
+    QueryBuilder::<Sqlite>::table("workspace_agent")
+        .select(COLS)
+        .where_eq("agent_def_id", agent_def_id)
+        .fetch_all::<WorkspaceAgentRow, _>(pool)
+        .await
+        .map_err(cb_err)
+}
+
 /// Find the workspace_agent for a specific (workspace_id, agent_def_id) pair.
 ///
 /// Returns `None` if the pair has not been linked yet. Used by

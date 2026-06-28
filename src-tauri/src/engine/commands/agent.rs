@@ -63,6 +63,13 @@ struct SaveAgentReq {
     skill_ids: Option<Vec<String>>,
 }
 
+/// Payload for `agentDef.delete`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteAgentReq {
+    id: String,
+}
+
 /// Payload for `agentDef.addToWorkspace`.
 ///
 /// Adds one agent definition to one or more workspaces. For each workspace a
@@ -193,6 +200,44 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     }
 
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Delete an agent definition everywhere.
+///
+/// Maps to `agentDef.delete` on the IPC bus. Removes every `workspace_agent`
+/// instance of this definition first (FK-safe + live-backend teardown) so the
+/// definition's `NO ACTION` foreign key can't abort the delete, then deletes the
+/// definition (its `agent_tool` / `agent_skill` / `fusion_config` rows cascade)
+/// and drops its secret env values from the Keychain.
+pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: DeleteAgentReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let id = req.id;
+
+    let def = repo::agent_definition::get(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("agent_definition id={id} not found")))?;
+
+    // Remove every instance of this def across all workspaces.
+    let instances = repo::workspace_agent::list_by_agent_def(&state.db, &id).await?;
+    for inst in &instances {
+        // Tear down any live backend before deleting the rows.
+        let _ = state.runtime.unregister(&inst.id);
+        repo::workspace_agent::remove(&state.db, &inst.id).await?;
+    }
+
+    repo::agent_definition::delete(&state.db, &id).await?;
+
+    // Drop this def's secret env values from the Keychain (best-effort).
+    if let Some(text) = def.secret_env_keys {
+        if let Ok(names) = serde_json::from_str::<Vec<String>>(&text) {
+            for name in names {
+                let _ = secrets::delete_key(&secret_account(&id, &name));
+            }
+        }
+    }
+
+    Ok(Value::Null)
 }
 
 /// Link an agent definition to one or more workspaces.
