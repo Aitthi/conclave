@@ -62,6 +62,7 @@ export function Terminal({ sessionId }: TerminalProps) {
     let lastCols = 0;
     let lastRows = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const applyResize = () => {
       try {
         fitAddon.fit();
@@ -76,6 +77,20 @@ export function Terminal({ sessionId }: TerminalProps) {
       void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
         // Session not running yet / no PTY — harmless.
       });
+      // Force a full viewport repaint shortly after the child's SIGWINCH redraw
+      // has had time to land. xterm's DOM renderer updates rows incrementally,
+      // so a resize can leave stale glyphs in cells the new frame doesn't
+      // overwrite (the scattered orange fragments seen on a TUI after zoom).
+      // `refresh()` re-renders every visible row from the (now-correct) buffer,
+      // clearing those leftovers. Re-armed on every resize; cleared on teardown.
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        try {
+          term.refresh(0, term.rows - 1);
+        } catch {
+          // Terminal disposed mid-timeout — ignore.
+        }
+      }, 200);
     };
     // Initial sizing is immediate so the first paint is at the right size.
     applyResize();
@@ -100,6 +115,7 @@ export function Terminal({ sessionId }: TerminalProps) {
 
     return () => {
       clearTimeout(resizeTimer);
+      clearTimeout(refreshTimer);
       observer.disconnect();
       dataSub.dispose();
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
