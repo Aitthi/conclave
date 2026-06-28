@@ -228,8 +228,36 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 }
                 Ok(("snapshot.create", params))
             }
+            // Agent self-handoff (strategic-compact). `save`/`last` are keyed on
+            // the INSTANCE id; the `conclave-cli` client fills it from
+            // CONCLAVE_INSTANCE_ID so a spawned agent types only
+            // `conclave snapshot save <text>` / `conclave snapshot last`.
+            Some("save") => {
+                let instance_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid("cli: snapshot save <instanceId> <text...>".into())
+                })?;
+                if argv.len() < 4 {
+                    return Err(AppError::Invalid(
+                        "cli: snapshot save <instanceId> <text...>".into(),
+                    ));
+                }
+                let text = argv[3..].join(" ");
+                Ok((
+                    "snapshot.save",
+                    json!({ "instanceId": instance_id, "text": text }),
+                ))
+            }
+            Some("last") => {
+                let instance_id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid("cli: snapshot last <instanceId>".into()))?;
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: snapshot last <instanceId>".into()));
+                }
+                Ok(("snapshot.last", json!({ "instanceId": instance_id })))
+            }
             _ => Err(AppError::Invalid(
-                "cli: snapshot <list|read|create> — unknown snapshot subcommand".into(),
+                "cli: snapshot <list|read|create|save|last> — unknown snapshot subcommand".into(),
             )),
         },
 
@@ -579,6 +607,41 @@ mod tests {
     #[test]
     fn snapshot_unknown_sub_is_invalid() {
         assert!(is_invalid(&["snapshot", "delete", "s1"]));
+    }
+
+    #[test]
+    fn snapshot_save_maps_correctly() {
+        assert_eq!(
+            ok_method(&["snapshot", "save", "inst1", "my", "handoff"]),
+            "snapshot.save"
+        );
+        let params = ok_params(&["snapshot", "save", "inst1", "my", "handoff"]);
+        assert_eq!(params["instanceId"], json!("inst1"));
+        assert_eq!(params["text"], json!("my handoff"));
+    }
+
+    #[test]
+    fn snapshot_save_missing_text_is_invalid() {
+        assert!(is_invalid(&["snapshot", "save", "inst1"]));
+    }
+
+    #[test]
+    fn snapshot_last_maps_correctly() {
+        assert_eq!(ok_method(&["snapshot", "last", "inst1"]), "snapshot.last");
+        assert_eq!(
+            ok_params(&["snapshot", "last", "inst1"]),
+            json!({ "instanceId": "inst1" })
+        );
+    }
+
+    #[test]
+    fn snapshot_last_missing_instance_is_invalid() {
+        assert!(is_invalid(&["snapshot", "last"]));
+    }
+
+    #[test]
+    fn snapshot_last_extra_args_is_invalid() {
+        assert!(is_invalid(&["snapshot", "last", "inst1", "extra"]));
     }
 
     // ── run ───────────────────────────────────────────────────────────────

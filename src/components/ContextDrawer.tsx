@@ -156,6 +156,8 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
     );
     setSnapshotError(false);
     setSnapshotBusy(false);
+    setConfirming(false);
+    setCompacting(false);
     // `session` is intentionally read but excluded from deps — we re-seed only on
     // identity change of the session id, not on every new session object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -169,6 +171,11 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [snapshotError, setSnapshotError] = useState(false);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
+  // Compact-loop UI: a Yes/No confirm gate (the loop CLEARS the agent, so we
+  // never fire it on a stray click), and a transient "compacting" note while the
+  // backend drives save → clear → restore in the agent's terminal.
+  const [confirming, setConfirming] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   // Full-screen memory-timeline overlay (M4.2). Local visibility flag; only
   // openable when a real `session` exists (the button is gated below).
   const [showTimeline, setShowTimeline] = useState(false);
@@ -196,7 +203,12 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   useEffect(() => {
     refetchSnapshots();
   }, [refetchSnapshots]);
-  useSnapshotCreated(sessionId, () => refetchSnapshots());
+  useSnapshotCreated(sessionId, () => {
+    // A snapshot landing means the compact loop's handoff was written — clear the
+    // transient "compacting" note (the /clear + restore now play out in the term).
+    setCompacting(false);
+    refetchSnapshots();
+  });
 
   // "Snapshot now" — create a manual snapshot, then refetch. Errors are surfaced
   // honestly (dev console + a tiny inline note), never silently swallowed.
@@ -219,6 +231,45 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
         if (mounted.current) setSnapshotBusy(false);
       });
   }, [sessionId, refetchSnapshots]);
+
+  // "Compact" — the strategic-compact loop for a live CLI agent. The backend
+  // injects a "save your handoff" prompt, waits for the agent to write its
+  // handoff snapshot, then `/clear`s and injects a "restore" prompt. The call
+  // returns immediately ("compacting"); the loop then plays out in the agent's
+  // own terminal, and the new handoff snapshot arrives via `snapshot:created`.
+  const doCompact = useCallback(() => {
+    setConfirming(false);
+    setSnapshotError(false);
+    setCompacting(true);
+    // `snapshot.compact` returns IMMEDIATELY (the loop then plays out in the
+    // agent's terminal), so there's nothing to refetch here — the new handoff
+    // snapshot arrives via `snapshot:created`, which clears `compacting`. We only
+    // handle the call itself failing (e.g. the agent isn't live).
+    ipc.snapshot.compact({ instanceId }).catch((err: unknown) => {
+      if (import.meta.env.DEV) {
+        console.error("ContextDrawer: snapshot.compact failed", err);
+      }
+      if (mounted.current) {
+        setSnapshotError(true);
+        setCompacting(false);
+      }
+    });
+  }, [instanceId]);
+
+  // Failsafe: if the agent never writes its handoff (ignores the prompt, is
+  // killed, the loop aborts server-side), no `snapshot:created` ever fires and
+  // the "Compacting…" note would pulse forever. Time it out a bit beyond the
+  // backend's own ~90s wait and surface an honest error instead of a stuck UI.
+  useEffect(() => {
+    if (!compacting) return;
+    const t = setTimeout(() => {
+      if (mounted.current) {
+        setCompacting(false);
+        setSnapshotError(true);
+      }
+    }, 120_000);
+    return () => clearTimeout(t);
+  }, [compacting]);
 
   // Resolve a counterpart instance id → display name via the roster.
   const nameOf = (id: string): string =>
@@ -435,19 +486,59 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
               <div>
                 <SectionLabel>
                   <span>Memory · snapshots</span>
-                  <button
-                    onClick={doSnapshot}
-                    disabled={snapshotBusy}
-                    title="Create a manual snapshot"
-                    className="normal-case tracking-normal text-[10.5px] font-medium text-accent hover:underline disabled:opacity-40 disabled:hover:no-underline flex items-center gap-1"
-                  >
-                    <Camera className="w-3 h-3" />
-                    {snapshotBusy ? "Saving…" : "Snapshot now"}
-                  </button>
+                  {confirming ? (
+                    // Yes/No gate — the compact loop CLEARS the agent, so confirm.
+                    <span className="normal-case tracking-normal text-[10.5px] font-medium flex items-center gap-2">
+                      <button
+                        onClick={doCompact}
+                        className="text-accent hover:underline flex items-center gap-1"
+                      >
+                        <Camera className="w-3 h-3" />
+                        Compact
+                      </button>
+                      <button
+                        onClick={() => setConfirming(false)}
+                        className="text-text-tertiary hover:text-text-secondary"
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : compacting ? (
+                    <span className="normal-case tracking-normal text-[10.5px] font-medium text-text-tertiary flex items-center gap-1">
+                      <Camera className="w-3 h-3 animate-pulse" />
+                      Compacting…
+                    </span>
+                  ) : (
+                    <button
+                      onClick={def.type === "cli" ? () => setConfirming(true) : doSnapshot}
+                      disabled={snapshotBusy}
+                      title={
+                        def.type === "cli"
+                          ? "Compact: save a handoff, clear the agent, then restore from it"
+                          : "Create a manual snapshot"
+                      }
+                      className="normal-case tracking-normal text-[10.5px] font-medium text-accent hover:underline disabled:opacity-40 disabled:hover:no-underline flex items-center gap-1"
+                    >
+                      <Camera className="w-3 h-3" />
+                      {snapshotBusy ? "Saving…" : def.type === "cli" ? "Compact now" : "Snapshot now"}
+                    </button>
+                  )}
                 </SectionLabel>
                 <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1 text-[11.5px]">
+                  {confirming && (
+                    <div className="text-[10.5px] text-text-secondary leading-snug pb-0.5">
+                      The agent will summarize its work, then be cleared and resume from
+                      that handoff. Continue?
+                    </div>
+                  )}
+                  {compacting && (
+                    <div className="text-[10.5px] text-text-secondary leading-snug pb-0.5">
+                      Asking the agent to save its handoff, then clearing &amp; restoring —
+                      watch its terminal.
+                    </div>
+                  )}
                   {snapshotError && (
-                    <div className="text-[10.5px] text-danger">Couldn't save snapshot</div>
+                    <div className="text-[10.5px] text-danger">Couldn't compact this agent</div>
                   )}
                   {snapshots.length === 0 ? (
                     <div className="text-[10.5px] text-text-tertiary py-0.5">No snapshots yet</div>

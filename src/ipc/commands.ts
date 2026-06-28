@@ -130,6 +130,16 @@ export interface Commands {
     req: { snapshotId: string };
     res: Snapshot;
   };
+  // ── strategic-compact loop (agent self-handoff) ──────────────────────────
+  // `save`/`last` are agent-facing (instance-keyed) and reached via the CLI, not
+  // the UI. `compact` is the UI entry point: it drives the whole loop (inject
+  // "save your handoff" → wait for the handoff snapshot → /clear → "restore").
+  "snapshot.compact": {
+    req: { instanceId: string };
+    // Returns immediately once the save prompt is injected; the loop then runs in
+    // the agent's terminal. `status` is a fixed acknowledgement, not progress.
+    res: { status: "compacting"; instanceId: string };
+  };
   "fusion.run": {
     req: { orchestratorId: string; prompt: string };
     res: FusionRun;
@@ -222,6 +232,7 @@ export const ipc = {
     create: (req: Commands["snapshot.create"]["req"]) => call("snapshot.create", req),
     list: (req: Commands["snapshot.list"]["req"]) => call("snapshot.list", req),
     read: (req: Commands["snapshot.read"]["req"]) => call("snapshot.read", req),
+    compact: (req: Commands["snapshot.compact"]["req"]) => call("snapshot.compact", req),
   },
   fusion: {
     run: (req: Commands["fusion.run"]["req"]) => call("fusion.run", req),

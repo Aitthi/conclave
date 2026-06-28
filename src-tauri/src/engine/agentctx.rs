@@ -58,6 +58,33 @@ set {ws_id} <key> <value>` and `conclave bb get {ws_id} <key>`."
     )
 }
 
+/// The strategic-compact "save" prompt — injected as a normal user turn (NOT a
+/// system prompt) when the user triggers a compact. It tells the agent to write
+/// its own handoff and persist it through `conclave snapshot save`, which is the
+/// signal the compact loop waits on before clearing. Kept to a single line (no
+/// embedded newlines) so a TUI submits it as one prompt, mirroring `inject`.
+#[must_use]
+pub fn compact_save_prompt() -> String {
+    "[conclave compact] Your context is about to be cleared to free space. Write a handoff so \
+you (resuming with ZERO memory of this conversation) can continue: the goal, the key decisions \
+and why, what is already done, the EXACT next step, and any half-finished edit. REFERENCE commit \
+SHAs and file paths instead of pasting their contents, and REDACT secrets (API keys, tokens, \
+passwords). Then persist it by running this single command (do not just print it): \
+`conclave snapshot save <your full handoff text>`. After it confirms, stop and wait."
+        .to_string()
+}
+
+/// The strategic-compact "restore" prompt — injected after `/clear` so the agent
+/// reloads the handoff it just saved and continues instead of starting over.
+/// Single line, same rationale as [`compact_save_prompt`].
+#[must_use]
+pub fn compact_restore_prompt() -> String {
+    "[conclave compact] Your context was just cleared. Restore your working state: run \
+`conclave snapshot last` to read the handoff you saved a moment ago, then continue the task \
+from the EXACT next step it describes. Do not restart work that the handoff says is done."
+        .to_string()
+}
+
 /// Ensure a `conclave` command exists on a dedicated shim directory and return
 /// that directory (to be prepended to the spawned agent's PATH). The shim is a
 /// symlink to the sibling `conclave-cli` binary, refreshed each call so it always
@@ -139,6 +166,17 @@ mod tests {
         let p = bootstrap_preamble("a=b\nc", Some("r=1"), "ws=prod\nx", "id\n1", "self=x\ny");
         assert!(!p.contains('\n'), "no newline: {p}");
         assert!(!p.contains('='), "no '=': {p}");
+    }
+
+    #[test]
+    fn compact_prompts_are_single_line_and_name_the_commands() {
+        let save = super::compact_save_prompt();
+        let restore = super::compact_restore_prompt();
+        assert!(!save.contains('\n'), "save prompt must be one line");
+        assert!(!restore.contains('\n'), "restore prompt must be one line");
+        // Each must name the exact command the agent has to run.
+        assert!(save.contains("conclave snapshot save"));
+        assert!(restore.contains("conclave snapshot last"));
     }
 
     #[test]

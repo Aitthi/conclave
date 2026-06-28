@@ -45,36 +45,88 @@ Subcommands:
   snapshot list <sessionId>
   snapshot read <snapshotId>
   snapshot create <sessionId> <type> [label]
+  snapshot save <text...>           (agent self-handoff; inside a spawned agent)
+  snapshot last                     (read your latest handoff; inside a spawned agent)
   run <orchestratorId> <prompt...>
   help
 
 Requires the Conclave app to be running.
 ";
 
-/// Expand the agent-friendly `tell <toInstanceId> <text...>` form into the wire
-/// form `tell <fromInstanceId> <toInstanceId> <text...>` the server allowlist
-/// expects, filling `<fromInstanceId>` from the spawned agent's
-/// `CONCLAVE_INSTANCE_ID`. The server tags the delivered message `[from <name>]`,
-/// so no client-side tagging is needed. Non-`tell` argv passes through untouched.
+/// Expand the agent-friendly subcommands that are keyed on the CALLER's own
+/// instance into the wire form the server allowlist expects, filling the
+/// instance id from the spawned agent's `CONCLAVE_INSTANCE_ID`:
 ///
-/// Errors (as a user-facing string) when `tell` is used without a known instance
-/// id (i.e. run outside a spawned agent) or with no target/text.
-fn expand_tell_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Vec<String>, String> {
-    if argv.first().map(String::as_str) != Some("tell") {
-        return Ok(argv);
+/// - `tell <toInstanceId> <text...>` → `tell <selfId> <toInstanceId> <text...>`
+/// - `snapshot save <text...>`       → `snapshot save <selfId> <text...>`
+/// - `snapshot last`                 → `snapshot last <selfId>`
+///
+/// Everything else (including `snapshot list/read/create`, which take an explicit
+/// id) passes through untouched.
+///
+/// Errors (as a user-facing string) when one of these forms is used without a
+/// known instance id (i.e. run outside a spawned agent) or with missing args.
+fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Vec<String>, String> {
+    // Resolve the caller's own instance id, or a user-facing error naming `cmd`.
+    let require_self = |cmd: &str| -> Result<&str, String> {
+        self_instance.filter(|s| !s.is_empty()).ok_or_else(|| {
+            format!(
+                "conclave: `{cmd}` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
+            )
+        })
+    };
+
+    match argv.first().map(String::as_str) {
+        Some("tell") => {
+            let from = require_self("tell")?;
+            if argv.len() < 3 {
+                return Err("conclave: tell <agentId> <text...>".to_string());
+            }
+            let mut out = Vec::with_capacity(argv.len() + 1);
+            out.push("tell".to_string()); // subcommand
+            out.push(from.to_string()); // fromInstanceId (injected from env)
+            out.extend_from_slice(&argv[1..]); // toInstanceId + text...
+            Ok(out)
+        }
+        Some("snapshot") => match argv.get(1).map(String::as_str) {
+            Some("save") => {
+                let me = require_self("snapshot save")?;
+                if argv.len() < 3 {
+                    return Err("conclave: snapshot save <text...>".to_string());
+                }
+                let mut out = Vec::with_capacity(argv.len() + 1);
+                out.push("snapshot".to_string());
+                out.push("save".to_string());
+                out.push(me.to_string()); // instanceId (injected from env)
+                out.extend_from_slice(&argv[2..]); // text...
+                Ok(out)
+            }
+            Some("last") => {
+                let me = require_self("snapshot last")?;
+                if argv.len() != 2 {
+                    return Err("conclave: snapshot last".to_string());
+                }
+                Ok(vec![
+                    "snapshot".to_string(),
+                    "last".to_string(),
+                    me.to_string(),
+                ])
+            }
+            // snapshot list/read/create carry an explicit id — leave untouched.
+            _ => Ok(argv),
+        },
+        _ => Ok(argv),
     }
-    let from = self_instance.filter(|s| !s.is_empty()).ok_or_else(|| {
-        "conclave: `tell` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
-            .to_string()
-    })?;
-    if argv.len() < 3 {
-        return Err("conclave: tell <agentId> <text...>".to_string());
-    }
-    let mut out = Vec::with_capacity(argv.len() + 1);
-    out.push("tell".to_string()); // subcommand
-    out.push(from.to_string()); // fromInstanceId (injected from env)
-    out.extend_from_slice(&argv[1..]); // toInstanceId + text...
-    Ok(out)
+}
+
+/// How `main` renders a successful result row.
+enum OutMode {
+    /// One-line confirmation (`tell` / `snapshot save`) — never echo the payload.
+    Terse,
+    /// The carried-forward handoff text (`snapshot last`) — the agent reads this.
+    Handoff,
+    /// Pretty-printed JSON (everything else).
+    Json,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -87,9 +139,10 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Expand `tell <agentId> <text>` to its wire form, filling the sender from
-    // CONCLAVE_INSTANCE_ID (set on spawned agents).
-    let argv = match expand_tell_args(argv, std::env::var("CONCLAVE_INSTANCE_ID").ok().as_deref()) {
+    // Expand the self-keyed forms (`tell`, `snapshot save`, `snapshot last`) to
+    // their wire form, filling the instance id from CONCLAVE_INSTANCE_ID (set on
+    // spawned agents).
+    let argv = match expand_self_args(argv, std::env::var("CONCLAVE_INSTANCE_ID").ok().as_deref()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
@@ -97,10 +150,22 @@ async fn main() -> ExitCode {
         }
     };
 
-    // `tell` echoes the full message back in its result row. Printing that into
-    // the agent's context would double the token cost of every message it sends,
-    // so we collapse a successful `tell` to a one-line confirmation below.
-    let is_tell = argv.first().map(String::as_str) == Some("tell");
+    // Pick how to render a successful result:
+    // - `tell` / `snapshot save` echo a full row; printing it into the agent's
+    //   context would waste tokens, so collapse to a one-line confirmation.
+    // - `snapshot last` exists precisely SO the agent reads its handoff — print
+    //   the carried-forward content, not the JSON row.
+    let is_snapshot = argv.first().map(String::as_str) == Some("snapshot");
+    let sub = argv.get(1).map(String::as_str);
+    let out_mode = if argv.first().map(String::as_str) == Some("tell")
+        || (is_snapshot && sub == Some("save"))
+    {
+        OutMode::Terse
+    } else if is_snapshot && sub == Some("last") {
+        OutMode::Handoff
+    } else {
+        OutMode::Json
+    };
 
     let path = match socket_path() {
         Some(p) => p,
@@ -177,21 +242,41 @@ async fn main() -> ExitCode {
     }
 
     if let Some(result) = response.get("result") {
-        if is_tell {
-            // Terse confirmation — never echo the message text back to the sender.
-            let status = result
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("sent");
-            let to = result
-                .get("toInstanceId")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            println!("{status} -> {to}");
-        } else {
-            let pretty =
-                serde_json::to_string_pretty(result).expect("serialize result cannot fail");
-            println!("{pretty}");
+        match out_mode {
+            // Terse: `tell` → "delivered -> <to>"; `snapshot save` → "saved <id>".
+            // Never echo the payload text back into the agent's context.
+            OutMode::Terse => {
+                if let Some(to) = result.get("toInstanceId").and_then(Value::as_str) {
+                    let status = result
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("sent");
+                    println!("{status} -> {to}");
+                } else {
+                    let id = result.get("id").and_then(Value::as_str).unwrap_or("");
+                    println!("saved snapshot {id}");
+                }
+            }
+            // The carried-forward handoff — the whole point of `snapshot last` is
+            // for the agent to READ this, so print the content, not the JSON row.
+            // If the latest snapshot somehow carries no handoff text, fail LOUDLY
+            // (non-zero) rather than print a placeholder the agent would silently
+            // "restore" from.
+            OutMode::Handoff => match result.get("carriedForward").and_then(Value::as_str) {
+                Some(content) => println!("{content}"),
+                None => {
+                    eprintln!(
+                        "conclave: latest snapshot has no handoff content (type: {})",
+                        result.get("type").and_then(Value::as_str).unwrap_or("?")
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            OutMode::Json => {
+                let pretty =
+                    serde_json::to_string_pretty(result).expect("serialize result cannot fail");
+                println!("{pretty}");
+            }
         }
         return ExitCode::SUCCESS;
     }
@@ -203,7 +288,7 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_tell_args;
+    use super::expand_self_args;
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
@@ -211,26 +296,66 @@ mod tests {
 
     #[test]
     fn tell_injects_sender_from_env() {
-        let out = expand_tell_args(v(&["tell", "to1", "hello", "there"]), Some("self1")).unwrap();
+        let out = expand_self_args(v(&["tell", "to1", "hello", "there"]), Some("self1")).unwrap();
         assert_eq!(out, v(&["tell", "self1", "to1", "hello", "there"]));
     }
 
     #[test]
     fn tell_without_instance_id_errors() {
-        assert!(expand_tell_args(v(&["tell", "to1", "hi"]), None).is_err());
-        assert!(expand_tell_args(v(&["tell", "to1", "hi"]), Some("")).is_err());
+        assert!(expand_self_args(v(&["tell", "to1", "hi"]), None).is_err());
+        assert!(expand_self_args(v(&["tell", "to1", "hi"]), Some("")).is_err());
     }
 
     #[test]
     fn tell_without_text_errors() {
-        assert!(expand_tell_args(v(&["tell", "to1"]), Some("self1")).is_err());
+        assert!(expand_self_args(v(&["tell", "to1"]), Some("self1")).is_err());
     }
 
     #[test]
-    fn non_tell_passes_through_untouched() {
+    fn snapshot_save_injects_instance_from_env() {
+        let out =
+            expand_self_args(v(&["snapshot", "save", "my", "handoff"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["snapshot", "save", "self1", "my", "handoff"]));
+    }
+
+    #[test]
+    fn snapshot_save_without_instance_id_errors() {
+        assert!(expand_self_args(v(&["snapshot", "save", "x"]), None).is_err());
+    }
+
+    #[test]
+    fn snapshot_save_without_text_errors() {
+        assert!(expand_self_args(v(&["snapshot", "save"]), Some("self1")).is_err());
+    }
+
+    #[test]
+    fn snapshot_last_injects_instance_from_env() {
+        let out = expand_self_args(v(&["snapshot", "last"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["snapshot", "last", "self1"]));
+    }
+
+    #[test]
+    fn snapshot_last_without_instance_id_errors() {
+        assert!(expand_self_args(v(&["snapshot", "last"]), None).is_err());
+    }
+
+    #[test]
+    fn snapshot_list_passes_through_untouched() {
+        // `snapshot list/read/create` carry an explicit id — must NOT be expanded.
+        let list = v(&["snapshot", "list", "sess1"]);
+        assert_eq!(expand_self_args(list.clone(), Some("self1")).unwrap(), list);
+        let create = v(&["snapshot", "create", "sess1", "manual"]);
+        assert_eq!(
+            expand_self_args(create.clone(), Some("self1")).unwrap(),
+            create
+        );
+    }
+
+    #[test]
+    fn non_self_args_pass_through_untouched() {
         let args = v(&["send", "sess1", "hello"]);
-        assert_eq!(expand_tell_args(args.clone(), Some("self1")).unwrap(), args);
+        assert_eq!(expand_self_args(args.clone(), Some("self1")).unwrap(), args);
         let list = v(&["agent", "list", "ws1"]);
-        assert_eq!(expand_tell_args(list.clone(), None).unwrap(), list);
+        assert_eq!(expand_self_args(list.clone(), None).unwrap(), list);
     }
 }

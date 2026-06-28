@@ -11,9 +11,11 @@
 //! There is no real provider token-usage telemetry yet, and no LLM
 //! summarisation. The stored `tokens` value is a labelled ESTIMATE derived from
 //! streamed output bytes (see `commands::instance`), and `summary` is a
-//! deterministic honest string. `carried_forward` and `diff` are therefore
-//! always NULL — real context carry-forward / diffing lands with Timeline
-//! Read/Fork/Restore in M4.2.
+//! deterministic honest string. For `auto`/`manual` markers `carried_forward`
+//! is NULL. A `handoff` snapshot, however, carries REAL context: the agent's own
+//! self-written summary, captured by the strategic-compact loop (the agent runs
+//! `conclave snapshot save <text>`) — that text lands in `carried_forward` and is
+//! read back verbatim after `/clear`. `diff` is still always NULL.
 //!
 //! # chain-builder usage
 //!
@@ -40,8 +42,9 @@ use uuid::Uuid;
 /// `skip_serializing_if` so an absent value is a missing key (matching the
 /// `field?: T` TS types), never `null`.
 ///
-/// `carried_forward` / `diff` hold raw stored text and are serialised as-is —
-/// both are NULL for now (M4.2 fills them).
+/// `carried_forward` / `diff` hold raw stored text and are serialised as-is.
+/// `carried_forward` holds the agent's handoff text on a `handoff` snapshot
+/// (NULL on markers); `diff` is always NULL.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotRow {
@@ -59,7 +62,7 @@ pub struct SnapshotRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_snapshot_id: Option<String>, // → "prevSnapshotId"
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub carried_forward: Option<String>, // → "carriedForward" (NULL until M4.2)
+    pub carried_forward: Option<String>, // → "carriedForward" (real text on `handoff`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>, // NULL until M4.2
     pub created_at: String, // → "createdAt"
@@ -94,6 +97,10 @@ pub struct NewSnapshot {
     pub tokens: Option<i64>,
     pub trigger_pct: Option<i64>,
     pub prev_snapshot_id: Option<String>,
+    /// Real carried-forward context (the agent's own handoff text) for a
+    /// `handoff` snapshot. `None` for `auto`/`manual` markers, which carry only
+    /// the token estimate.
+    pub carried_forward: Option<String>,
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
@@ -101,7 +108,8 @@ pub struct NewSnapshot {
 /// Insert a new snapshot and return the constructed row.
 ///
 /// Generates a UUID v4 `id` and ISO-8601 UTC `created_at`. `carried_forward`
-/// and `diff` are always NULL (M4.2 fills them).
+/// is persisted from `input` (the agent's handoff text for a `handoff`
+/// snapshot; `None` for markers); `diff` is always NULL.
 ///
 /// # Atomic `prev_snapshot_id` chaining (no TOCTOU)
 ///
@@ -125,6 +133,7 @@ pub async fn create(pool: &SqlitePool, input: NewSnapshot) -> sqlx::Result<Snaps
     let summary = input.summary;
     let tokens = input.tokens;
     let trigger_pct = input.trigger_pct;
+    let carried_forward = input.carried_forward;
 
     let prev_snapshot_id: Option<String> = sqlx::query_scalar(
         "INSERT INTO snapshot \
@@ -133,7 +142,7 @@ pub async fn create(pool: &SqlitePool, input: NewSnapshot) -> sqlx::Result<Snaps
          VALUES (?, ?, ?, ?, ?, ?, ?, \
           COALESCE(?, (SELECT s.id FROM snapshot s WHERE s.session_id = ? \
                        ORDER BY s.created_at DESC, s.id DESC LIMIT 1)), \
-          NULL, NULL, ?) \
+          ?, NULL, ?) \
          RETURNING prev_snapshot_id",
     )
     .bind(&id)
@@ -145,6 +154,7 @@ pub async fn create(pool: &SqlitePool, input: NewSnapshot) -> sqlx::Result<Snaps
     .bind(trigger_pct)
     .bind(&input.prev_snapshot_id)
     .bind(&input.session_id)
+    .bind(&carried_forward)
     .bind(&created_at)
     .fetch_one(pool)
     .await?;
@@ -158,7 +168,7 @@ pub async fn create(pool: &SqlitePool, input: NewSnapshot) -> sqlx::Result<Snaps
         tokens,
         trigger_pct,
         prev_snapshot_id,
-        carried_forward: None,
+        carried_forward,
         diff: None,
         created_at,
     })
@@ -193,9 +203,10 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SnapshotRow
 
 /// Fetch the newest snapshot for a session, or `None` if it has none yet.
 ///
-/// `#[allow(dead_code)]`: `create` now chains `prev_snapshot_id` atomically
-/// in-SQL, so this standalone lookup has no production caller; it's kept (and
-/// test-covered) as part of the repo's read API for M4.2's Timeline walk.
+/// `#[allow(dead_code)]`: `create` chains `prev_snapshot_id` atomically in-SQL,
+/// and the strategic-compact loop uses the type-filtered
+/// [`latest_handoff_for_session`] instead (an `auto` marker must not mask the
+/// handoff). Kept (test-covered) as part of the repo's read API.
 #[allow(dead_code)]
 pub async fn latest_for_session(
     pool: &SqlitePool,
@@ -204,6 +215,29 @@ pub async fn latest_for_session(
     QueryBuilder::<Sqlite>::table("snapshot")
         .select(COLS)
         .where_eq("session_id", session_id)
+        .order_by("created_at", Order::Desc)
+        .limit(1)
+        .fetch_optional::<SnapshotRow, _>(pool)
+        .await
+        .map_err(cb_err)
+}
+
+/// Fetch the newest `handoff` snapshot for a session, or `None` if it has none.
+///
+/// The strategic-compact loop relies on this (not [`latest_for_session`]): in the
+/// settle window after the agent saves its handoff, the output forwarder may fire
+/// an `auto` snapshot that would otherwise become "latest" — masking the handoff
+/// both for the loop's save-detection and for `snapshot.last`'s read-back, which
+/// would then restore from a `carried_forward = NULL` marker. Filtering on
+/// `type = 'handoff'` makes both paths see only real carried-forward content.
+pub async fn latest_handoff_for_session(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> sqlx::Result<Option<SnapshotRow>> {
+    QueryBuilder::<Sqlite>::table("snapshot")
+        .select(COLS)
+        .where_eq("session_id", session_id)
+        .where_eq("type", "handoff")
         .order_by("created_at", Order::Desc)
         .limit(1)
         .fetch_optional::<SnapshotRow, _>(pool)
@@ -267,6 +301,7 @@ mod tests {
             tokens: Some(tokens),
             trigger_pct: Some(pct),
             prev_snapshot_id: None,
+            carried_forward: None,
         }
     }
 
@@ -324,6 +359,37 @@ mod tests {
         let b = create(&pool, input).await.expect("create B failed");
 
         assert_eq!(b.prev_snapshot_id.as_deref(), Some(a.id.as_str()));
+    }
+
+    /// latest_handoff_for_session ignores a newer non-handoff marker — the race
+    /// the strategic-compact settle window opens.
+    #[tokio::test]
+    async fn latest_handoff_skips_newer_auto() {
+        let pool = connect_in_memory().await;
+        let sid = fixture_session(&pool).await;
+
+        // A handoff with real content…
+        let mut handoff = new_input(&sid, "handoff", 50, 25);
+        handoff.carried_forward = Some("goal: ship; next: tests".into());
+        let h = create(&pool, handoff).await.expect("create handoff failed");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // …then a NEWER auto marker (carried_forward NULL) lands on top.
+        create(&pool, new_input(&sid, "auto", 190, 95))
+            .await
+            .expect("create auto failed");
+
+        // latest_for_session sees the auto; latest_handoff_for_session sees the handoff.
+        let any = latest_for_session(&pool, &sid).await.unwrap().unwrap();
+        assert_eq!(any.r#type, "auto", "newest overall is the auto marker");
+        let ho = latest_handoff_for_session(&pool, &sid)
+            .await
+            .unwrap()
+            .expect("a handoff exists");
+        assert_eq!(ho.id, h.id, "latest handoff is the real one, not the auto");
+        assert_eq!(
+            ho.carried_forward.as_deref(),
+            Some("goal: ship; next: tests")
+        );
     }
 
     /// get by id returns the row; an unknown id → None.

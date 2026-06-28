@@ -41,6 +41,9 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "snapshot.create" => snapshot::create(state, payload).await,
         "snapshot.list" => snapshot::list(state, payload).await,
         "snapshot.read" => snapshot::read(state, payload).await,
+        "snapshot.save" => snapshot::save(state, payload).await,
+        "snapshot.last" => snapshot::last(state, payload).await,
+        "snapshot.compact" => snapshot::compact(state, payload).await,
 
         // ── fusion ────────────────────────────────────────────────────────
         "fusion.run" => fusion::run(state, payload).await,

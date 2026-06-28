@@ -112,7 +112,9 @@ export interface Snapshot {
   tokens?: number;
   triggerPct?: number;
   prevSnapshotId?: string;
-  carriedForward?: unknown;
+  // The agent's self-written handoff text on a `handoff` snapshot (the
+  // strategic-compact loop); absent on `auto`/`manual` markers.
+  carriedForward?: string;
   diff?: unknown;
   createdAt: string;
 }

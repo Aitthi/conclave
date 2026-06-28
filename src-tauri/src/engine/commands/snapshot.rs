@@ -17,11 +17,14 @@
 //!   persisted conversation history, which does not exist yet, so they are NOT
 //!   backend operations here (the Timeline renders them as honestly disabled).
 
-use crate::engine::{bus, repo, AppError, AppState};
+use crate::engine::runtime::Runtime;
+use crate::engine::{agentctx, bus, repo, AppError, AppState};
 use repo::snapshot::{NewSnapshot, SnapshotRow};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::AppHandle;
 
 // ── Request types ────────────────────────────────────────────────────────────
@@ -139,6 +142,7 @@ pub(crate) async fn create_auto(
             tokens: Some(tokens),
             trigger_pct: pct_of(tokens, limit),
             prev_snapshot_id: None, // resolved inside persist_and_emit
+            carried_forward: None,  // markers carry only the estimate
         },
     )
     .await
@@ -176,6 +180,7 @@ pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError>
             tokens,
             trigger_pct,
             prev_snapshot_id: None, // resolved inside persist_and_emit
+            carried_forward: None,  // a manual marker carries only the estimate
         },
     )
     .await?;
@@ -207,6 +212,230 @@ pub async fn read(state: &AppState, payload: Value) -> Result<Value, AppError> {
         .ok_or_else(|| AppError::NotFound(format!("snapshot id={} not found", req.snapshot_id)))?;
 
     serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+// ── Strategic-compact loop (agent self-handoff) ───────────────────────────────
+
+/// How long the compact tail waits, between polls, for the agent's handoff
+/// snapshot to appear, and how many times. ~60 × 1.5s = a 90s ceiling.
+const COMPACT_POLL_INTERVAL_MS: u64 = 1_500;
+const COMPACT_POLL_TRIES: u32 = 60;
+/// Settle pause around `/clear` so the harness processes one input before the next.
+const COMPACT_SETTLE_MS: u64 = 1_500;
+
+/// Payload for `snapshot.save` — the agent's own handoff text, instance-keyed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveReq {
+    instance_id: String,
+    text: String,
+}
+
+/// Payload for `snapshot.last` / `snapshot.compact` — instance-keyed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceReq {
+    instance_id: String,
+}
+
+/// The harness command that clears a CLI agent's conversation history. Claude
+/// Code and Codex both use `/clear`; centralised so a future divergence is a
+/// one-line edit. (Runtime-verify per harness — clearing is destructive.)
+fn clear_command(_cli_kind: Option<&str>) -> &'static str {
+    "/clear"
+}
+
+/// Type a line into a live agent's stdin and submit it. A TUI's Enter is CR
+/// (`\r`) sent as a SEPARATE write after a short beat, so Codex's paste-burst
+/// detection treats it as a real Enter (mirrors [`super::message::inject`]).
+/// Best-effort: a dead/closed backend is ignored — the caller owns liveness.
+async fn submit_line(runtime: &Runtime, instance_id: &str, text: &str) {
+    if runtime.send_stdin(instance_id, text).is_ok() {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let _ = runtime.send_stdin(instance_id, "\r");
+    }
+}
+
+/// Persist the agent's self-written handoff as a `handoff` snapshot (M4.2's
+/// deferred `carried_forward`, now filled). Instance-keyed: a spawned agent knows
+/// its own `CONCLAVE_INSTANCE_ID`, not its session id. The real text lands in
+/// `carried_forward`; [`last`] reads it back verbatim after `/clear`.
+pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: SaveReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    let session = repo::session::get_by_instance(&state.db, &req.instance_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("no session for instance id={}", req.instance_id))
+        })?;
+
+    let tokens = session.context_tokens;
+    let limit = session
+        .context_limit
+        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT);
+
+    let row = persist_and_emit(
+        &state.db,
+        state.app(),
+        NewSnapshot {
+            session_id: session.id,
+            kind: "handoff".to_owned(),
+            label: None,
+            summary: Some(honest_summary("handoff", tokens.unwrap_or(0), limit)),
+            tokens,
+            trigger_pct: tokens.and_then(|t| pct_of(t, limit)),
+            prev_snapshot_id: None, // resolved inside persist_and_emit
+            carried_forward: Some(req.text),
+        },
+    )
+    .await?;
+
+    serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Return the newest snapshot for the agent's session (instance-keyed), so a
+/// just-cleared agent can read back the handoff it saved. NotFound if the
+/// instance has no session or no snapshot yet.
+pub async fn last(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: InstanceReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    let session = repo::session::get_by_instance(&state.db, &req.instance_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("no session for instance id={}", req.instance_id))
+        })?;
+
+    // Type-filtered: a just-fired `auto` marker must not be returned as the
+    // "handoff" to restore from (it has no `carried_forward`).
+    let row = repo::snapshot::latest_handoff_for_session(&state.db, &session.id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "no handoff yet for instance id={}",
+                req.instance_id
+            ))
+        })?;
+
+    serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Drive the strategic-compact loop for a live CLI agent: inject the "save your
+/// handoff" prompt → wait for the agent to actually write its `handoff` snapshot
+/// → `/clear` → inject the "restore from your handoff" prompt. Maps to
+/// `snapshot.compact`. Returns IMMEDIATELY; the wait-and-clear tail runs as a
+/// detached task (it can take up to ~90s) so the JSON-RPC call doesn't block.
+///
+/// SAFETY: the tail clears the agent ONLY after a fresh handoff snapshot appears
+/// (proof the agent saved). If none appears within the timeout, it ABORTS without
+/// clearing — Conclave never destroys context it failed to capture.
+pub async fn compact(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: InstanceReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    // Resolve instance → agent definition (for the harness-specific clear command)
+    // → session. An honest NotFound rather than a raw error at each missing link.
+    let inst = repo::workspace_agent::get(&state.db, &req.instance_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("instance id={} not found", req.instance_id)))?;
+    let def = repo::agent_definition::get(&state.db, &inst.agent_def_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "agent definition id={} not found",
+                inst.agent_def_id
+            ))
+        })?;
+    let session = repo::session::get_by_instance(&state.db, &req.instance_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("no session for instance id={}", req.instance_id))
+        })?;
+
+    // Compacting a non-running agent makes no sense — there is no TUI to clear.
+    if !state.runtime.is_live(&req.instance_id) {
+        return Err(AppError::NotFound(format!(
+            "instance {} is not running — spawn it first",
+            req.instance_id
+        )));
+    }
+
+    // The HANDOFF snapshot id BEFORE we ask the agent to save — the tail waits for
+    // a newer handoff to appear as proof the save landed. Type-filtered so an
+    // `auto` marker firing in the settle window can't be mistaken for the save.
+    let before = repo::snapshot::latest_handoff_for_session(&state.db, &session.id)
+        .await?
+        .map(|s| s.id);
+
+    // Inject the save prompt now, as a normal submitted user turn.
+    submit_line(
+        &state.runtime,
+        &req.instance_id,
+        &agentctx::compact_save_prompt(),
+    )
+    .await;
+
+    // Detached tail: wait for the handoff, then clear + restore.
+    let db = state.db.clone();
+    let runtime = state.runtime.clone();
+    let instance_id = req.instance_id.clone();
+    let session_id = session.id.clone();
+    let clear_cmd = clear_command(def.cli_kind.as_deref()).to_string();
+    tauri::async_runtime::spawn(run_compact_tail(
+        db,
+        runtime,
+        instance_id,
+        session_id,
+        before,
+        clear_cmd,
+    ));
+
+    Ok(json!({ "status": "compacting", "instanceId": req.instance_id }))
+}
+
+/// The wait-and-clear tail of [`compact`], run as a detached task. Polls for the
+/// agent's handoff snapshot; on success clears the harness and injects the
+/// restore prompt; on timeout aborts WITHOUT clearing (never destroys uncaptured
+/// context). Self-contained (owned clones) so it outlives the JSON-RPC call.
+async fn run_compact_tail(
+    db: SqlitePool,
+    runtime: Arc<Runtime>,
+    instance_id: String,
+    session_id: String,
+    before: Option<String>,
+    clear_cmd: String,
+) {
+    // 1. Wait for a NEW handoff snapshot (type-filtered so an `auto` marker firing
+    //    in this window can't mask the agent's save and starve the loop).
+    let mut saved = false;
+    for _ in 0..COMPACT_POLL_TRIES {
+        tokio::time::sleep(Duration::from_millis(COMPACT_POLL_INTERVAL_MS)).await;
+        if let Ok(Some(s)) = repo::snapshot::latest_handoff_for_session(&db, &session_id).await {
+            if Some(&s.id) != before.as_ref() && s.carried_forward.is_some() {
+                saved = true;
+                break;
+            }
+        }
+    }
+    if !saved {
+        eprintln!(
+            "compact: instance {instance_id} did not save a handoff in time — \
+             NOT clearing (context preserved)"
+        );
+        return;
+    }
+
+    // The agent may have exited while we waited — don't type into a dead PTY.
+    if !runtime.is_live(&instance_id) {
+        return;
+    }
+
+    // 2. Clear, settle, then inject the restore prompt.
+    tokio::time::sleep(Duration::from_millis(COMPACT_SETTLE_MS)).await;
+    submit_line(&runtime, &instance_id, &clear_cmd).await;
+    tokio::time::sleep(Duration::from_millis(COMPACT_SETTLE_MS)).await;
+    submit_line(&runtime, &instance_id, &agentctx::compact_restore_prompt()).await;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -373,5 +602,104 @@ mod tests {
             Some(first.id.as_str()),
             "second chains to the first"
         );
+    }
+
+    /// Like `fixture_session` but returns the INSTANCE (workspace_agent) id —
+    /// what the agent-facing `save`/`last`/`compact` handlers are keyed on.
+    async fn fixture_instance(state: &AppState) -> String {
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "CompactAgent".into(),
+                role: None,
+                agent_type: "cli".into(),
+                cli_kind: Some("codex".into()),
+                color: None,
+                provider_id: None,
+                model: None,
+                harness_mode: "own".into(),
+                share_blackboard: None,
+                auto_submit_injected: None,
+                allowed_senders: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id
+    }
+
+    /// save persists the agent's handoff in `carried_forward`; last reads it back.
+    #[tokio::test]
+    async fn save_then_last_roundtrip() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+
+        let text = "goal: ship X; done: scaffolding; next: write the parser tests";
+        let out = save(&state, json!({ "instanceId": inst, "text": text }))
+            .await
+            .expect("save failed");
+
+        assert_eq!(out.get("type").and_then(Value::as_str), Some("handoff"));
+        assert_eq!(
+            out.get("carriedForward").and_then(Value::as_str),
+            Some(text)
+        );
+
+        let got = last(&state, json!({ "instanceId": inst }))
+            .await
+            .expect("last failed");
+        assert_eq!(got.get("id"), out.get("id"), "last returns the saved row");
+        assert_eq!(
+            got.get("carriedForward").and_then(Value::as_str),
+            Some(text),
+            "handoff text round-trips verbatim"
+        );
+    }
+
+    /// save for an unknown instance → NotFound (no fabricated row).
+    #[tokio::test]
+    async fn save_unknown_instance_not_found() {
+        let state = AppState::for_tests().await;
+        let err = save(&state, json!({ "instanceId": "nope", "text": "x" }))
+            .await
+            .expect_err("save must fail for an unknown instance");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// last with no snapshot yet → NotFound (nothing to restore).
+    #[tokio::test]
+    async fn last_with_no_snapshot_not_found() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        let err = last(&state, json!({ "instanceId": inst }))
+            .await
+            .expect_err("last must fail when no snapshot exists");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// compact on a non-running instance → NotFound, and (importantly) spawns no
+    /// detached tail that could clear a dead agent.
+    #[tokio::test]
+    async fn compact_not_running_not_found() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        let err = compact(&state, json!({ "instanceId": inst }))
+            .await
+            .expect_err("compact must fail when the agent is not live");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn clear_command_is_slash_clear() {
+        assert_eq!(clear_command(Some("claude-code")), "/clear");
+        assert_eq!(clear_command(Some("codex")), "/clear");
+        assert_eq!(clear_command(None), "/clear");
     }
 }
