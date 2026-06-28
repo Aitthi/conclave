@@ -245,6 +245,59 @@ pub async fn set_status(pool: &SqlitePool, id: &str, status: &str) -> sqlx::Resu
     Ok(())
 }
 
+/// Remove a workspace_agent (an agent's instance in a workspace) and everything
+/// that hangs off it. Returns `true` if a row was deleted.
+///
+/// The agent's `session` (and that session's `message`s and `snapshot`s) cascade
+/// via `ON DELETE CASCADE`. But several tables reference `workspace_agent` with
+/// the default `NO ACTION`, which would abort the final DELETE if any such row
+/// exists — so we clean those first, inside one transaction with the delete:
+///   - `inter_agent_message` (NOT NULL from/to) and `blackboard_activity`
+///     (NOT NULL instance) → delete the dependent rows
+///   - `message.from_instance_id`, `blackboard_entry.last_writer_id`,
+///     `fusion_panel_response.instance_id` (all nullable) → null the back-pointer
+///
+/// Raw sqlx (not chain-builder) because these are cross-table maintenance
+/// statements, not entity CRUD. Foreign keys are enabled on the pool, so the
+/// cascade fires for the owned rows.
+pub async fn remove(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM inter_agent_message WHERE from_instance_id = ? OR to_instance_id = ?")
+        .bind(id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM blackboard_activity WHERE instance_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("UPDATE message SET from_instance_id = NULL WHERE from_instance_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("UPDATE blackboard_entry SET last_writer_id = NULL WHERE last_writer_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("UPDATE fusion_panel_response SET instance_id = NULL WHERE instance_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    let res = sqlx::query("DELETE FROM workspace_agent WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(res.rows_affected() > 0)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -306,6 +359,212 @@ mod tests {
             .expect("get failed")
             .expect("row should exist");
         assert_eq!(fetched, row);
+    }
+
+    /// remove() deletes the instance (and cascades its session), returns true;
+    /// a second remove of the same id returns false.
+    #[tokio::test]
+    async fn remove_deletes_instance_and_cascades_session() {
+        let pool = connect_in_memory().await;
+        let (ws_id, def_id) = fixtures(&pool).await;
+
+        // instantiate creates the workspace_agent + its session atomically.
+        let inst = instantiate(&pool, &ws_id, &def_id)
+            .await
+            .expect("instantiate failed");
+        assert!(
+            crate::engine::repo::session::get_by_instance(&pool, &inst.id)
+                .await
+                .expect("session lookup failed")
+                .is_some()
+        );
+
+        let removed = remove(&pool, &inst.id).await.expect("remove failed");
+        assert!(removed, "first remove should report a deleted row");
+
+        // The instance is gone, and its session cascaded away.
+        assert!(!exists(&pool, &inst.id).await.expect("exists failed"));
+        assert!(
+            crate::engine::repo::session::get_by_instance(&pool, &inst.id)
+                .await
+                .expect("session lookup failed")
+                .is_none()
+        );
+
+        // Removing again is a no-op.
+        let again = remove(&pool, &inst.id).await.expect("second remove failed");
+        assert!(!again, "second remove should report no row");
+    }
+
+    /// remove() must clear every non-cascading reference to the instance so the
+    /// final DELETE can't trip a FK constraint, and must leave rows in OTHER
+    /// sessions intact (back-pointers nulled, not the rows deleted). Seeds one
+    /// row in each referencing table and asserts the outcome. This is the
+    /// regression guard: a future FK added without updating remove() breaks here.
+    #[tokio::test]
+    async fn remove_clears_all_references() {
+        let pool = connect_in_memory().await;
+        let (ws_id, def_id) = fixtures(&pool).await;
+
+        // Two instances: `a` is the one we remove; `b` survives and owns the
+        // "other session" rows that should be nulled rather than deleted.
+        let a = instantiate(&pool, &ws_id, &def_id)
+            .await
+            .expect("instantiate a");
+        let def2 = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "Agent2".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create def2");
+        let b = instantiate(&pool, &ws_id, &def2.id)
+            .await
+            .expect("instantiate b");
+        let b_session = crate::engine::repo::session::get_by_instance(&pool, &b.id)
+            .await
+            .expect("b session lookup")
+            .expect("b has a session");
+
+        let ts = "2026-01-01T00:00:00Z";
+
+        // 1. inter_agent_message in BOTH directions (NOT NULL refs → must delete).
+        for (from, to) in [(&a.id, &b.id), (&b.id, &a.id)] {
+            sqlx::query(
+                "INSERT INTO inter_agent_message \
+                 (id, from_instance_id, to_instance_id, text, status, created_at) \
+                 VALUES (?, ?, ?, 'hi', 'queued', ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(from)
+            .bind(to)
+            .bind(ts)
+            .execute(&pool)
+            .await
+            .expect("seed inter_agent_message");
+        }
+
+        // 2. blackboard_entry (last_writer_id = a → null) + activity (instance = a → delete).
+        let entry_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO blackboard_entry (id, workspace_id, key, value, last_writer_id, updated_at) \
+             VALUES (?, ?, 'k', 'v', ?, ?)",
+        )
+        .bind(&entry_id)
+        .bind(&ws_id)
+        .bind(&a.id)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("seed blackboard_entry");
+        sqlx::query(
+            "INSERT INTO blackboard_activity (id, entry_id, instance_id, action, at) \
+             VALUES (?, ?, ?, 'write', ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&entry_id)
+        .bind(&a.id)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("seed blackboard_activity");
+
+        // 3. message in B's session with from_instance_id = a (→ null, row survives).
+        let msg_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO message (id, session_id, role, text, from_instance_id, created_at) \
+             VALUES (?, ?, 'agent', 'x', ?, ?)",
+        )
+        .bind(&msg_id)
+        .bind(&b_session.id)
+        .bind(&a.id)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+
+        // 4. fusion_run in B's session + response with instance_id = a (→ null).
+        let run_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO fusion_run (id, session_id, prompt, created_at) VALUES (?, ?, 'p', ?)",
+        )
+        .bind(&run_id)
+        .bind(&b_session.id)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("seed fusion_run");
+        let resp_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO fusion_panel_response (id, fusion_run_id, instance_id, status, created_at) \
+             VALUES (?, ?, ?, 'done', ?)",
+        )
+        .bind(&resp_id)
+        .bind(&run_id)
+        .bind(&a.id)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .expect("seed fusion_panel_response");
+
+        // ── Remove `a` ───────────────────────────────────────────────────────
+        let removed = remove(&pool, &a.id).await.expect("remove a");
+        assert!(removed);
+        assert!(!exists(&pool, &a.id).await.expect("exists a"));
+
+        // Deleted: inter_agent_message + blackboard_activity referencing a.
+        let iam: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message WHERE from_instance_id = ? OR to_instance_id = ?",
+        )
+        .bind(&a.id)
+        .bind(&a.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count iam");
+        assert_eq!(iam, 0, "inter_agent_messages should be deleted");
+        let act: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM blackboard_activity WHERE instance_id = ?")
+                .bind(&a.id)
+                .fetch_one(&pool)
+                .await
+                .expect("count activity");
+        assert_eq!(act, 0, "blackboard_activity should be deleted");
+
+        // Nulled (rows survive): message, blackboard_entry, fusion_panel_response.
+        let msg_writer: Option<String> =
+            sqlx::query_scalar("SELECT from_instance_id FROM message WHERE id = ?")
+                .bind(&msg_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch message");
+        assert!(
+            msg_writer.is_none(),
+            "message.from_instance_id should be NULL"
+        );
+        let entry_writer: Option<String> =
+            sqlx::query_scalar("SELECT last_writer_id FROM blackboard_entry WHERE id = ?")
+                .bind(&entry_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch entry");
+        assert!(
+            entry_writer.is_none(),
+            "blackboard_entry.last_writer_id should be NULL"
+        );
+        let resp_inst: Option<String> =
+            sqlx::query_scalar("SELECT instance_id FROM fusion_panel_response WHERE id = ?")
+                .bind(&resp_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch response");
+        assert!(
+            resp_inst.is_none(),
+            "fusion_panel_response.instance_id should be NULL"
+        );
     }
 
     /// list_by_workspace returns only rows for the given workspace, in order.

@@ -303,6 +303,39 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
     serde_json::to_value(&session).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Remove a workspace_agent instance from its workspace.
+///
+/// Maps to `instance.remove` on the IPC bus. Tears down any live backend (kills
+/// the PTY child / aborts the chat loop) BEFORE deleting the rows, then deletes
+/// the instance and everything that hangs off it (see
+/// `repo::workspace_agent::remove`). Idempotent-ish: a missing id is `NotFound`.
+pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: InstanceReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let id = req.workspace_agent_id;
+
+    if !repo::workspace_agent::exists(&state.db, &id).await? {
+        return Err(AppError::NotFound(format!(
+            "workspace_agent id={id} not found"
+        )));
+    }
+
+    // Stop the live backend first so no PTY child / chat loop outlives the row.
+    // The `#[must_use]` bool (did THIS call perform teardown, for idle-status
+    // emission) is intentionally discarded: we're deleting the instance, so
+    // there is no idle status to emit.
+    let _ = state.runtime.unregister(&id);
+
+    let removed = repo::workspace_agent::remove(&state.db, &id).await?;
+    if !removed {
+        return Err(AppError::NotFound(format!(
+            "workspace_agent id={id} not found"
+        )));
+    }
+
+    Ok(Value::Null)
+}
+
 /// Drain a backend's output stream (CLI PTY chunks or chat-loop assistant text
 /// deltas) onto the event bus as `session:output` chunks, then perform idle
 /// cleanup when the backend self-terminates (the source hits EOF and

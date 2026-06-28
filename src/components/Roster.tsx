@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Waypoints, Terminal, Search, Folder, Plus, Layers } from "lucide-react";
+import { Waypoints, Terminal, Search, Folder, Plus, Layers, X } from "lucide-react";
 import { ipc } from "../ipc";
 import type { AgentDefinition, WorkspaceAgent } from "../ipc";
 
@@ -76,20 +76,33 @@ interface AgentRowProps {
   entry: RosterEntry;
   isSelected: boolean;
   onSelect: () => void;
+  onRemove: () => void;
+  removing: boolean;
 }
 
-function AgentRow({ entry, isSelected, onSelect }: AgentRowProps) {
+function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowProps) {
   const isCli = entry.type === "cli";
   const statusColor = STATUS_COLOR[entry.status];
+  // Two-step removal so a stray click can't delete an agent: the first click
+  // arms the confirm, the second (red) click commits.
+  const [confirming, setConfirming] = useState(false);
 
   return (
-    <button
-      className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors${
-        isSelected
-          ? " bg-[#0a84ff]/10 ring-1 ring-[#0a84ff]/30"
-          : " hover:bg-black/[0.04]"
+    // Not a <button> (it now nests buttons) — a div with a role for the a11y tree.
+    <div
+      className={`group w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors cursor-pointer${
+        isSelected ? " bg-[#0a84ff]/10 ring-1 ring-[#0a84ff]/30" : " hover:bg-black/[0.04]"
       }`}
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      onMouseLeave={() => setConfirming(false)}
     >
       <AgentAvatar entry={entry} />
 
@@ -101,14 +114,42 @@ function AgentRow({ entry, isSelected, onSelect }: AgentRowProps) {
         <div className="text-[10.5px] text-[#86868b] truncate">{entry.meta}</div>
       </div>
 
-      {/* Status dot */}
-      <span
-        className="w-2 h-2 rounded-full shrink-0"
-        style={{ backgroundColor: statusColor }}
-        role="img"
-        aria-label={entry.status}
-      />
-    </button>
+      {confirming ? (
+        // Confirm step — commits the removal.
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          disabled={removing}
+          className="text-[10.5px] font-semibold text-white bg-[#ff3b30] px-2 py-0.5 rounded-md shrink-0 disabled:opacity-50"
+          title="Confirm removal from this workspace"
+        >
+          {removing ? "Removing…" : "Remove"}
+        </button>
+      ) : (
+        <>
+          {/* Status dot — hidden on hover to make room for the remove affordance. */}
+          <span
+            className="w-2 h-2 rounded-full shrink-0 group-hover:hidden"
+            style={{ backgroundColor: statusColor }}
+            role="img"
+            aria-label={entry.status}
+          />
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirming(true);
+            }}
+            className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md text-[#86868b] hover:bg-black/[0.06] hover:text-[#ff3b30] shrink-0"
+            title="Remove from workspace"
+            aria-label={`Remove ${entry.name} from workspace`}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -122,7 +163,12 @@ interface RosterProps {
   folderPath?: string;
   selectedId: string | null;
   onSelect: (instanceId: string) => void;
-  onAddAgent?: () => void;
+  /** Open the Builder to define a brand-new agent (from inside the picker). */
+  onCreateAgent?: () => void;
+  /** Bumped externally whenever the workspace's agent set changes (re-fetch). */
+  agentsVersion?: number;
+  /** Notify the parent that this workspace's agent set changed (add / remove). */
+  onAgentsChanged?: () => void;
   /** Open the per-workspace Blackboard screen. Absent → no workspace active. */
   onOpenBlackboard?: () => void;
   /** Whether the Blackboard screen is currently shown (drives active styling). */
@@ -135,7 +181,9 @@ export function Roster({
   folderPath,
   selectedId,
   onSelect,
-  onAddAgent,
+  onCreateAgent,
+  agentsVersion,
+  onAgentsChanged,
   onOpenBlackboard,
   blackboardOpen,
 }: RosterProps) {
@@ -143,6 +191,22 @@ export function Roster({
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState("");
+  // Add-agent picker (choose an existing Library agent to add to this workspace).
+  const [showPicker, setShowPicker] = useState(false);
+  // Instance id currently being removed (disables its confirm button).
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  async function handleRemove(instanceId: string) {
+    setRemovingId(instanceId);
+    try {
+      await ipc.instance.remove({ workspaceAgentId: instanceId });
+      onAgentsChanged?.();
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("Roster: instance.remove failed", err);
+    } finally {
+      setRemovingId(null);
+    }
+  }
 
   // Fetch + join instances with their definitions whenever the workspace changes.
   // StrictMode-safe: `active` flag prevents a stale resolve from updating state
@@ -193,7 +257,7 @@ export function Roster({
     return () => {
       active = false;
     };
-  }, [workspaceId]);
+  }, [workspaceId, agentsVersion]);
 
   // Client-side search filter — case-insensitive match on name and meta.
   const q = search.trim().toLowerCase();
@@ -285,6 +349,8 @@ export function Roster({
                       entry={entry}
                       isSelected={selectedId === entry.instanceId}
                       onSelect={() => onSelect(entry.instanceId)}
+                      onRemove={() => handleRemove(entry.instanceId)}
+                      removing={removingId === entry.instanceId}
                     />
                   ))}
                 </div>
@@ -302,6 +368,8 @@ export function Roster({
                         entry={entry}
                         isSelected={selectedId === entry.instanceId}
                         onSelect={() => onSelect(entry.instanceId)}
+                        onRemove={() => handleRemove(entry.instanceId)}
+                        removing={removingId === entry.instanceId}
                       />
                     ))}
                   </div>
@@ -320,6 +388,8 @@ export function Roster({
                         entry={entry}
                         isSelected={selectedId === entry.instanceId}
                         onSelect={() => onSelect(entry.instanceId)}
+                        onRemove={() => handleRemove(entry.instanceId)}
+                        removing={removingId === entry.instanceId}
                       />
                     ))}
                   </div>
@@ -333,8 +403,8 @@ export function Roster({
       {/* Footer */}
       <div className="border-t border-black/[0.06] p-2 space-y-0.5 shrink-0">
         <button
-          onClick={() => onAddAgent?.()}
-          disabled={!onAddAgent}
+          onClick={() => setShowPicker(true)}
+          disabled={workspaceId === null}
           className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-[#0a84ff] hover:bg-[#0a84ff]/10 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <div className="w-7 h-7 rounded-[8px] border border-dashed border-[#0a84ff]/50 grid place-items-center shrink-0">
@@ -358,6 +428,149 @@ export function Roster({
           </div>
         </button>
       </div>
+
+      {/* Add-agent picker — choose an existing Library agent to add here. */}
+      {showPicker && workspaceId !== null && (
+        <AddAgentPicker
+          workspaceId={workspaceId}
+          onClose={() => setShowPicker(false)}
+          onAdded={() => {
+            setShowPicker(false);
+            onAgentsChanged?.();
+          }}
+          onCreateAgent={
+            onCreateAgent
+              ? () => {
+                  setShowPicker(false);
+                  onCreateAgent();
+                }
+              : undefined
+          }
+        />
+      )}
     </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AddAgentPicker — modal listing Library agents not yet in this workspace.
+// ---------------------------------------------------------------------------
+
+interface AddAgentPickerProps {
+  workspaceId: string;
+  onClose: () => void;
+  onAdded: () => void;
+  onCreateAgent?: () => void;
+}
+
+function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAgentPickerProps) {
+  const [available, setAvailable] = useState<AgentDefinition[] | null>(null);
+  const [error, setError] = useState(false);
+  const [addingId, setAddingId] = useState<string | null>(null);
+
+  // Load all defs ⨝ this workspace's instances → defs NOT already present.
+  useEffect(() => {
+    let active = true;
+    Promise.all([ipc.agentDef.list(), ipc.instance.list({ workspaceId })])
+      .then(([defs, instances]) => {
+        if (!active) return;
+        const present = new Set(instances.map((i) => i.agentDefId));
+        setAvailable(defs.filter((d) => !present.has(d.id)));
+      })
+      .catch(() => {
+        if (active) setError(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
+
+  async function handleAdd(def: AgentDefinition) {
+    setAddingId(def.id);
+    try {
+      await ipc.agentDef.addToWorkspace({ agentDefId: def.id, workspaceIds: [workspaceId] });
+      onAdded();
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("AddAgentPicker: addToWorkspace failed", err);
+      setAddingId(null);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+      onClick={onClose}
+    >
+      <div
+        className="w-[420px] max-h-[70vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-black/[0.08]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="h-12 flex items-center justify-between px-5 border-b border-black/[0.06] shrink-0">
+          <span className="text-[13px] font-semibold tracking-tight">Add agent to workspace</span>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 grid place-items-center rounded-md hover:bg-black/[0.05] text-[#6e6e73]"
+            aria-label="Close"
+          >
+            <X className="w-[15px] h-[15px]" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto scroll-thin p-2 min-h-0">
+          {available === null && !error ? (
+            <div className="grid place-items-center py-8 text-[12px] text-[#a1a1a6]">Loading…</div>
+          ) : error ? (
+            <div className="grid place-items-center py-8 text-[12px] text-[#a1a1a6]">
+              Failed to load agents
+            </div>
+          ) : available && available.length === 0 ? (
+            <div className="grid place-items-center py-8 text-[12px] text-[#a1a1a6] px-6 text-center">
+              Every agent in your Library is already in this workspace.
+            </div>
+          ) : (
+            available?.map((def) => (
+              <button
+                key={def.id}
+                onClick={() => handleAdd(def)}
+                disabled={addingId !== null}
+                className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-black/[0.04] disabled:opacity-50 text-left"
+              >
+                <div
+                  className="w-7 h-7 rounded-[8px] text-white grid place-items-center text-[12px] font-bold ring-hair shrink-0"
+                  style={{ backgroundColor: def.color ?? "#6e6e73" }}
+                >
+                  {def.type === "orchestrator" ? (
+                    <Waypoints className="w-[15px] h-[15px]" />
+                  ) : (
+                    def.name[0]?.toUpperCase()
+                  )}
+                </div>
+                <div className="flex-1 min-w-0 leading-tight">
+                  <div className="text-[12.5px] font-semibold truncate">{def.name}</div>
+                  <div className="text-[10.5px] text-[#86868b] truncate">{deriveMeta(def)}</div>
+                </div>
+                <span className="text-[11px] font-semibold text-[#0a84ff] shrink-0">
+                  {addingId === def.id ? "Adding…" : "Add"}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+
+        {onCreateAgent && (
+          <div className="border-t border-black/[0.06] p-2 shrink-0">
+            <button
+              onClick={onCreateAgent}
+              className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-[#0a84ff] hover:bg-[#0a84ff]/10"
+            >
+              <div className="w-7 h-7 rounded-[8px] border border-dashed border-[#0a84ff]/50 grid place-items-center shrink-0">
+                <Plus className="w-[15px] h-[15px]" />
+              </div>
+              <span className="text-[12.5px] font-semibold">Create new agent…</span>
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

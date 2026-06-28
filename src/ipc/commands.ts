@@ -77,6 +77,10 @@ export interface Commands {
     req: { workspaceAgentId: string };
     res: Session;
   };
+  "instance.remove": {
+    req: { workspaceAgentId: string };
+    res: void;
+  };
   "session.resize": {
     req: { sessionId: string; cols: number; rows: number };
     res: void;
@@ -194,6 +198,7 @@ export const ipc = {
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
+    remove: (req: Commands["instance.remove"]["req"]) => call("instance.remove", req),
   },
   session: {
     resize: (req: Commands["session.resize"]["req"]) => call("session.resize", req),

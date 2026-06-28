@@ -22,6 +22,11 @@ export function AppShell() {
   // ── Blackboard state ───────────────────────────────────────────────────
   const [showBlackboard, setShowBlackboard] = useState(false);
 
+  // Bumped whenever the set of agents in the active workspace changes (add via
+  // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
+  // key/refetch off it so the two views stay in sync without a manual reload.
+  const [agentsVersion, setAgentsVersion] = useState(0);
+
   // ── Library state ──────────────────────────────────────────────────────
   const [showLibrary, setShowLibrary] = useState(false);
   /** Incremented after Builder saves so Library re-fetches agentDef.list. */
@@ -137,9 +142,16 @@ export function AppShell() {
                 setShowBlackboard(false);
                 setSelectedId(id);
               }}
-              onAddAgent={() => {
+              // "Create new agent…" (from inside the picker) still opens the Builder.
+              onCreateAgent={() => {
                 setBuilderInitialDef(undefined);
                 setShowBuilder(true);
+              }}
+              agentsVersion={agentsVersion}
+              onAgentsChanged={() => {
+                setAgentsVersion((v) => v + 1);
+                // A removed agent may have been the current selection.
+                setSelectedId(null);
               }}
               // Blackboard needs a workspace to scope to — only toggle when one
               // is active (else the view would fall through to "Select a workspace").
@@ -158,8 +170,13 @@ export function AppShell() {
                 onClose={() => setShowBlackboard(false)}
               />
             ) : activeWorkspaceId ? (
-              // Remount per workspace so the pane refetches its instances.
-              <WorkspacePane key={activeWorkspaceId} workspaceId={activeWorkspaceId} focusInstanceId={selectedId} />
+              // Remount per workspace AND per agents change so the pane refetches
+              // its tabs when an agent is added/removed.
+              <WorkspacePane
+                key={`${activeWorkspaceId}:${agentsVersion}`}
+                workspaceId={activeWorkspaceId}
+                focusInstanceId={selectedId}
+              />
             ) : (
               <main className="flex-1 flex flex-col min-w-0 bg-white">
                 <div className="flex-1 grid place-items-center text-[13px] text-[#a1a1a6]">
