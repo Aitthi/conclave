@@ -443,7 +443,7 @@ export function Roster({
             blackboardOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
           }`}
         >
-          <div className="w-7 h-7 rounded-[8px] bg-text-primary text-white grid place-items-center ring-hair shrink-0">
+          <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
             <Layers className="w-[14px] h-[14px]" />
           </div>
           <div className="flex-1 text-left leading-tight">

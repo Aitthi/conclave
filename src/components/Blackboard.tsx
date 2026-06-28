@@ -203,7 +203,7 @@ export function Blackboard({ workspaceId, workspaceName, onClose }: BlackboardPr
         {/* Header */}
         <div className="h-12 flex items-center justify-between px-5 border-b border-overlay/[0.06] shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded-[7px] bg-text-primary text-white grid place-items-center ring-hair shrink-0">
+            <div className="w-6 h-6 rounded-[7px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
               <Layers className="w-[13px] h-[13px]" />
             </div>
             <div className="text-[13px] font-semibold tracking-tight flex items-center gap-1.5">
