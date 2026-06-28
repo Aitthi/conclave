@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
-import { ipc } from "../ipc";
-import type { AgentDefinition, Session, WorkspaceAgent } from "../ipc";
+import { ipc, useEvent, EVENT_NAMES } from "../ipc";
+import type { AgentDefinition, Session, WorkspaceAgent, SessionStatusEvent } from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
@@ -193,6 +193,28 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
         setSpawnErrors((prev) => ({ ...prev, [id]: msg }));
       });
   }, [activeInstanceId]);
+
+  // Live status dots on the tab strip. Spawning a session flips the
+  // workspace_agent to "running" and emits `session:status`, but the tabs were
+  // fetched at load with the pre-spawn status — so without this the tab dot
+  // stays stale at idle. On any status event, re-read instance.list and patch
+  // the tabs' status in place (the event carries only sessionId, so we refetch).
+  useEvent<SessionStatusEvent>(EVENT_NAMES.sessionStatus, () => {
+    ipc.instance
+      .list({ workspaceId })
+      .then((instances) => {
+        const byId = new Map(instances.map((i) => [i.id, i.status]));
+        setTabs((prev) =>
+          prev.map((t) => {
+            const next = byId.get(t.instanceId);
+            return next && next !== t.status ? { ...t, status: next } : t;
+          }),
+        );
+      })
+      .catch(() => {
+        // Transient failure — the dot just stays at its last value.
+      });
+  });
 
   // Routing roster — ALL agents (the picker shows self + others; consumers
   // exclude self where needed). Derived straight from the tab view-models.
