@@ -109,8 +109,16 @@ export function Timeline({ def, session, onClose }: TimelineProps) {
     setCtx({ tokens: e.contextTokens, limit: e.contextLimit, estimated: e.estimated }),
   );
 
-  const meterTokens = ctx?.tokens ?? session.contextTokens ?? null;
-  const meterLimit = ctx?.limit ?? session.contextLimit ?? null;
+  // The estimate is a CHAT-only concept (same rule as ContextDrawer): only chat
+  // backends have a self-owned provider loop to estimate from. CLI agents
+  // (claude-code/codex) track and display their own context — Conclave has no
+  // honest source, and a fresh CLI session still carries the seeded
+  // `0 / 200_000` columns (or a stale pre-fix estimate), so rendering them here
+  // would reintroduce the very meter the backend fix removed. For non-chat
+  // agents we null the meter out and fall back to "No context estimate yet".
+  const trackContext = def.type === "chat";
+  const meterTokens = trackContext ? (ctx?.tokens ?? session.contextTokens ?? null) : null;
+  const meterLimit = trackContext ? (ctx?.limit ?? session.contextLimit ?? null) : null;
   const meterPct =
     meterTokens != null && meterLimit != null && meterLimit > 0
       ? Math.min(100, Math.round((meterTokens / meterLimit) * 100))

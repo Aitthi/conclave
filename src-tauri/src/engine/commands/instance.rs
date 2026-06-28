@@ -202,7 +202,16 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
     // Detached forwarder: bridge PTY output → bus, and mark the instance idle
     // when the child self-terminates (EOF closes output_rx).
+    //
+    // Only `chat` backends get a live context estimate: there we own the
+    // provider loop, so streamed assistant text is a genuine (if rough) proxy
+    // for the conversation. A CLI/PTY child streams terminal redraw bytes
+    // (escape sequences, full-screen TUI repaints) that bear no relation to its
+    // real context window — and tools like Claude Code track and display their
+    // own context. Estimating from those bytes produced a meter that visibly
+    // disagreed with the child's own `/context`, so we don't fabricate one.
     if let Some(output_rx) = output_rx {
+        let track_context = def.r#type == "chat";
         tokio::spawn(forward_session_output(
             state.db.clone(),
             Arc::clone(&state.runtime),
@@ -210,6 +219,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             id.clone(),
             session.id.clone(),
             output_rx,
+            track_context,
         ));
     }
 
@@ -225,6 +235,14 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
 /// The idle transition is gated on `unregister` returning `true`, so a
 /// concurrent `stop` and this EOF path can't both emit `idle` — only the winner
 /// does. `app` is `None` in non-Tauri contexts (tests); emits are then skipped.
+///
+/// `track_context` gates the live context estimate (and the auto-compact it
+/// drives). It is `true` only for `chat` backends, whose streamed assistant
+/// text is a genuine proxy for the conversation. For CLI/PTY backends it is
+/// `false`: their output is terminal redraw noise, so we forward it to the bus
+/// but never count it, persist a token estimate, or emit `session:context` —
+/// the right-hand meter then stays hidden rather than showing a fabricated
+/// figure that contradicts the child's own context display.
 async fn forward_session_output(
     db: sqlx::SqlitePool,
     runtime: Arc<runtime::Runtime>,
@@ -232,14 +250,20 @@ async fn forward_session_output(
     instance_id: String,
     session_id: String,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
+    track_context: bool,
 ) {
     // Read the session's context limit once (default if unset or on error) — it
     // drives both the live meter denominator and the auto-compact threshold.
-    let limit = match repo::session::get(&db, &session_id).await {
-        Ok(Some(s)) => s
-            .context_limit
-            .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
-        _ => repo::session::DEFAULT_CONTEXT_LIMIT,
+    // Only needed when we actually track context.
+    let limit = if track_context {
+        match repo::session::get(&db, &session_id).await {
+            Ok(Some(s)) => s
+                .context_limit
+                .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
+            _ => repo::session::DEFAULT_CONTEXT_LIMIT,
+        }
+    } else {
+        0
     };
 
     // Rolling ESTIMATE of context usage in characters. `last_flush_chars` is the
@@ -251,7 +275,9 @@ async fn forward_session_output(
         // Count before moving `chunk` into the emit — avoids cloning every chunk
         // just to measure it. `chars().count()` (not `len()`) so multi-byte UTF-8
         // output isn't over-counted in the ≈4-chars/token estimate.
-        total_chars += chunk.chars().count();
+        if track_context {
+            total_chars += chunk.chars().count();
+        }
 
         if let Some(app) = &app {
             let _ = bus::session_output(
@@ -264,7 +290,7 @@ async fn forward_session_output(
         }
 
         // Flush the estimate roughly every ~100 tokens of new output.
-        if total_chars - last_flush_chars >= FLUSH_CHARS {
+        if track_context && total_chars - last_flush_chars >= FLUSH_CHARS {
             let compacted =
                 flush_context_estimate(&db, app.as_ref(), &session_id, total_chars, limit).await;
             last_flush_chars = total_chars;
@@ -582,6 +608,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             rx,
+            true, // chat backend — context tracking enabled.
         ));
 
         drop(tx); // EOF → forwarder runs its idle cleanup.
@@ -622,6 +649,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             rx,
+            true, // chat backend — context tracking enabled.
         ));
 
         // Push > FLUSH_CHARS (400) chars so a flush fires.
@@ -672,6 +700,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             rx,
+            true, // chat backend — context tracking enabled.
         ));
 
         // 720_000 chars / 4 = 180_000 tokens = 90% of the 200_000 default limit.
@@ -699,6 +728,70 @@ mod tests {
             after.context_tokens,
             Some(0),
             "estimate must reset to 0 after an auto-compact boundary"
+        );
+    }
+
+    /// The CLI/PTY path (`track_context = false`) must NOT fabricate a context
+    /// estimate, even when far more than FLUSH_CHARS of output streams through.
+    /// A CLI child emits terminal redraw bytes that are meaningless as a token
+    /// count, so `context_tokens` stays at its seeded value (`Some(0)`, never
+    /// updated) and the meter is hidden by the chat-only UI gate. This is the
+    /// regression guard for the "context ไม่ตรง" report: the byte-derived meter
+    /// visibly disagreed with Claude Code's own `/context`.
+    #[tokio::test]
+    async fn forwarder_skips_context_estimate_when_untracked() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        assert!(state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        // Capture the seeded estimate so we can prove the forwarder leaves it
+        // untouched (a fresh session seeds context_tokens to 0, not NULL).
+        let before = session.context_tokens;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            rx,
+            false, // CLI/PTY backend — context tracking disabled.
+        ));
+
+        // Well over FLUSH_CHARS: a tracked forwarder would persist ~250 tokens.
+        tx.send("x".repeat(1_000)).await.expect("send chunk failed");
+        drop(tx); // EOF → forwarder finishes.
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_tokens, before,
+            "untracked (CLI) forwarder must leave the token estimate untouched \
+             (before {before:?}, after {:?})",
+            after.context_tokens
+        );
+
+        // No snapshot either — the auto-compact path is gated on the estimate.
+        let snaps = repo::snapshot::list_for_session(&state.db, &session.id)
+            .await
+            .expect("list_for_session failed");
+        assert!(
+            snaps.is_empty(),
+            "untracked forwarder must not auto-compact"
         );
     }
 

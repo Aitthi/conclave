@@ -254,10 +254,15 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   const meterTokens = ctx?.tokens ?? session?.contextTokens ?? null;
   const meterLimit = ctx?.limit ?? session?.contextLimit ?? null;
   const meterEstimated = ctx?.estimated ?? true;
-  // Orchestrators don't have a streaming context window — never show the meter
-  // for them (their config drawer is the Fusion panel/judge/cost set above).
+  // The meter is a CHAT-only concept. For chat agents we own the provider loop,
+  // so the streamed-text estimate is a genuine (if rough) proxy. CLI agents
+  // (claude-code/codex) manage their own context internally and display it
+  // themselves — we have no honest source, and the old byte estimate visibly
+  // disagreed with the child's own `/context`, so we don't show a meter for
+  // them. Orchestrators have no streaming window at all. Gating on `type` here
+  // also covers any stale CLI session row that still carries a pre-fix estimate.
   const showMeter =
-    def.type !== "orchestrator" &&
+    def.type === "chat" &&
     session != null &&
     meterTokens != null &&
     meterLimit != null &&
