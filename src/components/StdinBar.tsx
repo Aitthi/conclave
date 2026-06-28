@@ -76,16 +76,22 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     }
 
     // ── Self send (own PTY) — submit the line ──
-    // Append a CARRIAGE RETURN (\r), not a newline (\n): that is the byte the
-    // Enter key actually emits in a terminal (xterm's onData sends \r too). A
-    // full-screen TUI like Claude Code treats \r as "submit" but \n as "insert a
-    // newline in the input field" — sending \n made `/clear` drop to a new line
-    // instead of running.
+    // Submit with a CARRIAGE RETURN (\r), the byte the Enter key emits in a
+    // terminal (xterm's onData sends \r too); a TUI treats \r as submit and \n
+    // as "insert a newline".
+    //
+    // But send the \r SEPARATELY, a beat after the text — not as one "text\r"
+    // burst. Some TUIs (Codex) run paste-burst detection: a flurry of bytes
+    // arriving together is treated as a PASTE, so an embedded \r is inserted
+    // literally (a stray ␍) instead of submitting. A standalone \r a moment
+    // later reads as a real Enter keypress, so both Claude Code and Codex submit.
     if (sessionId === null) return;
     setError(null);
     setSending(true);
     try {
-      await ipc.message.send({ sessionId, text: text + "\r" });
+      await ipc.message.send({ sessionId, text });
+      await new Promise((r) => setTimeout(r, 40));
+      await ipc.message.send({ sessionId, text: "\r" });
       if (mounted.current) setValue("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
