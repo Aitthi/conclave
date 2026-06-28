@@ -157,23 +157,16 @@ export function Terminal({ sessionId }: TerminalProps) {
       });
     });
 
-    // Mouse-wheel scrolling for the full-screen TUIs these panes always host
-    // (claude / codex). A TUI's transcript lives inside the app, not in xterm's
-    // scrollback, so the wheel does nothing by default. Mirror iTerm's "alternate
-    // scroll": translate a wheel notch into arrow-key presses sent to the PTY, so
-    // the app scrolls its own transcript (Codex's ↑/↓, Claude Code's pager).
-    //
-    // We deliberately do NOT gate on `buffer.active.type === "alternate"`. On a
-    // remount (tab switch / page reload) the PTY persists but a FRESH xterm is
-    // created — and the app's alt-screen-enter sequence was already consumed by
-    // the prior instance, so the new xterm still thinks it's on the normal buffer
-    // even though the app is mid-TUI. Gating on the buffer type made the wheel
-    // dead after every tab switch / reload. Since these panes never host a plain
-    // shell with real scrollback to scroll, translating the wheel unconditionally
-    // is safe. We still defer to the app when it's actively mouse-tracking (xterm
-    // forwards the wheel as mouse events then); after a remount that mode resets
-    // to "none", so we fall back to arrow keys — which scroll the pager just fine.
+    // Mouse-wheel scrolling for full-screen TUIs. The "alternate" screen buffer
+    // a TUI runs in has NO terminal-level scrollback — the history lives inside
+    // the app — so the wheel does nothing by default and you're stuck on the
+    // current frame. Mirror iTerm's "alternate scroll": translate a wheel notch
+    // into arrow-key presses sent to the PTY, so the app scrolls its own
+    // transcript (Codex's ↑/↓, Claude Code's pager). Skip it when the app is
+    // tracking the mouse itself (xterm already forwards the wheel as mouse events
+    // there) and on the normal buffer (xterm scrolls that natively).
     const wheelHandler = (e: WheelEvent) => {
+      if (term.buffer.active.type !== "alternate") return;
       if (term.modes.mouseTrackingMode !== "none") return;
       e.preventDefault();
       const seq = e.deltaY < 0 ? "\x1b[A" : "\x1b[B"; // arrow up / down
