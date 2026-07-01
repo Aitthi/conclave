@@ -130,7 +130,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   // way a normal terminal does (a CLI like Claude Code reads the path from the
   // line). Multiple files are space-separated; a trailing space readies the next
   // token. The field re-focuses so the user can keep typing.
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
     const insert = paths.map(shellQuotePath).join(" ");
     setValue((v) => (v.length === 0 || v.endsWith(" ") ? v : v + " ") + insert + " ");
@@ -142,7 +142,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     ? "Type to inject into the target session…"
     : sessionId === null
       ? "No running session"
-      : "Message the agent…";
+      : "Message the agent…  (Enter to send · Shift+Enter for newline)";
 
   return (
     <div className="shrink-0 border-t border-overlay/[0.06] bg-surface">
@@ -179,8 +179,9 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             disabled={sending}
           />
           <span className="text-[15px] text-text-tertiary font-mono select-none shrink-0">›</span>
-          <input
+          <textarea
             ref={inputRef}
+            rows={1}
             value={value}
             disabled={disabled}
             onChange={(e) => {
@@ -188,13 +189,19 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
               if (outbox) setOutbox(null);
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              // Enter submits; Shift+Enter falls through to the browser default
+              // (insert a literal newline) — matches ChatView's composer. The
+              // embedded "\n" rides along in the single `text` send below, and
+              // Claude Code / Codex read it as "insert a line" in their own
+              // input box rather than submitting (only the trailing standalone
+              // "\r" does that).
+              if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleSend();
               }
             }}
             placeholder={placeholder}
-            className="flex-1 min-w-0 bg-transparent outline-none text-[14.5px] font-mono placeholder:text-text-tertiary disabled:opacity-50"
+            className="flex-1 min-w-0 bg-transparent outline-none resize-none text-[14.5px] font-mono placeholder:text-text-tertiary py-0.5 max-h-40 disabled:opacity-50"
           />
           {/* Send — Enter also submits; the button mirrors that for discoverability. */}
           <button
