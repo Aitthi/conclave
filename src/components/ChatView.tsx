@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, CornerDownLeft, CornerUpRight } from "lucide-react";
+import { ArrowUp, CornerDownLeft, CornerUpRight, Paperclip } from "lucide-react";
 import { ipc } from "../ipc";
 import { useSessionOutput, useMessageInjected } from "../ipc";
 import { ToolCallCard } from "./ToolCallCard";
 import { SkillRunningCard } from "./SkillRunningCard";
 import { ArtifactView, splitMessageArtifacts } from "./ArtifactView";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
-import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
+import { useFileDrop, pickFiles, shellQuotePath } from "../lib/fileDrop";
 
 // ---------------------------------------------------------------------------
 // IMPORTANT — backend capability note
@@ -89,15 +89,17 @@ export function ChatView({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  // Drag a file onto the composer → insert its shell-quoted path (same behavior
-  // as the CLI stdin bar). Space-separated for multiple files, trailing space to
-  // ready the next token; re-focus so typing can continue.
+  // Insert file paths into the draft (same behavior as the CLI stdin bar).
+  // Space-separated for multiple files, trailing space to ready the next
+  // token; re-focus so typing can continue. Shared by drag-drop and the
+  // paperclip picker button below.
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
+  function insertPaths(paths: string[]) {
     const insert = paths.map(shellQuotePath).join(" ");
     setDraft((v) => (v.length === 0 || v.endsWith(" ") ? v : v + " ") + insert + " ");
     textareaRef.current?.focus();
-  });
+  }
+  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>(insertPaths);
 
   // Append a streamed chunk to the LAST assistant message's trailing text part.
   // If the last message is not an open assistant message (e.g. unsolicited
@@ -315,6 +317,19 @@ export function ChatView({
                 placeholder="Message…  (Enter to send · Shift+Enter for newline)"
                 className="flex-1 bg-transparent outline-none resize-none text-[13.5px] leading-relaxed placeholder:text-text-tertiary py-1 max-h-40 disabled:opacity-50"
               />
+              {/* Attach — opens the native file picker (Finder); same path-
+                  insertion as dragging a file in, for anyone who'd rather click
+                  than drag. */}
+              <button
+                type="button"
+                onClick={() => void pickFiles().then((paths) => paths && insertPaths(paths))}
+                disabled={sending}
+                title="Attach files or images"
+                aria-label="Attach files or images"
+                className="w-8 h-8 rounded-full grid place-items-center shrink-0 text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary disabled:opacity-40"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
               <button
                 onClick={() => void handleSend()}
                 disabled={sending || draft.trim().length === 0}

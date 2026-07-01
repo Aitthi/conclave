@@ -90,6 +90,30 @@ function ensureSubscribed() {
 }
 
 /**
+ * Open the native OS file picker (Finder) and return the chosen absolute
+ * paths, or `null` if the user cancelled. Mirrors the drop path: no type
+ * filter, so any file (including images) can be picked, same as dragging one
+ * in. Dynamic import so a plain `vite` dev run (no Tauri shell) degrades to
+ * "no picker" instead of crashing.
+ */
+export async function pickFiles(): Promise<string[] | null> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const result = await open({
+      directory: false,
+      multiple: true,
+      title: "Choose files",
+    });
+    if (Array.isArray(result)) return result.length > 0 ? result : null;
+    if (typeof result === "string") return [result];
+    return null;
+  } catch {
+    // Not a Tauri webview — no picker available.
+    return null;
+  }
+}
+
+/**
  * Register `el` (via the returned ref) as a native file-drop target. When files
  * are dropped onto it, `onPaths` receives their absolute paths. `isOver` tracks
  * whether a drag is currently hovering this target, for a highlight.

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { CornerUpRight, CornerDownLeft } from "lucide-react";
+import { CornerUpRight, CornerDownLeft, Paperclip } from "lucide-react";
 import { ipc } from "../ipc";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
-import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
+import { useFileDrop, pickFiles, shellQuotePath } from "../lib/fileDrop";
 
 interface StdinBarProps {
   /** The focused session to send input to, or null when none is live. */
@@ -126,17 +126,19 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     }
   }
 
-  // Drag a file onto the composer → insert its shell-quoted path at the end, the
-  // way a normal terminal does (a CLI like Claude Code reads the path from the
-  // line). Multiple files are space-separated; a trailing space readies the next
-  // token. The field re-focuses so the user can keep typing.
+  // Insert file paths at the end of the draft, the way a normal terminal does
+  // (a CLI like Claude Code reads the path from the line). Multiple files are
+  // space-separated; a trailing space readies the next token. The field
+  // re-focuses so the user can keep typing. Shared by drag-drop and the
+  // paperclip picker button below — same result either way.
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
+  function insertPaths(paths: string[]) {
     const insert = paths.map(shellQuotePath).join(" ");
     setValue((v) => (v.length === 0 || v.endsWith(" ") ? v : v + " ") + insert + " ");
     setOutbox(null);
     inputRef.current?.focus();
-  });
+  }
+  const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>(insertPaths);
 
   // Auto-grow with content, capped by the `max-h-40` on the element itself —
   // "auto" first so a shrink (e.g. clearing after send) isn't stuck at the
@@ -213,6 +215,18 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             placeholder={placeholder}
             className="flex-1 min-w-0 bg-transparent outline-none resize-none overflow-y-auto text-[14.5px] font-mono placeholder:text-text-tertiary py-0.5 max-h-40 disabled:opacity-50"
           />
+          {/* Attach — opens the native file picker (Finder); same path-insertion
+              as dragging a file in, for anyone who'd rather click than drag. */}
+          <button
+            type="button"
+            onClick={() => void pickFiles().then((paths) => paths && insertPaths(paths))}
+            disabled={sending}
+            title="Attach files or images"
+            aria-label="Attach files or images"
+            className="w-8 h-8 rounded-lg grid place-items-center shrink-0 text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary disabled:opacity-40"
+          >
+            <Paperclip className="w-4 h-4" />
+          </button>
           {/* Send — Enter also submits; the button mirrors that for discoverability. */}
           <button
             type="button"
