@@ -22,6 +22,21 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+/// Serialize the `launched_skill_ids` JSON-array-text column into a
+/// structured JSON array. Mirrors `agent_definition::serialize_json_text`
+/// (kept local rather than shared — same trivial helper, different module).
+fn serialize_json_text<S>(opt: &Option<String>, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match opt {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text)
+            .unwrap_or(serde_json::Value::Null)
+            .serialize(ser),
+        None => ser.serialize_none(),
+    }
+}
+
 /// Default context-window limit for new sessions (200 000 tokens).
 ///
 /// Mirrored as the literal `200000` in the raw-sqlx INSERT inside
@@ -51,17 +66,25 @@ pub struct SessionRow {
     pub started_at: String,         // → "startedAt"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<String>, // → "lastActiveAt"
+    /// JSON array of skill ids used at the last launch — see
+    /// `repo::skill::content_for_agent`. `None` until the first launch.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub launched_skill_ids: Option<String>,
 }
 
 // ── Column list ──────────────────────────────────────────────────────────────
 
-const COLS: [&str; 6] = [
+const COLS: [&str; 7] = [
     "id",
     "workspace_agent_id",
     "context_tokens",
     "context_limit",
     "started_at",
     "last_active_at",
+    "launched_skill_ids",
 ];
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
@@ -101,6 +124,7 @@ pub async fn create_for_instance(
             ("context_limit", Bind::I64(DEFAULT_CONTEXT_LIMIT)),
             ("started_at", Bind::Text(started_at.clone())),
             ("last_active_at", Bind::Null),
+            ("launched_skill_ids", Bind::Null),
         ])
         .execute(pool)
         .await
@@ -113,6 +137,7 @@ pub async fn create_for_instance(
         context_limit: Some(DEFAULT_CONTEXT_LIMIT),
         started_at,
         last_active_at: None,
+        launched_skill_ids: None,
     })
 }
 
@@ -164,6 +189,26 @@ pub async fn set_context_tokens(
             ("context_tokens", Bind::I64(tokens)),
             ("last_active_at", Bind::Text(now)),
         ])
+        .where_eq("id", session_id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
+/// Persist the ordered list of skill ids actually used for the most recent
+/// launch. Compared against an agent definition's CURRENT attachments
+/// (`repo::skill::custom_skill_ids_by_agent` + builtin ids) to detect drift
+/// and show a "Restart to apply" badge in the Roster.
+#[allow(dead_code)] // consumed by Task 10
+pub async fn set_launched_skill_ids(
+    pool: &SqlitePool,
+    session_id: &str,
+    skill_ids: &[String],
+) -> sqlx::Result<()> {
+    let json = serde_json::to_string(skill_ids).expect("serializing Vec<String> is infallible");
+    QueryBuilder::<Sqlite>::table("session")
+        .update([("launched_skill_ids", Bind::Text(json))])
         .where_eq("id", session_id)
         .execute(pool)
         .await
@@ -349,5 +394,58 @@ mod tests {
             "must NOT have context_limit"
         );
         assert!(json.get("started_at").is_none(), "must NOT have started_at");
+    }
+
+    /// set_launched_skill_ids persists an ordered JSON array, readable back
+    /// via get(); a fresh session (create_for_instance) starts with None.
+    #[tokio::test]
+    async fn set_launched_skill_ids_roundtrips() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+        let row = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create_for_instance failed");
+        assert!(
+            row.launched_skill_ids.is_none(),
+            "fresh session has no launch snapshot yet"
+        );
+
+        set_launched_skill_ids(&pool, &row.id, &["sk-1".to_string(), "sk-2".to_string()])
+            .await
+            .expect("set_launched_skill_ids failed");
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        let json = serde_json::to_value(&fetched).expect("serialize failed");
+        assert_eq!(
+            json.get("launchedSkillIds")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2),
+            "launchedSkillIds must serialize as a JSON array"
+        );
+    }
+
+    /// Calling set_launched_skill_ids with an empty slice stores `[]`, not
+    /// NULL — distinguishes "launched with zero skills" from "never launched".
+    #[tokio::test]
+    async fn set_launched_skill_ids_empty_slice_stores_empty_array_not_null() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+        let row = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create failed");
+
+        set_launched_skill_ids(&pool, &row.id, &[])
+            .await
+            .expect("set failed");
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("exists");
+        assert_eq!(fetched.launched_skill_ids.as_deref(), Some("[]"));
     }
 }
