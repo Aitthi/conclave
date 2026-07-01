@@ -13,6 +13,7 @@ import type {
   FusionRun,
   FusionPanelResponse,
   Tool,
+  Skill,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -80,6 +81,18 @@ export interface Commands {
   "agentDef.addToWorkspace": {
     req: { agentDefId: string; workspaceIds: string[] };
     res: WorkspaceAgent[];
+  };
+  "skill.list": {
+    req: void;
+    res: Skill[];
+  };
+  "skill.save": {
+    req: { id?: string; name: string; description?: string; content: string };
+    res: Skill;
+  };
+  "skill.delete": {
+    req: { id: string };
+    res: void;
   };
   "instance.list": {
     req: { workspaceId: string };
@@ -229,6 +242,11 @@ export const ipc = {
     delete: (req: Commands["agentDef.delete"]["req"]) => call("agentDef.delete", req),
     addToWorkspace: (req: Commands["agentDef.addToWorkspace"]["req"]) =>
       call("agentDef.addToWorkspace", req),
+  },
+  skill: {
+    list: () => call("skill.list"),
+    save: (req: Commands["skill.save"]["req"]) => call("skill.save", req),
+    delete: (req: Commands["skill.delete"]["req"]) => call("skill.delete", req),
   },
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
