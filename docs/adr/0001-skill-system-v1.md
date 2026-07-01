@@ -1,0 +1,14 @@
+---
+status: accepted
+---
+
+# Skill system v1: DB-seeded builtin skills, cli-only injection, persisted launch snapshot
+
+Conclave already had a dormant `skill`/`agent_skill` schema (`0001_init.sql`) deferred since M5, with no `content` field and no builtin/custom distinction. We're implementing it now as a real feature: a `Skill` is a reusable prompt module attached to an `AgentDefinition` and injected into the agent's bootstrap preamble at launch.
+
+Key decisions, each with a real alternative that was rejected:
+
+- **Builtin skills are DB rows, not hardcoded constants.** We add a `kind CHECK IN ('builtin','custom')` column to `skill` (mirroring the existing `tool.kind` pattern) and seed builtin rows via migration. The alternative — a hardcoded Rust/TS list merged with custom DB rows at read time — would need two code paths for what is otherwise identical list/attach/inject logic. Builtin skills are immutable and mandatory (auto-attached to every `AgentDefinition`, non-detachable) purely via UI/command-layer enforcement, not a schema constraint.
+- **v1 only injects into `cli`-type agents.** `chat`-type agents (`runtime::chat::spawn_chat`) have no system-prompt parameter at all today, and `orchestrator` is still an unimplemented placeholder (deferred to M4). Wiring skills into chat would require adding system-prompt plumbing to the chat loop first — a separate, larger piece of work. Skills for chat/orchestrator are explicitly out of scope until that lands.
+- **Instance staleness is tracked via a persisted launch-time snapshot, not an in-memory flag.** When a running agent's attached skills change, the UI shows a "Restart to apply" badge rather than silently doing nothing (unlike `customArgs`/`customEnv`, which already behave this way with no indicator). Detecting staleness requires knowing which skill set was actually used at the last launch; we persist that snapshot in the DB (rather than an in-memory dirty flag) so the badge survives an app restart instead of disappearing and understating actual drift.
+- **Skill content is delivered via a sidecar file, not embedded in the preamble string.** `bootstrap_preamble` is contractually a single line with no `=` (`agentctx.rs:35-59`, enforced by tests) because it's shared verbatim between Claude's `--append-system-prompt` and Codex's `-c developer_instructions=<value>` — the latter parses as a literal only if there's no embedded `=` or newline. Skill `content` is markdown and will routinely contain both. Embedding it directly (even after concatenating multiple skills) would violate that invariant. Instead, at launch we write the concatenated skill content (system skills first, then custom by `sort_order`, each under a `## Skill: <name>` header) to a per-instance file, and append one sanitized, single-line sentence to the preamble pointing the agent at that file.
