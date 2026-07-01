@@ -34,6 +34,7 @@ export interface EditWorkspaceProps {
 export function EditWorkspace({ workspace, onClose, onSaved, onDeleted }: EditWorkspaceProps) {
   const [name, setName] = useState(workspace.name);
   const [color, setColor] = useState(workspace.color ?? COLOR_SWATCHES[0]);
+  const isCustomColor = !COLOR_SWATCHES.includes(color);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -148,6 +149,34 @@ export function EditWorkspace({ workspace, onClose, onSaved, onDeleted }: EditWo
                   aria-label={`Color ${swatch}`}
                 />
               ))}
+              {/* Custom color — native OS color panel via a fully transparent
+                  <input type="color"> overlaid on a swatch-styled label. Shows
+                  a rainbow ring when the current color isn't one of the presets
+                  above (so the swatch itself doubles as the "active" indicator,
+                  same as the preset buttons), otherwise a neutral conic
+                  gradient signals "pick a custom color". */}
+              <label
+                className={`relative w-5 h-5 rounded-full shrink-0 cursor-pointer overflow-hidden transition-all ${
+                  isCustomColor ? "ring-2 ring-offset-2" : "ring-1 ring-overlay/[0.15]"
+                }`}
+                style={
+                  isCustomColor
+                    ? ({ backgroundColor: color, "--tw-ring-color": color } as React.CSSProperties)
+                    : {
+                        background:
+                          "conic-gradient(from 0deg, #ff3b30, #ff9f0a, #30d158, #0a84ff, #5e5ce6, #d6409f, #ff3b30)",
+                      }
+                }
+                title="Custom color"
+              >
+                <input
+                  type="color"
+                  value={color}
+                  onChange={(e) => setColor(e.target.value)}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  aria-label="Custom color"
+                />
+              </label>
             </div>
           </div>
 
