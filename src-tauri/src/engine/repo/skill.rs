@@ -240,6 +240,31 @@ pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, 
     Ok(rows.into_iter().collect())
 }
 
+/// Build the concatenated skill body for one agent definition's `cli` launch,
+/// plus the ordered list of skill ids used (for `session.launched_skill_ids`).
+/// Builtin skills come first (fixed `id` order, via `list_by_kind`), then
+/// custom skills by `sort_order` (via `attached_to_agent`). Each skill renders
+/// as a `## Skill: {name}` header followed by its `content`, sections
+/// separated by a blank line. Returns `("", [])` when nothing is attached and
+/// no builtin skills exist — the caller (`commands::instance::spawn`) treats
+/// an empty body as "skip the sidecar file entirely".
+#[allow(dead_code)] // consumed by Task 10's commands::instance::spawn
+pub async fn content_for_agent(
+    pool: &SqlitePool,
+    agent_def_id: &str,
+) -> sqlx::Result<(String, Vec<String>)> {
+    let builtins = list_by_kind(pool, "builtin").await?;
+    let customs = attached_to_agent(pool, agent_def_id).await?;
+
+    let mut ids = Vec::with_capacity(builtins.len() + customs.len());
+    let mut sections = Vec::with_capacity(builtins.len() + customs.len());
+    for s in builtins.iter().chain(customs.iter()) {
+        ids.push(s.id.clone());
+        sections.push(format!("## Skill: {}\n\n{}", s.name, s.content));
+    }
+    Ok((sections.join("\n\n"), ids))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::db::connect_in_memory;
@@ -526,5 +551,50 @@ mod tests {
                 .expect("exists check failed"),
             "agent_definition itself must be untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn content_for_agent_orders_builtin_then_custom_with_headers() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        sqlx::query("INSERT INTO skill (id, name, content, kind) VALUES ('sk-b', 'Base', 'Be careful', 'builtin')")
+            .execute(&pool)
+            .await
+            .expect("seed builtin failed");
+        let custom = super::create(&pool, "Extra", None, "Do X")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&custom.id))
+            .await
+            .expect("set failed");
+
+        let (body, ids) = super::content_for_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+
+        assert_eq!(
+            ids,
+            vec!["sk-b".to_string(), custom.id.clone()],
+            "builtin must come first"
+        );
+        let base_pos = body.find("## Skill: Base").expect("Base header missing");
+        let extra_pos = body.find("## Skill: Extra").expect("Extra header missing");
+        assert!(
+            base_pos < extra_pos,
+            "builtin section must precede custom section"
+        );
+        assert!(body.contains("Be careful"));
+        assert!(body.contains("Do X"));
+    }
+
+    #[tokio::test]
+    async fn content_for_agent_empty_when_nothing_attached() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let (body, ids) = super::content_for_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert_eq!(body, "");
+        assert!(ids.is_empty());
     }
 }
