@@ -106,6 +106,74 @@ pub async fn link(state: &AppState, payload: Value) -> Result<Value, AppError> {
     Ok(json!({ "workspace": workspace_json, "agents": agents_json }))
 }
 
+// ── workspace.update ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateReq {
+    workspace_id: String,
+    name: String,
+    color: Option<String>,
+}
+
+/// `workspace.update` — rename and/or recolor a workspace, returning the
+/// updated row. `folder_path` is not editable (the workspace stays bound to
+/// the folder it was linked from).
+pub async fn update(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = serde_json::from_value::<UpdateReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    let row = repo::workspace::update(
+        &state.db,
+        &req.workspace_id,
+        &req.name,
+        req.color.as_deref(),
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+
+    serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+// ── workspace.delete ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteReq {
+    workspace_id: String,
+}
+
+/// `workspace.delete` — tear down every agent in the workspace, then delete the
+/// (now agent-less) workspace row. `blackboard_entry` cascades away directly
+/// via `workspace_id`, but `workspace_agent` itself must be removed through
+/// `repo::workspace_agent::remove` rather than left to a bare cascade: several
+/// tables reference `workspace_agent` with `NO ACTION` (`inter_agent_message`
+/// NOT NULL from/to, `blackboard_activity`), so a raw `DELETE FROM workspace`
+/// would abort with a FK violation the moment any instance had ever sent an
+/// inter-agent message. Each live instance is also unregistered from the
+/// runtime first (mirrors `agentDef.delete` / `instance.remove`).
+pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = serde_json::from_value::<DeleteReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    if !repo::workspace::exists(&state.db, &req.workspace_id).await? {
+        return Err(AppError::NotFound(format!(
+            "workspace {}",
+            req.workspace_id
+        )));
+    }
+
+    let instances = repo::workspace_agent::list_by_workspace(&state.db, &req.workspace_id).await?;
+    for inst in &instances {
+        let _ = state.runtime.unregister(&inst.id);
+        repo::workspace_agent::remove(&state.db, &inst.id).await?;
+    }
+
+    repo::workspace::delete(&state.db, &req.workspace_id).await?;
+
+    Ok(Value::Null)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -114,7 +182,7 @@ mod tests {
     use crate::engine::{
         repo::{
             agent_definition::{self, AgentDefinitionInput},
-            session, workspace_agent,
+            inter_agent_message, session, workspace_agent,
         },
         AppState,
     };
@@ -220,5 +288,86 @@ mod tests {
             .await
             .expect("list workspaces");
         assert_eq!(all.len(), 0, "failed link must not create a workspace");
+    }
+
+    /// update() renames and recolors an existing workspace.
+    #[tokio::test]
+    async fn update_renames_and_recolors() {
+        let state = AppState::for_tests().await;
+        let row = repo::workspace::create(&state.db, "Before", "/tmp/upd", None)
+            .await
+            .expect("create failed");
+
+        let payload = json!({
+            "workspaceId": row.id,
+            "name": "After",
+            "color": "#5e5ce6",
+        });
+        let result = update(&state, payload).await.expect("update failed");
+        assert_eq!(result["name"], "After");
+        assert_eq!(result["color"], "#5e5ce6");
+        assert_eq!(result["id"], row.id);
+    }
+
+    /// update() on an unknown workspace id returns NotFound.
+    #[tokio::test]
+    async fn update_unknown_workspace_not_found() {
+        let state = AppState::for_tests().await;
+        let payload = json!({ "workspaceId": "no-such-id", "name": "X" });
+        let err = update(&state, payload).await.expect_err("should fail");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// delete() removes the workspace and cascades its workspace_agent rows,
+    /// even when a `workspace_agent` has inter-agent-message history.
+    /// `inter_agent_message.from_instance_id`/`to_instance_id` reference
+    /// `workspace_agent` with `NO ACTION` (not a cascade), so a bare
+    /// `DELETE FROM workspace` would abort with a FK violation here — this
+    /// locks in that `workspace_agent::remove` is called per instance first.
+    #[tokio::test]
+    async fn delete_removes_workspace_and_cascades_agents() {
+        let state = AppState::for_tests().await;
+        let ws = repo::workspace::create(&state.db, "Doomed", "/tmp/doomed", None)
+            .await
+            .expect("create workspace");
+        let def = agent_definition::create(&state.db, &agent_input("Resident"))
+            .await
+            .expect("create def");
+        let wa = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate");
+        let def2 = agent_definition::create(&state.db, &agent_input("Other"))
+            .await
+            .expect("create def2");
+        let wa2 = workspace_agent::instantiate(&state.db, &ws.id, &def2.id)
+            .await
+            .expect("instantiate2");
+        inter_agent_message::create(&state.db, &wa.id, &wa2.id, "hi", "delivered", false)
+            .await
+            .expect("create inter_agent_message");
+
+        let payload = json!({ "workspaceId": ws.id });
+        delete(&state, payload)
+            .await
+            .expect("delete failed (FK violation would surface here)");
+
+        assert!(!repo::workspace::exists(&state.db, &ws.id)
+            .await
+            .expect("exists check"));
+        assert!(
+            !workspace_agent::exists(&state.db, &wa.id)
+                .await
+                .expect("exists check"),
+            "workspace_agent must cascade-delete with its workspace"
+        );
+    }
+
+    /// delete() on an unknown workspace id returns NotFound.
+    #[tokio::test]
+    async fn delete_unknown_workspace_not_found() {
+        let state = AppState::for_tests().await;
+        let payload = json!({ "workspaceId": "no-such-id" });
+        let err = delete(&state, payload).await.expect_err("should fail");
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 }

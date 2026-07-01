@@ -14,6 +14,8 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "workspace.list" => workspace::list(state, payload).await,
         "workspace.link" => workspace::link(state, payload).await,
         "workspace.use" => workspace::use_workspace(state, payload).await,
+        "workspace.update" => workspace::update(state, payload).await,
+        "workspace.delete" => workspace::delete(state, payload).await,
 
         // ── agentDef ──────────────────────────────────────────────────────
         "agentDef.list" => agent::list(state, payload).await,

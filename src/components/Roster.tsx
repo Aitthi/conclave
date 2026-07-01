@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Waypoints, Terminal, Search, Folder, Plus, Layers, X } from "lucide-react";
+import { Waypoints, Terminal, Search, Folder, Plus, Layers, X, Pencil } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
 
@@ -173,6 +173,8 @@ interface RosterProps {
   onOpenBlackboard?: () => void;
   /** Whether the Blackboard screen is currently shown (drives active styling). */
   blackboardOpen?: boolean;
+  /** Open the rename/recolor/delete modal for the active workspace. */
+  onEditWorkspace?: () => void;
 }
 
 export function Roster({
@@ -186,6 +188,7 @@ export function Roster({
   onAgentsChanged,
   onOpenBlackboard,
   blackboardOpen,
+  onEditWorkspace,
 }: RosterProps) {
   const [entries, setEntries] = useState<RosterEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -300,10 +303,12 @@ export function Roster({
 
   return (
     <aside className="w-[266px] vibrancy border-r border-overlay/[0.06] flex flex-col shrink-0">
-      {/* Workspace header — real workspaceName + folderPath; plain non-interactive
-          display. Doubles as a window drag region (it has no controls): the
-          `pointer-events-none` children let clicks fall through to the
-          attributed container so dragging / double-click-zoom work here too. */}
+      {/* Workspace header — real workspaceName + folderPath. Doubles as a window
+          drag region: the name/avatar are `pointer-events-none` so clicks fall
+          through to the attributed container (dragging / double-click-zoom),
+          while the edit button is a REAL interactive element (no drag attribute
+          of its own) that keeps its own clicks, same pattern as the tab strip
+          buttons in WorkspacePane. */}
       <div
         data-tauri-drag-region
         className="h-12 flex items-center gap-2 px-3.5 border-b border-overlay/[0.06] shrink-0"
@@ -311,7 +316,7 @@ export function Roster({
         <div className="w-6 h-6 rounded-[7px] bg-accent text-white grid place-items-center text-[11px] font-bold ring-hair shrink-0 pointer-events-none">
           {wsLetter}
         </div>
-        <div className="leading-tight text-left min-w-0 pointer-events-none">
+        <div className="flex-1 leading-tight text-left min-w-0 pointer-events-none">
           <div className="text-[12.5px] font-semibold tracking-tight truncate">
             {workspaceName ?? "—"}
           </div>
@@ -322,6 +327,16 @@ export function Roster({
             </div>
           )}
         </div>
+        {onEditWorkspace && (
+          <button
+            onClick={onEditWorkspace}
+            className="w-6 h-6 grid place-items-center rounded-md text-text-muted hover:bg-overlay/[0.06] hover:text-text-primary shrink-0"
+            title="Edit workspace"
+            aria-label="Edit workspace"
+          >
+            <Pencil className="w-3 h-3" />
+          </button>
+        )}
       </div>
 
       {/* Search — functional client-side filter */}

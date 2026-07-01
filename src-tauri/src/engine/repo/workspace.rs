@@ -122,6 +122,52 @@ pub async fn create(
     })
 }
 
+/// Update a workspace's mutable fields (`name`, `color`) and return the updated
+/// row, or `None` if no row with `id` exists. `folder_path` is intentionally
+/// immutable here — a workspace is bound to the folder it was linked from.
+pub async fn update(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    color: Option<&str>,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    QueryBuilder::<Sqlite>::table("workspace")
+        .update([
+            ("name", Bind::Text(name.to_owned())),
+            (
+                "color",
+                color
+                    .map(str::to_owned)
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
+        ])
+        .where_eq("id", id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+
+    get(pool, id).await
+}
+
+/// Delete a workspace. Returns `true` if a row was deleted.
+///
+/// `blackboard_entry` cascades directly via `workspace_id`, but `workspace_agent`
+/// does NOT — the caller MUST remove every `workspace_agent` in this workspace
+/// via `repo::workspace_agent::remove` (and stop its live runtime backend)
+/// BEFORE calling this. A bare cascade is not enough: `inter_agent_message` and
+/// `blackboard_activity` reference `workspace_agent` with `NO ACTION`, so this
+/// DELETE aborts with a FK violation if any `workspace_agent` row still exists
+/// and ever sent/received a message. Raw sqlx (not chain-builder) for a plain
+/// DELETE-by-id.
+pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
+    let res = sqlx::query("DELETE FROM workspace WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -198,6 +244,64 @@ mod tests {
             .expect("create failed");
         assert!(exists(&pool, &row.id).await.expect("exists failed"));
         assert!(!exists(&pool, "wrong-id").await.expect("exists failed"));
+    }
+
+    /// update() changes name/color and preserves id/folder_path/created_at.
+    #[tokio::test]
+    async fn update_changes_name_and_color() {
+        let pool = connect_in_memory().await;
+        let row = create(&pool, "Original", "/tmp/ws", Some("#ff0000"))
+            .await
+            .expect("create failed");
+
+        let updated = update(&pool, &row.id, "Renamed", Some("#00ff00"))
+            .await
+            .expect("update failed")
+            .expect("row should exist after update");
+
+        assert_eq!(updated.id, row.id);
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.color.as_deref(), Some("#00ff00"));
+        assert_eq!(updated.folder_path, row.folder_path);
+        assert_eq!(updated.created_at, row.created_at);
+    }
+
+    /// update() can clear a color back to None.
+    #[tokio::test]
+    async fn update_clears_color_to_none() {
+        let pool = connect_in_memory().await;
+        let row = create(&pool, "Colored", "/tmp/ws2", Some("#ff0000"))
+            .await
+            .expect("create failed");
+
+        let updated = update(&pool, &row.id, "Colored", None)
+            .await
+            .expect("update failed")
+            .expect("row should exist");
+        assert!(updated.color.is_none());
+    }
+
+    /// update() on an unknown id returns None (no row to update or fetch back).
+    #[tokio::test]
+    async fn update_unknown_id_returns_none() {
+        let pool = connect_in_memory().await;
+        let result = update(&pool, "no-such-id", "X", None)
+            .await
+            .expect("update should not error");
+        assert!(result.is_none());
+    }
+
+    /// delete() removes the row and returns true; deleting again returns false.
+    #[tokio::test]
+    async fn delete_removes_then_second_is_noop() {
+        let pool = connect_in_memory().await;
+        let row = create(&pool, "Gone", "/tmp/gone", None)
+            .await
+            .expect("create failed");
+
+        assert!(delete(&pool, &row.id).await.expect("delete failed"));
+        assert!(get(&pool, &row.id).await.expect("get failed").is_none());
+        assert!(!delete(&pool, &row.id).await.expect("second delete failed"));
     }
 
     /// Serialized JSON must use camelCase keys — this locks the TS Workspace contract.

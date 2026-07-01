@@ -8,6 +8,7 @@ import { Roster } from "./Roster";
 import { Builder } from "./Builder";
 import { Library } from "./Library";
 import { LinkFolder } from "./LinkFolder";
+import { EditWorkspace } from "./EditWorkspace";
 import { Settings } from "./Settings";
 import { WorkspacePane } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
@@ -46,6 +47,9 @@ export function AppShell() {
 
   // ── LinkFolder state ───────────────────────────────────────────────────
   const [showLinkFolder, setShowLinkFolder] = useState(false);
+
+  // ── EditWorkspace state ────────────────────────────────────────────────
+  const [showEditWorkspace, setShowEditWorkspace] = useState(false);
 
   // Load workspaces from the DB on mount.
   // Falls back to an empty list if Tauri is not present (plain Vite dev).
@@ -179,6 +183,9 @@ export function AppShell() {
                 activeWorkspaceId ? () => setShowBlackboard((v) => !v) : undefined
               }
               blackboardOpen={showBlackboard}
+              onEditWorkspace={
+                activeWorkspaceId ? () => setShowEditWorkspace(true) : undefined
+              }
             />
 
             {/* ── Main content: Blackboard screen, else the live agent pane ─── */}
@@ -256,6 +263,23 @@ export function AppShell() {
             setWorkspaces((prev) => [...prev, ws]);
             setActiveWorkspaceId(ws.id);
             setShowLinkFolder(false);
+          }}
+        />
+      )}
+
+      {/* ── Edit-workspace overlay ────────────────────────────────────── */}
+      {showEditWorkspace && activeWorkspace && (
+        <EditWorkspace
+          workspace={activeWorkspace}
+          onClose={() => setShowEditWorkspace(false)}
+          onSaved={(updated) => {
+            setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
+          }}
+          onDeleted={(deletedId) => {
+            setWorkspaces((prev) => prev.filter((w) => w.id !== deletedId));
+            setActiveWorkspaceId(null);
+            setSelectedId(null);
+            setShowBlackboard(false);
           }}
         />
       )}

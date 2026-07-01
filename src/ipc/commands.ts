@@ -34,6 +34,14 @@ export interface Commands {
     req: { workspaceId: string };
     res: void;
   };
+  "workspace.update": {
+    req: { workspaceId: string; name: string; color?: string };
+    res: Workspace;
+  };
+  "workspace.delete": {
+    req: { workspaceId: string };
+    res: void;
+  };
   "agentDef.list": {
     req: void;
     res: AgentDefinition[];
@@ -212,6 +220,8 @@ export const ipc = {
     list: () => call("workspace.list"),
     link: (req: Commands["workspace.link"]["req"]) => call("workspace.link", req),
     use: (req: Commands["workspace.use"]["req"]) => call("workspace.use", req),
+    update: (req: Commands["workspace.update"]["req"]) => call("workspace.update", req),
+    delete: (req: Commands["workspace.delete"]["req"]) => call("workspace.delete", req),
   },
   agentDef: {
     list: () => call("agentDef.list"),
