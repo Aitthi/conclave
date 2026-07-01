@@ -89,6 +89,15 @@ struct AddToWorkspaceReq {
 /// Maps to `agentDef.list` on the IPC bus.
 pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let items = repo::agent_definition::list_with_counts(&state.db).await?;
+    // Same basis as the launch snapshot (`repo::skill::content_for_agent`):
+    // builtin ids first (fixed order via `list_by_kind`), then custom ids —
+    // so `AgentDefinition.skillIds` and `WorkspaceAgent.launchedSkillIds`
+    // are directly comparable (see Roster.tsx's `computeSkillsStale`).
+    let builtin_ids: Vec<String> = repo::skill::list_by_kind(&state.db, "builtin")
+        .await?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
     let skill_map = repo::skill::custom_skill_ids_by_agent(&state.db).await?;
 
     let mut value = serde_json::to_value(&items).map_err(|e| AppError::Internal(e.to_string()))?;
@@ -99,7 +108,11 @@ pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> 
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_owned();
-            if let Some(ids) = skill_map.get(&id) {
+            let mut ids = builtin_ids.clone();
+            if let Some(custom_ids) = skill_map.get(&id) {
+                ids.extend(custom_ids.iter().cloned());
+            }
+            if !ids.is_empty() {
                 item["skillIds"] = serde_json::json!(ids);
             }
         }
@@ -419,5 +432,46 @@ mod tests {
             .find(|d| d["id"] == id)
             .unwrap();
         assert_eq!(item["skillIds"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    /// A definition with ZERO custom skill attachments must still get a
+    /// `skillIds` entry for a builtin skill row — it's never attached via
+    /// `agentDef.save`, but `content_for_agent` (the launch snapshot) always
+    /// includes it, so `list()`'s annotation must too (Roster staleness fix).
+    #[tokio::test]
+    async fn list_annotates_builtin_skill_ids_even_without_attachment() {
+        let state = AppState::for_tests().await;
+        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk-b', 'Core', 'builtin')")
+            .execute(&state.db)
+            .await
+            .expect("seed failed");
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas", "type": "cli", "harnessMode": "own",
+            }),
+        )
+        .await
+        .expect("create failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let item = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap();
+        let ids: Vec<String> = item["skillIds"]
+            .as_array()
+            .expect("skillIds must be present")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            ids.contains(&"sk-b".to_string()),
+            "builtin skill must appear even with zero custom attachments"
+        );
     }
 }

@@ -14,7 +14,6 @@ use uuid::Uuid;
 /// Decoded row from the `skill` table. `kind` is `"builtin"` or `"custom"`
 /// (DB CHECK enforces this). `content` is always present (defaults to `""`
 /// at the schema level, never NULL).
-#[allow(dead_code)] // consumed by Task 8's command handlers
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillRow {
@@ -33,7 +32,6 @@ const COLS: [&str; 6] = ["id", "name", "description", "content", "kind", "icon"]
 /// All skills, builtin first. Relies on `'builtin' < 'custom'` in ASCII/UTF-8
 /// ordering (both are lowercase ASCII words compared lexically) — not an
 /// arbitrary CASE expression, but real and worth a comment for the next reader.
-#[allow(dead_code)]
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<SkillRow>> {
     QueryBuilder::<Sqlite>::table("skill")
         .select(COLS)
@@ -48,7 +46,6 @@ pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<SkillRow>> {
 /// determinism — used by `content_for_agent` to fetch every builtin
 /// unconditionally, and by `commands::agent::save` to validate requested
 /// custom skill ids.
-#[allow(dead_code)]
 pub async fn list_by_kind(pool: &SqlitePool, kind: &str) -> sqlx::Result<Vec<SkillRow>> {
     QueryBuilder::<Sqlite>::table("skill")
         .select(COLS)
@@ -60,7 +57,6 @@ pub async fn list_by_kind(pool: &SqlitePool, kind: &str) -> sqlx::Result<Vec<Ski
 }
 
 /// Fetch a single skill by `id`, or `None` if it does not exist.
-#[allow(dead_code)]
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SkillRow>> {
     QueryBuilder::<Sqlite>::table("skill")
         .select(COLS)
@@ -72,7 +68,6 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SkillRow>> 
 
 /// Create a new CUSTOM skill (builtin rows are seed-only, never created via
 /// this path) and return the constructed row.
-#[allow(dead_code)]
 pub async fn create(
     pool: &SqlitePool,
     name: &str,
@@ -113,7 +108,6 @@ pub async fn create(
 /// `None` if no row with `id` exists. Does NOT check `kind` — a caller wanting
 /// to protect builtin rows from mutation must check `get()`'s result first
 /// (see `commands::skill::save`).
-#[allow(dead_code)]
 pub async fn update(
     pool: &SqlitePool,
     id: &str,
@@ -143,7 +137,6 @@ pub async fn update(
 /// Delete a skill. Returns `true` if a row was deleted. `agent_skill` rows
 /// referencing it cascade away (`ON DELETE CASCADE`, `0001_init.sql:144`) —
 /// no further cleanup needed. Does NOT check `kind`; see `update`'s note.
-#[allow(dead_code)]
 pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     let res = sqlx::query("DELETE FROM skill WHERE id = ?")
         .bind(id)
@@ -158,7 +151,6 @@ use std::collections::HashMap;
 /// `sort_order` then `id` as a stable tie-breaker. Builtin skills are NEVER
 /// stored here — see `content_for_agent`, which fetches them separately and
 /// unconditionally.
-#[allow(dead_code)]
 pub async fn attached_to_agent(
     pool: &SqlitePool,
     agent_def_id: &str,
@@ -178,7 +170,6 @@ pub async fn attached_to_agent(
 /// `skill_ids`, in that order (index becomes `sort_order`). Delete-then-insert
 /// inside one transaction, mirroring `workspace_agent::instantiate`'s
 /// transaction style. An empty slice clears all attachments.
-#[allow(dead_code)]
 pub async fn set_custom_attachments(
     pool: &SqlitePool,
     agent_def_id: &str,
@@ -210,7 +201,6 @@ pub async fn set_custom_attachments(
 /// ordered by `sort_order` within each group. One query for ALL definitions —
 /// used by `commands::agent::list` to annotate `AgentDefinition.skillIds`
 /// without an N+1 query per definition.
-#[allow(dead_code)]
 pub async fn custom_skill_ids_by_agent(
     pool: &SqlitePool,
 ) -> sqlx::Result<HashMap<String, Vec<String>>> {
@@ -231,7 +221,6 @@ pub async fn custom_skill_ids_by_agent(
 /// each CUSTOM skill attached (a builtin skill has no `agent_skill` rows at
 /// all, so it's simply absent from the map / reads as 0). Used by
 /// `commands::skill::list` for the Library's "attached to N agents" label.
-#[allow(dead_code)]
 pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
     let rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT skill_id, COUNT(*) FROM agent_skill GROUP BY skill_id")
@@ -248,7 +237,6 @@ pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, 
 /// separated by a blank line. Returns `("", [])` when nothing is attached and
 /// no builtin skills exist — the caller (`commands::instance::spawn`) treats
 /// an empty body as "skip the sidecar file entirely".
-#[allow(dead_code)] // consumed by Task 10's commands::instance::spawn
 pub async fn content_for_agent(
     pool: &SqlitePool,
     agent_def_id: &str,

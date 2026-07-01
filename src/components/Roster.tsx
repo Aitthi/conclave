@@ -16,9 +16,10 @@ interface RosterEntry {
   status: WorkspaceAgent["status"];
   /** Subtitle derived honestly from the def — no fabricated strings. */
   meta: string;
-  /** True when the def's CURRENT skill attachments differ from what the live
-   *  session actually launched with — see Session.launchedSkillIds. Only
-   *  meaningful for `type === "cli"` (the only type skills apply to in v1). */
+  /** True when the def's CURRENT full skill id set (builtin + custom) differs
+   *  from what the live session actually launched with — see
+   *  Session.launchedSkillIds. Only meaningful for `type === "cli"` (the
+   *  only type skills apply to in v1). */
   skillsStale: boolean;
 }
 
@@ -41,11 +42,12 @@ function deriveMeta(def: AgentDefinition): string {
   }
 }
 
-// A `cli` instance is "stale" when its definition's current skill ids differ
-// from what its session actually launched with. Order matters (mirrors
+// A `cli` instance is "stale" when its definition's current FULL skill id
+// set (builtin + attached custom, same basis/order as the launch snapshot —
+// see AgentDefinition.skillIds' doc comment) differs from what its session
+// actually launched with. Order matters (mirrors
 // repo::skill::content_for_agent's deterministic ordering), so this is a
-// straight array comparison, not a set comparison — reordering also counts as
-// drift, matching the "content actually differs" intent. `undefined`
+// straight array comparison, not a set comparison. `undefined`
 // launchedSkillIds (never launched yet) is never stale — nothing to compare
 // against.
 function computeSkillsStale(def: AgentDefinition, inst: WorkspaceAgent): boolean {

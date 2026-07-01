@@ -200,7 +200,6 @@ pub async fn set_context_tokens(
 /// launch. Compared against an agent definition's CURRENT attachments
 /// (`repo::skill::custom_skill_ids_by_agent` + builtin ids) to detect drift
 /// and show a "Restart to apply" badge in the Roster.
-#[allow(dead_code)] // consumed by Task 10
 pub async fn set_launched_skill_ids(
     pool: &SqlitePool,
     session_id: &str,

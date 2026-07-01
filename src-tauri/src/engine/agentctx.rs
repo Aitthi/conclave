@@ -136,7 +136,6 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
 /// to this file does. Owner-only (`0700`) dir, mirroring
 /// `ensure_conclave_shim`'s `bin` dir.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub fn write_skill_sidecar(instance_id: &str, body: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
 
@@ -155,7 +154,6 @@ pub fn write_skill_sidecar(instance_id: &str, body: &str) -> std::io::Result<Pat
 }
 
 #[cfg(not(unix))]
-#[allow(dead_code)]
 pub fn write_skill_sidecar(_instance_id: &str, _body: &str) -> std::io::Result<PathBuf> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -168,7 +166,6 @@ pub fn write_skill_sidecar(_instance_id: &str, _body: &str) -> std::io::Result<P
 /// value on top of skill content. Runs the same `sanitize_field` the rest of
 /// the preamble uses, so a pathological path can't reintroduce a newline or
 /// '=' (defense in depth — a real filesystem path shouldn't contain either).
-#[allow(dead_code)]
 pub fn skill_pointer_sentence(path: &std::path::Path) -> String {
     let path = sanitize_field(&path.display().to_string());
     format!(

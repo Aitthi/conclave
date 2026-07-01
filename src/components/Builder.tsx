@@ -151,6 +151,10 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [error, setError] = useState<string | null>(null);
   // ── Skills ─────────────────────────────────────────────────────────────────
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
+  // initialDef?.skillIds may now also contain builtin ids (agentDef.list
+  // annotates the FULL builtin+custom set) — harmless here since the custom
+  // checklist below only ever tests membership against `kind === "custom"`
+  // skills, so a builtin id in this state simply never matches any checkbox.
   const [skillIds, setSkillIds] = useState<string[]>(initialDef?.skillIds ?? []);
 
   useEffect(() => {

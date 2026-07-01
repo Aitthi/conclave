@@ -43,8 +43,11 @@ export interface AgentDefinition {
   secretEnvKeys?: string[];
   /** Model context window: "1m" appends the [1m] suffix, "200k" is standard. */
   contextWindow?: "1m" | "200k";
-  /** Annotated by `agentDef.list`: attached CUSTOM skill ids (builtin skills
-   *  are always active and are NOT listed here — see Skill's `kind`). */
+  /** Annotated by `agentDef.list`: the FULL set of skill ids (builtin first,
+   *  then attached custom, matching the launch-snapshot ordering used by
+   *  `repo::skill::content_for_agent`) a `cli` agent would use if launched
+   *  right now. Matches `WorkspaceAgent.launchedSkillIds`' basis exactly —
+   *  that symmetry is what lets the Roster detect skill drift. */
   skillIds?: string[];
   createdAt: string;
   /** Annotated by list views: how many workspaces this agent belongs to. */

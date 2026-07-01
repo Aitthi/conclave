@@ -120,7 +120,6 @@ pub async fn list_by_workspace(
 /// without a second IPC round-trip per instance.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct WorkspaceAgentWithSkills {
     pub id: String,
     pub workspace_id: String,
@@ -136,7 +135,6 @@ pub struct WorkspaceAgentWithSkills {
 
 /// Same shape as `session::serialize_json_text` — kept local (small, trivial,
 /// different module) rather than shared.
-#[allow(dead_code)]
 fn serialize_launched_ids<S>(opt: &Option<String>, ser: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -154,7 +152,6 @@ where
 /// A workspace_agent with no session yet (should not normally happen —
 /// `instantiate` creates both atomically) yields `None`, same as one whose
 /// session simply hasn't launched.
-#[allow(dead_code)]
 pub async fn list_by_workspace_with_launched_skills(
     pool: &SqlitePool,
     workspace_id: &str,
