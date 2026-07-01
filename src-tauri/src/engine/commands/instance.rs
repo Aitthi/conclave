@@ -48,9 +48,45 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: ListInstancesReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
-    let rows = repo::workspace_agent::list_by_workspace(&state.db, &req.workspace_id).await?;
+    let rows =
+        repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, &req.workspace_id)
+            .await?;
 
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Compute this instance's skill content (builtin + attached custom, via
+/// `repo::skill::content_for_agent`), write it to a per-instance sidecar file
+/// if non-empty, and append ONE sanitized pointer sentence to `preamble` —
+/// never the raw content, which may contain '\n'/'=' and would violate
+/// `bootstrap_preamble`'s single-line/'='-free contract (ADR 0001). Persists
+/// the launch snapshot (`session.launched_skill_ids`) unconditionally — an
+/// empty attachment set still stores `"[]"`, distinct from a session that has
+/// never launched at all (`NULL`).
+///
+/// Extracted out of `spawn`'s `cli` branch so it's unit-testable without
+/// spawning a real PTY (this file's other tests avoid the `cli` dispatch
+/// branch entirely — see `fixture_instance`'s doc comment).
+async fn apply_skills_to_preamble(
+    state: &AppState,
+    agent_def_id: &str,
+    instance_id: &str,
+    session_id: &str,
+    preamble: String,
+) -> Result<String, AppError> {
+    let (skill_body, skill_ids) = repo::skill::content_for_agent(&state.db, agent_def_id).await?;
+    let preamble = if skill_body.is_empty() {
+        preamble
+    } else {
+        let path = crate::engine::agentctx::write_skill_sidecar(instance_id, &skill_body)
+            .map_err(|e| AppError::Internal(format!("write skill sidecar: {e}")))?;
+        format!(
+            "{preamble} {}",
+            crate::engine::agentctx::skill_pointer_sentence(&path)
+        )
+    };
+    repo::session::set_launched_skill_ids(&state.db, session_id, &skill_ids).await?;
+    Ok(preamble)
 }
 
 /// Spawn (or attach to) the live session for a workspace_agent instance.
@@ -147,6 +183,9 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 &ws.id,
                 &id,
             );
+
+            let preamble =
+                apply_skills_to_preamble(state, &def.id, &id, &session.id, preamble).await?;
 
             let mut launch = String::from(base);
             if base == "claude" {
@@ -961,6 +1000,143 @@ mod tests {
         assert!(
             snaps.is_empty(),
             "untracked forwarder must not auto-compact"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_skills_to_preamble_writes_sidecar_and_snapshot_when_attached() {
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "Atlas".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let skill = repo::skill::create(&state.db, "Reviewer", None, "Always check X")
+            .await
+            .expect("create skill failed");
+        let inst_id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+        repo::skill::set_custom_attachments(&state.db, &def.id, std::slice::from_ref(&skill.id))
+            .await
+            .expect("attach failed");
+        let session = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get session failed")
+            .expect("session exists");
+
+        let result = apply_skills_to_preamble(
+            &state,
+            &def.id,
+            &inst_id,
+            &session.id,
+            "BASE PREAMBLE".to_string(),
+        )
+        .await
+        .expect("apply_skills_to_preamble failed");
+
+        assert!(
+            result.starts_with("BASE PREAMBLE "),
+            "must extend, not replace, the base preamble: {result}"
+        );
+        assert!(!result.contains('\n'), "no newline: {result}");
+        assert!(!result.contains('='), "no '=': {result}");
+
+        let updated_session = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            updated_session.launched_skill_ids.as_deref(),
+            Some(format!("[\"{}\"]", skill.id).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_skills_to_preamble_is_noop_when_nothing_attached() {
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let inst_id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+        let session = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get failed")
+            .expect("exists");
+
+        let result =
+            apply_skills_to_preamble(&state, &def.id, &inst_id, &session.id, "BASE".to_string())
+                .await
+                .expect("apply_skills_to_preamble failed");
+        assert_eq!(
+            result, "BASE",
+            "no skills attached -> preamble passes through unchanged"
+        );
+
+        let updated_session = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("exists");
+        assert_eq!(
+            updated_session.launched_skill_ids.as_deref(),
+            Some("[]"),
+            "must snapshot an EMPTY array (launched-with-zero-skills), not leave it NULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_annotates_launched_skill_ids() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await; // orchestrator type — safe, no cli/chat dispatch
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("exists");
+        repo::session::set_launched_skill_ids(&state.db, &session.id, &["sk-x".to_string()])
+            .await
+            .expect("set failed");
+
+        let ws_id = workspace_agent::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("exists")
+            .workspace_id;
+        let listed = list(&state, json!({ "workspaceId": ws_id }))
+            .await
+            .expect("list failed");
+        let item = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .unwrap();
+        assert_eq!(
+            item["launchedSkillIds"].as_array().map(|a| a.len()),
+            Some(1)
         );
     }
 
