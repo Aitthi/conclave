@@ -7,6 +7,7 @@ import { Rail } from "./Rail";
 import { Roster } from "./Roster";
 import { Builder } from "./Builder";
 import { Library } from "./Library";
+import { SkillLibrary } from "./SkillLibrary";
 import { LinkFolder } from "./LinkFolder";
 import { EditWorkspace } from "./EditWorkspace";
 import { Settings } from "./Settings";
@@ -34,6 +35,9 @@ export function AppShell() {
   const [showLibrary, setShowLibrary] = useState(false);
   /** Incremented after Builder saves so Library re-fetches agentDef.list. */
   const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
+
+  // ── Skill Library state ────────────────────────────────────────────────
+  const [showSkillLibrary, setShowSkillLibrary] = useState(false);
 
   // ── Builder state ──────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder] = useState(false);
@@ -149,6 +153,7 @@ export function AppShell() {
             setShowBlackboard(false);
             setShowLibrary(true);
           }}
+          onOpenSkillLibrary={() => setShowSkillLibrary(true)}
           onOpenLinkFolder={() => setShowLinkFolder(true)}
           onOpenSettings={() => setShowSettings(true)}
         />
@@ -229,6 +234,9 @@ export function AppShell() {
           }}
         />
       )}
+
+      {/* ── Skill Library overlay (sheet) ─────────────────────────────── */}
+      {showSkillLibrary && <SkillLibrary onClose={() => setShowSkillLibrary(false)} />}
 
       {/* ── Agent builder overlay ─────────────────────────────────────── */}
       {showBuilder && (

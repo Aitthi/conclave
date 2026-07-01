@@ -1,4 +1,4 @@
-import { Hexagon, FolderPlus, UsersRound } from "lucide-react";
+import { Hexagon, FolderPlus, UsersRound, Wand2 } from "lucide-react";
 
 import type { Workspace } from "../ipc";
 
@@ -10,11 +10,12 @@ interface RailProps {
   activeWorkspaceId: string | null;
   onSelectWorkspace: (id: string) => void;
   onOpenLibrary?: () => void;
+  onOpenSkillLibrary?: () => void;
   onOpenLinkFolder?: () => void;
   onOpenSettings?: () => void;
 }
 
-export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenLinkFolder }: RailProps) {
+export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenLibrary, onOpenSkillLibrary, onOpenLinkFolder }: RailProps) {
   return (
     <nav className="w-[56px] shrink-0 bg-fill-soft border-r border-overlay/[0.06] flex flex-col items-center overflow-hidden">
       {/* Brand mark — sits in a 48px header zone so it lines up with the Roster
@@ -77,6 +78,13 @@ export function Rail({ workspaces, activeWorkspaceId, onSelectWorkspace, onOpenL
           onClick={onOpenLibrary}
         >
           <UsersRound className="w-[17px] h-[17px]" />
+        </button>
+        <button
+          className="w-9 h-9 rounded-[10px] bg-surface ring-hair text-text-body grid place-items-center hover:bg-overlay/[0.03]"
+          title="Skill Library"
+          onClick={onOpenSkillLibrary}
+        >
+          <Wand2 className="w-[17px] h-[17px]" />
         </button>
       </div>
       </div>
