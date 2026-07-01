@@ -5,6 +5,7 @@ pub mod fusion;
 pub mod instance;
 pub mod message;
 pub mod provider;
+pub mod skill;
 pub mod snapshot;
 pub mod tool;
 pub mod workspace;

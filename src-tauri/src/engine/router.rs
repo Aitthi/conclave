@@ -1,5 +1,5 @@
 use crate::engine::commands::{
-    agent, blackboard, cli, fusion, instance, message, provider, snapshot, tool, workspace,
+    agent, blackboard, cli, fusion, instance, message, provider, skill, snapshot, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -22,6 +22,11 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "agentDef.save" => agent::save(state, payload).await,
         "agentDef.delete" => agent::delete(state, payload).await,
         "agentDef.addToWorkspace" => agent::add_to_workspace(state, payload).await,
+
+        // ── skill ─────────────────────────────────────────────────────────
+        "skill.list" => skill::list(state, payload).await,
+        "skill.save" => skill::save(state, payload).await,
+        "skill.delete" => skill::delete(state, payload).await,
 
         // ── instance ──────────────────────────────────────────────────────
         "instance.list" => instance::list(state, payload).await,
