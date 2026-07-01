@@ -114,6 +114,64 @@ pub async fn list_by_workspace(
         .map_err(cb_err)
 }
 
+/// Like [`WorkspaceAgentRow`] but annotated with the paired session's
+/// `launched_skill_ids` (raw JSON-array text, `None` before any launch). Used
+/// ONLY by `commands::instance::list` so the Roster can detect skill drift
+/// without a second IPC round-trip per instance.
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct WorkspaceAgentWithSkills {
+    pub id: String,
+    pub workspace_id: String,
+    pub agent_def_id: String,
+    pub status: String,
+    pub added_at: String,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_launched_ids"
+    )]
+    pub launched_skill_ids: Option<String>,
+}
+
+/// Same shape as `session::serialize_json_text` — kept local (small, trivial,
+/// different module) rather than shared.
+#[allow(dead_code)]
+fn serialize_launched_ids<S>(opt: &Option<String>, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match opt {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text)
+            .unwrap_or(serde_json::Value::Null)
+            .serialize(ser),
+        None => ser.serialize_none(),
+    }
+}
+
+/// Return all workspace_agents for a workspace (same ordering as
+/// `list_by_workspace`) LEFT JOINed with their session's `launched_skill_ids`.
+/// A workspace_agent with no session yet (should not normally happen —
+/// `instantiate` creates both atomically) yields `None`, same as one whose
+/// session simply hasn't launched.
+#[allow(dead_code)]
+pub async fn list_by_workspace_with_launched_skills(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> sqlx::Result<Vec<WorkspaceAgentWithSkills>> {
+    sqlx::query_as::<_, WorkspaceAgentWithSkills>(
+        "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
+         sess.launched_skill_ids \
+         FROM workspace_agent wa \
+         LEFT JOIN session sess ON sess.workspace_agent_id = wa.id \
+         WHERE wa.workspace_id = ? \
+         ORDER BY wa.added_at ASC, wa.id ASC",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// All instances of a given agent definition, across every workspace.
 ///
 /// Used when deleting an agent definition: each instance must be removed
@@ -782,5 +840,53 @@ mod tests {
             "must NOT have agent_def_id"
         );
         assert!(json.get("added_at").is_none(), "must NOT have added_at");
+    }
+
+    /// list_by_workspace_with_launched_skills LEFT JOINs the paired session's
+    /// launched_skill_ids — present after a launch snapshot, NULL before one.
+    #[tokio::test]
+    async fn list_by_workspace_with_launched_skills_joins_session() {
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let inst = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+        let session = crate::engine::repo::session::get_by_instance(&pool, &inst.id)
+            .await
+            .expect("get session failed")
+            .expect("session exists");
+
+        // Before any launch snapshot: NULL.
+        let before = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert_eq!(before.len(), 1);
+        assert!(before[0].launched_skill_ids.is_none());
+
+        crate::engine::repo::session::set_launched_skill_ids(
+            &pool,
+            &session.id,
+            &["sk-1".to_string()],
+        )
+        .await
+        .expect("set failed");
+
+        let after = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert_eq!(after[0].launched_skill_ids.as_deref(), Some(r#"["sk-1"]"#));
     }
 }
