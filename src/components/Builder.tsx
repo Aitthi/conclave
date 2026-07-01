@@ -34,7 +34,7 @@ const COLOR_SWATCHES = [
 /** Quick-fill model presets (the user can still type any value). */
 const CLAUDE_MODELS = [
   "claude-opus-4-8",
-  "claude-sonnet-4-6",
+  "claude-sonnet-5",
   "claude-haiku-4-5",
 ];
 
