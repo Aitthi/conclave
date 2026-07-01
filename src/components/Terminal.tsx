@@ -126,21 +126,11 @@ export function Terminal({ sessionId }: TerminalProps) {
       }
       const { cols, rows } = term;
       // A hidden tab (display:none) or an element detached mid-teardown fits to
-      // 0. A LIVE but not-yet-settled container (the window's native open/zoom
-      // animation, a sidebar/drawer mid-transition) can transiently measure a
-      // few pixels wide and fit to a degenerate size like cols=1 — the PTY
-      // starts at 80×24 (see spawn_cli), so pushing that garbage size mid-launch
-      // makes the child (an ink/TUI redraw-on-SIGWINCH app) repaint its welcome
-      // screen wrapped one character per line, which then sits in the normal
-      // buffer's scrollback as a stray frame even after the next, correct
-      // resize repaints below it. The app's min window width (880px, see
-      // tauri.conf.json) leaves well over 30 usable columns for the terminal
-      // pane even at the smallest window with the Context drawer open, so any
-      // measurement below this floor is always a layout-race artifact, never a
-      // real size. Leave `firstSizing` unconsumed in both cases: when the
-      // container next settles the ResizeObserver fires again with real dims
-      // (a genuine change) and the normal first-sizing jiggle repaints the child.
-      if (cols < 15 || rows < 3) return;
+      // 0 — never push a zero-dimension resize to the PTY (it would wedge the
+      // child's layout). Leave `firstSizing` unconsumed: when the tab becomes
+      // visible the ResizeObserver fires again with real dims (0 → real is a
+      // genuine change) and the normal first-sizing jiggle repaints the child.
+      if (cols === 0 || rows === 0) return;
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
