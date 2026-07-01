@@ -31,8 +31,9 @@ fn secret_account(agent_id: &str, env_key: &str) -> String {
 
 /// Payload for `agentDef.save` — create if `id` is absent, update if present.
 ///
-/// `toolIds` / `skillIds` are accepted and forwarded without error but deferred
-/// to M5 (when the `agent_tool` / `agent_skill` join tables will be persisted).
+/// `toolIds` is accepted and forwarded without error but deferred (agent_tool
+/// wiring is out of scope for the v1 skill system). `skillIds` IS persisted —
+/// see the `set_custom_attachments` call in `save()`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveAgentReq {
@@ -59,7 +60,6 @@ struct SaveAgentReq {
     // Accepted but deferred — TODO(M5): persist agent_tool / agent_skill joins.
     #[allow(dead_code)]
     tool_ids: Option<Vec<String>>,
-    #[allow(dead_code)]
     skill_ids: Option<Vec<String>>,
 }
 
@@ -89,7 +89,22 @@ struct AddToWorkspaceReq {
 /// Maps to `agentDef.list` on the IPC bus.
 pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let items = repo::agent_definition::list_with_counts(&state.db).await?;
-    serde_json::to_value(items).map_err(|e| AppError::Internal(e.to_string()))
+    let skill_map = repo::skill::custom_skill_ids_by_agent(&state.db).await?;
+
+    let mut value = serde_json::to_value(&items).map_err(|e| AppError::Internal(e.to_string()))?;
+    if let Some(arr) = value.as_array_mut() {
+        for item in arr.iter_mut() {
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            if let Some(ids) = skill_map.get(&id) {
+                item["skillIds"] = serde_json::json!(ids);
+            }
+        }
+    }
+    Ok(value)
 }
 
 /// Create or update an agent definition.
@@ -199,6 +214,24 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         }
     }
 
+    // Persist custom skill attachments (replace semantics). Filter to known
+    // CUSTOM skill ids so a stale/tampered request can't create an
+    // `agent_skill` row for a builtin skill (which is never attached via that
+    // table — see `repo::skill::content_for_agent`) or a nonexistent id.
+    let valid_custom_ids: std::collections::HashSet<String> =
+        repo::skill::list_by_kind(&state.db, "custom")
+            .await?
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+    let filtered_skill_ids: Vec<String> = req
+        .skill_ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| valid_custom_ids.contains(id))
+        .collect();
+    repo::skill::set_custom_attachments(&state.db, &row.id, &filtered_skill_ids).await?;
+
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
 }
 
@@ -286,4 +319,105 @@ pub async fn add_to_workspace(state: &AppState, payload: Value) -> Result<Value,
     }
 
     serde_json::to_value(&results).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn save_persists_and_replaces_skill_attachments() {
+        let state = AppState::for_tests().await;
+        let skill = repo::skill::create(&state.db, "S1", None, "c")
+            .await
+            .expect("create skill failed");
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas", "type": "cli", "harnessMode": "own",
+                "skillIds": [skill.id],
+            }),
+        )
+        .await
+        .expect("create agent failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let attached = repo::skill::attached_to_agent(&state.db, &id)
+            .await
+            .expect("query failed");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].id, skill.id);
+
+        // A second save with an EMPTY skillIds list must clear the attachment
+        // (replace semantics, not merge).
+        save(
+            &state,
+            serde_json::json!({
+                "id": id, "name": "Atlas", "type": "cli", "harnessMode": "own",
+                "skillIds": [],
+            }),
+        )
+        .await
+        .expect("update agent failed");
+        let attached_after = repo::skill::attached_to_agent(&state.db, &id)
+            .await
+            .expect("query failed");
+        assert!(attached_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_silently_drops_unknown_or_builtin_skill_ids() {
+        let state = AppState::for_tests().await;
+        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk-b', 'Core', 'builtin')")
+            .execute(&state.db)
+            .await
+            .expect("seed failed");
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas", "type": "cli", "harnessMode": "own",
+                "skillIds": ["sk-b", "no-such-id"],
+            }),
+        )
+        .await
+        .expect("create failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let attached = repo::skill::attached_to_agent(&state.db, &id)
+            .await
+            .expect("query failed");
+        assert!(
+            attached.is_empty(),
+            "builtin/unknown ids must never become agent_skill rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_annotates_skill_ids() {
+        let state = AppState::for_tests().await;
+        let skill = repo::skill::create(&state.db, "S1", None, "c")
+            .await
+            .expect("create failed");
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas", "type": "cli", "harnessMode": "own",
+                "skillIds": [skill.id],
+            }),
+        )
+        .await
+        .expect("create failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let item = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap();
+        assert_eq!(item["skillIds"].as_array().map(|a| a.len()), Some(1));
+    }
 }
