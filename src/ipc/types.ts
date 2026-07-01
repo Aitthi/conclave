@@ -43,9 +43,23 @@ export interface AgentDefinition {
   secretEnvKeys?: string[];
   /** Model context window: "1m" appends the [1m] suffix, "200k" is standard. */
   contextWindow?: "1m" | "200k";
+  /** Annotated by `agentDef.list`: attached CUSTOM skill ids (builtin skills
+   *  are always active and are NOT listed here — see Skill's `kind`). */
+  skillIds?: string[];
   createdAt: string;
   /** Annotated by list views: how many workspaces this agent belongs to. */
   inWorkspaces?: number;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  description?: string;
+  content: string;
+  kind: "builtin" | "custom";
+  icon?: string;
+  /** Annotated by `skill.list`: how many AgentDefinitions have this attached. */
+  attachedTo?: number;
 }
 
 export interface WorkspaceAgent {
@@ -54,6 +68,9 @@ export interface WorkspaceAgent {
   agentDefId: string;
   status: "running" | "idle" | "waiting";
   addedAt: string;
+  /** Annotated by `instance.list`: skill ids used at the last launch (see
+   *  Session.launchedSkillIds — same value, joined in for the Roster). */
+  launchedSkillIds?: string[];
 }
 
 export interface Session {
