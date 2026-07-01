@@ -1,5 +1,5 @@
 {
-  "tab": "plan",
+  "tab": "prototype",
   "screen": "workspace",
   "screens": [
     {
@@ -50,6 +50,6 @@
   "phase": "plan",
   "store": {},
   "errors": [],
-  "updatedAt": "08:51:47 PM",
-  "reportedAt": "2026-06-28T13:51:47.129Z"
+  "updatedAt": "05:20:49 PM",
+  "reportedAt": "2026-06-30T10:20:49.600Z"
 }
