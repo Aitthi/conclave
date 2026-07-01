@@ -56,13 +56,16 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
 }
 
 /// Compute this instance's skill content (builtin + attached custom, via
-/// `repo::skill::content_for_agent`), write it to a per-instance sidecar file
-/// if non-empty, and append ONE sanitized pointer sentence to `preamble` —
-/// never the raw content, which may contain '\n'/'=' and would violate
-/// `bootstrap_preamble`'s single-line/'='-free contract (ADR 0001). Persists
-/// the launch snapshot (`session.launched_skill_ids`) unconditionally — an
-/// empty attachment set still stores `"[]"`, distinct from a session that has
-/// never launched at all (`NULL`).
+/// `repo::skill::content_for_agent`) and, if non-empty, write it to a
+/// per-instance sidecar file and append ONE sanitized pointer sentence to
+/// `preamble` — never the raw content, which may contain '\n'/'=' and would
+/// violate `bootstrap_preamble`'s single-line/'='-free contract (ADR 0001).
+///
+/// Does NOT persist `session.launched_skill_ids` — the caller must do that
+/// ONLY after the launch this preamble is used for has actually succeeded
+/// (see `spawn`'s `cli` branch), so a failed spawn or a lost registration
+/// race never records a launch snapshot for content that was never used by a
+/// live process.
 ///
 /// Extracted out of `spawn`'s `cli` branch so it's unit-testable without
 /// spawning a real PTY (this file's other tests avoid the `cli` dispatch
@@ -71,9 +74,8 @@ async fn apply_skills_to_preamble(
     state: &AppState,
     agent_def_id: &str,
     instance_id: &str,
-    session_id: &str,
     preamble: String,
-) -> Result<String, AppError> {
+) -> Result<(String, Vec<String>), AppError> {
     let (skill_body, skill_ids) = repo::skill::content_for_agent(&state.db, agent_def_id).await?;
     let preamble = if skill_body.is_empty() {
         preamble
@@ -85,8 +87,7 @@ async fn apply_skills_to_preamble(
             crate::engine::agentctx::skill_pointer_sentence(&path)
         )
     };
-    repo::session::set_launched_skill_ids(&state.db, session_id, &skill_ids).await?;
-    Ok(preamble)
+    Ok((preamble, skill_ids))
 }
 
 /// Spawn (or attach to) the live session for a workspace_agent instance.
@@ -184,8 +185,8 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 &id,
             );
 
-            let preamble =
-                apply_skills_to_preamble(state, &def.id, &id, &session.id, preamble).await?;
+            let (preamble, skill_ids) =
+                apply_skills_to_preamble(state, &def.id, &id, preamble).await?;
 
             let mut launch = String::from(base);
             if base == "claude" {
@@ -314,6 +315,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 return serde_json::to_value(&session)
                     .map_err(|e| AppError::Internal(e.to_string()));
             }
+            repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
             Some(backend.output_rx)
         }
         "chat" => {
@@ -1004,7 +1006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_skills_to_preamble_writes_sidecar_and_snapshot_when_attached() {
+    async fn apply_skills_to_preamble_extends_preamble_when_attached() {
         let state = AppState::for_tests().await;
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
@@ -1030,20 +1032,11 @@ mod tests {
         repo::skill::set_custom_attachments(&state.db, &def.id, std::slice::from_ref(&skill.id))
             .await
             .expect("attach failed");
-        let session = repo::session::get_by_instance(&state.db, &inst_id)
-            .await
-            .expect("get session failed")
-            .expect("session exists");
 
-        let result = apply_skills_to_preamble(
-            &state,
-            &def.id,
-            &inst_id,
-            &session.id,
-            "BASE PREAMBLE".to_string(),
-        )
-        .await
-        .expect("apply_skills_to_preamble failed");
+        let (result, skill_ids) =
+            apply_skills_to_preamble(&state, &def.id, &inst_id, "BASE PREAMBLE".to_string())
+                .await
+                .expect("apply_skills_to_preamble failed");
 
         assert!(
             result.starts_with("BASE PREAMBLE "),
@@ -1051,15 +1044,7 @@ mod tests {
         );
         assert!(!result.contains('\n'), "no newline: {result}");
         assert!(!result.contains('='), "no '=': {result}");
-
-        let updated_session = repo::session::get(&state.db, &session.id)
-            .await
-            .expect("get failed")
-            .expect("session exists");
-        assert_eq!(
-            updated_session.launched_skill_ids.as_deref(),
-            Some(format!("[\"{}\"]", skill.id).as_str())
-        );
+        assert_eq!(skill_ids, vec![skill.id]);
     }
 
     #[tokio::test]
@@ -1083,29 +1068,35 @@ mod tests {
             .await
             .expect("instantiate failed")
             .id;
-        let session = repo::session::get_by_instance(&state.db, &inst_id)
-            .await
-            .expect("get failed")
-            .expect("exists");
 
-        let result =
-            apply_skills_to_preamble(&state, &def.id, &inst_id, &session.id, "BASE".to_string())
+        let (result, skill_ids) =
+            apply_skills_to_preamble(&state, &def.id, &inst_id, "BASE".to_string())
                 .await
                 .expect("apply_skills_to_preamble failed");
         assert_eq!(
             result, "BASE",
             "no skills attached -> preamble passes through unchanged"
         );
+        assert!(skill_ids.is_empty());
+    }
 
-        let updated_session = repo::session::get(&state.db, &session.id)
+    /// The persist-only-on-success invariant this fix exists for: an
+    /// orchestrator-type instance (safe, non-PTY dispatch path) still goes
+    /// through `spawn`'s success path and registers live — confirming
+    /// `spawn` doesn't blow up now that the cli branch's persist call moved.
+    /// (The cli-specific "skip persist on failed spawn" behavior itself is
+    /// inherently untestable without a real process, same boundary this
+    /// file's other tests already respect — see `fixture_instance`'s doc
+    /// comment.)
+    #[tokio::test]
+    async fn spawn_orchestrator_still_succeeds_after_skill_persist_reorder() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let out = spawn(&state, json!({ "workspaceAgentId": id }))
             .await
-            .expect("get failed")
-            .expect("exists");
-        assert_eq!(
-            updated_session.launched_skill_ids.as_deref(),
-            Some("[]"),
-            "must snapshot an EMPTY array (launched-with-zero-skills), not leave it NULL"
-        );
+            .expect("spawn failed");
+        assert!(out.get("id").is_some());
+        assert!(state.runtime.is_live(&id));
     }
 
     #[tokio::test]
