@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X, Sparkles, Waypoints, MessageSquare, Terminal } from "lucide-react";
 import { ipc } from "../ipc";
-import type { AgentDefinition } from "../ipc";
+import type { AgentDefinition, Skill } from "../ipc";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -149,6 +149,18 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [envText, setEnvText] = useState(() => buildEnvText(initialDef));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ── Skills ─────────────────────────────────────────────────────────────────
+  const [allSkills, setAllSkills] = useState<Skill[]>([]);
+  const [skillIds, setSkillIds] = useState<string[]>(initialDef?.skillIds ?? []);
+
+  useEffect(() => {
+    ipc.skill
+      .list()
+      .then(setAllSkills)
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) console.error("Builder: skill.list failed", err);
+      });
+  }, []);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const letter = name.trim().charAt(0).toUpperCase() || "?";
@@ -204,6 +216,9 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         contextWindow: isClaudeCode ? contextWindow : undefined,
         customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
+        // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
+        // save never sends a stale list.
+        skillIds: agentType === "cli" ? skillIds : undefined,
       });
       onSaved?.(def);
       onClose();
@@ -603,6 +618,71 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   )}
                 </div>
                 )}
+              </div>
+            </section>
+          )}
+
+          {/* Skills — for claude-code + codex */}
+          {showCliConfig && (
+            <section>
+              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
+                Skills
+              </div>
+              <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
+                {allSkills.filter((s) => s.kind === "builtin").length > 0 && (
+                  <div className="px-3 py-2">
+                    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
+                      System skills — always on
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {allSkills
+                        .filter((s) => s.kind === "builtin")
+                        .map((s) => (
+                          <span
+                            key={s.id}
+                            className="text-[11px] font-medium px-2 py-0.5 rounded-md ring-1 ring-overlay/[0.08] text-text-secondary"
+                          >
+                            {s.name}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
+                <div className="px-3 py-2">
+                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
+                    Custom skills
+                  </div>
+                  {allSkills.filter((s) => s.kind === "custom").length === 0 ? (
+                    <p className="text-[11.5px] text-text-tertiary">
+                      No custom skills yet — create one in the Skill Library.
+                    </p>
+                  ) : (
+                    <div className="space-y-1">
+                      {allSkills
+                        .filter((s) => s.kind === "custom")
+                        .map((s) => {
+                          const checked = skillIds.includes(s.id);
+                          return (
+                            <label
+                              key={s.id}
+                              className="flex items-center gap-2 text-[12.5px] text-text-secondary cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) =>
+                                  setSkillIds((prev) =>
+                                    e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
+                                  )
+                                }
+                              />
+                              {s.name}
+                            </label>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
               </div>
             </section>
           )}
