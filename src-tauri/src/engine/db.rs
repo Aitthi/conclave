@@ -95,6 +95,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 4 {
+        sqlx::raw_sql(include_str!("migrations/0004_skill_system.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 4;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -141,7 +150,7 @@ mod tests {
         assert_eq!(count, 19, "expected 19 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 3.
+    /// Running migrate twice must not error and must leave user_version == 4.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -174,7 +183,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 3, "user_version should be 3");
+        assert_eq!(version, 4, "user_version should be 4");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -247,5 +256,62 @@ mod tests {
         );
         assert!(sql.contains('?'), "sqlite should use ? placeholders: {sql}");
         assert_eq!(binds.len(), 1, "one bind for the id filter");
+    }
+
+    /// Migration 0004 adds `skill.kind`/`skill.content` and
+    /// `session.launched_skill_ids`, and bumps user_version to 4.
+    #[tokio::test]
+    async fn migrate_adds_skill_system_columns() {
+        let pool = connect_in_memory().await;
+
+        // A plain INSERT into skill must now require `kind` (NOT NULL, no
+        // default) to succeed only when kind is supplied; content defaults to ''.
+        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk1', 'Test', 'builtin')")
+            .execute(&pool)
+            .await
+            .expect("insert with kind should succeed");
+
+        let (kind, content): (String, String) =
+            sqlx::query_as("SELECT kind, content FROM skill WHERE id = 'sk1'")
+                .fetch_one(&pool)
+                .await
+                .expect("select should succeed");
+        assert_eq!(kind, "builtin");
+        assert_eq!(content, "");
+
+        // session.launched_skill_ids exists and defaults to NULL.
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let wa = crate::engine::repo::workspace_agent::create(&pool, &ws.id, &def.id, "idle")
+            .await
+            .expect("create workspace_agent failed");
+        let session = crate::engine::repo::session::create_for_instance(&pool, &wa.id)
+            .await
+            .expect("create session failed");
+        let launched: Option<String> =
+            sqlx::query_scalar("SELECT launched_skill_ids FROM session WHERE id = ?")
+                .bind(&session.id)
+                .fetch_one(&pool)
+                .await
+                .expect("select should succeed");
+        assert!(launched.is_none());
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .expect("pragma read failed");
+        assert_eq!(version, 4);
     }
 }
