@@ -152,6 +152,94 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     Ok(res.rows_affected() > 0)
 }
 
+use std::collections::HashMap;
+
+/// All skills attached to `agent_def_id` via `agent_skill`, ordered by
+/// `sort_order` then `id` as a stable tie-breaker. Builtin skills are NEVER
+/// stored here — see `content_for_agent`, which fetches them separately and
+/// unconditionally.
+#[allow(dead_code)]
+pub async fn attached_to_agent(
+    pool: &SqlitePool,
+    agent_def_id: &str,
+) -> sqlx::Result<Vec<SkillRow>> {
+    sqlx::query_as::<_, SkillRow>(
+        "SELECT s.id, s.name, s.description, s.content, s.kind, s.icon \
+         FROM agent_skill a JOIN skill s ON s.id = a.skill_id \
+         WHERE a.agent_def_id = ? \
+         ORDER BY a.sort_order ASC, s.id ASC",
+    )
+    .bind(agent_def_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Replace an agent definition's CUSTOM skill attachments with exactly
+/// `skill_ids`, in that order (index becomes `sort_order`). Delete-then-insert
+/// inside one transaction, mirroring `workspace_agent::instantiate`'s
+/// transaction style. An empty slice clears all attachments.
+#[allow(dead_code)]
+pub async fn set_custom_attachments(
+    pool: &SqlitePool,
+    agent_def_id: &str,
+    skill_ids: &[String],
+) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM agent_skill WHERE agent_def_id = ?")
+        .bind(agent_def_id)
+        .execute(&mut *tx)
+        .await?;
+
+    for (idx, skill_id) in skill_ids.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO agent_skill (agent_def_id, skill_id, sort_order) VALUES (?, ?, ?)",
+        )
+        .bind(agent_def_id)
+        .bind(skill_id)
+        .bind(idx as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Every agent definition's custom skill ids, grouped by `agent_def_id` and
+/// ordered by `sort_order` within each group. One query for ALL definitions —
+/// used by `commands::agent::list` to annotate `AgentDefinition.skillIds`
+/// without an N+1 query per definition.
+#[allow(dead_code)]
+pub async fn custom_skill_ids_by_agent(
+    pool: &SqlitePool,
+) -> sqlx::Result<HashMap<String, Vec<String>>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT agent_def_id, skill_id FROM agent_skill ORDER BY agent_def_id, sort_order",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for (agent_def_id, skill_id) in rows {
+        map.entry(agent_def_id).or_default().push(skill_id);
+    }
+    Ok(map)
+}
+
+/// Count of `agent_skill` rows per skill id — how many agent definitions have
+/// each CUSTOM skill attached (a builtin skill has no `agent_skill` rows at
+/// all, so it's simply absent from the map / reads as 0). Used by
+/// `commands::skill::list` for the Library's "attached to N agents" label.
+#[allow(dead_code)]
+pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT skill_id, COUNT(*) FROM agent_skill GROUP BY skill_id")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::db::connect_in_memory;
@@ -283,5 +371,160 @@ mod tests {
         assert!(json.get("content").is_some());
         assert!(json.get("description").is_none(), "None must be omitted");
         assert!(json.get("icon").is_none(), "None must be omitted");
+    }
+
+    async fn fixture_agent_def(pool: &sqlx::SqlitePool) -> String {
+        crate::engine::repo::agent_definition::create(
+            pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Fixture".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed")
+        .id
+    }
+
+    #[tokio::test]
+    async fn attached_to_agent_respects_sort_order() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let s1 = super::create(&pool, "First", None, "1")
+            .await
+            .expect("create failed");
+        let s2 = super::create(&pool, "Second", None, "2")
+            .await
+            .expect("create failed");
+
+        // Attach in REVERSE order to prove sort_order (not insertion order) wins.
+        super::set_custom_attachments(&pool, &def_id, &[s2.id.clone(), s1.id.clone()])
+            .await
+            .expect("set_custom_attachments failed");
+
+        let attached = super::attached_to_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert_eq!(attached.len(), 2);
+        assert_eq!(attached[0].id, s2.id, "sort_order 0 must come first");
+        assert_eq!(attached[1].id, s1.id);
+    }
+
+    #[tokio::test]
+    async fn set_custom_attachments_replaces_not_appends() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let s1 = super::create(&pool, "A", None, "a")
+            .await
+            .expect("create failed");
+        let s2 = super::create(&pool, "B", None, "b")
+            .await
+            .expect("create failed");
+
+        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&s1.id))
+            .await
+            .expect("first set failed");
+        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&s2.id))
+            .await
+            .expect("second set failed");
+
+        let attached = super::attached_to_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert_eq!(attached.len(), 1, "second call must REPLACE, not append");
+        assert_eq!(attached[0].id, s2.id);
+    }
+
+    #[tokio::test]
+    async fn set_custom_attachments_empty_clears() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let s1 = super::create(&pool, "A", None, "a")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&s1.id))
+            .await
+            .expect("set failed");
+        super::set_custom_attachments(&pool, &def_id, &[])
+            .await
+            .expect("clear failed");
+
+        let attached = super::attached_to_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert!(attached.is_empty());
+    }
+
+    #[tokio::test]
+    async fn custom_skill_ids_by_agent_groups_correctly() {
+        let pool = connect_in_memory().await;
+        let def1 = fixture_agent_def(&pool).await;
+        let def2 = fixture_agent_def(&pool).await;
+        let s1 = super::create(&pool, "A", None, "a")
+            .await
+            .expect("create failed");
+        let s2 = super::create(&pool, "B", None, "b")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def1, &[s1.id.clone(), s2.id.clone()])
+            .await
+            .expect("set failed");
+        super::set_custom_attachments(&pool, &def2, std::slice::from_ref(&s1.id))
+            .await
+            .expect("set failed");
+
+        let map = super::custom_skill_ids_by_agent(&pool)
+            .await
+            .expect("query failed");
+        assert_eq!(map.get(&def1).cloned().unwrap_or_default().len(), 2);
+        assert_eq!(map.get(&def2).cloned().unwrap_or_default(), vec![s1.id]);
+    }
+
+    #[tokio::test]
+    async fn attached_counts_counts_across_agents() {
+        let pool = connect_in_memory().await;
+        let def1 = fixture_agent_def(&pool).await;
+        let def2 = fixture_agent_def(&pool).await;
+        let s1 = super::create(&pool, "Shared", None, "s")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def1, std::slice::from_ref(&s1.id))
+            .await
+            .expect("set failed");
+        super::set_custom_attachments(&pool, &def2, std::slice::from_ref(&s1.id))
+            .await
+            .expect("set failed");
+
+        let counts = super::attached_counts(&pool).await.expect("query failed");
+        assert_eq!(counts.get(&s1.id).copied(), Some(2));
+    }
+
+    /// Deleting a skill cascades its `agent_skill` rows without touching the
+    /// agent_definition (locks in the ON DELETE CASCADE relied on in the ADR).
+    #[tokio::test]
+    async fn delete_skill_cascades_agent_skill_rows() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let s1 = super::create(&pool, "Doomed", None, "d")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&s1.id))
+            .await
+            .expect("set failed");
+
+        super::delete(&pool, &s1.id).await.expect("delete failed");
+
+        let attached = super::attached_to_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert!(attached.is_empty(), "agent_skill row must cascade away");
+        assert!(
+            crate::engine::repo::agent_definition::exists(&pool, &def_id)
+                .await
+                .expect("exists check failed"),
+            "agent_definition itself must be untouched"
+        );
     }
 }
