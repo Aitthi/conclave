@@ -16,6 +16,10 @@ interface RosterEntry {
   status: WorkspaceAgent["status"];
   /** Subtitle derived honestly from the def — no fabricated strings. */
   meta: string;
+  /** True when the def's CURRENT skill attachments differ from what the live
+   *  session actually launched with — see Session.launchedSkillIds. Only
+   *  meaningful for `type === "cli"` (the only type skills apply to in v1). */
+  skillsStale: boolean;
 }
 
 // Status dot colors mapped from WorkspaceAgent.status (mirrors WorkspacePane).
@@ -35,6 +39,22 @@ function deriveMeta(def: AgentDefinition): string {
     case "chat":
       return def.role ?? def.model ?? "Chat";
   }
+}
+
+// A `cli` instance is "stale" when its definition's current skill ids differ
+// from what its session actually launched with. Order matters (mirrors
+// repo::skill::content_for_agent's deterministic ordering), so this is a
+// straight array comparison, not a set comparison — reordering also counts as
+// drift, matching the "content actually differs" intent. `undefined`
+// launchedSkillIds (never launched yet) is never stale — nothing to compare
+// against.
+function computeSkillsStale(def: AgentDefinition, inst: WorkspaceAgent): boolean {
+  if (def.type !== "cli") return false;
+  if (inst.launchedSkillIds === undefined) return false;
+  const current = def.skillIds ?? [];
+  const launched = inst.launchedSkillIds;
+  if (current.length !== launched.length) return true;
+  return current.some((id, i) => id !== launched[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +156,14 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
             role="img"
             aria-label={entry.status}
           />
+          {entry.skillsStale && (
+            <span
+              className="text-[9px] font-semibold text-warning bg-warning/[0.1] px-1.5 py-px rounded-md shrink-0"
+              title="This agent's skills changed since it last launched — restart to apply"
+            >
+              Restart to apply
+            </span>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -242,6 +270,7 @@ export function Roster({
             type: def.type,
             status: inst.status,
             meta: deriveMeta(def),
+            skillsStale: computeSkillsStale(def, inst),
           });
         }
         setEntries(rosterEntries);
