@@ -128,6 +128,54 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
     None
 }
 
+/// Write concatenated skill content for one instance to a sidecar file under
+/// the Conclave data dir, overwriting on each launch. The content itself
+/// (real markdown — may contain '\n' and '=') NEVER enters
+/// `bootstrap_preamble`'s return value directly (that string must stay a
+/// single line with no '=', see its own doc comment); only a pointer sentence
+/// to this file does. Owner-only (`0700`) dir, mirroring
+/// `ensure_conclave_shim`'s `bin` dir.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn write_skill_sidecar(instance_id: &str, body: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory"))?
+        .join("Conclave")
+        .join("skills");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+
+    let path = dir.join(format!("{instance_id}.md"));
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub fn write_skill_sidecar(_instance_id: &str, _body: &str) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "skill sidecar files are only supported on unix",
+    ))
+}
+
+/// One sanitized, single-line sentence pointing a CLI agent at its skill
+/// sidecar file — the ONLY thing appended to `bootstrap_preamble`'s return
+/// value on top of skill content. Runs the same `sanitize_field` the rest of
+/// the preamble uses, so a pathological path can't reintroduce a newline or
+/// '=' (defense in depth — a real filesystem path shouldn't contain either).
+#[allow(dead_code)]
+pub fn skill_pointer_sentence(path: &std::path::Path) -> String {
+    let path = sanitize_field(&path.display().to_string());
+    format!(
+        "Additional standing instructions for this session are at {path} — read that file before your first response."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::bootstrap_preamble;
@@ -185,5 +233,41 @@ mod tests {
         let p = bootstrap_preamble("Sol", Some("   "), "Repo", "ws_1", "inst_s");
         assert!(p.contains("\"Sol\" and your own"), "{p}");
         assert!(!p.contains("\"Sol\", a"), "no role clause: {p}");
+    }
+
+    #[test]
+    fn skill_pointer_sentence_is_single_line_and_equals_free() {
+        let s = super::skill_pointer_sentence(std::path::Path::new("/tmp/a=b\nc.md"));
+        assert!(!s.contains('\n'), "no newline: {s}");
+        assert!(!s.contains('='), "no '=': {s}");
+    }
+
+    #[test]
+    fn skill_pointer_sentence_names_the_path() {
+        let s = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst-a.md"));
+        assert!(s.contains("/tmp/inst-a.md"), "{s}");
+    }
+
+    /// The invariant the whole feature exists to protect: appending the skill
+    /// pointer sentence to a real preamble must NOT reintroduce a newline or
+    /// '=', even when the underlying skill body (never embedded here) is
+    /// pathological — see ADR 0001.
+    #[test]
+    fn preamble_with_skill_pointer_appended_stays_single_line_and_equals_free() {
+        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
+        let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
+        let combined = format!("{p} {pointer}");
+        assert!(!combined.contains('\n'), "no newline: {combined}");
+        assert!(!combined.contains('='), "no '=': {combined}");
+    }
+
+    #[test]
+    fn write_skill_sidecar_writes_and_returns_path() {
+        let body = "## Skill: Test\n\nkey=value works fine in a real FILE";
+        let path = super::write_skill_sidecar("test-instance-xyz", body)
+            .expect("write_skill_sidecar failed");
+        let contents = std::fs::read_to_string(&path).expect("read back failed");
+        assert_eq!(contents, body);
+        let _ = std::fs::remove_file(&path); // test cleanup
     }
 }
