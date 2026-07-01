@@ -138,6 +138,16 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     inputRef.current?.focus();
   });
 
+  // Auto-grow with content, capped by the `max-h-40` on the element itself —
+  // "auto" first so a shrink (e.g. clearing after send) isn't stuck at the
+  // tallest height it ever reached (scrollHeight only ever grows otherwise).
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+
   const placeholder = routingToOther
     ? "Type to inject into the target session…"
     : sessionId === null
@@ -201,7 +211,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
               }
             }}
             placeholder={placeholder}
-            className="flex-1 min-w-0 bg-transparent outline-none resize-none text-[14.5px] font-mono placeholder:text-text-tertiary py-0.5 max-h-40 disabled:opacity-50"
+            className="flex-1 min-w-0 bg-transparent outline-none resize-none overflow-y-auto text-[14.5px] font-mono placeholder:text-text-tertiary py-0.5 max-h-40 disabled:opacity-50"
           />
           {/* Send — Enter also submits; the button mirrors that for discoverability. */}
           <button
