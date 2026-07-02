@@ -1226,4 +1226,39 @@ mod tests {
             "after Drop, list_builtin must be back on the real skills dir"
         );
     }
+
+    /// The ONLY test allowed to depend on shipped skill content (everything
+    /// else goes through `test_support::fixture_skills_dir`). Guards two
+    /// invariants: every shipped `skills/*/SKILL.md` parses (a broken one
+    /// would be silently skipped in production — invisible until an agent
+    /// launches without it), and the mandatory `collaboration` skill exists.
+    /// Reads the source tree path directly instead of `list_builtin()` so a
+    /// concurrently-running test's thread-local override can never leak in.
+    #[test]
+    fn shipped_skills_all_parse_and_include_collaboration() {
+        let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/skills"));
+        let skill_md_count = std::fs::read_dir(&dir)
+            .expect("shipped skills dir must exist")
+            .flatten()
+            .filter(|e| e.path().join("SKILL.md").is_file())
+            .count();
+        let skills = super::read_builtin_skills_from(&dir);
+        assert_eq!(
+            skills.len(),
+            skill_md_count,
+            "every shipped SKILL.md must parse — a failing one is silently dropped in production"
+        );
+
+        let collab = skills
+            .iter()
+            .find(|s| s.id == "collaboration")
+            .expect("the shipped collaboration skill must exist");
+        assert_eq!(collab.name, "Collaboration");
+        assert_eq!(collab.kind, "builtin");
+        assert!(collab.mandatory, "collaboration must be mandatory");
+        assert!(
+            collab.description.is_some(),
+            "collaboration must carry a description for the Skill Library"
+        );
+    }
 }
