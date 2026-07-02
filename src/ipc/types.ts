@@ -49,6 +49,11 @@ export interface AgentDefinition {
    *  right now. Matches `WorkspaceAgent.launchedSkillIds`' basis exactly —
    *  that symmetry is what lets the Roster detect skill drift. */
   skillIds?: string[];
+  /** Raw storage: which OPTIONAL builtin skill ids (`mandatory: false`) this
+   *  definition has selected (see ADR 0003). `skillIds` above already
+   *  reflects the full effective set (mandatory + this list + custom) — the
+   *  Builder's checkboxes read `skillIds`, not this field, directly. */
+  selectedBuiltinSkillIds?: string[];
   createdAt: string;
   /** Annotated by list views: how many workspaces this agent belongs to. */
   inWorkspaces?: number;
@@ -60,6 +65,13 @@ export interface Skill {
   description?: string;
   content: string;
   kind: "builtin" | "custom";
+  /** Only meaningful when `kind === "builtin"` — a mandatory builtin is
+   *  auto-attached to every AgentDefinition and cannot be detached; an
+   *  optional one (`mandatory: false` in its SKILL.md frontmatter) is
+   *  picked per agent, like a custom skill, but still read-only content
+   *  (see ADR 0003). Always `true` for `kind === "custom"` — there's
+   *  nothing to opt into, custom skills are already opt-in via agent_skill. */
+  mandatory: boolean;
   icon?: string;
   /** Annotated by `skill.list`: how many AgentDefinitions have this attached. */
   attachedTo?: number;

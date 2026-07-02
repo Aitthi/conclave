@@ -74,8 +74,14 @@ function SystemSkillCard({ skill }: { skill: Skill }) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <span className="text-[13.5px] font-semibold">{skill.name}</span>
-            <span className="text-[9.5px] font-medium text-text-muted bg-overlay/[0.05] px-1.5 py-px rounded">
-              Always on
+            <span
+              className={
+                skill.mandatory
+                  ? "text-[9.5px] font-medium text-text-muted bg-overlay/[0.05] px-1.5 py-px rounded"
+                  : "text-[9.5px] font-medium text-accent bg-accent/[0.12] px-1.5 py-px rounded"
+              }
+            >
+              {skill.mandatory ? "Always on" : "Optional"}
             </span>
           </div>
           <div className="text-[11px] text-text-muted truncate">{skill.description || "No description"}</div>

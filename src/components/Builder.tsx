@@ -633,14 +633,14 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                 Skills
               </div>
               <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
-                {allSkills.filter((s) => s.kind === "builtin").length > 0 && (
+                {allSkills.filter((s) => s.kind === "builtin" && s.mandatory).length > 0 && (
                   <div className="px-3 py-2">
                     <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
                       System skills — always on
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {allSkills
-                        .filter((s) => s.kind === "builtin")
+                        .filter((s) => s.kind === "builtin" && s.mandatory)
                         .map((s) => (
                           <span
                             key={s.id}
@@ -649,6 +649,37 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                             {s.name}
                           </span>
                         ))}
+                    </div>
+                  </div>
+                )}
+                {allSkills.filter((s) => s.kind === "builtin" && !s.mandatory).length > 0 && (
+                  <div className="px-3 py-2">
+                    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
+                      System skills — optional
+                    </div>
+                    <div className="space-y-1">
+                      {allSkills
+                        .filter((s) => s.kind === "builtin" && !s.mandatory)
+                        .map((s) => {
+                          const checked = skillIds.includes(s.id);
+                          return (
+                            <label
+                              key={s.id}
+                              className="flex items-center gap-2 text-[12.5px] text-text-secondary cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) =>
+                                  setSkillIds((prev) =>
+                                    e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
+                                  )
+                                }
+                              />
+                              {s.name}
+                            </label>
+                          );
+                        })}
                     </div>
                   </div>
                 )}
