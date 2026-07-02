@@ -113,6 +113,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 6 {
+        sqlx::raw_sql(include_str!("migrations/0006_selected_builtin_skills.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 6;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -159,7 +168,7 @@ mod tests {
         assert_eq!(count, 19, "expected 19 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 5.
+    /// Running migrate twice must not error and must leave user_version == 6.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -192,7 +201,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 5, "user_version should be 5");
+        assert_eq!(version, 6, "user_version should be 6");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -317,7 +326,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -342,5 +351,39 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert without kind should succeed");
+    }
+
+    #[tokio::test]
+    async fn migrate_adds_selected_builtin_skill_ids_column() {
+        let pool = connect_in_memory().await;
+
+        // Column exists and accepts a JSON array of ids.
+        sqlx::query(
+            "INSERT INTO agent_definition (id, name, type, harness_mode, created_at, selected_builtin_skill_ids) \
+             VALUES ('a1', 'A', 'cli', 'own', '2024-01-01T00:00:00Z', '[\"opt-1\",\"opt-2\"]')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert with selected_builtin_skill_ids should succeed");
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT selected_builtin_skill_ids FROM agent_definition WHERE id = 'a1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("select failed");
+        assert_eq!(stored, "[\"opt-1\",\"opt-2\"]");
+
+        // NULL (no selection) must also be a valid, common state.
+        sqlx::query("INSERT INTO agent_definition (id, name, type, harness_mode, created_at) VALUES ('a2', 'B', 'cli', 'own', '2024-01-01T00:00:00Z')")
+            .execute(&pool)
+            .await
+            .expect("insert without selected_builtin_skill_ids should succeed");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .expect("pragma failed");
+        assert_eq!(version, 6);
     }
 }
