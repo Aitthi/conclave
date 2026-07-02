@@ -327,10 +327,11 @@ mod tests {
     async fn migrate_drops_skill_kind_column() {
         let pool = connect_in_memory().await;
 
-        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('skill')")
-            .fetch_all(&pool)
-            .await
-            .expect("pragma_table_info query failed");
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('skill')")
+                .fetch_all(&pool)
+                .await
+                .expect("pragma_table_info query failed");
         assert!(
             !columns.iter().any(|c| c == "kind"),
             "skill.kind must not exist after migration: {columns:?}"
