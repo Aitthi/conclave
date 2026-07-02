@@ -56,9 +56,10 @@ pub struct WorkspaceRow {
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
 
-/// Return all workspaces ordered by `created_at` ascending, with `id` as a
-/// stable tie-breaker (two rows created in the same second would otherwise
-/// order non-deterministically).
+/// Return all non-hidden workspaces ordered by `created_at` ascending, with
+/// `id` as a stable tie-breaker (two rows created in the same second would
+/// otherwise order non-deterministically). Hidden workspaces (see
+/// [`WorkspaceRow::hidden`]) are excluded.
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
     let rows = QueryBuilder::<Sqlite>::table("workspace")
         .select(["id", "name", "folder_path", "color", "hidden", "created_at"])

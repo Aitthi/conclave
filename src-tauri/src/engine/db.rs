@@ -362,6 +362,39 @@ mod tests {
             .expect("insert without kind should succeed");
     }
 
+    /// Migration 0007 added `workspace.hidden`, defaulting existing and new
+    /// rows to visible (`0`) so hidden agent-assist workspaces are opt-in.
+    #[tokio::test]
+    async fn migrate_adds_workspace_hidden_column() {
+        let pool = connect_in_memory().await;
+
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('workspace')")
+                .fetch_all(&pool)
+                .await
+                .expect("pragma_table_info query failed");
+        assert!(
+            columns.iter().any(|c| c == "hidden"),
+            "workspace.hidden must exist after migration: {columns:?}"
+        );
+
+        // An insert with no `hidden` column reference must default to 0.
+        sqlx::query(
+            "INSERT INTO workspace (id, name, folder_path, created_at) \
+             VALUES ('ws-no-hidden', 'WS', '/tmp/ws', '2024-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert without hidden should succeed");
+
+        let hidden: i64 =
+            sqlx::query_scalar("SELECT hidden FROM workspace WHERE id = 'ws-no-hidden'")
+                .fetch_one(&pool)
+                .await
+                .expect("select failed");
+        assert_eq!(hidden, 0);
+    }
+
     #[tokio::test]
     async fn migrate_adds_selected_builtin_skill_ids_column() {
         let pool = connect_in_memory().await;
