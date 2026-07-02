@@ -414,13 +414,14 @@ mod tests {
 
     #[tokio::test]
     async fn save_silently_drops_unknown_or_builtin_skill_ids() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-agent-save-drops");
         let state = AppState::for_tests().await;
 
         let created = save(
             &state,
             serde_json::json!({
                 "name": "Atlas", "type": "cli", "harnessMode": "own",
-                "skillIds": ["example", "no-such-id"],
+                "skillIds": ["fix-mandatory", "no-such-id"],
             }),
         )
         .await
@@ -438,6 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_splits_skill_ids_into_custom_and_optional_builtin() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-agent-save-splits");
         let state = AppState::for_tests().await;
         let custom = repo::skill::create(&state.db, "Custom", None, "c")
             .await
@@ -448,7 +450,7 @@ mod tests {
             serde_json::json!({
                 "name": "A",
                 "type": "cli",
-                "skillIds": [custom.id, "example-optional", "example", "no-such-id"],
+                "skillIds": [custom.id, "fix-optional", "fix-mandatory", "no-such-id"],
             }),
         )
         .await
@@ -463,7 +465,7 @@ mod tests {
         assert_eq!(attached[0].id, custom.id);
 
         // Optional builtin id -> agent_definition.selected_builtin_skill_ids;
-        // the mandatory "example" id and the unknown id are both dropped.
+        // the mandatory "fix-mandatory" id and the unknown id are both dropped.
         let def = repo::agent_definition::get(&state.db, &id)
             .await
             .expect("get failed")
@@ -473,11 +475,12 @@ mod tests {
             .as_deref()
             .map(|t| serde_json::from_str(t).expect("valid json"))
             .unwrap_or_default();
-        assert_eq!(selected, vec!["example-optional".to_string()]);
+        assert_eq!(selected, vec!["fix-optional".to_string()]);
     }
 
     #[tokio::test]
     async fn list_annotates_skill_ids() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-agent-list-annotates");
         let state = AppState::for_tests().await;
         let skill = repo::skill::create(&state.db, "S1", None, "c")
             .await
@@ -509,6 +512,8 @@ mod tests {
     /// includes it, so `list()`'s annotation must too (Roster staleness fix).
     #[tokio::test]
     async fn list_annotates_builtin_skill_ids_even_without_attachment() {
+        let _fx =
+            repo::skill::test_support::fixture_skills_dir("cmd-agent-list-builtin-unattached");
         let state = AppState::for_tests().await;
 
         let created = save(
@@ -535,20 +540,22 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
         assert!(
-            ids.contains(&"example".to_string()),
-            "the checked-in builtin example skill must appear even though nothing was attached: {ids:?}"
+            ids.contains(&"fix-mandatory".to_string()),
+            "the mandatory fixture builtin must appear even though nothing was attached: {ids:?}"
         );
     }
 
     #[tokio::test]
     async fn list_skill_ids_include_selected_optional_builtin_but_exclude_unselected() {
+        let _fx =
+            repo::skill::test_support::fixture_skills_dir("cmd-agent-list-optional-selected");
         let state = AppState::for_tests().await;
         let created = save(
             &state,
             serde_json::json!({
                 "name": "A",
                 "type": "cli",
-                "skillIds": ["example-optional"],
+                "skillIds": ["fix-optional"],
             }),
         )
         .await
@@ -569,17 +576,19 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
         assert!(
-            ids.contains(&"example".to_string()),
+            ids.contains(&"fix-mandatory".to_string()),
             "mandatory builtin always present"
         );
         assert!(
-            ids.contains(&"example-optional".to_string()),
+            ids.contains(&"fix-optional".to_string()),
             "selected optional builtin must be present"
         );
     }
 
     #[tokio::test]
     async fn list_skill_ids_exclude_optional_builtin_when_not_selected() {
+        let _fx =
+            repo::skill::test_support::fixture_skills_dir("cmd-agent-list-optional-unselected");
         let state = AppState::for_tests().await;
         let created = save(&state, serde_json::json!({ "name": "A", "type": "cli" }))
             .await
@@ -599,19 +608,20 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
-        assert!(ids.contains(&"example".to_string()));
-        assert!(!ids.contains(&"example-optional".to_string()));
+        assert!(ids.contains(&"fix-mandatory".to_string()));
+        assert!(!ids.contains(&"fix-optional".to_string()));
     }
 
     #[tokio::test]
     async fn list_skill_ids_are_isolated_per_agent_definition() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-agent-list-isolated");
         let state = AppState::for_tests().await;
         let created_a = save(
             &state,
             serde_json::json!({
                 "name": "A",
                 "type": "cli",
-                "skillIds": ["example-optional"],
+                "skillIds": ["fix-optional"],
             }),
         )
         .await
@@ -637,11 +647,11 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
         assert!(
-            ids_a.contains(&"example".to_string()),
+            ids_a.contains(&"fix-mandatory".to_string()),
             "mandatory builtin always present"
         );
         assert!(
-            ids_a.contains(&"example-optional".to_string()),
+            ids_a.contains(&"fix-optional".to_string()),
             "agent A's selected optional builtin must be present"
         );
 
@@ -655,9 +665,9 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
-        assert!(ids_b.contains(&"example".to_string()));
+        assert!(ids_b.contains(&"fix-mandatory".to_string()));
         assert!(
-            !ids_b.contains(&"example-optional".to_string()),
+            !ids_b.contains(&"fix-optional".to_string()),
             "agent B must not inherit agent A's optional builtin selection"
         );
     }
