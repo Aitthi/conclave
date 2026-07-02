@@ -90,13 +90,11 @@ struct AddToWorkspaceReq {
 pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let items = repo::agent_definition::list_with_counts(&state.db).await?;
     // Same basis as the launch snapshot (`repo::skill::content_for_agent`):
-    // builtin ids first (fixed order via `list_builtin`), then custom ids —
-    // so `AgentDefinition.skillIds` and `WorkspaceAgent.launchedSkillIds`
-    // are directly comparable (see Roster.tsx's `computeSkillsStale`).
-    let builtin_ids: Vec<String> = repo::skill::list_builtin()
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    // the EFFECTIVE builtin set (mandatory + this item's selected optional
+    // ones, via `effective_builtin_skills` — see ADR 0003) first, then
+    // custom ids — so `AgentDefinition.skillIds` and
+    // `WorkspaceAgent.launchedSkillIds` are directly comparable (see
+    // Roster.tsx's `computeSkillsStale`).
     let skill_map = repo::skill::custom_skill_ids_by_agent(&state.db).await?;
 
     let mut value = serde_json::to_value(&items).map_err(|e| AppError::Internal(e.to_string()))?;
@@ -107,7 +105,19 @@ pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> 
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_owned();
-            let mut ids = builtin_ids.clone();
+            let selected_optional: Vec<String> = item
+                .get("selectedBuiltinSkillIds")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut ids: Vec<String> = repo::skill::effective_builtin_skills(&selected_optional)
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
             if let Some(custom_ids) = skill_map.get(&id) {
                 ids.extend(custom_ids.iter().cloned());
             }
@@ -175,6 +185,37 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         }
     }
 
+    // Split the incoming skillIds into three groups: a real custom DB skill
+    // id -> agent_skill (unchanged path); an OPTIONAL builtin's id (see ADR
+    // 0003) -> agent_definition.selected_builtin_skill_ids; anything else (a
+    // mandatory builtin id, an unknown/stale id) -> silently dropped, same
+    // "filter to known ids" precedent as the pre-existing custom-only path.
+    let requested_skill_ids = req.skill_ids.unwrap_or_default();
+    let optional_builtin_ids: std::collections::HashSet<String> = repo::skill::list_builtin()
+        .into_iter()
+        .filter(|s| !s.mandatory)
+        .map(|s| s.id)
+        .collect();
+    let valid_custom_ids: std::collections::HashSet<String> = repo::skill::list(&state.db)
+        .await?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    let filtered_custom_skill_ids: Vec<String> = requested_skill_ids
+        .iter()
+        .filter(|id| valid_custom_ids.contains(*id))
+        .cloned()
+        .collect();
+    let filtered_optional_builtin_ids: Vec<String> = requested_skill_ids
+        .iter()
+        .filter(|id| optional_builtin_ids.contains(*id))
+        .cloned()
+        .collect();
+    let selected_builtin_skill_ids = (!filtered_optional_builtin_ids.is_empty()).then(|| {
+        serde_json::to_string(&filtered_optional_builtin_ids)
+            .expect("serializing Vec<String> is infallible")
+    });
+
     let input = AgentDefinitionInput {
         name: req.name,
         role: req.role,
@@ -192,9 +233,7 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         custom_env,
         secret_env_keys,
         context_window: nonblank(req.context_window),
-        // TODO(Task 4): wire from the split `skillIds` request once
-        // commands::agent gains a dedicated builtin-skill-ids field.
-        selected_builtin_skill_ids: None,
+        selected_builtin_skill_ids,
     };
 
     // Capture the previously-stored secret key NAMES (UPDATE only) so we can
@@ -229,22 +268,11 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         }
     }
 
-    // Persist custom skill attachments (replace semantics). Filter to known
-    // CUSTOM skill ids so a stale/tampered request can't create an
-    // `agent_skill` row for a builtin skill (which is never attached via that
-    // table — see `repo::skill::content_for_agent`) or a nonexistent id.
-    let valid_custom_ids: std::collections::HashSet<String> = repo::skill::list(&state.db)
-        .await?
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
-    let filtered_skill_ids: Vec<String> = req
-        .skill_ids
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|id| valid_custom_ids.contains(id))
-        .collect();
-    repo::skill::set_custom_attachments(&state.db, &row.id, &filtered_skill_ids).await?;
+    // Persist custom skill attachments (replace semantics) — the filtered
+    // set was already computed above, before `row` existed, so both this and
+    // the optional-builtin selection (already stored via `input` in the
+    // create/update call above) come from one shared split of `skillIds`.
+    repo::skill::set_custom_attachments(&state.db, &row.id, &filtered_custom_skill_ids).await?;
 
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -405,6 +433,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_splits_skill_ids_into_custom_and_optional_builtin() {
+        let state = AppState::for_tests().await;
+        let custom = repo::skill::create(&state.db, "Custom", None, "c")
+            .await
+            .expect("create skill failed");
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "A",
+                "type": "cli",
+                "skillIds": [custom.id, "example-optional", "example", "no-such-id"],
+            }),
+        )
+        .await
+        .expect("save failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        // Custom id -> agent_skill.
+        let attached = repo::skill::attached_to_agent(&state.db, &id)
+            .await
+            .expect("query failed");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].id, custom.id);
+
+        // Optional builtin id -> agent_definition.selected_builtin_skill_ids;
+        // the mandatory "example" id and the unknown id are both dropped.
+        let def = repo::agent_definition::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        let selected: Vec<String> = def
+            .selected_builtin_skill_ids
+            .as_deref()
+            .map(|t| serde_json::from_str(t).expect("valid json"))
+            .unwrap_or_default();
+        assert_eq!(selected, vec!["example-optional".to_string()]);
+    }
+
+    #[tokio::test]
     async fn list_annotates_skill_ids() {
         let state = AppState::for_tests().await;
         let skill = repo::skill::create(&state.db, "S1", None, "c")
@@ -466,5 +534,65 @@ mod tests {
             ids.contains(&"example".to_string()),
             "the checked-in builtin example skill must appear even though nothing was attached: {ids:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_skill_ids_include_selected_optional_builtin_but_exclude_unselected() {
+        let state = AppState::for_tests().await;
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "A",
+                "type": "cli",
+                "skillIds": ["example-optional"],
+            }),
+        )
+        .await
+        .expect("save failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let item = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .expect("item present");
+        let ids: Vec<String> = item["skillIds"]
+            .as_array()
+            .expect("skillIds must be present")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids.contains(&"example".to_string()), "mandatory builtin always present");
+        assert!(
+            ids.contains(&"example-optional".to_string()),
+            "selected optional builtin must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_skill_ids_exclude_optional_builtin_when_not_selected() {
+        let state = AppState::for_tests().await;
+        let created = save(&state, serde_json::json!({ "name": "A", "type": "cli" }))
+            .await
+            .expect("save failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let item = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .expect("item present");
+        let ids: Vec<String> = item["skillIds"]
+            .as_array()
+            .expect("skillIds must be present (mandatory builtin still applies)")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids.contains(&"example".to_string()));
+        assert!(!ids.contains(&"example-optional".to_string()));
     }
 }
