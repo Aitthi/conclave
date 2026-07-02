@@ -9,8 +9,8 @@ A reusable capability/prompt module that can be attached to one or more `AgentDe
 _Avoid_: Capability, playbook, macro (for this concept specifically — those are generic terms, not this project's canonical name).
 
 Two kinds:
-- **System skill** (built-in): shipped with the app, not editable or deletable by the user, auto-attached to every `AgentDefinition` — cannot be detached.
-- **Custom skill**: user-created via full CRUD, freely attached/detached per `AgentDefinition` via `agent_skill`.
+- **System skill** (built-in): a `SKILL.md` file (frontmatter `name`/`description` + markdown body as `content`) in a `skills/` folder bundled into the app at build time — NOT a DB row (see ADR 0002). Not editable or deletable by the user, auto-attached to every `AgentDefinition` — cannot be detached. Its id is the skill's folder name.
+- **Custom skill**: user-created via full CRUD, stored as a `skill` DB row, freely attached/detached per `AgentDefinition` via `agent_skill`.
 _Avoid_: "Default skill" for system skill (default implies optional/overridable; these are mandatory).
 
 **AgentDefinition**:
