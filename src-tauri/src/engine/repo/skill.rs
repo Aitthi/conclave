@@ -252,20 +252,41 @@ pub fn list_builtin() -> Vec<SkillRow> {
     read_builtin_skills_from(&skills_dir())
 }
 
-/// The builtin skills that actually apply to an agent definition: every
-/// mandatory builtin (always), plus every optional builtin (`mandatory:
-/// false`) whose id appears in `selected_optional_ids`. Preserves
-/// `list_builtin()`'s id-ascending order. Both `content_for_agent` (what
-/// gets injected at launch) and `commands::agent::list`'s `skillIds`
-/// annotation (what the Roster compares against the launch snapshot) MUST
-/// go through this one function — see ADR 0003's rationale (a v1 final
-/// review caught a real bug from two call sites computing "the agent's
-/// builtin ids" via separate, silently-drifting logic).
-pub fn effective_builtin_skills(selected_optional_ids: &[String]) -> Vec<SkillRow> {
-    list_builtin()
-        .into_iter()
+/// The actual filter behind "the builtin skills that apply to an agent
+/// definition": every mandatory builtin (always), plus every optional
+/// builtin (`mandatory: false`) whose id appears in `selected_optional_ids`.
+/// Preserves `builtins`' incoming order (callers pass `list_builtin()`'s
+/// id-ascending output). Pure and filesystem-free — takes a pre-fetched
+/// `builtins` slice instead of reading the skills folder itself, so a caller
+/// that needs the effective set for MANY agent definitions in a loop (e.g.
+/// `commands::agent::list`) can call `list_builtin()` ONCE outside the loop
+/// and then call this function per item, instead of re-scanning the
+/// filesystem per item.
+///
+/// This is the single source of truth for the filter logic itself: both
+/// `content_for_agent` (via the `effective_builtin_skills` wrapper below) and
+/// `commands::agent::list` (which calls this function directly, passing its
+/// own once-fetched `builtins`) MUST derive "the agent's effective builtin
+/// ids" through this one filter — see ADR 0003's rationale (a v1 final
+/// review caught a real bug from two call sites computing that set via
+/// separate, silently-drifting logic).
+pub fn effective_from(builtins: &[SkillRow], selected_optional_ids: &[String]) -> Vec<SkillRow> {
+    builtins
+        .iter()
         .filter(|s| s.mandatory || selected_optional_ids.iter().any(|id| id == &s.id))
+        .cloned()
         .collect()
+}
+
+/// Thin, filesystem-reading convenience wrapper around [`effective_from`] for
+/// callers that only need the effective set for a SINGLE agent definition
+/// (e.g. `content_for_agent`, called once per `cli` launch — no per-item-loop
+/// regression risk). Fetches `list_builtin()` fresh on every call, so a
+/// caller iterating over many agent definitions should call
+/// [`list_builtin`] once and use [`effective_from`] directly instead (see
+/// `commands::agent::list`).
+pub fn effective_builtin_skills(selected_optional_ids: &[String]) -> Vec<SkillRow> {
+    effective_from(&list_builtin(), selected_optional_ids)
 }
 
 /// Parse every skill in `dir` — each direct subdirectory containing a
@@ -837,6 +858,79 @@ mod tests {
             .map(|s| s.id)
             .collect::<Vec<_>>();
         assert!(!ids.contains(&"no-such-skill".to_string()));
+    }
+
+    /// Fixture builtins for `effective_from` tests — deliberately NOT read
+    /// from the filesystem, so these tests exercise the pure filter logic in
+    /// isolation from `list_builtin()`.
+    fn fixture_builtins() -> Vec<super::SkillRow> {
+        vec![
+            super::SkillRow {
+                id: "mandatory-one".to_string(),
+                name: "Mandatory One".to_string(),
+                description: None,
+                content: "mandatory-one content".to_string(),
+                kind: "builtin".to_string(),
+                mandatory: true,
+                icon: None,
+            },
+            super::SkillRow {
+                id: "optional-one".to_string(),
+                name: "Optional One".to_string(),
+                description: None,
+                content: "optional-one content".to_string(),
+                kind: "builtin".to_string(),
+                mandatory: false,
+                icon: None,
+            },
+            super::SkillRow {
+                id: "optional-two".to_string(),
+                name: "Optional Two".to_string(),
+                description: None,
+                content: "optional-two content".to_string(),
+                kind: "builtin".to_string(),
+                mandatory: false,
+                icon: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn effective_from_always_includes_mandatory() {
+        let ids = super::effective_from(&fixture_builtins(), &[])
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        assert!(
+            ids.contains(&"mandatory-one".to_string()),
+            "mandatory builtin must be present even with zero selections"
+        );
+        assert!(
+            !ids.contains(&"optional-one".to_string()),
+            "optional builtin must be absent when not selected"
+        );
+        assert!(!ids.contains(&"optional-two".to_string()));
+    }
+
+    #[test]
+    fn effective_from_includes_selected_optional() {
+        let ids = super::effective_from(&fixture_builtins(), &["optional-two".to_string()])
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"mandatory-one".to_string()));
+        assert!(ids.contains(&"optional-two".to_string()));
+        assert!(!ids.contains(&"optional-one".to_string()));
+    }
+
+    #[test]
+    fn effective_from_ignores_unknown_selected_id() {
+        let ids = super::effective_from(&fixture_builtins(), &["no-such-skill".to_string()])
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        assert!(!ids.contains(&"no-such-skill".to_string()));
+        assert!(ids.contains(&"mandatory-one".to_string()));
     }
 
     #[test]

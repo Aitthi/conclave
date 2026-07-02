@@ -91,11 +91,15 @@ pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> 
     let items = repo::agent_definition::list_with_counts(&state.db).await?;
     // Same basis as the launch snapshot (`repo::skill::content_for_agent`):
     // the EFFECTIVE builtin set (mandatory + this item's selected optional
-    // ones, via `effective_builtin_skills` — see ADR 0003) first, then
-    // custom ids — so `AgentDefinition.skillIds` and
-    // `WorkspaceAgent.launchedSkillIds` are directly comparable (see
-    // Roster.tsx's `computeSkillsStale`).
+    // ones, via `effective_from` — see ADR 0003) first, then custom ids — so
+    // `AgentDefinition.skillIds` and `WorkspaceAgent.launchedSkillIds` are
+    // directly comparable (see Roster.tsx's `computeSkillsStale`).
     let skill_map = repo::skill::custom_skill_ids_by_agent(&state.db).await?;
+    // Fetched ONCE here (a filesystem scan of the skills folder), then
+    // filtered per item below via `effective_from` — not `list_builtin()`
+    // per item, which would turn one `agentDef.list` call into N filesystem
+    // scans (one per agent definition returned above).
+    let builtins = repo::skill::list_builtin();
 
     let mut value = serde_json::to_value(&items).map_err(|e| AppError::Internal(e.to_string()))?;
     if let Some(arr) = value.as_array_mut() {
@@ -114,7 +118,7 @@ pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> 
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut ids: Vec<String> = repo::skill::effective_builtin_skills(&selected_optional)
+            let mut ids: Vec<String> = repo::skill::effective_from(&builtins, &selected_optional)
                 .into_iter()
                 .map(|s| s.id)
                 .collect();
