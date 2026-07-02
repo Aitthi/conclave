@@ -94,6 +94,18 @@ export interface Commands {
     req: { id: string };
     res: void;
   };
+  "skill.startDraftSession": {
+    req: { name: string; description?: string; content: string; agentDefId: string };
+    res: { workspaceAgentId: string; sessionId: string };
+  };
+  "skill.syncDraft": {
+    req: { workspaceAgentId: string };
+    res: { name: string; description?: string; content: string };
+  };
+  "skill.stopDraftSession": {
+    req: { workspaceAgentId: string };
+    res: void;
+  };
   "instance.list": {
     req: { workspaceId: string };
     res: WorkspaceAgent[];
@@ -247,6 +259,11 @@ export const ipc = {
     list: () => call("skill.list"),
     save: (req: Commands["skill.save"]["req"]) => call("skill.save", req),
     delete: (req: Commands["skill.delete"]["req"]) => call("skill.delete", req),
+    startDraftSession: (req: Commands["skill.startDraftSession"]["req"]) =>
+      call("skill.startDraftSession", req),
+    syncDraft: (req: Commands["skill.syncDraft"]["req"]) => call("skill.syncDraft", req),
+    stopDraftSession: (req: Commands["skill.stopDraftSession"]["req"]) =>
+      call("skill.stopDraftSession", req),
   },
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
