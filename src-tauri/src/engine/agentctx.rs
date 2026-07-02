@@ -65,12 +65,16 @@ set {ws_id} <key> <value>` and `conclave bb get {ws_id} <key>`."
 /// embedded newlines) so a TUI submits it as one prompt, mirroring `inject`.
 #[must_use]
 pub fn compact_save_prompt() -> String {
-    "[conclave compact] Your context is about to be cleared to free space. Write a handoff so \
-you (resuming with ZERO memory of this conversation) can continue: the goal, the key decisions \
-and why, what is already done, the EXACT next step, and any half-finished edit. REFERENCE commit \
-SHAs and file paths instead of pasting their contents, and REDACT secrets (API keys, tokens, \
-passwords). Then persist it by running this single command (do not just print it): \
-`conclave snapshot save <your full handoff text>`. After it confirms, stop and wait."
+    "[conclave compact] Your context is about to be cleared to free space. Write the RICHEST \
+handoff you can for a reader with ZERO memory of this conversation — follow your Strategic \
+Compact skill's seven sections if you have it, else cover: the exact next step and any \
+half-finished edit FIRST, then goal/authority/peers, every decision with its why, open threads \
+with your defaults, hard-won gotchas and failed approaches, done work as commit SHAs, and \
+pointers. Do not economize tokens — the only limit is a HARD CAP of 10k tokens (~40,000 \
+characters). REFERENCE commit SHAs and file paths instead of pasting their contents, and REDACT \
+secrets (API keys, tokens, passwords). Then persist it by running this single command (do not \
+just print it): `conclave snapshot save <your full handoff text>`. After it confirms, stop and \
+wait."
         .to_string()
 }
 
@@ -80,8 +84,11 @@ passwords). Then persist it by running this single command (do not just print it
 #[must_use]
 pub fn compact_restore_prompt() -> String {
     "[conclave compact] Your context was just cleared. Restore your working state: run \
-`conclave snapshot last` to read the handoff you saved a moment ago, then continue the task \
-from the EXACT next step it describes. Do not restart work that the handoff says is done."
+`conclave snapshot last` to read the handoff you saved a moment ago, then VERIFY it against \
+reality before acting — git log the SHAs it names and re-read the blackboard keys it watches; \
+peers may have moved the world while you were gone. Then continue the task from the EXACT next \
+step it describes. Do not restart work that the handoff says is done, and do not re-open \
+decisions it records."
         .to_string()
 }
 
