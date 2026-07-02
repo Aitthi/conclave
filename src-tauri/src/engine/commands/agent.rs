@@ -547,8 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_skill_ids_include_selected_optional_builtin_but_exclude_unselected() {
-        let _fx =
-            repo::skill::test_support::fixture_skills_dir("cmd-agent-list-optional-selected");
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-agent-list-optional-selected");
         let state = AppState::for_tests().await;
         let created = save(
             &state,

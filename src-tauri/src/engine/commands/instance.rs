@@ -1006,6 +1006,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_skills_to_preamble_extends_preamble_when_attached() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-inst-preamble-attached");
         let state = AppState::for_tests().await;
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
@@ -1044,8 +1045,8 @@ mod tests {
         assert!(!result.contains('\n'), "no newline: {result}");
         assert!(!result.contains('='), "no '=': {result}");
         assert!(
-            skill_ids.contains(&"example".to_string()),
-            "must include builtin example: {skill_ids:?}"
+            skill_ids.contains(&"fix-mandatory".to_string()),
+            "must include builtin fixture: {skill_ids:?}"
         );
         assert!(
             skill_ids.contains(&skill.id),
@@ -1055,6 +1056,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_skills_to_preamble_is_noop_when_nothing_attached() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-inst-preamble-noop");
         let state = AppState::for_tests().await;
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
@@ -1081,11 +1083,11 @@ mod tests {
                 .expect("apply_skills_to_preamble failed");
         assert!(
             result.starts_with("BASE "),
-            "builtin example skill always extends preamble: {result}"
+            "builtin fixture skill always extends preamble: {result}"
         );
         assert!(
-            skill_ids.contains(&"example".to_string()),
-            "builtin example skill always included: {skill_ids:?}"
+            skill_ids.contains(&"fix-mandatory".to_string()),
+            "builtin fixture skill always included: {skill_ids:?}"
         );
     }
 
