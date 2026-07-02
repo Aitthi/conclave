@@ -1,7 +1,7 @@
 {
   "meta": {
     "name": "Conclave",
-    "phase": "plan",
+    "phase": "prototype",
     "tagline": "Native macOS workspace for a swarm of AI agents that run, message, and collaborate"
   },
   "spec": {
@@ -217,6 +217,16 @@
         "id": "cli",
         "title": "Conclave CLI",
         "url": "/cli",
+        "frame": "desktop"
+      },
+      {
+        "id": "skill-editor",
+        "title": "Skill Editor · agent assist (idle)",
+        "frame": "desktop"
+      },
+      {
+        "id": "skill-editor-active",
+        "title": "Skill Editor · agent assist (active)",
         "frame": "desktop"
       }
     ],

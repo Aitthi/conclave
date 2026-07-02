@@ -1,0 +1,71 @@
+<div class="h-screen w-full flex flex-col bg-[#232325] text-[#f5f5f7] overflow-hidden select-none">
+
+  <!-- Header -->
+  <div class="h-11 flex items-center justify-between px-4 border-b border-white/[0.06] shrink-0">
+    <div class="flex items-center gap-2">
+      <i data-lucide="wand-2" class="w-4 h-4 text-[#0a84ff]"></i>
+      <span class="text-[13px] font-semibold tracking-tight">New skill</span>
+    </div>
+    <button class="w-7 h-7 grid place-items-center rounded-md hover:bg-white/[0.06] text-[#9a9aa0]">
+      <i data-lucide="x" class="w-[15px] h-[15px]"></i>
+    </button>
+  </div>
+
+  <div class="flex-1 flex min-h-0">
+
+    <!-- Left: fields + content editor -->
+    <div class="flex-1 flex flex-col min-w-0 p-5 overflow-y-auto scroll-thin">
+      <div class="mb-4">
+        <div class="text-[11px] font-bold tracking-wider text-[#6e6e74] uppercase mb-1.5">Name</div>
+        <input placeholder="e.g. Code Reviewer" class="w-full rounded-lg ring-1 ring-white/[0.10] bg-[#202022] px-3 h-9 text-[13px] text-[#f5f5f7] placeholder:text-[#6e6e74] outline-none focus:ring-[#0a84ff]/50"/>
+      </div>
+
+      <div class="mb-4">
+        <div class="text-[11px] font-bold tracking-wider text-[#6e6e74] uppercase mb-1.5">Description</div>
+        <input placeholder="Shown in the Skill Library list" class="w-full rounded-lg ring-1 ring-white/[0.10] bg-[#202022] px-3 h-9 text-[13px] text-[#f5f5f7] placeholder:text-[#6e6e74] outline-none focus:ring-[#0a84ff]/50"/>
+      </div>
+
+      <div class="flex-1 min-h-0 flex flex-col">
+        <div class="text-[11px] font-bold tracking-wider text-[#6e6e74] uppercase mb-1.5">Content</div>
+        <div class="flex-1 min-h-0 rounded-lg ring-1 ring-white/[0.10] overflow-hidden bg-[#1c1c1e] flex">
+          <div class="w-10 shrink-0 bg-[#18181a] text-right pr-2.5 pt-2.5 text-[11px] leading-[1.6] text-[#525256] font-mono select-none">
+            <div>1</div><div>2</div><div>3</div>
+          </div>
+          <div class="flex-1 pt-2.5 pl-3 text-[12.5px] leading-[1.6] font-mono text-[#d8d8da]">
+            <div class="bg-[#0a84ff]/[0.08] -mx-3 px-3">asasadsadsa</div>
+            <div>&nbsp;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: agent-assist panel -->
+    <div class="w-[360px] shrink-0 border-l border-white/[0.07] flex flex-col bg-[#1c1c1e]">
+      <div class="h-11 flex items-center px-3 border-b border-white/[0.06] shrink-0">
+        <span class="text-[12.5px] font-semibold tracking-tight">Ask agent to help</span>
+      </div>
+
+      <div class="p-3 space-y-2">
+        <div class="relative">
+          <select class="w-full appearance-none rounded-lg ring-1 ring-white/[0.10] bg-[#202022] px-2.5 h-8 text-[12.5px] text-[#f5f5f7] outline-none">
+            <option>Detoro</option>
+          </select>
+          <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-[#9a9aa0] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
+        </div>
+        <button data-to="skill-editor-active" class="w-full flex items-center justify-center gap-1.5 rounded-lg bg-[#0a84ff] text-white py-2 text-[12.5px] font-semibold hover:brightness-105">
+          <i data-lucide="play" class="w-3.5 h-3.5"></i>
+          Start
+        </button>
+        <p class="text-[10.5px] text-[#6e6e74] leading-snug px-0.5 pt-1">Agent gets full file access to a scratch copy of this skill — edits sync back when it's idle, or tap Sync now.</p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Footer -->
+  <div class="border-t border-white/[0.07] px-5 py-3 bg-[#232325] shrink-0 flex items-center gap-2">
+    <button class="flex-1 text-[12.5px] font-medium text-[#d8d8da] bg-[#232325] ring-1 ring-white/[0.08] rounded-lg py-2.5 hover:bg-white/[0.03]">Cancel</button>
+    <button class="flex-[1.4] text-[12.5px] font-semibold text-white bg-[#0a84ff] rounded-lg py-2.5 hover:brightness-105">Save skill</button>
+  </div>
+
+</div>

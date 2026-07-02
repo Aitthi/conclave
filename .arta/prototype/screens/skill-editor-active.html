@@ -1,0 +1,94 @@
+<div class="h-screen w-full flex flex-col bg-[#232325] text-[#f5f5f7] overflow-hidden select-none">
+
+  <!-- Header -->
+  <div class="h-11 flex items-center justify-between px-4 border-b border-white/[0.06] shrink-0">
+    <div class="flex items-center gap-2">
+      <i data-lucide="wand-2" class="w-4 h-4 text-[#0a84ff]"></i>
+      <span class="text-[13px] font-semibold tracking-tight">New skill</span>
+    </div>
+    <button data-to="skill-editor" class="w-7 h-7 grid place-items-center rounded-md hover:bg-white/[0.06] text-[#9a9aa0]">
+      <i data-lucide="x" class="w-[15px] h-[15px]"></i>
+    </button>
+  </div>
+
+  <div class="flex-1 flex min-h-0">
+
+    <!-- Left: locked fields + content editor -->
+    <div class="flex-1 flex flex-col min-w-0 p-5 overflow-y-auto scroll-thin">
+      <div class="mb-4">
+        <div class="text-[11px] font-bold tracking-wider text-[#6e6e74] uppercase mb-1.5">Name</div>
+        <input disabled value="PR Checklist Reviewer" class="w-full rounded-lg ring-1 ring-white/[0.10] bg-[#202022] px-3 h-9 text-[13px] text-[#d8d8da] outline-none opacity-60"/>
+      </div>
+
+      <div class="mb-4">
+        <div class="text-[11px] font-bold tracking-wider text-[#6e6e74] uppercase mb-1.5">Description</div>
+        <input disabled value="Reviews PR diffs against a checklist" class="w-full rounded-lg ring-1 ring-white/[0.10] bg-[#202022] px-3 h-9 text-[13px] text-[#d8d8da] outline-none opacity-60"/>
+      </div>
+
+      <div class="mb-3 rounded-lg bg-[#0a84ff]/[0.10] text-[#5ab0ff] text-[11.5px] px-3 py-2 flex items-center gap-2">
+        <i data-lucide="lock" class="w-3.5 h-3.5 shrink-0"></i>
+        Agent is editing — stop the session to edit manually.
+      </div>
+
+      <div class="flex-1 min-h-0 flex flex-col">
+        <div class="text-[11px] font-bold tracking-wider text-[#6e6e74] uppercase mb-1.5">Content</div>
+        <div class="flex-1 min-h-0 rounded-lg ring-1 ring-white/[0.10] overflow-hidden bg-[#1c1c1e] opacity-70 flex">
+          <div class="w-10 shrink-0 bg-[#18181a] text-right pr-2.5 pt-2.5 text-[11px] leading-[1.6] text-[#525256] font-mono select-none">
+            <div>1</div><div>2</div><div>3</div><div>4</div>
+          </div>
+          <div class="flex-1 pt-2.5 pl-3 text-[12.5px] leading-[1.6] font-mono text-[#d8d8da] space-y-0">
+            <div class="text-[#6e6e74]"># PR Checklist Reviewer</div>
+            <div>&nbsp;</div>
+            <div>Check for: tests, changelog entry,</div>
+            <div>breaking-change notes.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: agent-assist panel, active session — CLI terminal surface + real ChatView composer style -->
+    <div class="w-[360px] shrink-0 border-l border-white/[0.07] flex flex-col bg-[#1c1c1e]">
+      <div class="h-11 flex items-center justify-between px-3 border-b border-white/[0.06] shrink-0">
+        <div class="flex items-center gap-2">
+          <span class="text-[12.5px] font-semibold tracking-tight">Ask agent to help</span>
+          <span class="flex items-center gap-1 text-[10.5px] text-[#30d158] font-medium"><span class="w-1.5 h-1.5 rounded-full bg-[#30d158]"></span>running</span>
+        </div>
+        <button data-to="skill-editor" title="Stop agent" class="w-7 h-7 grid place-items-center rounded-md text-[#ff453a] hover:bg-[#ff453a]/[0.12]">
+          <i data-lucide="square" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+
+      <!-- terminal surface -->
+      <div class="flex-1 min-h-0 bg-[#1e1e22] overflow-y-auto scroll-thin font-mono text-[11.5px] leading-[1.6] px-3 py-2.5 text-[#d4d4d8]">
+        <div><span class="text-[#7ee787]">detoro</span><span class="text-[#8b8b94]">:</span><span class="text-[#79c0ff]">skill-draft</span><span class="text-[#8b8b94]"> $</span> claude</div>
+        <div class="text-[#8b8b94] mt-1">● Claude Code v2.1 · own harness</div>
+        <div class="mt-1.5"><span class="text-[#0a84ff]">●</span> ช่วยเขียน checklist ใหม่ให้มี 4 ข้อ ครอบคลุม tests, docs, breaking change, security</div>
+        <div class="text-[#8b8b94] mt-1">⎿ <i data-lucide="pencil" class="inline w-3 h-3"></i> Edit SKILL.md <span class="text-[#7ee787]">+6 −2</span></div>
+        <div class="mt-1.5 text-[#d4d4d8]">อัปเดต checklist แล้ว เพิ่มหัวข้อ security review และแก้ frontmatter ให้ตรงฟอร์แมต<span class="inline-block w-2 h-3.5 align-middle bg-[#d4d4d8] ml-0.5"></span></div>
+      </div>
+
+      <!-- Composer — same pill + paperclip + circular send button as the app's real ChatView -->
+      <div class="border-t border-white/[0.06] p-2 shrink-0">
+        <div class="rounded-2xl ring-1 ring-white/[0.10] bg-[#202022] px-3 pt-2 pb-1.5 focus-within:ring-[#0a84ff]/50">
+          <div class="flex items-end gap-1.5">
+            <textarea rows="1" placeholder="Message the agent…" class="flex-1 bg-transparent outline-none resize-none text-[12.5px] leading-relaxed placeholder:text-[#6e6e74] py-1 max-h-32"></textarea>
+            <button class="w-7 h-7 rounded-full grid place-items-center shrink-0 text-[#6e6e74] hover:bg-white/[0.06] hover:text-[#9a9aa0]">
+              <i data-lucide="paperclip" class="w-3.5 h-3.5"></i>
+            </button>
+            <button class="w-7 h-7 rounded-full bg-[#0a84ff] text-white grid place-items-center shrink-0 hover:brightness-105">
+              <i data-lucide="arrow-up" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Footer -->
+  <div class="border-t border-white/[0.07] px-5 py-3 bg-[#232325] shrink-0 flex items-center gap-2">
+    <button class="flex-1 text-[12.5px] font-medium text-[#d8d8da] bg-[#232325] ring-1 ring-white/[0.08] rounded-lg py-2.5 hover:bg-white/[0.03]">Cancel</button>
+    <button disabled class="flex-[1.4] text-[12.5px] font-semibold text-white bg-[#0a84ff] rounded-lg py-2.5 opacity-40">Save skill</button>
+  </div>
+
+</div>

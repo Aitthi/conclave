@@ -1,6 +1,6 @@
 {
   "tab": "prototype",
-  "screen": "workspace",
+  "screen": "skill-editor-active",
   "screens": [
     {
       "id": "workspace",
@@ -45,11 +45,19 @@
     {
       "id": "cli",
       "title": "Conclave CLI"
+    },
+    {
+      "id": "skill-editor",
+      "title": "Skill Editor · agent assist (idle)"
+    },
+    {
+      "id": "skill-editor-active",
+      "title": "Skill Editor · agent assist (active)"
     }
   ],
-  "phase": "plan",
+  "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "05:20:49 PM",
-  "reportedAt": "2026-06-30T10:20:49.600Z"
+  "updatedAt": "02:28:29 PM",
+  "reportedAt": "2026-07-02T07:28:30.007Z"
 }
