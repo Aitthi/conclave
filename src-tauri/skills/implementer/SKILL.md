@@ -21,6 +21,19 @@ the Collaboration skill; this one only covers what implementing adds.
 - Work isolated (a worktree or branch). The main branch stays clean until
   integration is an explicit decision, not a side effect.
 
+## Know who to ask — it is written down, not guessed
+
+- Your escalation target is named in the handoff message and in the
+  `plan:<task>` blackboard key (its `owner:` id). Read those before asking
+  anyone anything: `conclave bb get <ws> plan:<task>`.
+- Escalate to the LEAD, not the human — with `conclave tell <ownerId>
+  <message>`; text printed in your own terminal reaches nobody. The human
+  delegated the loop; going around the lead re-opens decisions that are
+  already closed.
+- Subagents you dispatch report to YOU. You are their escalation target the
+  same way the lead is yours — don't forward their questions upward unless
+  they genuinely conflict with a recorded decision.
+
 ## Follow the plan — but don't follow it off a cliff
 
 - The plan is authoritative for WHAT and WHY. When reality contradicts it —

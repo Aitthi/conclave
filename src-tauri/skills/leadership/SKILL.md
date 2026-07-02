@@ -37,6 +37,19 @@ Collaboration skill; this one only covers what leading adds.
 - Global constraints go in ONE section every task inherits — a rule stated
   once per task will be violated by the task where you forgot to repeat it.
 
+## Know who is who — and make sure they know too
+
+- Discover your peers with `conclave agent list <workspaceId>`; every id that
+  is not yours is a potential implementer. Message them with
+  `conclave tell <id> <text>` — text in your own terminal reaches nobody.
+- Roles are not discoverable by magic: DECLARE them. When you take a piece of
+  work, write yourself into the record — put your id as owner inside
+  `plan:<task>` on the blackboard (`conclave bb set <ws> plan:<task> "…
+  owner: <your id> …"`), and name the implementer in the handoff. An agent
+  who has to guess who rules on escalations will guess the human.
+- If YOU can't tell who leads a piece of work, read `plan:<task>` /
+  `claim:<task>` first (`conclave bb get`), and only then ask.
+
 ## Delegate and stay out
 
 - Once the plan exists, you do not implement. Your hands on the keyboard
