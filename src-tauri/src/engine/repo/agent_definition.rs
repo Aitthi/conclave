@@ -842,13 +842,13 @@ mod tests {
             name: "A".into(),
             agent_type: "cli".into(),
             harness_mode: "own".into(),
-            selected_builtin_skill_ids: Some(serde_json::json!(["example-optional"]).to_string()),
+            selected_builtin_skill_ids: Some(serde_json::json!(["fix-optional"]).to_string()),
             ..Default::default()
         };
         let row = super::create(&pool, &input).await.expect("create failed");
         assert_eq!(
             row.selected_builtin_skill_ids.as_deref(),
-            Some(r#"["example-optional"]"#)
+            Some(r#"["fix-optional"]"#)
         );
 
         let fetched = super::get(&pool, &row.id)
