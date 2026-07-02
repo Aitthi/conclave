@@ -9,9 +9,11 @@ A reusable capability/prompt module that can be attached to one or more `AgentDe
 _Avoid_: Capability, playbook, macro (for this concept specifically — those are generic terms, not this project's canonical name).
 
 Two kinds:
-- **System skill** (built-in): a `SKILL.md` file (frontmatter `name`/`description` + markdown body as `content`) in a `skills/` folder bundled into the app at build time — NOT a DB row (see ADR 0002). Not editable or deletable by the user, auto-attached to every `AgentDefinition` — cannot be detached. Its id is the skill's folder name.
+- **System skill** (built-in): a `SKILL.md` file (frontmatter `name`/`description`/`mandatory` + markdown body as `content`) in a `skills/` folder bundled into the app at build time — NOT a DB row (see ADR 0002). Never editable or deletable by the user. Its id is the skill's folder name. Splits into two subtypes by its frontmatter `mandatory` field (default `true` when omitted):
+  - **Mandatory system skill**: auto-attached to every `AgentDefinition`, cannot be detached (see ADR 0002).
+  - **Optional system skill**: shown as a pickable item per `AgentDefinition`, like a custom skill, but still read-only content — the user chooses whether to attach it, not what it says (see ADR 0003).
 - **Custom skill**: user-created via full CRUD, stored as a `skill` DB row, freely attached/detached per `AgentDefinition` via `agent_skill`.
-_Avoid_: "Default skill" for system skill (default implies optional/overridable; these are mandatory).
+_Avoid_: "Default skill" for system skill (default implies optional/overridable; only some system skills are optional, and even those aren't user-authored).
 
 **AgentDefinition**:
 The reusable template for an agent: name, role, model, launch config (`cliKind`, `permissionMode`, `customArgs`/`customEnv`). Not yet running anywhere on its own.
