@@ -155,9 +155,12 @@ mod tests {
             .expect("at least the checked-in example skill must exist")
             .id
             .clone();
-        let created = save(&state, serde_json::json!({ "name": "Custom", "content": "c" }))
-            .await
-            .expect("create failed");
+        let created = save(
+            &state,
+            serde_json::json!({ "name": "Custom", "content": "c" }),
+        )
+        .await
+        .expect("create failed");
         let custom_id = created["id"].as_str().unwrap().to_owned();
 
         let builtin_delete = delete(&state, serde_json::json!({ "id": builtin_id })).await;
@@ -170,18 +173,23 @@ mod tests {
     #[tokio::test]
     async fn list_includes_builtin_and_custom() {
         let state = AppState::for_tests().await;
-        save(&state, serde_json::json!({ "name": "Custom", "content": "c" }))
-            .await
-            .expect("create failed");
+        save(
+            &state,
+            serde_json::json!({ "name": "Custom", "content": "c" }),
+        )
+        .await
+        .expect("create failed");
 
         let listed = list(&state, Value::Null).await.expect("list failed");
         let arr = listed.as_array().unwrap();
         assert!(
-            arr.iter().any(|s| s["kind"] == "builtin" && s["id"] == "example"),
+            arr.iter()
+                .any(|s| s["kind"] == "builtin" && s["id"] == "example"),
             "builtin example skill must appear in list()"
         );
         assert!(
-            arr.iter().any(|s| s["kind"] == "custom" && s["name"] == "Custom"),
+            arr.iter()
+                .any(|s| s["kind"] == "custom" && s["name"] == "Custom"),
             "custom skill must appear in list()"
         );
         let builtin_item = arr.iter().find(|s| s["id"] == "example").unwrap();
