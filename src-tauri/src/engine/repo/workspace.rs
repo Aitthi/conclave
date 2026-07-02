@@ -42,6 +42,15 @@ pub struct WorkspaceRow {
     pub folder_path: String, // serializes to "folderPath"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// `true` for a single-purpose scratch workspace backing a skill-draft
+    /// agent-assist session (see
+    /// docs/specs/2026-07-02-skill-editor-agent-assist-design.md). Excluded
+    /// from `list()` so it never appears in the normal workspace switcher;
+    /// every other repo function treats it exactly like a normal workspace.
+    /// Never serialized — the frontend `Workspace` TS type has no `hidden`
+    /// field and nothing outside this module needs to know a row is hidden.
+    #[serde(skip)]
+    pub hidden: bool,
     pub created_at: String, // serializes to "createdAt"
 }
 
@@ -51,19 +60,24 @@ pub struct WorkspaceRow {
 /// stable tie-breaker (two rows created in the same second would otherwise
 /// order non-deterministically).
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
-    QueryBuilder::<Sqlite>::table("workspace")
-        .select(["id", "name", "folder_path", "color", "created_at"])
+    let rows = QueryBuilder::<Sqlite>::table("workspace")
+        .select(["id", "name", "folder_path", "color", "hidden", "created_at"])
         .order_by("created_at", Order::Asc)
         .order_by("id", Order::Asc)
         .fetch_all::<WorkspaceRow, _>(pool)
         .await
-        .map_err(cb_err)
+        .map_err(cb_err)?;
+    // Filtered in Rust rather than a chain-builder `.where_eq("hidden", ...)`
+    // predicate — this table is always small (dozens of rows at most), and
+    // filtering here avoids depending on chain-builder's bool-bind behavior
+    // in a WHERE clause, which nothing else in this codebase exercises yet.
+    Ok(rows.into_iter().filter(|w| !w.hidden).collect())
 }
 
 /// Fetch a single workspace by `id`, or `None` if it does not exist.
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<WorkspaceRow>> {
     QueryBuilder::<Sqlite>::table("workspace")
-        .select(["id", "name", "folder_path", "color", "created_at"])
+        .select(["id", "name", "folder_path", "color", "hidden", "created_at"])
         .where_eq("id", id)
         .fetch_optional::<WorkspaceRow, _>(pool)
         .await
@@ -77,20 +91,40 @@ pub async fn exists(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     get(pool, id).await.map(|opt| opt.is_some())
 }
 
-/// Insert a new workspace and return the constructed row.
+/// Insert a new (non-hidden) workspace and return the constructed row.
 ///
 /// Generates a UUID v4 `id` and ISO-8601 UTC `created_at` timestamp.
-///
-/// All INSERT bind values are `chain_builder::Value` so the array is
-/// homogeneous: `color: Option<&str>` maps to `Bind::Text(s)` or `Bind::Null`
-/// without needing a separate raw-sqlx path.
-///
-/// Returns the row directly (no re-fetch round-trip) since we know all values.
 pub async fn create(
     pool: &SqlitePool,
     name: &str,
     folder_path: &str,
     color: Option<&str>,
+) -> sqlx::Result<WorkspaceRow> {
+    insert_row(pool, name, folder_path, color, false).await
+}
+
+/// Create a HIDDEN, single-purpose workspace — used only to back an
+/// agent-assist skill-draft session (see
+/// docs/specs/2026-07-02-skill-editor-agent-assist-design.md). Always
+/// `color: None`. Excluded from `list()`; every other repo function treats
+/// it exactly like a normal workspace (in particular, `instance::spawn`'s
+/// prerequisites — workspace_agent → session → agent_definition → workspace
+/// — are satisfied without any change to `instance::spawn` itself).
+#[allow(dead_code)]
+pub async fn create_hidden(
+    pool: &SqlitePool,
+    name: &str,
+    folder_path: &str,
+) -> sqlx::Result<WorkspaceRow> {
+    insert_row(pool, name, folder_path, None, true).await
+}
+
+async fn insert_row(
+    pool: &SqlitePool,
+    name: &str,
+    folder_path: &str,
+    color: Option<&str>,
+    hidden: bool,
 ) -> sqlx::Result<WorkspaceRow> {
     // Allocate each owned value once, then clone into the bind array — avoids a
     // second allocation per field when constructing the returned row.
@@ -107,6 +141,7 @@ pub async fn create(
             ("folder_path", Bind::Text(folder_path.clone())),
             // Option<String> → Value::Text(s) | Value::Null (no raw sqlx needed)
             ("color", color.clone().map(Bind::Text).unwrap_or(Bind::Null)),
+            ("hidden", Bind::Bool(hidden)),
             ("created_at", Bind::Text(created_at.clone())),
         ])
         .execute(pool)
@@ -118,6 +153,7 @@ pub async fn create(
         name,
         folder_path,
         color,
+        hidden,
         created_at,
     })
 }
@@ -323,5 +359,52 @@ mod tests {
             json.get("created_at").is_none(),
             "must NOT have snake_case created_at"
         );
+    }
+
+    /// A hidden workspace round-trips through get() with hidden state intact,
+    /// but is completely excluded from list().
+    #[tokio::test]
+    async fn create_hidden_excluded_from_list_but_gettable() {
+        let pool = connect_in_memory().await;
+        create(&pool, "Visible", "/tmp/visible", None)
+            .await
+            .expect("create failed");
+        let hidden = create_hidden(&pool, "Scratch", "/tmp/scratch")
+            .await
+            .expect("create_hidden failed");
+        assert!(hidden.hidden);
+        assert!(hidden.color.is_none());
+
+        let listed = list(&pool).await.expect("list failed");
+        assert_eq!(listed.len(), 1, "only the visible workspace must be listed");
+        assert_eq!(listed[0].name, "Visible");
+
+        let fetched = get(&pool, &hidden.id)
+            .await
+            .expect("get failed")
+            .expect("hidden row must still be gettable by id");
+        assert_eq!(fetched, hidden);
+    }
+
+    /// A normal create() always yields hidden: false.
+    #[tokio::test]
+    async fn create_is_never_hidden() {
+        let pool = connect_in_memory().await;
+        let row = create(&pool, "Normal", "/tmp/n", None)
+            .await
+            .expect("create failed");
+        assert!(!row.hidden);
+    }
+
+    /// `hidden` must never appear in serialized JSON (skip, not
+    /// skip_serializing_if — there is no frontend-visible state for it).
+    #[tokio::test]
+    async fn hidden_field_is_never_serialized() {
+        let pool = connect_in_memory().await;
+        let row = create_hidden(&pool, "Scratch", "/tmp/scratch2")
+            .await
+            .expect("create_hidden failed");
+        let json = serde_json::to_value(&row).expect("serialize failed");
+        assert!(json.get("hidden").is_none(), "hidden must never serialize");
     }
 }

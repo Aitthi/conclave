@@ -122,6 +122,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 7 {
+        sqlx::raw_sql(include_str!("migrations/0007_workspace_hidden.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 7;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -201,7 +210,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 6, "user_version should be 6");
+        assert_eq!(version, 7, "user_version should be 7");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -326,7 +335,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -384,6 +393,6 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 }
