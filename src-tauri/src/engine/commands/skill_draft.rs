@@ -54,8 +54,27 @@ pub async fn start(state: &AppState, payload: Value) -> Result<Value, AppError> 
     repo::skill::write_draft(&dir, &req.name, req.description.as_deref(), &req.content)
         .map_err(|e| AppError::Internal(format!("write skill draft: {e}")))?;
 
-    let ws = repo::workspace::create_hidden(&state.db, &req.name, &dir.to_string_lossy()).await?;
-    let wa = repo::workspace_agent::instantiate(&state.db, &ws.id, &req.agent_def_id).await?;
+    let ws =
+        match repo::workspace::create_hidden(&state.db, &req.name, &dir.to_string_lossy()).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                // Best-effort rollback: a doomed create_hidden must not leave the
+                // just-written scratch dir behind for the user to never see again.
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e.into());
+            }
+        };
+    let wa = match repo::workspace_agent::instantiate(&state.db, &ws.id, &req.agent_def_id).await {
+        Ok(wa) => wa,
+        Err(e) => {
+            // Best-effort rollback: a doomed instantiate must not leave the
+            // just-created hidden workspace + scratch dir behind for the user
+            // to never see again.
+            let _ = super::workspace::delete(state, json!({ "workspaceId": ws.id })).await;
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e.into());
+        }
+    };
 
     match super::instance::spawn(state, json!({ "workspaceAgentId": wa.id })).await {
         Ok(session) => {
