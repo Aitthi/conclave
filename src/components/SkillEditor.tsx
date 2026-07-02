@@ -5,6 +5,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { ipc } from "../ipc";
 import type { Skill } from "../ipc";
 import { SkillAssistPanel, type DraftSession } from "./SkillAssistPanel";
+import { skillContentEditorTheme } from "../lib/skillContentEditorTheme";
 
 export interface SkillEditorProps {
   onClose: () => void;
@@ -136,6 +137,7 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
                 value={content}
                 onChange={(value) => setContent(value)}
                 editable={!locked}
+                theme={skillContentEditorTheme}
                 extensions={[markdown()]}
                 height="100%"
                 className="h-full text-[12.5px]"
