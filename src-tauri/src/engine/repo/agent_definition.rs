@@ -98,6 +98,16 @@ pub struct AgentDefRow {
     pub secret_env_keys: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<String>,
+    /// JSON array of OPTIONAL builtin skill ids (`mandatory: false`) this
+    /// definition has opted into (see ADR 0003). `None`/absent means no
+    /// optional builtins selected — distinct from an empty JSON array only
+    /// in that both mean the same thing here (no meaningful distinction is
+    /// drawn between "never set" and "explicitly cleared").
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub selected_builtin_skill_ids: Option<String>,
     pub created_at: String,
 }
 
@@ -144,6 +154,11 @@ pub struct AgentDefListItem {
     pub secret_env_keys: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_json_text"
+    )]
+    pub selected_builtin_skill_ids: Option<String>,
     pub created_at: String,
     /// How many workspaces this definition has been added to.
     pub in_workspaces: i64,
@@ -151,7 +166,7 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 18] = [
+const COLS: [&str; 19] = [
     "id",
     "name",
     "role",
@@ -169,6 +184,7 @@ const COLS: [&str; 18] = [
     "custom_env",
     "secret_env_keys",
     "context_window",
+    "selected_builtin_skill_ids",
     "created_at",
 ];
 
@@ -201,6 +217,9 @@ pub struct AgentDefinitionInput {
     pub secret_env_keys: Option<String>,
     /// "1m" / "200k" — selects the model's context window.
     pub context_window: Option<String>,
+    /// JSON array of optional builtin skill ids selected for this agent
+    /// definition (see ADR 0003). `None` clears the selection.
+    pub selected_builtin_skill_ids: Option<String>,
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -232,6 +251,7 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
         "SELECT d.id, d.name, d.role, d.type, d.cli_kind, d.color, d.provider_id, d.model, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
          d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
+         d.selected_builtin_skill_ids, \
          d.created_at, \
          (SELECT COUNT(*) FROM workspace_agent wa WHERE wa.agent_def_id = d.id) AS in_workspaces \
          FROM agent_definition d \
@@ -359,6 +379,14 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
                     .map(Bind::Text)
                     .unwrap_or(Bind::Null),
             ),
+            (
+                "selected_builtin_skill_ids",
+                input
+                    .selected_builtin_skill_ids
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
             ("created_at", Bind::Text(created_at.clone())),
         ])
         .execute(pool)
@@ -383,6 +411,7 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         custom_env: input.custom_env,
         secret_env_keys: input.secret_env_keys,
         context_window: input.context_window,
+        selected_builtin_skill_ids: input.selected_builtin_skill_ids,
         created_at,
     })
 }
@@ -449,6 +478,13 @@ pub async fn update(
                 "context_window",
                 input.context_window.map(Bind::Text).unwrap_or(Bind::Null),
             ),
+            (
+                "selected_builtin_skill_ids",
+                input
+                    .selected_builtin_skill_ids
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
+            ),
         ])
         .where_eq("id", id)
         .execute(pool)
@@ -499,6 +535,7 @@ mod tests {
             custom_env: None,
             secret_env_keys: None,
             context_window: None,
+            selected_builtin_skill_ids: None,
         }
     }
 
@@ -528,6 +565,7 @@ mod tests {
                 custom_env: Some(r#"{"ANTHROPIC_BASE_URL":"https://openrouter.ai/api"}"#.into()),
                 secret_env_keys: Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#.into()),
                 context_window: Some("1m".into()),
+                selected_builtin_skill_ids: None,
             },
         )
         .await
@@ -617,6 +655,7 @@ mod tests {
                 custom_env: Some(r#"{"ANTHROPIC_MODEL":"gpt-5.5"}"#.into()),
                 secret_env_keys: None,
                 context_window: Some("200k".into()),
+                selected_builtin_skill_ids: None,
             },
         )
         .await
@@ -711,6 +750,7 @@ mod tests {
                 custom_env: Some(r#"{"ANTHROPIC_BASE_URL":"https://x"}"#.into()),
                 secret_env_keys: Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#.into()),
                 context_window: Some("1m".into()),
+                selected_builtin_skill_ids: None,
             },
         )
         .await
@@ -792,6 +832,45 @@ mod tests {
         assert!(
             item_json.get("in_workspaces").is_none(),
             "must NOT have in_workspaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_and_update_roundtrip_selected_builtin_skill_ids() {
+        let pool = connect_in_memory().await;
+        let input = AgentDefinitionInput {
+            name: "A".into(),
+            agent_type: "cli".into(),
+            harness_mode: "own".into(),
+            selected_builtin_skill_ids: Some(serde_json::json!(["example-optional"]).to_string()),
+            ..Default::default()
+        };
+        let row = super::create(&pool, &input).await.expect("create failed");
+        assert_eq!(
+            row.selected_builtin_skill_ids.as_deref(),
+            Some(r#"["example-optional"]"#)
+        );
+
+        let fetched = super::get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert_eq!(
+            fetched.selected_builtin_skill_ids,
+            row.selected_builtin_skill_ids
+        );
+
+        let cleared_input = AgentDefinitionInput {
+            selected_builtin_skill_ids: None,
+            ..input
+        };
+        let updated = super::update(&pool, &row.id, &cleared_input)
+            .await
+            .expect("update failed")
+            .expect("row should exist after update");
+        assert!(
+            updated.selected_builtin_skill_ids.is_none(),
+            "update with None must clear the column"
         );
     }
 }

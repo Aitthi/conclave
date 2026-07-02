@@ -192,6 +192,9 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         custom_env,
         secret_env_keys,
         context_window: nonblank(req.context_window),
+        // TODO(Task 4): wire from the split `skillIds` request once
+        // commands::agent gains a dedicated builtin-skill-ids field.
+        selected_builtin_skill_ids: None,
     };
 
     // Capture the previously-stored secret key NAMES (UPDATE only) so we can
