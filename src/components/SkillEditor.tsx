@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X, Wand2 } from "lucide-react";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { ipc } from "../ipc";
 import type { Skill } from "../ipc";
+import { SkillAssistPanel, type DraftSession } from "./SkillAssistPanel";
 
 export interface SkillEditorProps {
   onClose: () => void;
@@ -28,6 +29,27 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
   const [content, setContent] = useState(initialSkill?.content ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Agent-assist session — non-null while the assist panel has a live
+  // session. Locks the editor fields (single writer at a time — see design
+  // spec's conflict-avoidance decision).
+  const [draft, setDraft] = useState<DraftSession | null>(null);
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  // Best-effort cleanup: if the editor unmounts (closed, or the app
+  // navigates away) while a session is still active, stop it rather than
+  // leaking a hidden workspace + live agent process.
+  useEffect(() => {
+    return () => {
+      const active = draftRef.current;
+      if (active) void ipc.skill.stopDraftSession({ workspaceAgentId: active.workspaceAgentId });
+    };
+  }, []);
+
+  const locked = draft !== null;
 
   async function handleSave() {
     if (!name.trim()) {
@@ -80,8 +102,9 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
+              disabled={locked}
               placeholder="e.g. Code Reviewer"
-              className="w-full rounded-lg ring-1 ring-overlay/[0.10] bg-fill-softer px-3 h-9 text-[13px] outline-none focus:ring-accent/50"
+              className="w-full rounded-lg ring-1 ring-overlay/[0.10] bg-fill-softer px-3 h-9 text-[13px] outline-none focus:ring-accent/50 disabled:opacity-60"
             />
           </div>
 
@@ -92,10 +115,17 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
             <input
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              disabled={locked}
               placeholder="Shown in the Skill Library list"
-              className="w-full rounded-lg ring-1 ring-overlay/[0.10] bg-fill-softer px-3 h-9 text-[13px] outline-none focus:ring-accent/50"
+              className="w-full rounded-lg ring-1 ring-overlay/[0.10] bg-fill-softer px-3 h-9 text-[13px] outline-none focus:ring-accent/50 disabled:opacity-60"
             />
           </div>
+
+          {locked && (
+            <div className="mb-3 rounded-lg bg-accent/[0.08] text-accent text-[11.5px] px-3 py-2">
+              Agent is editing — stop the session to edit manually.
+            </div>
+          )}
 
           <div className="flex-1 min-h-0 flex flex-col">
             <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
@@ -105,6 +135,7 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
               <CodeMirror
                 value={content}
                 onChange={(value) => setContent(value)}
+                editable={!locked}
                 extensions={[markdown()]}
                 height="100%"
                 className="h-full text-[12.5px]"
@@ -114,6 +145,20 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
 
           {error && <p className="text-[12px] text-danger mt-3">{error}</p>}
         </div>
+
+        <SkillAssistPanel
+          name={name}
+          description={description}
+          content={content}
+          draft={draft}
+          onStarted={setDraft}
+          onSynced={(v) => {
+            setName(v.name);
+            setDescription(v.description ?? "");
+            setContent(v.content);
+          }}
+          onStopped={() => setDraft(null)}
+        />
       </div>
 
       <div className="border-t border-overlay/[0.07] px-5 py-3 bg-surface shrink-0 flex items-center gap-2">
@@ -126,7 +171,7 @@ export function SkillEditor({ onClose, onSaved, initialSkill }: SkillEditorProps
         </button>
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || locked}
           className="flex-[1.4] text-[12.5px] font-semibold text-white bg-accent rounded-lg py-2.5 hover:brightness-105 disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save skill"}
