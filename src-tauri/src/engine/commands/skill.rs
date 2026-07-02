@@ -200,6 +200,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_reports_mandatory_flag_for_both_builtin_fixtures() {
+        let state = AppState::for_tests().await;
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let arr = listed.as_array().unwrap();
+
+        let mandatory_item = arr
+            .iter()
+            .find(|s| s["id"] == "example")
+            .expect("mandatory example fixture must be present");
+        assert_eq!(mandatory_item["mandatory"], true);
+
+        let optional_item = arr
+            .iter()
+            .find(|s| s["id"] == "example-optional")
+            .expect("optional example fixture must be present");
+        assert_eq!(optional_item["mandatory"], false);
+
+        // Custom skills always report mandatory: true (nothing to opt into —
+        // they're already opt-in via agent_skill).
+        save(
+            &state,
+            serde_json::json!({ "name": "Custom", "content": "c" }),
+        )
+        .await
+        .expect("create failed");
+        let listed2 = list(&state, Value::Null).await.expect("list failed");
+        let custom_item = listed2
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "Custom")
+            .expect("custom skill present");
+        assert_eq!(custom_item["mandatory"], true);
+    }
+
+    #[tokio::test]
     async fn list_annotates_attached_to_count() {
         let state = AppState::for_tests().await;
         let created = save(&state, serde_json::json!({ "name": "S", "content": "c" }))
