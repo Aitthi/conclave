@@ -6,6 +6,7 @@ pub mod instance;
 pub mod message;
 pub mod provider;
 pub mod skill;
+pub mod skill_draft;
 pub mod snapshot;
 pub mod tool;
 pub mod workspace;

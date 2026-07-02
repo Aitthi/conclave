@@ -601,7 +601,6 @@ async fn flush_context_estimate(
 ///
 /// `#[allow(dead_code)]`: routed in a later milestone — UI stop button /
 /// app teardown.
-#[allow(dead_code)]
 pub async fn stop(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: InstanceReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
