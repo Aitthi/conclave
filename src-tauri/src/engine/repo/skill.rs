@@ -385,6 +385,10 @@ fn parse_skill_md(raw: &str) -> Option<(String, Option<String>, String, bool)> {
 /// run`/`cargo test`/`tauri dev` build, none of which have a `.app` bundle
 /// structure.
 fn skills_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_support::override_dir() {
+        return dir;
+    }
     if let Some(bundled) = bundled_skills_dir() {
         if bundled.is_dir() {
             return bundled;
@@ -397,6 +401,67 @@ fn bundled_skills_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // macOS .app layout: Contents/MacOS/<exe> ; Contents/Resources/<...>
     Some(exe.parent()?.parent()?.join("Resources").join("skills"))
+}
+
+/// Test-only override of the builtin-skills directory, so tests never depend
+/// on the SHIPPED skill content (which is product copy, free to change).
+/// Thread-local because `cargo test` runs tests on parallel threads and every
+/// affected test uses `#[tokio::test]`'s default current-thread runtime — the
+/// whole test, including awaited repo calls, stays on one thread.
+#[cfg(test)]
+pub mod test_support {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn override_dir() -> Option<PathBuf> {
+        OVERRIDE.with(|c| c.borrow().clone())
+    }
+
+    /// RAII guard from [`fixture_skills_dir`]. While alive, `skills_dir()` on
+    /// THIS thread resolves to the guard's temp fixture dir. `Drop` restores
+    /// the real resolution and deletes the fixture dir.
+    pub struct FixtureSkillsDir {
+        dir: PathBuf,
+    }
+
+    impl Drop for FixtureSkillsDir {
+        fn drop(&mut self) {
+            OVERRIDE.with(|c| *c.borrow_mut() = None);
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Create the standard two-skill fixture and point this thread's builtin
+    /// resolution at it: `fix-mandatory` (name "Fixture Mandatory", mandatory
+    /// by omission) and `fix-optional` (name "Fixture Optional",
+    /// `mandatory: false`). `tag` must be unique per test — it names the temp
+    /// dir, and tests run concurrently under one shared temp root.
+    pub fn fixture_skills_dir(tag: &str) -> FixtureSkillsDir {
+        let dir = std::env::temp_dir().join(format!("conclave-skill-fixture-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_skill(
+            &dir,
+            "fix-mandatory",
+            "---\nname: Fixture Mandatory\ndescription: Mandatory test fixture\n---\n\nMandatory fixture content.\n",
+        );
+        write_skill(
+            &dir,
+            "fix-optional",
+            "---\nname: Fixture Optional\ndescription: Optional test fixture\nmandatory: false\n---\n\nOptional fixture content.\n",
+        );
+        OVERRIDE.with(|c| *c.borrow_mut() = Some(dir.clone()));
+        FixtureSkillsDir { dir }
+    }
+
+    fn write_skill(root: &Path, id: &str, raw: &str) {
+        let d = root.join(id);
+        std::fs::create_dir_all(&d).expect("fixture mkdir failed");
+        std::fs::write(d.join("SKILL.md"), raw).expect("fixture SKILL.md write failed");
+    }
 }
 
 /// Allocate a fresh scratch directory for one skill-draft agent-assist
@@ -1142,5 +1207,35 @@ mod tests {
             "a freshly allocated draft dir must start empty"
         );
         std::fs::remove_dir_all(&dir).expect("cleanup failed");
+    }
+
+    /// While a `fixture_skills_dir` guard is alive, `list_builtin()` must read
+    /// ONLY the fixture dir — the shipped `skills/` folder must not leak in.
+    #[test]
+    fn list_builtin_reads_from_fixture_override() {
+        let _fx = super::test_support::fixture_skills_dir("override-basic");
+        let ids: Vec<String> = super::list_builtin().into_iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            vec!["fix-mandatory".to_string(), "fix-optional".to_string()],
+            "override dir must fully replace the shipped skills folder"
+        );
+    }
+
+    /// Dropping the guard must restore the real (shipped) skills folder.
+    #[test]
+    fn fixture_override_is_restored_on_drop() {
+        {
+            let _fx = super::test_support::fixture_skills_dir("override-drop");
+            assert!(super::list_builtin()
+                .iter()
+                .any(|s| s.id == "fix-mandatory"));
+        }
+        assert!(
+            !super::list_builtin()
+                .iter()
+                .any(|s| s.id == "fix-mandatory"),
+            "after Drop, list_builtin must be back on the real skills dir"
+        );
     }
 }
