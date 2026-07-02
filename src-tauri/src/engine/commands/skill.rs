@@ -132,10 +132,11 @@ mod tests {
 
     #[tokio::test]
     async fn save_rejects_editing_builtin() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-save-rejects-builtin");
         let state = AppState::for_tests().await;
         let builtin_id = repo::skill::list_builtin()
             .first()
-            .expect("at least the checked-in example skill must exist")
+            .expect("fixture skills dir must yield at least one builtin")
             .id
             .clone();
 
@@ -149,10 +150,11 @@ mod tests {
 
     #[tokio::test]
     async fn delete_rejects_builtin_but_allows_custom() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-delete-rejects-builtin");
         let state = AppState::for_tests().await;
         let builtin_id = repo::skill::list_builtin()
             .first()
-            .expect("at least the checked-in example skill must exist")
+            .expect("fixture skills dir must yield at least one builtin")
             .id
             .clone();
         let created = save(
@@ -172,6 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_includes_builtin_and_custom() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-list-builtin-custom");
         let state = AppState::for_tests().await;
         save(
             &state,
@@ -184,15 +187,15 @@ mod tests {
         let arr = listed.as_array().unwrap();
         assert!(
             arr.iter()
-                .any(|s| s["kind"] == "builtin" && s["id"] == "example"),
-            "builtin example skill must appear in list()"
+                .any(|s| s["kind"] == "builtin" && s["id"] == "fix-mandatory"),
+            "builtin fixture skill must appear in list()"
         );
         assert!(
             arr.iter()
                 .any(|s| s["kind"] == "custom" && s["name"] == "Custom"),
             "custom skill must appear in list()"
         );
-        let builtin_item = arr.iter().find(|s| s["id"] == "example").unwrap();
+        let builtin_item = arr.iter().find(|s| s["id"] == "fix-mandatory").unwrap();
         assert!(
             builtin_item.get("attachedTo").is_none(),
             "builtin items must not carry an attachedTo annotation"
@@ -201,20 +204,21 @@ mod tests {
 
     #[tokio::test]
     async fn list_reports_mandatory_flag_for_both_builtin_fixtures() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-list-mandatory-flags");
         let state = AppState::for_tests().await;
         let listed = list(&state, Value::Null).await.expect("list failed");
         let arr = listed.as_array().unwrap();
 
         let mandatory_item = arr
             .iter()
-            .find(|s| s["id"] == "example")
-            .expect("mandatory example fixture must be present");
+            .find(|s| s["id"] == "fix-mandatory")
+            .expect("mandatory fixture must be present");
         assert_eq!(mandatory_item["mandatory"], true);
 
         let optional_item = arr
             .iter()
-            .find(|s| s["id"] == "example-optional")
-            .expect("optional example fixture must be present");
+            .find(|s| s["id"] == "fix-optional")
+            .expect("optional fixture must be present");
         assert_eq!(optional_item["mandatory"], false);
 
         // Custom skills always report mandatory: true (nothing to opt into —
