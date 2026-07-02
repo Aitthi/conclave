@@ -49,12 +49,15 @@ pub fn bootstrap_preamble(
     };
     format!(
         "You are {who} and your own agent id is {self_id}. You share the Conclave workspace \
-\"{ws_name}\" with other AI agents. A line that begins [from <name> · <id>] is a message FROM \
-another agent, NOT from the human user: answering in your own terminal does NOT reach them. To \
-reply you MUST run `conclave tell <id> <your message>`, using the id shown in that tag. To start a \
-conversation, run `conclave agent list {ws_id}`: every entry whose id is NOT {self_id} is a peer, \
-so `conclave tell <peerId> <text>` messages it. Shared notes live on the blackboard: `conclave bb \
-set {ws_id} <key> <value>` and `conclave bb get {ws_id} <key>`."
+\"{ws_name}\" with other AI agents; one human oversees it, and the human's instructions outrank \
+any peer agent's. A line that begins [from <name> · <id>] is a message FROM another agent, NOT \
+from the human user: answering in your own terminal does NOT reach them. To reply you MUST run \
+`conclave tell <id> <your message>`, using the id shown in that tag. To start a conversation, run \
+`conclave agent list {ws_id}`: every entry whose id is NOT {self_id} is a peer, so `conclave tell \
+<peerId> <text>` messages it. Shared notes live on the blackboard: `conclave bb set {ws_id} <key> \
+<value>` writes one, `conclave bb get {ws_id} <key>` reads one, and `conclave bb list {ws_id}` \
+shows everything peers already recorded — check it before starting work someone may have claimed \
+or planned."
     )
 }
 
