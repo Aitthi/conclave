@@ -937,49 +937,37 @@ mod tests {
         assert!(super::read_builtin_skills_from(&dir).is_empty());
     }
 
-    /// The real, checked-in `src-tauri/skills/example/` fixture must be
-    /// discoverable via the production `list_builtin()` entry point in a
-    /// `cargo test` run (its CARGO_MANIFEST_DIR fallback resolves to
-    /// `src-tauri/skills` regardless of CWD).
-    #[test]
-    fn list_builtin_finds_the_checked_in_example_skill() {
-        let skills = super::list_builtin();
-        let example = skills
-            .iter()
-            .find(|s| s.id == "example")
-            .expect("the checked-in example skill must be discoverable");
-        assert_eq!(example.name, "Example Skill");
-        assert_eq!(example.kind, "builtin");
-    }
-
     #[test]
     fn effective_builtin_skills_always_includes_mandatory() {
+        let _fx = super::test_support::fixture_skills_dir("effective-mandatory");
         let ids = super::effective_builtin_skills(&[])
             .into_iter()
             .map(|s| s.id)
             .collect::<Vec<_>>();
         assert!(
-            ids.contains(&"example".to_string()),
+            ids.contains(&"fix-mandatory".to_string()),
             "mandatory builtin must be present even with zero selections"
         );
         assert!(
-            !ids.contains(&"example-optional".to_string()),
+            !ids.contains(&"fix-optional".to_string()),
             "optional builtin must be absent when not selected"
         );
     }
 
     #[test]
     fn effective_builtin_skills_includes_selected_optional() {
-        let ids = super::effective_builtin_skills(&["example-optional".to_string()])
+        let _fx = super::test_support::fixture_skills_dir("effective-selected");
+        let ids = super::effective_builtin_skills(&["fix-optional".to_string()])
             .into_iter()
             .map(|s| s.id)
             .collect::<Vec<_>>();
-        assert!(ids.contains(&"example".to_string()));
-        assert!(ids.contains(&"example-optional".to_string()));
+        assert!(ids.contains(&"fix-mandatory".to_string()));
+        assert!(ids.contains(&"fix-optional".to_string()));
     }
 
     #[test]
     fn effective_builtin_skills_ignores_unknown_selected_id() {
+        let _fx = super::test_support::fixture_skills_dir("effective-unknown");
         let ids = super::effective_builtin_skills(&["no-such-skill".to_string()])
             .into_iter()
             .map(|s| s.id)
@@ -1061,29 +1049,28 @@ mod tests {
     }
 
     #[test]
-    fn list_builtin_reports_mandatory_flags_for_both_fixtures() {
+    fn list_builtin_reports_mandatory_flags() {
+        let _fx = super::test_support::fixture_skills_dir("mandatory-flags");
         let skills = super::list_builtin();
         let mandatory = skills
             .iter()
-            .find(|s| s.id == "example")
-            .expect("example fixture must exist");
+            .find(|s| s.id == "fix-mandatory")
+            .expect("fix-mandatory fixture must exist");
         assert!(
             mandatory.mandatory,
-            "example/SKILL.md has no mandatory: line, must default true"
+            "fix-mandatory has no mandatory: line, must default true"
         );
 
         let optional = skills
             .iter()
-            .find(|s| s.id == "example-optional")
-            .expect("example-optional fixture must exist");
-        assert!(
-            !optional.mandatory,
-            "example-optional/SKILL.md sets mandatory: false"
-        );
+            .find(|s| s.id == "fix-optional")
+            .expect("fix-optional fixture must exist");
+        assert!(!optional.mandatory, "fix-optional sets mandatory: false");
     }
 
     #[tokio::test]
     async fn content_for_agent_orders_builtin_then_custom_with_headers() {
+        let _fx = super::test_support::fixture_skills_dir("content-order");
         let pool = connect_in_memory().await;
         let def_id = fixture_agent_def(&pool).await;
         let custom = super::create(&pool, "Extra", None, "Do X")
@@ -1099,12 +1086,12 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec!["example".to_string(), custom.id.clone()],
-            "builtin (the checked-in example) must come first"
+            vec!["fix-mandatory".to_string(), custom.id.clone()],
+            "builtin must come first"
         );
         let base_pos = body
-            .find("## Skill: Example Skill")
-            .expect("Example header missing");
+            .find("## Skill: Fixture Mandatory")
+            .expect("builtin header missing");
         let extra_pos = body.find("## Skill: Extra").expect("Extra header missing");
         assert!(
             base_pos < extra_pos,
@@ -1115,17 +1102,19 @@ mod tests {
 
     #[tokio::test]
     async fn content_for_agent_still_includes_builtin_when_nothing_custom_attached() {
+        let _fx = super::test_support::fixture_skills_dir("content-builtin-only");
         let pool = connect_in_memory().await;
         let def_id = fixture_agent_def(&pool).await;
         let (body, ids) = super::content_for_agent(&pool, &def_id)
             .await
             .expect("query failed");
-        assert_eq!(ids, vec!["example".to_string()]);
-        assert!(body.contains("## Skill: Example Skill"));
+        assert_eq!(ids, vec!["fix-mandatory".to_string()]);
+        assert!(body.contains("## Skill: Fixture Mandatory"));
     }
 
     #[tokio::test]
     async fn content_for_agent_includes_optional_builtin_only_when_selected() {
+        let _fx = super::test_support::fixture_skills_dir("content-optional");
         let pool = connect_in_memory().await;
         let def_id = fixture_agent_def(&pool).await;
 
@@ -1133,13 +1122,12 @@ mod tests {
         let (_, ids) = super::content_for_agent(&pool, &def_id)
             .await
             .expect("query failed");
-        assert!(!ids.contains(&"example-optional".to_string()));
+        assert!(!ids.contains(&"fix-optional".to_string()));
 
-        // Select it via the agent_definition column directly (Task 3's
-        // setter isn't this task's concern — this test only proves
-        // content_for_agent honors whatever is stored there).
+        // Select it via the agent_definition column directly — this test only
+        // proves content_for_agent honors whatever is stored there.
         sqlx::query("UPDATE agent_definition SET selected_builtin_skill_ids = ? WHERE id = ?")
-            .bind(serde_json::json!(["example-optional"]).to_string())
+            .bind(serde_json::json!(["fix-optional"]).to_string())
             .bind(&def_id)
             .execute(&pool)
             .await
@@ -1148,8 +1136,8 @@ mod tests {
         let (body, ids) = super::content_for_agent(&pool, &def_id)
             .await
             .expect("query failed");
-        assert!(ids.contains(&"example-optional".to_string()));
-        assert!(body.contains("## Skill: Example Optional Skill"));
+        assert!(ids.contains(&"fix-optional".to_string()));
+        assert!(body.contains("## Skill: Fixture Optional"));
     }
 
     #[test]
