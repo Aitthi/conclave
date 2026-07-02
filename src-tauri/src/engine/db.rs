@@ -104,6 +104,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 5 {
+        sqlx::raw_sql(include_str!("migrations/0005_drop_skill_kind.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 5;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -150,7 +159,7 @@ mod tests {
         assert_eq!(count, 19, "expected 19 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 4.
+    /// Running migrate twice must not error and must leave user_version == 5.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -183,7 +192,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 4, "user_version should be 4");
+        assert_eq!(version, 5, "user_version should be 5");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -258,25 +267,21 @@ mod tests {
         assert_eq!(binds.len(), 1, "one bind for the id filter");
     }
 
-    /// Migration 0004 adds `skill.kind`/`skill.content` and
-    /// `session.launched_skill_ids`, and bumps user_version to 4.
+    /// Migration 0004 added `skill.content` and `session.launched_skill_ids`
+    /// (kind was later dropped by migration 0005 — see the next test).
     #[tokio::test]
     async fn migrate_adds_skill_system_columns() {
         let pool = connect_in_memory().await;
 
-        // A plain INSERT into skill must now require `kind` (NOT NULL, no
-        // default) to succeed only when kind is supplied; content defaults to ''.
-        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk1', 'Test', 'builtin')")
+        sqlx::query("INSERT INTO skill (id, name) VALUES ('sk1', 'Test')")
             .execute(&pool)
             .await
-            .expect("insert with kind should succeed");
+            .expect("insert should succeed");
 
-        let (kind, content): (String, String) =
-            sqlx::query_as("SELECT kind, content FROM skill WHERE id = 'sk1'")
-                .fetch_one(&pool)
-                .await
-                .expect("select should succeed");
-        assert_eq!(kind, "builtin");
+        let content: String = sqlx::query_scalar("SELECT content FROM skill WHERE id = 'sk1'")
+            .fetch_one(&pool)
+            .await
+            .expect("select should succeed");
         assert_eq!(content, "");
 
         // session.launched_skill_ids exists and defaults to NULL.
@@ -312,6 +317,29 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
+    }
+
+    /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
+    /// from a bundled folder, never the DB (see ADR 0002). Every `skill` row
+    /// after this migration is, structurally, a custom skill.
+    #[tokio::test]
+    async fn migrate_drops_skill_kind_column() {
+        let pool = connect_in_memory().await;
+
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('skill')")
+            .fetch_all(&pool)
+            .await
+            .expect("pragma_table_info query failed");
+        assert!(
+            !columns.iter().any(|c| c == "kind"),
+            "skill.kind must not exist after migration: {columns:?}"
+        );
+
+        // An insert with no `kind` column reference must succeed.
+        sqlx::query("INSERT INTO skill (id, name, content) VALUES ('sk-no-kind', 'X', 'body')")
+            .execute(&pool)
+            .await
+            .expect("insert without kind should succeed");
     }
 }
