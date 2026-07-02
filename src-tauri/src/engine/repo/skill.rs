@@ -235,6 +235,131 @@ pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, 
     Ok(rows.into_iter().collect())
 }
 
+/// Every skill shipped with the app (see
+/// docs/adr/0002-builtin-skills-from-bundled-folder.md). Sync and infallible
+/// — a missing/unreadable directory just yields zero skills rather than
+/// propagating an error, so one bad file can never take down a `cli` agent's
+/// launch (which depends on `content_for_agent` succeeding).
+pub fn list_builtin() -> Vec<SkillRow> {
+    read_builtin_skills_from(&skills_dir())
+}
+
+/// Parse every skill in `dir` — each direct subdirectory containing a
+/// `SKILL.md` file becomes one builtin `SkillRow` (`id` = the subdirectory's
+/// name). A subdirectory with no `SKILL.md`, or one with unparsable
+/// frontmatter, is silently skipped rather than failing the whole read.
+fn read_builtin_skills_from(dir: &std::path::Path) -> Vec<SkillRow> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read_to_string(path.join("SKILL.md")) else {
+            continue;
+        };
+        let Some((name, description, content)) = parse_skill_md(&raw) else {
+            continue;
+        };
+        out.push(SkillRow {
+            id,
+            name,
+            description,
+            content,
+            kind: "builtin".to_owned(),
+            icon: None,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Parse a `SKILL.md`'s `---`-delimited frontmatter (flat `key: value` lines
+/// — only `name`/`description` recognized) and body. Hand-rolled rather than
+/// pulling in a YAML crate: the format is two flat string fields, not
+/// general YAML (see ADR 0002). Returns `None` (skip this skill) if the file
+/// doesn't start with a frontmatter block or `name` is missing/blank.
+fn parse_skill_md(raw: &str) -> Option<(String, Option<String>, String)> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let rest = raw.strip_prefix("---")?;
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))?;
+    let end = rest.find("\n---")?;
+    let frontmatter = &rest[..end];
+    let after_closing = &rest[end + 4..];
+    // Skip the closing `---` line's own terminator plus any further blank
+    // separator line(s) before the body content starts.
+    let body = after_closing.trim_start_matches(['\r', '\n']);
+
+    let mut name = None;
+    let mut description = None;
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("name:") {
+            name = Some(v.trim().to_owned());
+        } else if let Some(v) = line.strip_prefix("description:") {
+            description = Some(v.trim().to_owned());
+        }
+    }
+    let name = name.filter(|s| !s.is_empty())?;
+    Some((
+        name,
+        description.filter(|s| !s.is_empty()),
+        body.trim_end().to_owned(),
+    ))
+}
+
+/// Resolve the real builtin-skills directory: the bundled `Resources/skills`
+/// sibling of the running executable inside a packaged `.app` (mirrors
+/// `agentctx::ensure_conclave_shim`'s exe-relative resolution for
+/// `conclave-cli`), falling back to the source tree's `skills/` directory
+/// (`CARGO_MANIFEST_DIR`, a compile-time constant) for a `cargo
+/// run`/`cargo test`/`tauri dev` build, none of which have a `.app` bundle
+/// structure.
+fn skills_dir() -> std::path::PathBuf {
+    if let Some(bundled) = bundled_skills_dir() {
+        if bundled.is_dir() {
+            return bundled;
+        }
+    }
+    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/skills"))
+}
+
+fn bundled_skills_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // macOS .app layout: Contents/MacOS/<exe> ; Contents/Resources/<...>
+    Some(exe.parent()?.parent()?.join("Resources").join("skills"))
+}
+
+/// Build the concatenated skill body for one agent definition's `cli` launch,
+/// plus the ordered list of skill ids used (for `session.launched_skill_ids`).
+/// Builtin skills come first (fixed `id` order, via `list_builtin`), then
+/// custom skills by `sort_order` (via `attached_to_agent`). Each skill renders
+/// as a `## Skill: {name}` header followed by its `content`, sections
+/// separated by a blank line.
+pub async fn content_for_agent(
+    pool: &SqlitePool,
+    agent_def_id: &str,
+) -> sqlx::Result<(String, Vec<String>)> {
+    let builtins = list_builtin();
+    let customs = attached_to_agent(pool, agent_def_id).await?;
+
+    let mut ids = Vec::with_capacity(builtins.len() + customs.len());
+    let mut sections = Vec::with_capacity(builtins.len() + customs.len());
+    for s in builtins.iter().chain(customs.iter()) {
+        ids.push(s.id.clone());
+        sections.push(format!("## Skill: {}\n\n{}", s.name, s.content));
+    }
+    Ok((sections.join("\n\n"), ids))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::engine::db::connect_in_memory;
@@ -496,5 +621,136 @@ mod tests {
                 .expect("exists check failed"),
             "agent_definition itself must be untouched"
         );
+    }
+
+    #[test]
+    fn parse_skill_md_extracts_frontmatter_and_body() {
+        let raw = "---\nname: Reviewer\ndescription: Reviews diffs\n---\n\nAlways check X.\n";
+        let (name, description, content) = super::parse_skill_md(raw).expect("should parse");
+        assert_eq!(name, "Reviewer");
+        assert_eq!(description.as_deref(), Some("Reviews diffs"));
+        assert_eq!(content, "Always check X.");
+    }
+
+    #[test]
+    fn parse_skill_md_description_optional() {
+        let raw = "---\nname: Bare\n---\n\nBody only.\n";
+        let (name, description, content) = super::parse_skill_md(raw).expect("should parse");
+        assert_eq!(name, "Bare");
+        assert!(description.is_none());
+        assert_eq!(content, "Body only.");
+    }
+
+    #[test]
+    fn parse_skill_md_rejects_missing_frontmatter() {
+        assert!(super::parse_skill_md("Just a body, no frontmatter.").is_none());
+    }
+
+    #[test]
+    fn parse_skill_md_rejects_missing_name() {
+        let raw = "---\ndescription: no name here\n---\n\nBody.\n";
+        assert!(super::parse_skill_md(raw).is_none());
+    }
+
+    /// Real filesystem test (no tempfile crate in this codebase — mirrors
+    /// `agentctx.rs`'s existing sidecar test pattern of writing to a real
+    /// path under `std::env::temp_dir()` and cleaning up manually).
+    #[test]
+    fn read_builtin_skills_from_parses_one_skill_per_subdir_skips_bad_ones() {
+        let dir = std::env::temp_dir().join("conclave-skill-test-read-builtin-skills");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("good")).expect("mkdir failed");
+        std::fs::write(
+            dir.join("good").join("SKILL.md"),
+            "---\nname: Good One\ndescription: Works\n---\n\nDo the thing.\n",
+        )
+        .expect("write failed");
+        // A subdir with no SKILL.md at all must be silently skipped.
+        std::fs::create_dir_all(dir.join("empty-dir")).expect("mkdir failed");
+        // A subdir with unparsable frontmatter must be silently skipped.
+        std::fs::create_dir_all(dir.join("bad")).expect("mkdir failed");
+        std::fs::write(dir.join("bad").join("SKILL.md"), "no frontmatter here")
+            .expect("write failed");
+        // A plain FILE directly under dir (not a subdirectory) must be ignored.
+        std::fs::write(dir.join("stray.txt"), "ignore me").expect("write failed");
+
+        let skills = super::read_builtin_skills_from(&dir);
+
+        assert_eq!(
+            skills.len(),
+            1,
+            "only the well-formed 'good' skill should survive"
+        );
+        assert_eq!(skills[0].id, "good");
+        assert_eq!(skills[0].name, "Good One");
+        assert_eq!(skills[0].description.as_deref(), Some("Works"));
+        assert_eq!(skills[0].content, "Do the thing.");
+        assert_eq!(skills[0].kind, "builtin");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup failed");
+    }
+
+    #[test]
+    fn read_builtin_skills_from_missing_dir_returns_empty() {
+        let dir = std::env::temp_dir().join("conclave-skill-test-does-not-exist-xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(super::read_builtin_skills_from(&dir).is_empty());
+    }
+
+    /// The real, checked-in `src-tauri/skills/example/` fixture must be
+    /// discoverable via the production `list_builtin()` entry point in a
+    /// `cargo test` run (its CARGO_MANIFEST_DIR fallback resolves to
+    /// `src-tauri/skills` regardless of CWD).
+    #[test]
+    fn list_builtin_finds_the_checked_in_example_skill() {
+        let skills = super::list_builtin();
+        let example = skills
+            .iter()
+            .find(|s| s.id == "example")
+            .expect("the checked-in example skill must be discoverable");
+        assert_eq!(example.name, "Example Skill");
+        assert_eq!(example.kind, "builtin");
+    }
+
+    #[tokio::test]
+    async fn content_for_agent_orders_builtin_then_custom_with_headers() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let custom = super::create(&pool, "Extra", None, "Do X")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&custom.id))
+            .await
+            .expect("set failed");
+
+        let (body, ids) = super::content_for_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+
+        assert_eq!(
+            ids,
+            vec!["example".to_string(), custom.id.clone()],
+            "builtin (the checked-in example) must come first"
+        );
+        let base_pos = body
+            .find("## Skill: Example Skill")
+            .expect("Example header missing");
+        let extra_pos = body.find("## Skill: Extra").expect("Extra header missing");
+        assert!(
+            base_pos < extra_pos,
+            "builtin section must precede custom section"
+        );
+        assert!(body.contains("Do X"));
+    }
+
+    #[tokio::test]
+    async fn content_for_agent_still_includes_builtin_when_nothing_custom_attached() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+        let (body, ids) = super::content_for_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert_eq!(ids, vec!["example".to_string()]);
+        assert!(body.contains("## Skill: Example Skill"));
     }
 }
