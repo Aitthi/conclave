@@ -262,9 +262,16 @@ fn read_builtin_skills_from(dir: &std::path::Path) -> Vec<SkillRow> {
             continue;
         };
         let Ok(raw) = std::fs::read_to_string(path.join("SKILL.md")) else {
+            #[cfg(debug_assertions)]
+            eprintln!("[skill] {}: no readable SKILL.md, skipping", path.display());
             continue;
         };
         let Some((name, description, content)) = parse_skill_md(&raw) else {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[skill] {}: unparsable SKILL.md frontmatter, skipping",
+                path.display()
+            );
             continue;
         };
         out.push(SkillRow {
