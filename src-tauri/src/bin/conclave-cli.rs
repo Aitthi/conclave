@@ -14,10 +14,39 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+/// Connect retry budget: the app binds its UDS listener asynchronously during
+/// startup (and briefly unlinks/rebinds the socket file on restart), so a
+/// single-shot connect right after launch can race a listener that hasn't
+/// bound yet and see ECONNREFUSED/ENOENT even though the app is genuinely
+/// coming up. Spreading a few attempts over ~2s absorbs that race without
+/// making a real "app isn't running" error wait any longer than necessary.
+const CONNECT_RETRY_ATTEMPTS: u32 = 8;
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// Connect to the UDS socket at `path`, retrying on failure for a short,
+/// bounded window (see [`CONNECT_RETRY_ATTEMPTS`]). Returns the last error if
+/// every attempt fails.
+async fn connect_with_retry(path: &std::path::Path) -> std::io::Result<UnixStream> {
+    let mut last_err = None;
+    for attempt in 0..CONNECT_RETRY_ATTEMPTS {
+        match UnixStream::connect(path).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < CONNECT_RETRY_ATTEMPTS {
+                    tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    Err(last_err.expect("loop runs at least once"))
+}
 
 /// Resolve the socket path (`~/Library/Application Support/Conclave/conclave.sock`).
 ///
@@ -175,8 +204,9 @@ async fn main() -> ExitCode {
         }
     };
 
-    // Connect to the running Conclave app via its Unix-domain socket.
-    let stream = match UnixStream::connect(&path).await {
+    // Connect to the running Conclave app via its Unix-domain socket, with a
+    // short retry window to absorb the app's async startup/restart race.
+    let stream = match connect_with_retry(&path).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
