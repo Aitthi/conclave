@@ -24,6 +24,12 @@ pub struct SkillRow {
     pub description: Option<String>,
     pub content: String,
     pub kind: String,
+    /// `true` for every custom (DB) skill and every mandatory builtin;
+    /// `false` only for a builtin skill whose SKILL.md sets
+    /// `mandatory: false` (see ADR 0003). Custom skills are always
+    /// attach/detach-able already, so this is always `true` for them —
+    /// the field only matters when `kind == "builtin"`.
+    pub mandatory: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }
@@ -48,6 +54,7 @@ impl From<CustomSkillDbRow> for SkillRow {
             description: r.description,
             content: r.content,
             kind: "custom".to_owned(),
+            mandatory: true,
             icon: r.icon,
         }
     }
@@ -112,6 +119,7 @@ pub async fn create(
         description: description.map(str::to_owned),
         content: content.to_owned(),
         kind: "custom".to_owned(),
+        mandatory: true,
         icon: None,
     })
 }
@@ -244,6 +252,22 @@ pub fn list_builtin() -> Vec<SkillRow> {
     read_builtin_skills_from(&skills_dir())
 }
 
+/// The builtin skills that actually apply to an agent definition: every
+/// mandatory builtin (always), plus every optional builtin (`mandatory:
+/// false`) whose id appears in `selected_optional_ids`. Preserves
+/// `list_builtin()`'s id-ascending order. Both `content_for_agent` (what
+/// gets injected at launch) and `commands::agent::list`'s `skillIds`
+/// annotation (what the Roster compares against the launch snapshot) MUST
+/// go through this one function — see ADR 0003's rationale (a v1 final
+/// review caught a real bug from two call sites computing "the agent's
+/// builtin ids" via separate, silently-drifting logic).
+pub fn effective_builtin_skills(selected_optional_ids: &[String]) -> Vec<SkillRow> {
+    list_builtin()
+        .into_iter()
+        .filter(|s| s.mandatory || selected_optional_ids.iter().any(|id| id == &s.id))
+        .collect()
+}
+
 /// Parse every skill in `dir` — each direct subdirectory containing a
 /// `SKILL.md` file becomes one builtin `SkillRow` (`id` = the subdirectory's
 /// name). A subdirectory with no `SKILL.md`, or one with unparsable
@@ -266,7 +290,7 @@ fn read_builtin_skills_from(dir: &std::path::Path) -> Vec<SkillRow> {
             eprintln!("[skill] {}: no readable SKILL.md, skipping", path.display());
             continue;
         };
-        let Some((name, description, content)) = parse_skill_md(&raw) else {
+        let Some((name, description, content, mandatory)) = parse_skill_md(&raw) else {
             #[cfg(debug_assertions)]
             eprintln!(
                 "[skill] {}: unparsable SKILL.md frontmatter, skipping",
@@ -280,6 +304,7 @@ fn read_builtin_skills_from(dir: &std::path::Path) -> Vec<SkillRow> {
             description,
             content,
             kind: "builtin".to_owned(),
+            mandatory,
             icon: None,
         });
     }
@@ -288,11 +313,15 @@ fn read_builtin_skills_from(dir: &std::path::Path) -> Vec<SkillRow> {
 }
 
 /// Parse a `SKILL.md`'s `---`-delimited frontmatter (flat `key: value` lines
-/// — only `name`/`description` recognized) and body. Hand-rolled rather than
-/// pulling in a YAML crate: the format is two flat string fields, not
-/// general YAML (see ADR 0002). Returns `None` (skip this skill) if the file
-/// doesn't start with a frontmatter block or `name` is missing/blank.
-fn parse_skill_md(raw: &str) -> Option<(String, Option<String>, String)> {
+/// — `name`/`description`/`mandatory` recognized) and body. Hand-rolled
+/// rather than pulling in a YAML crate: the format is a handful of flat
+/// string/bool fields, not general YAML (see ADR 0002). Returns `None` (skip
+/// this skill) if the file doesn't start with a frontmatter block or `name`
+/// is missing/blank. The fourth element is `mandatory`, defaulting to `true`
+/// when the field is absent OR its value isn't recognized as `true`/`false`
+/// (case-insensitive) — an author typo must fail safe to mandatory, never
+/// silently to optional (see ADR 0003).
+fn parse_skill_md(raw: &str) -> Option<(String, Option<String>, String, bool)> {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let rest = raw.strip_prefix("---")?;
     let rest = rest
@@ -307,12 +336,15 @@ fn parse_skill_md(raw: &str) -> Option<(String, Option<String>, String)> {
 
     let mut name = None;
     let mut description = None;
+    let mut mandatory = true;
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(v) = line.strip_prefix("name:") {
             name = Some(v.trim().to_owned());
         } else if let Some(v) = line.strip_prefix("description:") {
             description = Some(v.trim().to_owned());
+        } else if let Some(v) = line.strip_prefix("mandatory:") {
+            mandatory = !v.trim().eq_ignore_ascii_case("false");
         }
     }
     let name = name.filter(|s| !s.is_empty())?;
@@ -320,6 +352,7 @@ fn parse_skill_md(raw: &str) -> Option<(String, Option<String>, String)> {
         name,
         description.filter(|s| !s.is_empty()),
         body.trim_end().to_owned(),
+        mandatory,
     ))
 }
 
@@ -355,7 +388,12 @@ pub async fn content_for_agent(
     pool: &SqlitePool,
     agent_def_id: &str,
 ) -> sqlx::Result<(String, Vec<String>)> {
-    let builtins = list_builtin();
+    let selected_optional: Vec<String> = super::agent_definition::get(pool, agent_def_id)
+        .await?
+        .and_then(|def| def.selected_builtin_skill_ids)
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default();
+    let builtins = effective_builtin_skills(&selected_optional);
     let customs = attached_to_agent(pool, agent_def_id).await?;
 
     let mut ids = Vec::with_capacity(builtins.len() + customs.len());
@@ -633,19 +671,66 @@ mod tests {
     #[test]
     fn parse_skill_md_extracts_frontmatter_and_body() {
         let raw = "---\nname: Reviewer\ndescription: Reviews diffs\n---\n\nAlways check X.\n";
-        let (name, description, content) = super::parse_skill_md(raw).expect("should parse");
+        let (name, description, content, mandatory) =
+            super::parse_skill_md(raw).expect("should parse");
         assert_eq!(name, "Reviewer");
         assert_eq!(description.as_deref(), Some("Reviews diffs"));
         assert_eq!(content, "Always check X.");
+        assert!(
+            mandatory,
+            "no mandatory: line present, must default to true"
+        );
     }
 
     #[test]
     fn parse_skill_md_description_optional() {
         let raw = "---\nname: Bare\n---\n\nBody only.\n";
-        let (name, description, content) = super::parse_skill_md(raw).expect("should parse");
+        let (name, description, content, mandatory) =
+            super::parse_skill_md(raw).expect("should parse");
         assert_eq!(name, "Bare");
         assert!(description.is_none());
         assert_eq!(content, "Body only.");
+        assert!(
+            mandatory,
+            "no mandatory: line present, must default to true"
+        );
+    }
+
+    #[test]
+    fn parse_skill_md_mandatory_defaults_to_true_when_absent() {
+        let raw = "---\nname: Bare\n---\n\nBody.\n";
+        let mandatory = super::parse_skill_md(raw).expect("should parse").3;
+        assert!(mandatory, "omitted `mandatory:` must default to true");
+    }
+
+    #[test]
+    fn parse_skill_md_mandatory_false_is_respected() {
+        let raw = "---\nname: Opt\nmandatory: false\n---\n\nBody.\n";
+        let mandatory = super::parse_skill_md(raw).expect("should parse").3;
+        assert!(!mandatory);
+    }
+
+    #[test]
+    fn parse_skill_md_mandatory_true_is_respected() {
+        let raw = "---\nname: Man\nmandatory: true\n---\n\nBody.\n";
+        let mandatory = super::parse_skill_md(raw).expect("should parse").3;
+        assert!(mandatory);
+    }
+
+    #[test]
+    fn parse_skill_md_mandatory_is_case_insensitive() {
+        let raw = "---\nname: Opt\nmandatory: FALSE\n---\n\nBody.\n";
+        let mandatory = super::parse_skill_md(raw).expect("should parse").3;
+        assert!(!mandatory);
+    }
+
+    #[test]
+    fn parse_skill_md_mandatory_unrecognized_value_defaults_to_true() {
+        // An author typo ("nope") must fail safe to the mandatory default,
+        // not silently become optional.
+        let raw = "---\nname: Weird\nmandatory: nope\n---\n\nBody.\n";
+        let mandatory = super::parse_skill_md(raw).expect("should parse").3;
+        assert!(mandatory);
     }
 
     #[test]
@@ -719,6 +804,63 @@ mod tests {
         assert_eq!(example.kind, "builtin");
     }
 
+    #[test]
+    fn effective_builtin_skills_always_includes_mandatory() {
+        let ids = super::effective_builtin_skills(&[])
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        assert!(
+            ids.contains(&"example".to_string()),
+            "mandatory builtin must be present even with zero selections"
+        );
+        assert!(
+            !ids.contains(&"example-optional".to_string()),
+            "optional builtin must be absent when not selected"
+        );
+    }
+
+    #[test]
+    fn effective_builtin_skills_includes_selected_optional() {
+        let ids = super::effective_builtin_skills(&["example-optional".to_string()])
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"example".to_string()));
+        assert!(ids.contains(&"example-optional".to_string()));
+    }
+
+    #[test]
+    fn effective_builtin_skills_ignores_unknown_selected_id() {
+        let ids = super::effective_builtin_skills(&["no-such-skill".to_string()])
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        assert!(!ids.contains(&"no-such-skill".to_string()));
+    }
+
+    #[test]
+    fn list_builtin_reports_mandatory_flags_for_both_fixtures() {
+        let skills = super::list_builtin();
+        let mandatory = skills
+            .iter()
+            .find(|s| s.id == "example")
+            .expect("example fixture must exist");
+        assert!(
+            mandatory.mandatory,
+            "example/SKILL.md has no mandatory: line, must default true"
+        );
+
+        let optional = skills
+            .iter()
+            .find(|s| s.id == "example-optional")
+            .expect("example-optional fixture must exist");
+        assert!(
+            !optional.mandatory,
+            "example-optional/SKILL.md sets mandatory: false"
+        );
+    }
+
     #[tokio::test]
     async fn content_for_agent_orders_builtin_then_custom_with_headers() {
         let pool = connect_in_memory().await;
@@ -759,5 +901,33 @@ mod tests {
             .expect("query failed");
         assert_eq!(ids, vec!["example".to_string()]);
         assert!(body.contains("## Skill: Example Skill"));
+    }
+
+    #[tokio::test]
+    async fn content_for_agent_includes_optional_builtin_only_when_selected() {
+        let pool = connect_in_memory().await;
+        let def_id = fixture_agent_def(&pool).await;
+
+        // Nothing selected: optional builtin absent.
+        let (_, ids) = super::content_for_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert!(!ids.contains(&"example-optional".to_string()));
+
+        // Select it via the agent_definition column directly (Task 3's
+        // setter isn't this task's concern — this test only proves
+        // content_for_agent honors whatever is stored there).
+        sqlx::query("UPDATE agent_definition SET selected_builtin_skill_ids = ? WHERE id = ?")
+            .bind(serde_json::json!(["example-optional"]).to_string())
+            .bind(&def_id)
+            .execute(&pool)
+            .await
+            .expect("update failed");
+
+        let (body, ids) = super::content_for_agent(&pool, &def_id)
+            .await
+            .expect("query failed");
+        assert!(ids.contains(&"example-optional".to_string()));
+        assert!(body.contains("## Skill: Example Optional Skill"));
     }
 }
