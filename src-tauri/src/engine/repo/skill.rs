@@ -9,11 +9,12 @@ use super::cb_err;
 use chain_builder::{Order, QueryBuilder, Sqlite, Value as Bind};
 use serde::Serialize;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Decoded row from the `skill` table. `kind` is `"builtin"` or `"custom"`
-/// (DB CHECK enforces this). `content` is always present (defaults to `""`
-/// at the schema level, never NULL).
+/// A skill as seen by callers — either a builtin (from a bundled folder, see
+/// `list_builtin`) or a custom one (a DB row). `kind` distinguishes them for
+/// JSON output; nothing about this struct's SHAPE differs by kind.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillRow {
@@ -27,47 +28,59 @@ pub struct SkillRow {
     pub icon: Option<String>,
 }
 
-const COLS: [&str; 6] = ["id", "name", "description", "content", "kind", "icon"];
+/// Decoded row from the `skill` table, which (as of migration 0005) has no
+/// `kind` column at all — every row is, structurally, a custom skill. Never
+/// exposed outside this module; converted to `SkillRow` via `From` below.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+struct CustomSkillDbRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    content: String,
+    icon: Option<String>,
+}
 
-/// All skills, builtin first. Relies on `'builtin' < 'custom'` in ASCII/UTF-8
-/// ordering (both are lowercase ASCII words compared lexically) — not an
-/// arbitrary CASE expression, but real and worth a comment for the next reader.
+impl From<CustomSkillDbRow> for SkillRow {
+    fn from(r: CustomSkillDbRow) -> Self {
+        SkillRow {
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            content: r.content,
+            kind: "custom".to_owned(),
+            icon: r.icon,
+        }
+    }
+}
+
+const COLS: [&str; 5] = ["id", "name", "description", "content", "icon"];
+
+/// All CUSTOM skills (the only kind stored in the DB), ordered by name.
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<SkillRow>> {
     QueryBuilder::<Sqlite>::table("skill")
         .select(COLS)
-        .order_by("kind", Order::Asc)
         .order_by("name", Order::Asc)
-        .fetch_all::<SkillRow, _>(pool)
+        .fetch_all::<CustomSkillDbRow, _>(pool)
         .await
         .map_err(cb_err)
+        .map(|rows| rows.into_iter().map(SkillRow::from).collect())
 }
 
-/// Skills of exactly one kind (`"builtin"` or `"custom"`), ordered by `id` for
-/// determinism — used by `content_for_agent` to fetch every builtin
-/// unconditionally, and by `commands::agent::save` to validate requested
-/// custom skill ids.
-pub async fn list_by_kind(pool: &SqlitePool, kind: &str) -> sqlx::Result<Vec<SkillRow>> {
-    QueryBuilder::<Sqlite>::table("skill")
-        .select(COLS)
-        .where_eq("kind", kind)
-        .order_by("id", Order::Asc)
-        .fetch_all::<SkillRow, _>(pool)
-        .await
-        .map_err(cb_err)
-}
-
-/// Fetch a single skill by `id`, or `None` if it does not exist.
+/// Fetch a single CUSTOM skill by `id`, or `None` if it does not exist. A
+/// builtin id (never in the DB) correctly returns `None` here — callers
+/// needing to distinguish "unknown id" from "builtin id" must check
+/// `list_builtin()` first (see `commands::skill::save`/`delete`).
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SkillRow>> {
     QueryBuilder::<Sqlite>::table("skill")
         .select(COLS)
         .where_eq("id", id)
-        .fetch_optional::<SkillRow, _>(pool)
+        .fetch_optional::<CustomSkillDbRow, _>(pool)
         .await
         .map_err(cb_err)
+        .map(|opt| opt.map(SkillRow::from))
 }
 
-/// Create a new CUSTOM skill (builtin rows are seed-only, never created via
-/// this path) and return the constructed row.
+/// Create a new custom skill and return the constructed row.
 pub async fn create(
     pool: &SqlitePool,
     name: &str,
@@ -87,7 +100,6 @@ pub async fn create(
                     .unwrap_or(Bind::Null),
             ),
             ("content", Bind::Text(content.to_owned())),
-            ("kind", Bind::Text("custom".to_owned())),
             ("icon", Bind::Null),
         ])
         .execute(pool)
@@ -104,10 +116,11 @@ pub async fn create(
     })
 }
 
-/// Update an existing skill's mutable fields and return the updated row, or
-/// `None` if no row with `id` exists. Does NOT check `kind` — a caller wanting
-/// to protect builtin rows from mutation must check `get()`'s result first
-/// (see `commands::skill::save`).
+/// Update an existing custom skill's mutable fields and return the updated
+/// row, or `None` if no row with `id` exists. Does NOT check whether `id` is
+/// a builtin — a builtin id is simply never in the DB, so `get(id)` after
+/// this returns `None` for one; the command layer must reject a builtin
+/// mutation attempt BEFORE calling this (see `commands::skill::save`).
 pub async fn update(
     pool: &SqlitePool,
     id: &str,
@@ -134,9 +147,8 @@ pub async fn update(
     get(pool, id).await
 }
 
-/// Delete a skill. Returns `true` if a row was deleted. `agent_skill` rows
-/// referencing it cascade away (`ON DELETE CASCADE`, `0001_init.sql:144`) —
-/// no further cleanup needed. Does NOT check `kind`; see `update`'s note.
+/// Delete a custom skill. Returns `true` if a row was deleted. `agent_skill`
+/// rows referencing it cascade away (`ON DELETE CASCADE`, `0001_init.sql:144`).
 pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     let res = sqlx::query("DELETE FROM skill WHERE id = ?")
         .bind(id)
@@ -145,31 +157,29 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
     Ok(res.rows_affected() > 0)
 }
 
-use std::collections::HashMap;
-
 /// All skills attached to `agent_def_id` via `agent_skill`, ordered by
-/// `sort_order` then `id` as a stable tie-breaker. Builtin skills are NEVER
-/// stored here — see `content_for_agent`, which fetches them separately and
-/// unconditionally.
+/// `sort_order` then `id` as a stable tie-breaker. `agent_skill` only ever
+/// references CUSTOM (DB) skills — builtins are never attached via this
+/// table, see `content_for_agent`.
 pub async fn attached_to_agent(
     pool: &SqlitePool,
     agent_def_id: &str,
 ) -> sqlx::Result<Vec<SkillRow>> {
-    sqlx::query_as::<_, SkillRow>(
-        "SELECT s.id, s.name, s.description, s.content, s.kind, s.icon \
+    let rows: Vec<CustomSkillDbRow> = sqlx::query_as(
+        "SELECT s.id, s.name, s.description, s.content, s.icon \
          FROM agent_skill a JOIN skill s ON s.id = a.skill_id \
          WHERE a.agent_def_id = ? \
          ORDER BY a.sort_order ASC, s.id ASC",
     )
     .bind(agent_def_id)
     .fetch_all(pool)
-    .await
+    .await?;
+    Ok(rows.into_iter().map(SkillRow::from).collect())
 }
 
 /// Replace an agent definition's CUSTOM skill attachments with exactly
 /// `skill_ids`, in that order (index becomes `sort_order`). Delete-then-insert
-/// inside one transaction, mirroring `workspace_agent::instantiate`'s
-/// transaction style. An empty slice clears all attachments.
+/// inside one transaction. An empty slice clears all attachments.
 pub async fn set_custom_attachments(
     pool: &SqlitePool,
     agent_def_id: &str,
@@ -198,9 +208,7 @@ pub async fn set_custom_attachments(
 }
 
 /// Every agent definition's custom skill ids, grouped by `agent_def_id` and
-/// ordered by `sort_order` within each group. One query for ALL definitions —
-/// used by `commands::agent::list` to annotate `AgentDefinition.skillIds`
-/// without an N+1 query per definition.
+/// ordered by `sort_order` within each group. Used by `commands::agent::list`.
 pub async fn custom_skill_ids_by_agent(
     pool: &SqlitePool,
 ) -> sqlx::Result<HashMap<String, Vec<String>>> {
@@ -217,40 +225,14 @@ pub async fn custom_skill_ids_by_agent(
     Ok(map)
 }
 
-/// Count of `agent_skill` rows per skill id — how many agent definitions have
-/// each CUSTOM skill attached (a builtin skill has no `agent_skill` rows at
-/// all, so it's simply absent from the map / reads as 0). Used by
-/// `commands::skill::list` for the Library's "attached to N agents" label.
+/// Count of `agent_skill` rows per skill id. Used by `commands::skill::list`
+/// for the Library's "attached to N agents" label (custom skills only).
 pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
     let rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT skill_id, COUNT(*) FROM agent_skill GROUP BY skill_id")
             .fetch_all(pool)
             .await?;
     Ok(rows.into_iter().collect())
-}
-
-/// Build the concatenated skill body for one agent definition's `cli` launch,
-/// plus the ordered list of skill ids used (for `session.launched_skill_ids`).
-/// Builtin skills come first (fixed `id` order, via `list_by_kind`), then
-/// custom skills by `sort_order` (via `attached_to_agent`). Each skill renders
-/// as a `## Skill: {name}` header followed by its `content`, sections
-/// separated by a blank line. Returns `("", [])` when nothing is attached and
-/// no builtin skills exist — the caller (`commands::instance::spawn`) treats
-/// an empty body as "skip the sidecar file entirely".
-pub async fn content_for_agent(
-    pool: &SqlitePool,
-    agent_def_id: &str,
-) -> sqlx::Result<(String, Vec<String>)> {
-    let builtins = list_by_kind(pool, "builtin").await?;
-    let customs = attached_to_agent(pool, agent_def_id).await?;
-
-    let mut ids = Vec::with_capacity(builtins.len() + customs.len());
-    let mut sections = Vec::with_capacity(builtins.len() + customs.len());
-    for s in builtins.iter().chain(customs.iter()) {
-        ids.push(s.id.clone());
-        sections.push(format!("## Skill: {}\n\n{}", s.name, s.content));
-    }
-    Ok((sections.join("\n\n"), ids))
 }
 
 #[cfg(test)]
@@ -304,6 +286,7 @@ mod tests {
         assert_eq!(updated.name, "New");
         assert_eq!(updated.description.as_deref(), Some("new desc"));
         assert_eq!(updated.content, "new content");
+        assert_eq!(updated.kind, "custom");
     }
 
     #[tokio::test]
@@ -332,44 +315,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_orders_builtin_before_custom() {
+    async fn list_returns_only_custom_ordered_by_name() {
         let pool = connect_in_memory().await;
-        // Seed a builtin row directly (create() only ever makes custom rows).
-        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk-builtin', 'Core', 'builtin')")
-            .execute(&pool)
+        super::create(&pool, "Zeta", None, "z")
             .await
-            .expect("seed builtin failed");
-        super::create(&pool, "Custom", None, "c")
+            .expect("create failed");
+        super::create(&pool, "Alpha", None, "a")
             .await
             .expect("create failed");
 
         let all = super::list(&pool).await.expect("list failed");
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].kind, "builtin");
-        assert_eq!(all[1].kind, "custom");
-    }
-
-    #[tokio::test]
-    async fn list_by_kind_filters() {
-        let pool = connect_in_memory().await;
-        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk-b', 'Core', 'builtin')")
-            .execute(&pool)
-            .await
-            .expect("seed failed");
-        super::create(&pool, "Custom", None, "c")
-            .await
-            .expect("create failed");
-
-        let builtins = super::list_by_kind(&pool, "builtin")
-            .await
-            .expect("list failed");
-        assert_eq!(builtins.len(), 1);
-        assert_eq!(builtins[0].id, "sk-b");
-
-        let customs = super::list_by_kind(&pool, "custom")
-            .await
-            .expect("list failed");
-        assert_eq!(customs.len(), 1);
+        assert_eq!(all[0].name, "Alpha", "must be name-ordered");
+        assert_eq!(all[1].name, "Zeta");
+        assert!(all.iter().all(|s| s.kind == "custom"));
     }
 
     /// JSON must use camelCase keys and omit `description`/`icon` when None.
@@ -514,8 +473,6 @@ mod tests {
         assert_eq!(counts.get(&s1.id).copied(), Some(2));
     }
 
-    /// Deleting a skill cascades its `agent_skill` rows without touching the
-    /// agent_definition (locks in the ON DELETE CASCADE relied on in the ADR).
     #[tokio::test]
     async fn delete_skill_cascades_agent_skill_rows() {
         let pool = connect_in_memory().await;
@@ -539,50 +496,5 @@ mod tests {
                 .expect("exists check failed"),
             "agent_definition itself must be untouched"
         );
-    }
-
-    #[tokio::test]
-    async fn content_for_agent_orders_builtin_then_custom_with_headers() {
-        let pool = connect_in_memory().await;
-        let def_id = fixture_agent_def(&pool).await;
-        sqlx::query("INSERT INTO skill (id, name, content, kind) VALUES ('sk-b', 'Base', 'Be careful', 'builtin')")
-            .execute(&pool)
-            .await
-            .expect("seed builtin failed");
-        let custom = super::create(&pool, "Extra", None, "Do X")
-            .await
-            .expect("create failed");
-        super::set_custom_attachments(&pool, &def_id, std::slice::from_ref(&custom.id))
-            .await
-            .expect("set failed");
-
-        let (body, ids) = super::content_for_agent(&pool, &def_id)
-            .await
-            .expect("query failed");
-
-        assert_eq!(
-            ids,
-            vec!["sk-b".to_string(), custom.id.clone()],
-            "builtin must come first"
-        );
-        let base_pos = body.find("## Skill: Base").expect("Base header missing");
-        let extra_pos = body.find("## Skill: Extra").expect("Extra header missing");
-        assert!(
-            base_pos < extra_pos,
-            "builtin section must precede custom section"
-        );
-        assert!(body.contains("Be careful"));
-        assert!(body.contains("Do X"));
-    }
-
-    #[tokio::test]
-    async fn content_for_agent_empty_when_nothing_attached() {
-        let pool = connect_in_memory().await;
-        let def_id = fixture_agent_def(&pool).await;
-        let (body, ids) = super::content_for_agent(&pool, &def_id)
-            .await
-            .expect("query failed");
-        assert_eq!(body, "");
-        assert!(ids.is_empty());
     }
 }
