@@ -399,6 +399,68 @@ fn bundled_skills_dir() -> Option<std::path::PathBuf> {
     Some(exe.parent()?.parent()?.join("Resources").join("skills"))
 }
 
+/// Allocate a fresh scratch directory for one skill-draft agent-assist
+/// session (see docs/specs/2026-07-02-skill-editor-agent-assist-design.md),
+/// under the same per-user Conclave data dir `agentctx::write_skill_sidecar`
+/// uses, in its own `skill-drafts/<uuid>` subdirectory so concurrent
+/// sessions never collide.
+#[allow(dead_code)]
+pub fn new_draft_dir() -> std::io::Result<std::path::PathBuf> {
+    let dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory"))?
+        .join("Conclave")
+        .join("skill-drafts")
+        .join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Serialize a skill draft's `SKILL.md` in the same frontmatter format
+/// `parse_skill_md` reads back — so the file an agent-assist session's CLI
+/// agent edits looks identical to a real builtin `SKILL.md`, and the same
+/// parser handles both.
+#[allow(dead_code)]
+fn render_draft_skill_md(name: &str, description: Option<&str>, content: &str) -> String {
+    let mut out = format!("---\nname: {name}\n");
+    if let Some(d) = description {
+        out.push_str(&format!("description: {d}\n"));
+    }
+    out.push_str("---\n\n");
+    out.push_str(content);
+    out.push('\n');
+    out
+}
+
+/// Write a skill draft's current `name`/`description`/`content` to `dir`'s
+/// `SKILL.md` (creating `dir` if missing), for an agent-assist session's CLI
+/// agent to edit directly.
+#[allow(dead_code)]
+pub fn write_draft(
+    dir: &std::path::Path,
+    name: &str,
+    description: Option<&str>,
+    content: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join("SKILL.md"),
+        render_draft_skill_md(name, description, content),
+    )
+}
+
+/// Read a skill draft's current `SKILL.md` back out of `dir`, reusing
+/// `parse_skill_md` (its `mandatory` element is irrelevant for a custom
+/// skill draft and is dropped). `None` if the file is missing or its
+/// frontmatter is currently unparsable (e.g. the agent is mid-write) — the
+/// caller (`commands::skill_draft::sync`) leaves the editor's last
+/// successfully synced fields untouched in that case rather than erroring.
+#[allow(dead_code)]
+pub fn read_draft(dir: &std::path::Path) -> Option<(String, Option<String>, String)> {
+    let raw = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
+    let (name, description, content, _mandatory) = parse_skill_md(&raw)?;
+    Some((name, description, content))
+}
+
 /// Build the concatenated skill body for one agent definition's `cli` launch,
 /// plus the ordered list of skill ids used (for `session.launched_skill_ids`).
 /// Builtin skills come first (fixed `id` order, via `list_builtin`), then
@@ -1023,5 +1085,62 @@ mod tests {
             .expect("query failed");
         assert!(ids.contains(&"example-optional".to_string()));
         assert!(body.contains("## Skill: Example Optional Skill"));
+    }
+
+    #[test]
+    fn write_draft_then_read_draft_round_trips() {
+        let dir = std::env::temp_dir().join("conclave-skill-test-draft-roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        super::write_draft(&dir, "My Draft", Some("A test draft"), "Body text here.")
+            .expect("write_draft failed");
+        let (name, description, content) =
+            super::read_draft(&dir).expect("read_draft should parse what write_draft wrote");
+
+        assert_eq!(name, "My Draft");
+        assert_eq!(description.as_deref(), Some("A test draft"));
+        assert_eq!(content, "Body text here.");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup failed");
+    }
+
+    #[test]
+    fn write_draft_with_no_description_round_trips() {
+        let dir = std::env::temp_dir().join("conclave-skill-test-draft-no-desc");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        super::write_draft(&dir, "Bare", None, "Content.").expect("write_draft failed");
+        let (name, description, content) = super::read_draft(&dir).expect("should parse");
+
+        assert_eq!(name, "Bare");
+        assert!(description.is_none());
+        assert_eq!(content, "Content.");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup failed");
+    }
+
+    #[test]
+    fn read_draft_missing_file_returns_none() {
+        let dir = std::env::temp_dir().join("conclave-skill-test-draft-missing-xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir failed");
+
+        assert!(super::read_draft(&dir).is_none());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup failed");
+    }
+
+    #[test]
+    fn new_draft_dir_creates_a_fresh_empty_directory() {
+        let dir = super::new_draft_dir().expect("new_draft_dir failed");
+        assert!(dir.is_dir());
+        assert!(
+            std::fs::read_dir(&dir)
+                .expect("read_dir failed")
+                .next()
+                .is_none(),
+            "a freshly allocated draft dir must start empty"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup failed");
     }
 }
