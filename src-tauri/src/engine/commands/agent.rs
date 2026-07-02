@@ -595,4 +595,54 @@ mod tests {
         assert!(ids.contains(&"example".to_string()));
         assert!(!ids.contains(&"example-optional".to_string()));
     }
+
+    #[tokio::test]
+    async fn list_skill_ids_are_isolated_per_agent_definition() {
+        let state = AppState::for_tests().await;
+        let created_a = save(
+            &state,
+            serde_json::json!({
+                "name": "A",
+                "type": "cli",
+                "skillIds": ["example-optional"],
+            }),
+        )
+        .await
+        .expect("save failed");
+        let id_a = created_a["id"].as_str().unwrap().to_owned();
+
+        let created_b = save(&state, serde_json::json!({ "name": "B", "type": "cli" }))
+            .await
+            .expect("save failed");
+        let id_b = created_b["id"].as_str().unwrap().to_owned();
+
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let listed = listed.as_array().unwrap();
+
+        let item_a = listed.iter().find(|i| i["id"] == id_a).expect("item A present");
+        let ids_a: Vec<String> = item_a["skillIds"]
+            .as_array()
+            .expect("skillIds must be present")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids_a.contains(&"example".to_string()), "mandatory builtin always present");
+        assert!(
+            ids_a.contains(&"example-optional".to_string()),
+            "agent A's selected optional builtin must be present"
+        );
+
+        let item_b = listed.iter().find(|i| i["id"] == id_b).expect("item B present");
+        let ids_b: Vec<String> = item_b["skillIds"]
+            .as_array()
+            .expect("skillIds must be present (mandatory builtin still applies)")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids_b.contains(&"example".to_string()));
+        assert!(
+            !ids_b.contains(&"example-optional".to_string()),
+            "agent B must not inherit agent A's optional builtin selection"
+        );
+    }
 }
