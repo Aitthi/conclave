@@ -1,0 +1,319 @@
+{
+  "screens": [
+    {
+      "id": "workspace",
+      "title": "Workspace home",
+      "url": "/workspace",
+      "frame": "desktop"
+    },
+    {
+      "id": "terminal",
+      "title": "Terminal pane",
+      "url": "/terminal",
+      "frame": "desktop"
+    },
+    {
+      "id": "chat",
+      "title": "Custom chat agent",
+      "url": "/chat",
+      "frame": "desktop"
+    },
+    {
+      "id": "builder",
+      "title": "Agent builder",
+      "url": "/builder",
+      "frame": "desktop"
+    },
+    {
+      "id": "library",
+      "title": "Agent Library",
+      "url": "/library",
+      "frame": "desktop"
+    },
+    {
+      "id": "blackboard",
+      "title": "Shared blackboard",
+      "url": "/blackboard",
+      "frame": "desktop"
+    },
+    {
+      "id": "orchestrator",
+      "title": "Orchestrator · Fusion",
+      "url": "/orchestrator",
+      "frame": "desktop"
+    },
+    {
+      "id": "settings",
+      "title": "Settings",
+      "url": "/settings",
+      "frame": "desktop"
+    },
+    {
+      "id": "link-folder",
+      "title": "Link folder · new workspace",
+      "url": "/link-folder",
+      "frame": "desktop"
+    },
+    {
+      "id": "timeline",
+      "title": "Memory timeline",
+      "url": "/timeline",
+      "frame": "desktop"
+    },
+    {
+      "id": "cli",
+      "title": "Conclave CLI",
+      "url": "/cli",
+      "frame": "desktop"
+    },
+    {
+      "id": "skill-editor",
+      "title": "Skill Editor · agent assist (idle)",
+      "frame": "desktop"
+    },
+    {
+      "id": "skill-editor-active",
+      "title": "Skill Editor · agent assist (active)",
+      "frame": "desktop"
+    }
+  ],
+  "start": "workspace",
+  "tokens": {
+    "colors": [
+      {
+        "name": "accent",
+        "value": "#0a84ff",
+        "description": "System blue — primary action, selection, user bubble"
+      },
+      {
+        "name": "bg-canvas",
+        "value": "#ececed",
+        "description": "Window background behind panels"
+      },
+      {
+        "name": "surface",
+        "value": "#ffffff",
+        "description": "Center working area / cards"
+      },
+      {
+        "name": "sidebar",
+        "value": "#f5f5f7",
+        "description": "Vibrancy sidebar & context drawer (solid, screenshot-safe)"
+      },
+      {
+        "name": "fill-soft",
+        "value": "#f2f2f4",
+        "description": "Agent reply bubble, subtle fills"
+      },
+      {
+        "name": "text-primary",
+        "value": "#1d1d1f",
+        "description": "Primary label"
+      },
+      {
+        "name": "text-secondary",
+        "value": "#6e6e73",
+        "description": "Secondary label"
+      },
+      {
+        "name": "text-tertiary",
+        "value": "#a1a1a6",
+        "description": "Section headers, placeholders"
+      },
+      {
+        "name": "agent-maestro",
+        "value": "#5e5ce6",
+        "description": "Orchestrator (indigo)"
+      },
+      {
+        "name": "agent-atlas",
+        "value": "#ff7a45",
+        "description": "Claude Code CLI agent (orange)"
+      },
+      {
+        "name": "agent-vega",
+        "value": "#0fa3a3",
+        "description": "Codex CLI agent (teal)"
+      },
+      {
+        "name": "agent-iris",
+        "value": "#d6409f",
+        "description": "Chat agent · researcher (magenta)"
+      },
+      {
+        "name": "agent-sol",
+        "value": "#ff9f0a",
+        "description": "Chat agent · reviewer (amber)"
+      },
+      {
+        "name": "agent-echo",
+        "value": "#32ade6",
+        "description": "Chat agent · summarizer (cyan)"
+      },
+      {
+        "name": "status-running",
+        "value": "#30d158",
+        "description": "Agent running / online"
+      },
+      {
+        "name": "status-waiting",
+        "value": "#ff9f0a",
+        "description": "Agent waiting / human-in-loop"
+      },
+      {
+        "name": "status-idle",
+        "value": "#c7c7cc",
+        "description": "Agent idle"
+      },
+      {
+        "name": "danger",
+        "value": "#ff3b30",
+        "description": "Unread badge / destructive"
+      },
+      {
+        "name": "success",
+        "value": "#30a14e",
+        "description": "Tool done / verified"
+      }
+    ],
+    "typography": [
+      {
+        "name": "title",
+        "sample": "Iris · Chat agent",
+        "family": "sans",
+        "size": "13px",
+        "weight": 600,
+        "lineHeight": "1.2",
+        "letterSpacing": "-0.01em"
+      },
+      {
+        "name": "body",
+        "sample": "ได้ของจาก Atlas แล้ว กำลังรวมเข้าสรุป",
+        "family": "sans",
+        "size": "13.5px",
+        "weight": 400,
+        "lineHeight": "1.5"
+      },
+      {
+        "name": "label",
+        "sample": "Shared blackboard",
+        "family": "sans",
+        "size": "12.5px",
+        "weight": 600,
+        "lineHeight": "1.2"
+      },
+      {
+        "name": "meta",
+        "sample": "Claude Code · running tests",
+        "family": "sans",
+        "size": "10.5px",
+        "weight": 500,
+        "lineHeight": "1.3"
+      },
+      {
+        "name": "section",
+        "sample": "CHAT AGENTS",
+        "family": "sans",
+        "size": "10px",
+        "weight": 700,
+        "lineHeight": "1",
+        "letterSpacing": "0.06em"
+      },
+      {
+        "name": "mono",
+        "sample": "key: bench/results",
+        "family": "mono",
+        "size": "11.5px",
+        "weight": 400,
+        "lineHeight": "1.5"
+      }
+    ],
+    "spacing": [
+      {
+        "name": "1",
+        "value": "4px"
+      },
+      {
+        "name": "2",
+        "value": "8px"
+      },
+      {
+        "name": "3",
+        "value": "12px"
+      },
+      {
+        "name": "4",
+        "value": "16px"
+      },
+      {
+        "name": "6",
+        "value": "24px"
+      },
+      {
+        "name": "8",
+        "value": "32px"
+      },
+      {
+        "name": "sidebar-w",
+        "value": "266px",
+        "description": "Roster column width"
+      },
+      {
+        "name": "drawer-w",
+        "value": "306px",
+        "description": "Context drawer width"
+      }
+    ],
+    "radii": [
+      {
+        "name": "sm",
+        "value": "6px",
+        "description": "Buttons, chips, search field"
+      },
+      {
+        "name": "md",
+        "value": "8px",
+        "description": "Agent avatars, rows"
+      },
+      {
+        "name": "lg",
+        "value": "12px",
+        "description": "Cards (tool/skill/harness)"
+      },
+      {
+        "name": "xl",
+        "value": "16px",
+        "description": "Chat bubbles, input bar"
+      },
+      {
+        "name": "pill",
+        "value": "9999px",
+        "description": "Status dots, badges, send button"
+      }
+    ],
+    "shadows": [
+      {
+        "name": "hairline",
+        "value": "inset 0 0 0 0.5px rgba(0,0,0,0.10)",
+        "description": "Card / avatar inner ring (ring-hair)"
+      },
+      {
+        "name": "popover",
+        "value": "0 8px 28px rgba(0,0,0,0.16)",
+        "description": "Menus, the agent-builder sheet"
+      }
+    ],
+    "fonts": [
+      {
+        "name": "sans",
+        "value": "-apple-system, \"SF Pro Text\", \"Helvetica Neue\", Inter, system-ui, sans-serif",
+        "description": "UI text — native SF stack"
+      },
+      {
+        "name": "mono",
+        "value": "\"SF Mono\", \"JetBrains Mono\", ui-monospace, Menlo, monospace",
+        "description": "Terminal, tool I/O, code, blackboard keys"
+      }
+    ]
+  }
+}
