@@ -90,11 +90,10 @@ struct AddToWorkspaceReq {
 pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let items = repo::agent_definition::list_with_counts(&state.db).await?;
     // Same basis as the launch snapshot (`repo::skill::content_for_agent`):
-    // builtin ids first (fixed order via `list_by_kind`), then custom ids —
+    // builtin ids first (fixed order via `list_builtin`), then custom ids —
     // so `AgentDefinition.skillIds` and `WorkspaceAgent.launchedSkillIds`
     // are directly comparable (see Roster.tsx's `computeSkillsStale`).
-    let builtin_ids: Vec<String> = repo::skill::list_by_kind(&state.db, "builtin")
-        .await?
+    let builtin_ids: Vec<String> = repo::skill::list_builtin()
         .into_iter()
         .map(|s| s.id)
         .collect();
@@ -231,12 +230,11 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     // CUSTOM skill ids so a stale/tampered request can't create an
     // `agent_skill` row for a builtin skill (which is never attached via that
     // table — see `repo::skill::content_for_agent`) or a nonexistent id.
-    let valid_custom_ids: std::collections::HashSet<String> =
-        repo::skill::list_by_kind(&state.db, "custom")
-            .await?
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
+    let valid_custom_ids: std::collections::HashSet<String> = repo::skill::list(&state.db)
+        .await?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
     let filtered_skill_ids: Vec<String> = req
         .skill_ids
         .unwrap_or_default()
@@ -382,16 +380,12 @@ mod tests {
     #[tokio::test]
     async fn save_silently_drops_unknown_or_builtin_skill_ids() {
         let state = AppState::for_tests().await;
-        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk-b', 'Core', 'builtin')")
-            .execute(&state.db)
-            .await
-            .expect("seed failed");
 
         let created = save(
             &state,
             serde_json::json!({
                 "name": "Atlas", "type": "cli", "harnessMode": "own",
-                "skillIds": ["sk-b", "no-such-id"],
+                "skillIds": ["example", "no-such-id"],
             }),
         )
         .await
@@ -431,7 +425,7 @@ mod tests {
             .iter()
             .find(|d| d["id"] == id)
             .unwrap();
-        assert_eq!(item["skillIds"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(item["skillIds"].as_array().map(|a| a.len()), Some(2));
     }
 
     /// A definition with ZERO custom skill attachments must still get a
@@ -441,10 +435,6 @@ mod tests {
     #[tokio::test]
     async fn list_annotates_builtin_skill_ids_even_without_attachment() {
         let state = AppState::for_tests().await;
-        sqlx::query("INSERT INTO skill (id, name, kind) VALUES ('sk-b', 'Core', 'builtin')")
-            .execute(&state.db)
-            .await
-            .expect("seed failed");
 
         let created = save(
             &state,
@@ -465,13 +455,13 @@ mod tests {
             .unwrap();
         let ids: Vec<String> = item["skillIds"]
             .as_array()
-            .expect("skillIds must be present")
+            .expect("skillIds must be present even with zero custom attachments")
             .iter()
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
         assert!(
-            ids.contains(&"sk-b".to_string()),
-            "builtin skill must appear even with zero custom attachments"
+            ids.contains(&"example".to_string()),
+            "the checked-in builtin example skill must appear even though nothing was attached: {ids:?}"
         );
     }
 }

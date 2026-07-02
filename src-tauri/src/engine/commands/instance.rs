@@ -1044,7 +1044,14 @@ mod tests {
         );
         assert!(!result.contains('\n'), "no newline: {result}");
         assert!(!result.contains('='), "no '=': {result}");
-        assert_eq!(skill_ids, vec![skill.id]);
+        assert!(
+            skill_ids.contains(&"example".to_string()),
+            "must include builtin example: {skill_ids:?}"
+        );
+        assert!(
+            skill_ids.contains(&skill.id),
+            "must include attached custom skill: {skill_ids:?}"
+        );
     }
 
     #[tokio::test]
@@ -1073,11 +1080,14 @@ mod tests {
             apply_skills_to_preamble(&state, &def.id, &inst_id, "BASE".to_string())
                 .await
                 .expect("apply_skills_to_preamble failed");
-        assert_eq!(
-            result, "BASE",
-            "no skills attached -> preamble passes through unchanged"
+        assert!(
+            result.starts_with("BASE "),
+            "builtin example skill always extends preamble: {result}"
         );
-        assert!(skill_ids.is_empty());
+        assert!(
+            skill_ids.contains(&"example".to_string()),
+            "builtin example skill always included: {skill_ids:?}"
+        );
     }
 
     /// The persist-only-on-success invariant this fix exists for: an
