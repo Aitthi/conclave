@@ -163,25 +163,64 @@ async fn handle_conn(state: Arc<AppState>, stream: UnixStream) {
     }
 }
 
+/// Claim the socket at `path` for THIS process WITHOUT stealing it from a live
+/// instance. Returns the bound listener, or `None` if the path is already
+/// served (this process then runs without its own UDS server) or the bind fails.
+///
+/// The old code did an unconditional `remove_file` + `bind`: a second process
+/// (e.g. a debug build launched next to the installed app) would unlink the
+/// live socket's directory entry and bind its own, so every agent CLI then
+/// connected to the impostor while the real GUI kept an orphaned listener — the
+/// 2026-07-03 socket-steal incident. We now PROBE first with a connect:
+///
+/// - connect **accepted** → a live instance owns the path → abort, never steal;
+/// - connect **refused** (`ECONNREFUSED`, a prior instance died without
+///   unlinking) → stale entry → remove it and bind;
+/// - **no file** (`ENOENT`) → nothing to remove, just bind;
+/// - any other probe error → ambiguous, so do NOT remove (removing could steal
+///   a live socket we merely failed to probe) — attempt the bind and let
+///   `AddrInUse` fall through to the failure path.
+async fn acquire_socket(path: &std::path::Path) -> Option<UnixListener> {
+    match UnixStream::connect(path).await {
+        Ok(_) => {
+            eprintln!(
+                "[uds] another Conclave instance is already serving {path:?}; \
+                 this process will run without its own UDS server"
+            );
+            return None;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            if let Err(e) = std::fs::remove_file(path) {
+                eprintln!("[uds] could not remove stale socket {path:?}: {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[uds] could not probe existing socket {path:?}: {e}; \
+                 binding without removing (won't steal a live socket)"
+            );
+        }
+    }
+
+    match UnixListener::bind(path) {
+        Ok(listener) => Some(listener),
+        Err(e) => {
+            eprintln!("[uds] failed to bind socket {path:?}: {e}");
+            None
+        }
+    }
+}
+
 /// Bind the UDS at `path` (0600), then accept connections forever, spawning a
-/// task per connection. Never panics: if the socket cannot bind, the GUI must
-/// still run, so we log and return.
+/// task per connection. Never panics: if the socket cannot be claimed (already
+/// served by a live instance, or bind failure), the GUI must still run, so we
+/// log and return.
 pub async fn serve(state: Arc<AppState>, path: PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
-    // Best-effort removal of a stale socket file (ignore NotFound).
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => eprintln!("[uds] could not remove stale socket {path:?}: {e}"),
-    }
-
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[uds] failed to bind socket {path:?}: {e}");
-            return;
-        }
+    let Some(listener) = acquire_socket(&path).await else {
+        return;
     };
 
     // Lock the socket down to owner-only (0600). Log + continue on error.
@@ -346,6 +385,84 @@ mod tests {
         assert!(v.get("result").is_some(), "result present: {line}");
 
         server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Regression for the 2026-07-03 socket-steal incident: a second process
+    /// must NOT hijack a socket a live instance is already serving. The old
+    /// unconditional `remove_file` + `bind` unlinked the live entry and bound
+    /// an impostor; `acquire_socket` now probes first and refuses.
+    #[tokio::test]
+    async fn acquire_socket_refuses_to_steal_a_live_owner() {
+        let path = std::env::temp_dir()
+            .join(format!("conclave-uds-steal-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // "Instance A" — a live listener accepting on the path.
+        let a = UnixListener::bind(&path).expect("bind A");
+        let a_task = tokio::spawn(async move {
+            while a.accept().await.is_ok() {}
+        });
+
+        // "Instance B" tries to acquire the SAME path. It must decline.
+        let claimed = acquire_socket(&path).await;
+        assert!(
+            claimed.is_none(),
+            "acquire_socket must not steal a live socket"
+        );
+
+        // A's socket is intact — a fresh client still reaches the live owner.
+        assert!(
+            UnixStream::connect(&path).await.is_ok(),
+            "live owner must remain reachable after the refused steal"
+        );
+
+        a_task.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The guard must still recover a genuinely stale socket: a file left by a
+    /// crashed instance (bound then dropped without unlinking → `ECONNREFUSED`)
+    /// is removed and rebound, so a clean restart isn't blocked by debris.
+    #[tokio::test]
+    async fn acquire_socket_replaces_a_stale_socket() {
+        let path = std::env::temp_dir()
+            .join(format!("conclave-uds-stale-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // Leave a stale socket FILE with no listener: bind then drop. Rust does
+        // not unlink a UnixListener's path on drop, so the file remains and a
+        // connect to it is refused.
+        drop(UnixListener::bind(&path).expect("bind stale"));
+        assert!(path.exists(), "stale socket file should remain after drop");
+        assert!(
+            UnixStream::connect(&path).await.is_err(),
+            "stale socket must refuse connections"
+        );
+
+        let claimed = acquire_socket(&path).await;
+        assert!(
+            claimed.is_some(),
+            "acquire_socket must replace a stale (refused) socket"
+        );
+        // The fresh listener is live — a client can connect to us now.
+        assert!(UnixStream::connect(&path).await.is_ok());
+
+        drop(claimed);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// No socket file at all (`ENOENT`) → bind cleanly, nothing to remove.
+    #[tokio::test]
+    async fn acquire_socket_binds_when_absent() {
+        let path = std::env::temp_dir()
+            .join(format!("conclave-uds-absent-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let claimed = acquire_socket(&path).await;
+        assert!(claimed.is_some(), "must bind when the path is free");
+
+        drop(claimed);
         let _ = std::fs::remove_file(&path);
     }
 }
