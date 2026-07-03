@@ -16,11 +16,11 @@ import {
   Gauge,
   History,
   RotateCcw,
+  MessageSquare,
 } from "lucide-react";
-import { ipc, useMessageInjected, useSessionContext, useSnapshotCreated } from "../ipc";
+import { ipc, useSessionContext, useSnapshotCreated } from "../ipc";
 import type {
   AgentDefinition,
-  InterAgentMessage,
   Role,
   Session,
   Skill,
@@ -31,7 +31,6 @@ import type { RoutingTarget } from "./RoutingPicker";
 import { timeHint } from "../lib/timeHint";
 import { computeSkillsStale } from "../lib/skills";
 import { DeferredNote } from "./DeferredNote";
-import { ClampText } from "./ClampText";
 
 // ---------------------------------------------------------------------------
 // Right-side Context drawer — shows the ACTIVE agent's configuration. The
@@ -59,18 +58,10 @@ interface ContextDrawerProps {
   /** Skill ids the live session actually launched with (undefined before any
    *  launch) — drives the Skills section's "restart to apply" drift hint. */
   launchedSkillIds?: string[];
+  /** Opens the workspace Chat Hub (the drawer shows policy only — the
+   *  conversation itself lives in the hub). */
+  onOpenChat?: () => void;
 }
-
-// How many recent inbox/outbox messages the chat timeline loads (newest-first
-// from the API, rendered oldest→newest). A readable conversation needs more
-// than a handful of rows; 50 is the `message.list` server default.
-const MESSAGE_LOG_LIMIT = 50;
-
-// Auto-scroll only snaps to the newest message when the reader is already
-// within this many pixels of the bottom (or on first load / a message this
-// agent just sent) — otherwise a background refetch would scroll-jack someone
-// reading older history.
-const NEAR_BOTTOM_PX = 40;
 
 // How many recent snapshots the Memory section shows.
 const SNAPSHOT_LOG_LIMIT = 6;
@@ -104,6 +95,7 @@ export function ContextDrawer({
   roster,
   session,
   launchedSkillIds,
+  onOpenChat,
 }: ContextDrawerProps) {
   // Simplest collapse affordance: internal open/closed state. The header
   // `panel-right` button toggles it; collapsed → a thin strip to reopen.
@@ -112,8 +104,6 @@ export function ContextDrawer({
   // when the pane remounts (WorkspacePane is keyed by workspaceId).
   const [open, setOpen] = useState(true);
 
-  // Recent inbox/outbox for this instance — REAL data from `message.list`.
-  const [messages, setMessages] = useState<InterAgentMessage[]>([]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -121,61 +111,6 @@ export function ContextDrawer({
       mounted.current = false;
     };
   }, []);
-
-  // Fetch on mount / when the active instance changes, and on each injection.
-  // `refetch` is memoised per instanceId so the effect deps stay honest (no
-  // exhaustive-deps trap). A monotonic seq guard drops stale results: if two
-  // injections fire in quick succession, only the latest list response wins,
-  // even if an earlier (slower) request settles after it.
-  const seq = useRef(0);
-  const refetch = useCallback(() => {
-    const mine = ++seq.current;
-    ipc.message
-      .list({ instanceId, limit: MESSAGE_LOG_LIMIT })
-      .then((rows) => {
-        if (mounted.current && mine === seq.current) setMessages(rows);
-      })
-      .catch((err: unknown) => {
-        // Non-Tauri dev context (plain `vite`) lands here — surface in dev only.
-        if (import.meta.env.DEV) {
-          console.error("ContextDrawer: message.list failed", err);
-        }
-      });
-  }, [instanceId]);
-  useEffect(() => {
-    refetch();
-  }, [refetch]);
-
-  // Refetch when an injection involving this instance fires (in OR out).
-  useMessageInjected(instanceId, () => refetch());
-
-  // ── Chat timeline UI state ────────────────────────────────────────────────
-  // `null` = show All peers; otherwise narrow to one counterpart instance id.
-  const [peerFilter, setPeerFilter] = useState<string | null>(null);
-  const timelineRef = useRef<HTMLDivElement | null>(null);
-  // Forces the next auto-scroll to snap regardless of position (first load of a
-  // conversation / drawer reopen); consumed in the scroll effect below.
-  const forceScrollRef = useRef(true);
-  // The newest message id we last reacted to — lets the scroll effect tell a
-  // genuinely-new message from a background refetch returning identical data.
-  const lastMsgIdRef = useRef<string | null>(null);
-  // Whether the reader was at the bottom as of their LAST scroll — captured on
-  // the scroll event so it reflects the position BEFORE new content lands (a
-  // post-update measurement would misread a tall new message as "not at bottom"
-  // and fail to follow it).
-  const atBottomRef = useRef(true);
-  const onTimelineScroll = () => {
-    const el = timelineRef.current;
-    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
-  };
-  // Clear an active peer filter only when that peer truly LEAVES THE WORKSPACE
-  // (gone from the roster) — NOT merely when its messages age out of the loaded
-  // 50-message window, which would yank a filter the human is actively reading.
-  useEffect(() => {
-    if (peerFilter && !roster.some((t) => t.instanceId === peerFilter)) {
-      setPeerFilter(null);
-    }
-  }, [roster, peerFilter]);
 
   // ── Skills (REAL — the agent's effective skill set) ───────────────────────
   // `def.skillIds` is annotated by `agentDef.list` (mandatory builtins +
@@ -338,13 +273,6 @@ export function ContextDrawer({
     setRestartPhase(null);
     setResumeBusy(false);
     setSessionError(null);
-    // Chat timeline is per-conversation: drop the previous agent's peer filter
-    // and force the next auto-scroll to snap to the newest message (mirrors this
-    // file's established transient-state reset on session/instance change).
-    // Per-bubble Show-more state needs no reset here — it unmounts with the
-    // messages themselves.
-    setPeerFilter(null);
-    forceScrollRef.current = true;
     // `session` is intentionally read but excluded from deps — we re-seed only on
     // identity change of the session id, not on every new session object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -509,62 +437,6 @@ export function ContextDrawer({
     },
     [instanceId],
   );
-
-  // Resolve a counterpart instance id → display name / agent color via the
-  // roster (falls back to the raw id / a neutral grey for a peer no longer in
-  // the workspace).
-  const nameOf = (id: string): string =>
-    roster.find((t) => t.instanceId === id)?.name ?? id;
-  const colorOf = (id: string): string =>
-    roster.find((t) => t.instanceId === id)?.color ?? "#8e8e93";
-  const counterpartOf = (m: InterAgentMessage): string =>
-    m.fromInstanceId === instanceId ? m.toInstanceId : m.fromInstanceId;
-
-  // The API returns newest-first; the chat reads oldest→newest (top→bottom).
-  const timeline = useMemo(() => [...messages].reverse(), [messages]);
-  // Distinct peers appearing in the loaded window — drives the filter chips.
-  const chatPeers = useMemo(() => {
-    const seen = new Map<string, { id: string; name: string; color: string }>();
-    for (const m of messages) {
-      const id = m.fromInstanceId === instanceId ? m.toInstanceId : m.fromInstanceId;
-      if (!seen.has(id)) {
-        const t = roster.find((r) => r.instanceId === id);
-        seen.set(id, { id, name: t?.name ?? id, color: t?.color ?? "#8e8e93" });
-      }
-    }
-    return [...seen.values()];
-  }, [messages, instanceId, roster]);
-  const visibleMessages = useMemo(
-    () => (peerFilter ? timeline.filter((m) => counterpartOf(m) === peerFilter) : timeline),
-    // counterpartOf is a stable pure closure over instanceId; timeline+filter are the real deps.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timeline, peerFilter, instanceId],
-  );
-  // Reopening the drawer remounts the timeline (scrollTop 0); force the next
-  // snap so a long conversation opens at its newest message, not the top.
-  useEffect(() => {
-    if (open) forceScrollRef.current = true;
-  }, [open]);
-
-  // Auto-scroll to the newest message (bottom), but do NOT scroll-jack: snap
-  // only when a genuinely-new message arrived AND the reader is near the bottom,
-  // OR this agent just sent the newest one, OR a forced snap is pending (first
-  // load / reopen / instance switch). A background refetch of identical data
-  // never moves the view.
-  useEffect(() => {
-    const el = timelineRef.current;
-    if (!el) return;
-    const newest = visibleMessages[visibleMessages.length - 1];
-    const newestId = newest?.id ?? null;
-    const isNew = newestId !== lastMsgIdRef.current;
-    const justSent = isNew && newest?.fromInstanceId === instanceId;
-    if (forceScrollRef.current || justSent || (isNew && atBottomRef.current)) {
-      el.scrollTop = el.scrollHeight;
-      atBottomRef.current = true;
-    }
-    lastMsgIdRef.current = newestId;
-    forceScrollRef.current = false;
-  }, [visibleMessages, open, instanceId]);
 
   // Fusion panel (orchestrator branch) — the workspace's chat agents excluding
   // self, capped at 8 (the same derivation the M4.3 backend does). Memoised so
@@ -1053,100 +925,17 @@ export function ContextDrawer({
                   </span>
                 </div>
 
-                {/* Per-peer filter chips (only when there are peers to filter). */}
-                {chatPeers.length > 0 && (
-                  <div className="flex flex-wrap gap-1 px-2.5 pt-2">
-                    <button
-                      onClick={() => setPeerFilter(null)}
-                      className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
-                        peerFilter === null
-                          ? "bg-accent text-white"
-                          : "ring-1 ring-overlay/[0.1] text-text-secondary hover:bg-overlay/[0.05]"
-                      }`}
-                    >
-                      All
-                    </button>
-                    {chatPeers.map((p) => {
-                      const active = peerFilter === p.id;
-                      return (
-                        <button
-                          key={p.id}
-                          onClick={() => setPeerFilter(active ? null : p.id)}
-                          className={`text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-colors ${
-                            active
-                              ? "bg-accent text-white"
-                              : "ring-1 ring-overlay/[0.1] text-text-secondary hover:bg-overlay/[0.05]"
-                          }`}
-                        >
-                          <span
-                            className="w-1.5 h-1.5 rounded-full shrink-0"
-                            style={{ backgroundColor: p.color }}
-                          />
-                          <span className="truncate max-w-[90px]">{p.name}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                {/* The conversation lives in the workspace Chat Hub — the
+                    drawer keeps only this agent's routing policy. */}
+                {onOpenChat && (
+                  <button
+                    onClick={onOpenChat}
+                    className="w-full text-left px-2.5 py-2 text-[11px] font-medium text-accent hover:underline flex items-center gap-1.5"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Open chat
+                  </button>
                 )}
-
-                {/* The conversation — oldest→newest, internal scroll, auto-
-                    scrolled to the newest message. */}
-                <div
-                  ref={timelineRef}
-                  onScroll={onTimelineScroll}
-                  className="max-h-72 overflow-y-auto px-2.5 py-2 space-y-2.5"
-                >
-                  {visibleMessages.length === 0 ? (
-                    <div className="text-[10.5px] text-text-tertiary py-2 text-center">
-                      No messages yet
-                    </div>
-                  ) : (
-                    visibleMessages.map((m) => {
-                      const outgoing = m.fromInstanceId === instanceId;
-                      const peerId = counterpartOf(m);
-                      const peerColor = colorOf(peerId);
-                      return (
-                        <div
-                          key={m.id}
-                          className={`flex flex-col ${outgoing ? "items-end" : "items-start"}`}
-                        >
-                          {/* Incoming: peer name + color accent above the bubble. */}
-                          {!outgoing && (
-                            <div className="flex items-center gap-1 mb-0.5 px-0.5 max-w-[88%]">
-                              <span
-                                className="w-1.5 h-1.5 rounded-full shrink-0"
-                                style={{ backgroundColor: peerColor }}
-                              />
-                              <span className="text-[10px] font-semibold text-text-secondary truncate">
-                                {nameOf(peerId)}
-                              </span>
-                            </div>
-                          )}
-                          <div
-                            className={`max-w-[88%] rounded-2xl px-2.5 py-1.5 ${
-                              outgoing
-                                ? "bg-accent text-white rounded-br-md"
-                                : "bg-overlay/[0.06] text-text-primary rounded-bl-md"
-                            }`}
-                            style={outgoing ? undefined : { borderLeft: `2px solid ${peerColor}` }}
-                          >
-                            <ClampText text={m.text} outgoing={outgoing} />
-                          </div>
-                          {/* Subtle metadata line — timestamp + soft status hints. */}
-                          <div
-                            className={`flex items-center gap-1.5 mt-0.5 px-0.5 text-[9px] text-text-tertiary ${
-                              outgoing ? "flex-row-reverse" : ""
-                            }`}
-                          >
-                            <span>{timeHint(m.createdAt)}</span>
-                            {m.status === "queued" && <span className="text-warning">queued</span>}
-                            {outgoing && m.autoSubmitted && <span>injected</span>}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
               </div>
             </div>
           </>

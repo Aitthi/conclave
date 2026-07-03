@@ -20,6 +20,9 @@ interface WorkspacePaneProps {
    *  auto-focus-first-tab behavior in the load effect is unaffected — this effect
    *  runs after it and only overrides when the id is a real loaded tab. */
   focusInstanceId?: string | null;
+  /** Opens the workspace Chat Hub (threaded down to the Context drawer's
+   *  "Open chat" affordance). */
+  onOpenChat?: () => void;
 }
 
 // View-model for one agent tab (any type). Carries the full `AgentDefinition`
@@ -65,7 +68,7 @@ function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
  * tab lazily spawns its session (idempotent server-side; we also memoize the
  * instance→session mapping so re-selecting never re-spawns).
  */
-export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePaneProps) {
+export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: WorkspacePaneProps) {
   const [tabs, setTabs] = useState<AgentTab[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -405,6 +408,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
           roster={roster}
           session={activeSession}
           launchedSkillIds={activeTab.launchedSkillIds}
+          onOpenChat={onOpenChat}
         />
       )}
     </div>

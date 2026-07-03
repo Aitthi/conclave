@@ -234,6 +234,10 @@ export function AppShell() {
                 key={`${activeWorkspaceId}:${agentsVersion}`}
                 workspaceId={activeWorkspaceId}
                 focusInstanceId={selectedId}
+                onOpenChat={() => {
+                  setShowBlackboard(false);
+                  setShowChat(true);
+                }}
               />
             ) : (
               <main className="flex-1 flex flex-col min-w-0 bg-surface">
