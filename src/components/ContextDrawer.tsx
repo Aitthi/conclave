@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   PanelRight,
   Bot,
@@ -10,8 +10,6 @@ import {
   Camera,
   Clock,
   Waypoints,
-  CornerDownLeft,
-  CornerUpRight,
   ChevronDown,
   Trash2,
   Scale,
@@ -62,8 +60,56 @@ interface ContextDrawerProps {
   launchedSkillIds?: string[];
 }
 
-// How many recent inbox/outbox rows the Messages log shows.
-const MESSAGE_LOG_LIMIT = 6;
+// How many recent inbox/outbox messages the chat timeline loads (newest-first
+// from the API, rendered oldest→newest). A readable conversation needs more
+// than a handful of rows; 50 is the `message.list` server default.
+const MESSAGE_LOG_LIMIT = 50;
+
+// Auto-scroll only snaps to the newest message when the reader is already
+// within this many pixels of the bottom (or on first load / a message this
+// agent just sent) — otherwise a background refetch would scroll-jack someone
+// reading older history.
+const NEAR_BOTTOM_PX = 40;
+
+/** One chat message's text, clamped to ~6 lines with a Show-more/less toggle
+ *  that appears ONLY when the text actually overflows the clamp (measured, not
+ *  guessed — so a long-but-short-lined message shows no dead toggle). Expand
+ *  state lives per-bubble, so it resets for free when the message unmounts on
+ *  an instance switch (no cross-instance state leak). */
+function ClampText({ text, outgoing }: { text: string; outgoing: boolean }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clampable, setClampable] = useState(false);
+  // Measure while clamped (expanded starts false): the element overflows six
+  // lines iff its scroll height exceeds its clamped client height. Runs on text
+  // change only, so it is NOT re-measured (and hidden) after the user expands.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) setClampable(el.scrollHeight - el.clientHeight > 4);
+  }, [text]);
+  return (
+    <>
+      <div
+        ref={ref}
+        className={`whitespace-pre-wrap break-words leading-snug ${
+          expanded ? "" : "line-clamp-6"
+        }`}
+      >
+        {text}
+      </div>
+      {clampable && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className={`mt-0.5 text-[10px] font-semibold ${
+            outgoing ? "text-white/80 hover:text-white" : "text-accent hover:underline"
+          }`}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </>
+  );
+}
 
 // How many recent snapshots the Memory section shows.
 const SNAPSHOT_LOG_LIMIT = 6;
@@ -141,6 +187,34 @@ export function ContextDrawer({
 
   // Refetch when an injection involving this instance fires (in OR out).
   useMessageInjected(instanceId, () => refetch());
+
+  // ── Chat timeline UI state ────────────────────────────────────────────────
+  // `null` = show All peers; otherwise narrow to one counterpart instance id.
+  const [peerFilter, setPeerFilter] = useState<string | null>(null);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  // Forces the next auto-scroll to snap regardless of position (first load of a
+  // conversation / drawer reopen); consumed in the scroll effect below.
+  const forceScrollRef = useRef(true);
+  // The newest message id we last reacted to — lets the scroll effect tell a
+  // genuinely-new message from a background refetch returning identical data.
+  const lastMsgIdRef = useRef<string | null>(null);
+  // Whether the reader was at the bottom as of their LAST scroll — captured on
+  // the scroll event so it reflects the position BEFORE new content lands (a
+  // post-update measurement would misread a tall new message as "not at bottom"
+  // and fail to follow it).
+  const atBottomRef = useRef(true);
+  const onTimelineScroll = () => {
+    const el = timelineRef.current;
+    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+  };
+  // Clear an active peer filter only when that peer truly LEAVES THE WORKSPACE
+  // (gone from the roster) — NOT merely when its messages age out of the loaded
+  // 50-message window, which would yank a filter the human is actively reading.
+  useEffect(() => {
+    if (peerFilter && !roster.some((t) => t.instanceId === peerFilter)) {
+      setPeerFilter(null);
+    }
+  }, [roster, peerFilter]);
 
   // ── Skills (REAL — the agent's effective skill set) ───────────────────────
   // `def.skillIds` is annotated by `agentDef.list` (mandatory builtins +
@@ -303,6 +377,13 @@ export function ContextDrawer({
     setRestartPhase(null);
     setResumeBusy(false);
     setSessionError(null);
+    // Chat timeline is per-conversation: drop the previous agent's peer filter
+    // and force the next auto-scroll to snap to the newest message (mirrors this
+    // file's established transient-state reset on session/instance change).
+    // Per-bubble Show-more state needs no reset here — it unmounts with the
+    // messages themselves.
+    setPeerFilter(null);
+    forceScrollRef.current = true;
     // `session` is intentionally read but excluded from deps — we re-seed only on
     // identity change of the session id, not on every new session object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -468,9 +549,61 @@ export function ContextDrawer({
     [instanceId],
   );
 
-  // Resolve a counterpart instance id → display name via the roster.
+  // Resolve a counterpart instance id → display name / agent color via the
+  // roster (falls back to the raw id / a neutral grey for a peer no longer in
+  // the workspace).
   const nameOf = (id: string): string =>
     roster.find((t) => t.instanceId === id)?.name ?? id;
+  const colorOf = (id: string): string =>
+    roster.find((t) => t.instanceId === id)?.color ?? "#8e8e93";
+  const counterpartOf = (m: InterAgentMessage): string =>
+    m.fromInstanceId === instanceId ? m.toInstanceId : m.fromInstanceId;
+
+  // The API returns newest-first; the chat reads oldest→newest (top→bottom).
+  const timeline = useMemo(() => [...messages].reverse(), [messages]);
+  // Distinct peers appearing in the loaded window — drives the filter chips.
+  const chatPeers = useMemo(() => {
+    const seen = new Map<string, { id: string; name: string; color: string }>();
+    for (const m of messages) {
+      const id = m.fromInstanceId === instanceId ? m.toInstanceId : m.fromInstanceId;
+      if (!seen.has(id)) {
+        const t = roster.find((r) => r.instanceId === id);
+        seen.set(id, { id, name: t?.name ?? id, color: t?.color ?? "#8e8e93" });
+      }
+    }
+    return [...seen.values()];
+  }, [messages, instanceId, roster]);
+  const visibleMessages = useMemo(
+    () => (peerFilter ? timeline.filter((m) => counterpartOf(m) === peerFilter) : timeline),
+    // counterpartOf is a stable pure closure over instanceId; timeline+filter are the real deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timeline, peerFilter, instanceId],
+  );
+  // Reopening the drawer remounts the timeline (scrollTop 0); force the next
+  // snap so a long conversation opens at its newest message, not the top.
+  useEffect(() => {
+    if (open) forceScrollRef.current = true;
+  }, [open]);
+
+  // Auto-scroll to the newest message (bottom), but do NOT scroll-jack: snap
+  // only when a genuinely-new message arrived AND the reader is near the bottom,
+  // OR this agent just sent the newest one, OR a forced snap is pending (first
+  // load / reopen / instance switch). A background refetch of identical data
+  // never moves the view.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const newest = visibleMessages[visibleMessages.length - 1];
+    const newestId = newest?.id ?? null;
+    const isNew = newestId !== lastMsgIdRef.current;
+    const justSent = isNew && newest?.fromInstanceId === instanceId;
+    if (forceScrollRef.current || justSent || (isNew && atBottomRef.current)) {
+      el.scrollTop = el.scrollHeight;
+      atBottomRef.current = true;
+    }
+    lastMsgIdRef.current = newestId;
+    forceScrollRef.current = false;
+  }, [visibleMessages, open, instanceId]);
 
   // Fusion panel (orchestrator branch) — the workspace's chat agents excluding
   // self, capped at 8 (the same derivation the M4.3 backend does). Memoised so
@@ -925,53 +1058,129 @@ export function ContextDrawer({
               </div>
             )}
 
-            {/* Messages — routing POLICY (REAL config from AgentDefinition) + a
-                REAL recent inbox/outbox log from `message.list`. */}
+            {/* Messages — a readable chat of this agent's inter-agent
+                conversation (REAL data from `message.list`), one merged
+                timeline with per-peer filter chips. Routing POLICY is compacted
+                into the header so it never pushes the conversation down. */}
             <div>
               <SectionLabel>Messages</SectionLabel>
-              <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1.5 text-[11.5px]">
-                <div className="flex items-center justify-between">
-                  <span className="text-text-secondary flex items-center gap-1.5">
-                    <Inbox className="w-3.5 h-3.5" />
-                    Accepts from
+              <div className="rounded-xl ring-hair bg-surface text-[11.5px] overflow-hidden">
+                {/* Compact policy header — Accepts-from + Auto-submit as subtle
+                    hints, not full rows. */}
+                <div className="flex items-center gap-3 px-2.5 py-1.5 border-b border-overlay/[0.06] text-[10px] text-text-tertiary">
+                  <span
+                    className="flex items-center gap-1"
+                    title={`Accepts messages from: ${allowedSendersLabel(def.allowedSenders)}`}
+                  >
+                    <Inbox className="w-3 h-3 shrink-0" />
+                    <span className="text-text-secondary font-medium">
+                      {allowedSendersLabel(def.allowedSenders)}
+                    </span>
                   </span>
-                  <span className="font-medium">{allowedSendersLabel(def.allowedSenders)}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-text-secondary flex items-center gap-1.5">
-                    <Send className="w-3.5 h-3.5" />
-                    Auto-submit on inject
+                  <span
+                    className="flex items-center gap-1"
+                    title={
+                      def.autoSubmitInjected
+                        ? "Injected messages auto-submit into this agent's input"
+                        : "Injected messages wait for manual submit"
+                    }
+                  >
+                    <Send className="w-3 h-3 shrink-0" />
+                    <span className="text-text-secondary font-medium">
+                      {def.autoSubmitInjected ? "Auto-submit" : "Manual submit"}
+                    </span>
                   </span>
-                  <span className="font-medium">{def.autoSubmitInjected ? "On" : "Off"}</span>
                 </div>
 
-                {/* Recent inbox/outbox — newest first. Honest empty state. */}
-                <div className="pt-1.5 mt-0.5 border-t border-overlay/[0.06] space-y-1">
-                  {messages.length === 0 ? (
-                    <div className="text-[10.5px] text-text-tertiary py-0.5">No messages yet</div>
-                  ) : (
-                    messages.map((m) => {
-                      const inbound = m.toInstanceId === instanceId;
-                      const counterpart = inbound ? m.fromInstanceId : m.toInstanceId;
+                {/* Per-peer filter chips (only when there are peers to filter). */}
+                {chatPeers.length > 0 && (
+                  <div className="flex flex-wrap gap-1 px-2.5 pt-2">
+                    <button
+                      onClick={() => setPeerFilter(null)}
+                      className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
+                        peerFilter === null
+                          ? "bg-accent text-white"
+                          : "ring-1 ring-overlay/[0.1] text-text-secondary hover:bg-overlay/[0.05]"
+                      }`}
+                    >
+                      All
+                    </button>
+                    {chatPeers.map((p) => {
+                      const active = peerFilter === p.id;
                       return (
-                        <div key={m.id} className="flex items-center gap-1.5">
-                          {inbound ? (
-                            <CornerDownLeft className="w-3 h-3 shrink-0 text-success" />
-                          ) : (
-                            <CornerUpRight className="w-3 h-3 shrink-0 text-accent" />
+                        <button
+                          key={p.id}
+                          onClick={() => setPeerFilter(active ? null : p.id)}
+                          className={`text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-colors ${
+                            active
+                              ? "bg-accent text-white"
+                              : "ring-1 ring-overlay/[0.1] text-text-secondary hover:bg-overlay/[0.05]"
+                          }`}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full shrink-0"
+                            style={{ backgroundColor: p.color }}
+                          />
+                          <span className="truncate max-w-[90px]">{p.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* The conversation — oldest→newest, internal scroll, auto-
+                    scrolled to the newest message. */}
+                <div
+                  ref={timelineRef}
+                  onScroll={onTimelineScroll}
+                  className="max-h-72 overflow-y-auto px-2.5 py-2 space-y-2.5"
+                >
+                  {visibleMessages.length === 0 ? (
+                    <div className="text-[10.5px] text-text-tertiary py-2 text-center">
+                      No messages yet
+                    </div>
+                  ) : (
+                    visibleMessages.map((m) => {
+                      const outgoing = m.fromInstanceId === instanceId;
+                      const peerId = counterpartOf(m);
+                      const peerColor = colorOf(peerId);
+                      return (
+                        <div
+                          key={m.id}
+                          className={`flex flex-col ${outgoing ? "items-end" : "items-start"}`}
+                        >
+                          {/* Incoming: peer name + color accent above the bubble. */}
+                          {!outgoing && (
+                            <div className="flex items-center gap-1 mb-0.5 px-0.5 max-w-[88%]">
+                              <span
+                                className="w-1.5 h-1.5 rounded-full shrink-0"
+                                style={{ backgroundColor: peerColor }}
+                              />
+                              <span className="text-[10px] font-semibold text-text-secondary truncate">
+                                {nameOf(peerId)}
+                              </span>
+                            </div>
                           )}
-                          <span className="text-text-secondary shrink-0">
-                            {inbound ? "from" : "to"}
-                          </span>
-                          <span className="font-medium truncate flex-1 min-w-0">
-                            {nameOf(counterpart)}
-                          </span>
-                          {m.status === "queued" && (
-                            <span className="text-[10px] text-warning shrink-0">queued</span>
-                          )}
-                          <span className="text-[10px] text-text-tertiary shrink-0">
-                            {timeHint(m.createdAt)}
-                          </span>
+                          <div
+                            className={`max-w-[88%] rounded-2xl px-2.5 py-1.5 ${
+                              outgoing
+                                ? "bg-accent text-white rounded-br-md"
+                                : "bg-overlay/[0.06] text-text-primary rounded-bl-md"
+                            }`}
+                            style={outgoing ? undefined : { borderLeft: `2px solid ${peerColor}` }}
+                          >
+                            <ClampText text={m.text} outgoing={outgoing} />
+                          </div>
+                          {/* Subtle metadata line — timestamp + soft status hints. */}
+                          <div
+                            className={`flex items-center gap-1.5 mt-0.5 px-0.5 text-[9px] text-text-tertiary ${
+                              outgoing ? "flex-row-reverse" : ""
+                            }`}
+                          >
+                            <span>{timeHint(m.createdAt)}</span>
+                            {m.status === "queued" && <span className="text-warning">queued</span>}
+                            {outgoing && m.autoSubmitted && <span>injected</span>}
+                          </div>
                         </div>
                       );
                     })
