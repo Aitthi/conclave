@@ -1,5 +1,15 @@
 import { useEffect, useState } from "react";
-import { Waypoints, Terminal, Search, Folder, Plus, Layers, X, Pencil } from "lucide-react";
+import {
+  Waypoints,
+  Terminal,
+  Search,
+  Folder,
+  Plus,
+  Layers,
+  MessageSquare,
+  X,
+  Pencil,
+} from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
 import { computeSkillsStale } from "../lib/skills";
@@ -197,6 +207,10 @@ interface RosterProps {
   onOpenBlackboard?: () => void;
   /** Whether the Blackboard screen is currently shown (drives active styling). */
   blackboardOpen?: boolean;
+  /** Open/toggle the workspace Chat Hub (undefined → disabled). */
+  onOpenChat?: () => void;
+  /** Whether the Chat Hub is currently open (highlights the toggle). */
+  chatOpen?: boolean;
   /** Open the rename/recolor/delete modal for the active workspace. */
   onEditWorkspace?: () => void;
 }
@@ -212,6 +226,8 @@ export function Roster({
   onAgentsChanged,
   onOpenBlackboard,
   blackboardOpen,
+  onOpenChat,
+  chatOpen,
   onEditWorkspace,
 }: RosterProps) {
   const [entries, setEntries] = useState<RosterEntry[]>([]);
@@ -492,6 +508,21 @@ export function Roster({
           <div className="flex-1 text-left leading-tight">
             <div className="text-[12.5px] font-semibold">Blackboard</div>
             <div className="text-[10.5px] text-text-muted">Shared key/value store</div>
+          </div>
+        </button>
+        <button
+          onClick={onOpenChat}
+          disabled={!onOpenChat}
+          className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            chatOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
+          }`}
+        >
+          <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
+            <MessageSquare className="w-[14px] h-[14px]" />
+          </div>
+          <div className="flex-1 text-left leading-tight">
+            <div className="text-[12.5px] font-semibold">Chat</div>
+            <div className="text-[10.5px] text-text-muted">Agent conversations</div>
           </div>
         </button>
       </div>

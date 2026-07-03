@@ -13,6 +13,7 @@ import { EditWorkspace } from "./EditWorkspace";
 import { Settings } from "./Settings";
 import { WorkspacePane } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
+import { ChatHub } from "./ChatHub";
 
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
@@ -25,6 +26,10 @@ export function AppShell() {
 
   // ── Blackboard state ───────────────────────────────────────────────────
   const [showBlackboard, setShowBlackboard] = useState(false);
+
+  // ── Chat Hub state — shares the center pane with the Blackboard, so
+  //    opening one closes the other. ────────────────────────────────────────
+  const [showChat, setShowChat] = useState(false);
 
   // Bumped whenever the set of agents in the active workspace changes (add via
   // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
@@ -167,8 +172,9 @@ export function AppShell() {
               folderPath={activeWorkspace?.folderPath}
               selectedId={selectedId}
               onSelect={(id) => {
-                // Selecting an agent returns from the Blackboard to the pane.
+                // Selecting an agent returns from the Blackboard/Chat to the pane.
                 setShowBlackboard(false);
+                setShowChat(false);
                 setSelectedId(id);
               }}
               // "Create new agent…" (from inside the picker) still opens the Builder.
@@ -185,16 +191,36 @@ export function AppShell() {
               // Blackboard needs a workspace to scope to — only toggle when one
               // is active (else the view would fall through to "Select a workspace").
               onOpenBlackboard={
-                activeWorkspaceId ? () => setShowBlackboard((v) => !v) : undefined
+                activeWorkspaceId
+                  ? () => {
+                      setShowChat(false);
+                      setShowBlackboard((v) => !v);
+                    }
+                  : undefined
               }
               blackboardOpen={showBlackboard}
+              onOpenChat={
+                activeWorkspaceId
+                  ? () => {
+                      setShowBlackboard(false);
+                      setShowChat((v) => !v);
+                    }
+                  : undefined
+              }
+              chatOpen={showChat}
               onEditWorkspace={
                 activeWorkspaceId ? () => setShowEditWorkspace(true) : undefined
               }
             />
 
-            {/* ── Main content: Blackboard screen, else the live agent pane ─── */}
-            {showBlackboard && activeWorkspaceId ? (
+            {/* ── Main content: Chat Hub / Blackboard screen, else the live agent pane ─── */}
+            {showChat && activeWorkspaceId ? (
+              <ChatHub
+                key={activeWorkspaceId}
+                workspaceId={activeWorkspaceId}
+                onClose={() => setShowChat(false)}
+              />
+            ) : showBlackboard && activeWorkspaceId ? (
               <Blackboard
                 key={activeWorkspaceId}
                 workspaceId={activeWorkspaceId}
