@@ -134,7 +134,6 @@ pub async fn list_for_instance(
 /// Raw `sqlx::query_as` (not chain-builder): the membership filter is an
 /// `IN (subquery)` on two columns — the documented fallback case, same as
 /// `list_for_instance` above. The column list mirrors `InterAgentMessageRow`.
-#[allow(dead_code)] // consumed by commands::message::list_for_workspace, added next
 pub async fn list_for_workspace(
     pool: &SqlitePool,
     workspace_id: &str,

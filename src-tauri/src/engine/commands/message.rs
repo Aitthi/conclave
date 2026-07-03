@@ -227,6 +227,34 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Payload for `message.listForWorkspace` — the Chat Hub's workspace-wide query.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListForWorkspaceReq {
+    workspace_id: String,
+    limit: Option<i64>,
+}
+
+/// `message.listForWorkspace` — the whole workspace's inter-agent traffic,
+/// newest first (Chat Hub). `limit` defaults to [`MAX_LIST_LIMIT`] (the hub
+/// wants the full recent window) and is clamped to `1..=MAX_LIST_LIMIT`,
+/// same rationale as [`list`].
+pub async fn list_for_workspace(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let ListForWorkspaceReq { workspace_id, limit } =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    if !repo::workspace::exists(&state.db, &workspace_id).await? {
+        return Err(AppError::NotFound(format!(
+            "workspace id={workspace_id} not found"
+        )));
+    }
+
+    let limit = limit.unwrap_or(MAX_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
+    let rows =
+        repo::inter_agent_message::list_for_workspace(&state.db, &workspace_id, limit).await?;
+    serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +330,83 @@ mod tests {
             .await
             .expect("instantiate failed")
             .id
+    }
+
+    /// Helper: a workspace with TWO instances in it — returns (ws_id, a, b).
+    /// `fixture_instance_id` makes a fresh workspace per call, which is
+    /// exactly what listForWorkspace tests must NOT do.
+    async fn fixture_workspace_pair(state: &AppState) -> (String, String, String) {
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let mut ids = Vec::new();
+        for name in ["Alpha", "Bravo"] {
+            let def = agent_definition::create(
+                &state.db,
+                &AgentDefinitionInput {
+                    name: name.into(),
+                    role: None,
+                    agent_type: "cli".into(),
+                    cli_kind: None,
+                    color: None,
+                    provider_id: None,
+                    model: None,
+                    harness_mode: "own".into(),
+                    share_blackboard: None,
+                    auto_submit_injected: None,
+                    allowed_senders: None,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create agent_def failed");
+            ids.push(
+                workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+                    .await
+                    .expect("instantiate failed")
+                    .id,
+            );
+        }
+        let b = ids.pop().expect("b");
+        let a = ids.pop().expect("a");
+        (ws.id, a, b)
+    }
+
+    /// listForWorkspace: unknown workspace → NotFound.
+    #[tokio::test]
+    async fn list_for_workspace_unknown_workspace_not_found() {
+        let state = AppState::for_tests().await;
+        let err = list_for_workspace(&state, json!({ "workspaceId": "nope" }))
+            .await
+            .expect_err("should fail for unknown workspace");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// listForWorkspace returns the workspace's rows (camelCase), and another
+    /// workspace's traffic never leaks in.
+    #[tokio::test]
+    async fn list_for_workspace_returns_scoped_rows() {
+        let state = AppState::for_tests().await;
+        let (ws_id, a, b) = fixture_workspace_pair(&state).await;
+        // Traffic in a DIFFERENT workspace (fixture makes its own ws per call).
+        let x = fixture_instance_id(&state, "Other").await;
+        repo::inter_agent_message::create(&state.db, &a, &b, "hello", "delivered", true)
+            .await
+            .expect("msg in ws");
+        repo::inter_agent_message::create(&state.db, &x, &x, "elsewhere", "delivered", true)
+            .await
+            .expect("msg elsewhere");
+
+        let val = list_for_workspace(&state, json!({ "workspaceId": ws_id }))
+            .await
+            .expect("list failed");
+        let arr = val.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "only the workspace's own message");
+        assert_eq!(arr[0].get("text").and_then(Value::as_str), Some("hello"));
+        assert_eq!(
+            arr[0].get("fromInstanceId").and_then(Value::as_str),
+            Some(a.as_str())
+        );
     }
 
     #[tokio::test]

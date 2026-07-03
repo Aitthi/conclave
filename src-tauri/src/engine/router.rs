@@ -48,6 +48,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "message.send" => message::send(state, payload).await,
         "message.inject" => message::inject(state, payload).await,
         "message.list" => message::list(state, payload).await,
+        "message.listForWorkspace" => message::list_for_workspace(state, payload).await,
 
         // ── blackboard ────────────────────────────────────────────────────
         "blackboard.list" => blackboard::list(state, payload).await,
