@@ -1,63 +1,10 @@
 {
   "tab": "prototype",
-  "screen": "skill-editor-active",
-  "screens": [
-    {
-      "id": "workspace",
-      "title": "Workspace home"
-    },
-    {
-      "id": "terminal",
-      "title": "Terminal pane"
-    },
-    {
-      "id": "chat",
-      "title": "Custom chat agent"
-    },
-    {
-      "id": "builder",
-      "title": "Agent builder"
-    },
-    {
-      "id": "library",
-      "title": "Agent Library"
-    },
-    {
-      "id": "blackboard",
-      "title": "Shared blackboard"
-    },
-    {
-      "id": "orchestrator",
-      "title": "Orchestrator · Fusion"
-    },
-    {
-      "id": "settings",
-      "title": "Settings"
-    },
-    {
-      "id": "link-folder",
-      "title": "Link folder · new workspace"
-    },
-    {
-      "id": "timeline",
-      "title": "Memory timeline"
-    },
-    {
-      "id": "cli",
-      "title": "Conclave CLI"
-    },
-    {
-      "id": "skill-editor",
-      "title": "Skill Editor · agent assist (idle)"
-    },
-    {
-      "id": "skill-editor-active",
-      "title": "Skill Editor · agent assist (active)"
-    }
-  ],
+  "screen": null,
+  "screens": [],
   "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "02:28:29 PM",
-  "reportedAt": "2026-07-02T07:28:30.007Z"
+  "updatedAt": "05:33:16 PM",
+  "reportedAt": "2026-07-03T10:33:16.173Z"
 }

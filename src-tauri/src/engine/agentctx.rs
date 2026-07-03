@@ -86,7 +86,9 @@ wait."
 /// Single line, same rationale as [`compact_save_prompt`].
 #[must_use]
 pub fn compact_restore_prompt() -> String {
-    "[conclave compact] Your context was just cleared. Restore your working state: run \
+    "[conclave compact] Your context was just cleared. FIRST: if your system prompt names a \
+standing-instructions file, re-read that file now — the clear erased its content from your \
+context, and your skills live in it. Then restore your working state: run \
 `conclave snapshot last` to read the handoff you saved a moment ago, then VERIFY it against \
 reality before acting — git log the SHAs it names and re-read the blackboard keys it watches; \
 peers may have moved the world while you were gone. Then continue the task from the EXACT next \
@@ -123,12 +125,14 @@ After it confirms, stop and wait for the restart."
 /// [`compact_save_prompt`].
 #[must_use]
 pub fn resume_restore_prompt() -> String {
-    "[conclave resume] Your process was restarted and this is a fresh context. Restore your \
-working state: run `conclave snapshot last` to read the last handoff saved for you, then VERIFY \
-it against reality before acting — git log the SHAs it names and re-read the blackboard keys it \
-watches; the world may have moved while you were gone. Then continue the task from the EXACT \
-next step it describes. Do not restart work that the handoff says is done, and do not re-open \
-decisions it records."
+    "[conclave resume] Your process was restarted and this is a fresh context. FIRST: if your \
+system prompt names a standing-instructions file, re-read that file now — a fresh context has \
+none of its content, and your skills live in it. Then restore your working state: run \
+`conclave snapshot last` to read the last handoff saved for you, then VERIFY it against reality \
+before acting — git log the SHAs it names and re-read the blackboard keys it watches; the world \
+may have moved while you were gone. Then continue the task from the EXACT next step it \
+describes. Do not restart work that the handoff says is done, and do not re-open decisions it \
+records."
         .to_string()
 }
 
@@ -216,7 +220,26 @@ pub fn write_skill_sidecar(_instance_id: &str, _body: &str) -> std::io::Result<P
 pub fn skill_pointer_sentence(path: &std::path::Path) -> String {
     let path = sanitize_field(&path.display().to_string());
     format!(
-        "Additional standing instructions for this session are at {path} — read that file before your first response."
+        "Additional standing instructions for this session are at {path} — read that file before \
+your first response, and re-read it whenever your context has just been cleared, compacted, or \
+restarted: its content lives only in that file, never in your conversation history, so a fresh \
+context always starts without it."
+    )
+}
+
+/// The live-reload "nudge" sentence (ADR 0004): injected as a chat turn into
+/// an already-running instance right after a skill mutation (`agent.save`
+/// attach/detach, `skill.save`/`skill.delete`) rewrites its sidecar.  Unlike
+/// [`skill_pointer_sentence`] (a first-launch pointer appended to the static
+/// system prompt), this is a one-off nudge telling the agent its standing
+/// instructions changed mid-session and any copy it already read into
+/// context is now stale. Runs the same `sanitize_field` pipeline so a
+/// pathological path can't reintroduce a newline or '='.
+pub fn skills_updated_prompt(path: &std::path::Path) -> String {
+    let path = sanitize_field(&path.display().to_string());
+    format!(
+        "[conclave skills] Your standing instructions were just UPDATED at {path} — re-read that \
+file NOW before continuing: any copy of it already in your context is stale."
     )
 }
 
@@ -305,6 +328,33 @@ mod tests {
         assert!(s.contains("/tmp/inst-a.md"), "{s}");
     }
 
+    /// The sidecar's content reaches the model only through a file read whose
+    /// result lives in CONVERSATION history — which `/clear` erases. The
+    /// pointer (system-prompt layer) is the only survivor, so it must order a
+    /// re-read on every fresh context, not just "before your first response".
+    #[test]
+    fn skill_pointer_sentence_orders_reread_after_context_clear() {
+        let s = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst-a.md"));
+        assert!(s.contains("re-read"), "{s}");
+        assert!(s.contains("clear"), "{s}");
+    }
+
+    /// Restore prompts drive the agent straight into `conclave snapshot last`
+    /// + continue-the-task. Without an explicit first step to re-read the
+    /// standing-instructions file, the agent resumes work skill-less — the
+    /// exact "forgets skills after /clear" bug. Both fresh-context prompts
+    /// must name that step BEFORE the snapshot restore.
+    #[test]
+    fn fresh_context_restore_prompts_order_skill_file_reread_first() {
+        for p in [super::compact_restore_prompt(), super::resume_restore_prompt()] {
+            assert!(p.contains("standing-instructions"), "{p}");
+            assert!(p.contains("re-read"), "{p}");
+            let reread = p.find("re-read").unwrap();
+            let snapshot = p.find("conclave snapshot last").unwrap();
+            assert!(reread < snapshot, "re-read must come before snapshot restore: {p}");
+        }
+    }
+
     /// The invariant the whole feature exists to protect: appending the skill
     /// pointer sentence to a real preamble must NOT reintroduce a newline or
     /// '=', even when the underlying skill body (never embedded here) is
@@ -316,6 +366,32 @@ mod tests {
         let combined = format!("{p} {pointer}");
         assert!(!combined.contains('\n'), "no newline: {combined}");
         assert!(!combined.contains('='), "no '=': {combined}");
+    }
+
+    /// ADR 0004: the live-reload nudge injected into a running instance after
+    /// a skill mutation. Mirrors `skill_pointer_sentence`'s single-line/`=`
+    /// -free/path-naming invariants, plus the two things a NUDGE (not a
+    /// first-launch pointer) must add: the word UPDATED, and an instruction
+    /// that any previously-read copy already in context is stale.
+    #[test]
+    fn skills_updated_prompt_is_single_line_and_equals_free() {
+        let s = super::skills_updated_prompt(std::path::Path::new("/tmp/a=b\nc.md"));
+        assert!(!s.contains('\n'), "no newline: {s}");
+        assert!(!s.contains('='), "no '=': {s}");
+    }
+
+    #[test]
+    fn skills_updated_prompt_names_the_path() {
+        let s = super::skills_updated_prompt(std::path::Path::new("/tmp/inst-a.md"));
+        assert!(s.contains("/tmp/inst-a.md"), "{s}");
+    }
+
+    #[test]
+    fn skills_updated_prompt_says_updated_and_orders_reread_now() {
+        let s = super::skills_updated_prompt(std::path::Path::new("/tmp/inst-a.md"));
+        assert!(s.contains("UPDATED"), "{s}");
+        assert!(s.contains("re-read"), "{s}");
+        assert!(s.contains("stale"), "{s}");
     }
 
     #[test]

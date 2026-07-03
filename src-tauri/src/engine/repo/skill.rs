@@ -233,6 +233,19 @@ pub async fn custom_skill_ids_by_agent(
     Ok(map)
 }
 
+/// Reverse of [`custom_skill_ids_by_agent`]: every agent definition id that
+/// currently has `skill_id` attached. A skill content edit (`skill.save`) or
+/// removal (`skill.delete`) can affect many defs across many workspaces at
+/// once (ADR 0004's live-reload fan-out).
+pub async fn agent_def_ids_by_skill(pool: &SqlitePool, skill_id: &str) -> sqlx::Result<Vec<String>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT agent_def_id FROM agent_skill WHERE skill_id = ?")
+            .bind(skill_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
 /// Count of `agent_skill` rows per skill id. Used by `commands::skill::list`
 /// for the Library's "attached to N agents" label (custom skills only).
 pub async fn attached_counts(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
@@ -461,6 +474,18 @@ pub mod test_support {
         let d = root.join(id);
         std::fs::create_dir_all(&d).expect("fixture mkdir failed");
         std::fs::write(d.join("SKILL.md"), raw).expect("fixture SKILL.md write failed");
+    }
+
+    /// Like [`fixture_skills_dir`] but seeds NO skills at all — for exercising
+    /// the genuinely-empty `content_for_agent` path (ADR 0004's placeholder
+    /// sidecar body). The real shipped `skills/` dir can never produce this
+    /// case: it always carries mandatory builtins (e.g. `collaboration`).
+    pub fn empty_skills_dir(tag: &str) -> FixtureSkillsDir {
+        let dir = std::env::temp_dir().join(format!("conclave-skill-fixture-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("empty fixture mkdir failed");
+        OVERRIDE.with(|c| *c.borrow_mut() = Some(dir.clone()));
+        FixtureSkillsDir { dir }
     }
 }
 
@@ -770,6 +795,53 @@ mod tests {
             .expect("query failed");
         assert_eq!(map.get(&def1).cloned().unwrap_or_default().len(), 2);
         assert_eq!(map.get(&def2).cloned().unwrap_or_default(), vec![s1.id]);
+    }
+
+    /// Reverse of `custom_skill_ids_by_agent`: one skill can be attached to
+    /// many defs (ADR 0004's `skill.save`/`delete` fan-out — reloading every
+    /// def a content edit affects).
+    #[tokio::test]
+    async fn agent_def_ids_by_skill_finds_every_attached_def() {
+        let pool = connect_in_memory().await;
+        let def1 = fixture_agent_def(&pool).await;
+        let def2 = fixture_agent_def(&pool).await;
+        let def3 = fixture_agent_def(&pool).await;
+        let shared = super::create(&pool, "Shared", None, "s")
+            .await
+            .expect("create failed");
+        let other = super::create(&pool, "Other", None, "o")
+            .await
+            .expect("create failed");
+        super::set_custom_attachments(&pool, &def1, std::slice::from_ref(&shared.id))
+            .await
+            .expect("set failed");
+        super::set_custom_attachments(&pool, &def2, std::slice::from_ref(&shared.id))
+            .await
+            .expect("set failed");
+        super::set_custom_attachments(&pool, &def3, std::slice::from_ref(&other.id))
+            .await
+            .expect("set failed");
+
+        let mut ids = super::agent_def_ids_by_skill(&pool, &shared.id)
+            .await
+            .expect("query failed");
+        ids.sort();
+        let mut expected = vec![def1, def2];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn agent_def_ids_by_skill_empty_when_unattached() {
+        let pool = connect_in_memory().await;
+        let lonely = super::create(&pool, "Lonely", None, "l")
+            .await
+            .expect("create failed");
+
+        let ids = super::agent_def_ids_by_skill(&pool, &lonely.id)
+            .await
+            .expect("query failed");
+        assert!(ids.is_empty(), "{ids:?}");
     }
 
     #[tokio::test]

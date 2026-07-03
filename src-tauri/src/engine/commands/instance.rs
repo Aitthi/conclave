@@ -68,11 +68,21 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Placeholder sidecar body for an instance with no builtin/custom skills
+/// attached. The sidecar + pointer are unconditional (ADR 0004: the sidecar
+/// is the LIVE source of truth for the instance's whole lifetime) — an
+/// instance launched skill-less still needs a file a later `agent.save`
+/// attachment can rewrite in place, and a pointer so the nudge can tell it
+/// to re-read.
+pub(crate) const NO_SKILLS_PLACEHOLDER: &str =
+    "(no standing instructions attached right now — this file updates in place; re-read it when told to)";
+
 /// Compute this instance's skill content (builtin + attached custom, via
-/// `repo::skill::content_for_agent`) and, if non-empty, write it to a
-/// per-instance sidecar file and append ONE sanitized pointer sentence to
-/// `preamble` — never the raw content, which may contain '\n'/'=' and would
-/// violate `bootstrap_preamble`'s single-line/'='-free contract (ADR 0001).
+/// `repo::skill::content_for_agent`) and unconditionally write it to a
+/// per-instance sidecar file (falling back to `NO_SKILLS_PLACEHOLDER` when
+/// empty) and append ONE sanitized pointer sentence to `preamble` — never the
+/// raw content, which may contain '\n'/'=' and would violate
+/// `bootstrap_preamble`'s single-line/'='-free contract (ADR 0001).
 ///
 /// Does NOT persist `session.launched_skill_ids` — the caller must do that
 /// ONLY after the launch this preamble is used for has actually succeeded
@@ -90,16 +100,17 @@ async fn apply_skills_to_preamble(
     preamble: String,
 ) -> Result<(String, Vec<String>), AppError> {
     let (skill_body, skill_ids) = repo::skill::content_for_agent(&state.db, agent_def_id).await?;
-    let preamble = if skill_body.is_empty() {
-        preamble
+    let body = if skill_body.is_empty() {
+        NO_SKILLS_PLACEHOLDER
     } else {
-        let path = crate::engine::agentctx::write_skill_sidecar(instance_id, &skill_body)
-            .map_err(|e| AppError::Internal(format!("write skill sidecar: {e}")))?;
-        format!(
-            "{preamble} {}",
-            crate::engine::agentctx::skill_pointer_sentence(&path)
-        )
+        skill_body.as_str()
     };
+    let path = crate::engine::agentctx::write_skill_sidecar(instance_id, body)
+        .map_err(|e| AppError::Internal(format!("write skill sidecar: {e}")))?;
+    let preamble = format!(
+        "{preamble} {}",
+        crate::engine::agentctx::skill_pointer_sentence(&path)
+    );
     Ok((preamble, skill_ids))
 }
 
@@ -1226,9 +1237,59 @@ mod tests {
         );
     }
 
+    /// ADR 0004: the sidecar + pointer are now UNCONDITIONAL, even when the
+    /// agent def has no builtin or custom skills attached at all (no
+    /// `fixture_skills_dir` override here, so `content_for_agent` returns
+    /// truly empty content) — a later live reload needs the file to already
+    /// exist so it can rewrite it in place.
     #[tokio::test]
-    async fn apply_skills_to_preamble_is_noop_when_nothing_attached() {
-        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-inst-preamble-noop");
+    async fn apply_skills_to_preamble_writes_placeholder_when_nothing_attached() {
+        let _fx = repo::skill::test_support::empty_skills_dir("cmd-inst-preamble-empty");
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let inst_id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+
+        let (result, skill_ids) =
+            apply_skills_to_preamble(&state, &def.id, &inst_id, "BASE".to_string())
+                .await
+                .expect("apply_skills_to_preamble failed");
+        assert!(
+            result.starts_with("BASE "),
+            "pointer must be appended even with nothing attached: {result}"
+        );
+        assert!(skill_ids.is_empty(), "nothing attached: {skill_ids:?}");
+
+        let path = dirs::data_dir()
+            .expect("data dir")
+            .join("Conclave")
+            .join("skills")
+            .join(format!("{inst_id}.md"));
+        let contents = std::fs::read_to_string(&path).expect("sidecar must exist");
+        assert_eq!(contents, NO_SKILLS_PLACEHOLDER);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A mandatory builtin fixture is still included and rendered into the
+    /// sidecar body (not the placeholder) when at least one skill applies.
+    #[tokio::test]
+    async fn apply_skills_to_preamble_extends_when_builtin_mandatory_applies() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("cmd-inst-preamble-builtin");
         let state = AppState::for_tests().await;
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
