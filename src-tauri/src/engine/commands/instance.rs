@@ -114,6 +114,126 @@ async fn apply_skills_to_preamble(
     Ok((preamble, skill_ids))
 }
 
+/// Recompute one agent definition's effective skill content ONCE and push it
+/// to every instance of that def (ADR 0004: the sidecar is the LIVE source of
+/// truth for the instance's whole lifetime, not just a launch-time snapshot).
+///
+/// Per instance: skip ONLY when NOTHING effective changed — the skill-id set
+/// matches what's recorded as launched AND the freshly computed body equals
+/// the sidecar file's CURRENT content (a missing/unreadable file always
+/// counts as changed). Comparing ids alone is wrong: a `skill.save` content
+/// edit on an already-attached skill keeps the id set identical, so an
+/// id-only guard would silently skip the entire content-edit reload path —
+/// the feature's main use case (caught in lead integration review
+/// 2026-07-03; see `reload_skills_for_def_rewrites_on_content_only_edit`).
+/// Otherwise rewrite the sidecar unconditionally; a LIVE instance
+/// additionally gets the [`crate::engine::agentctx::skills_updated_prompt`]
+/// nudge injected and its `session.launched_skill_ids` refreshed so the
+/// staleness badge (ADR 0001) clears. A DEAD instance is rewritten only —
+/// its next `spawn` recomputes `launched_skill_ids` fresh via
+/// `apply_skills_to_preamble`, so touching it here would be redundant.
+///
+/// A single instance's failure (missing/corrupted session row, a sidecar
+/// write error, a `set_launched_skill_ids` write error) is logged and
+/// SKIPPED, never propagated — one broken/orphaned instance must not deny
+/// the reload to every OTHER instance of the same def (Mellow's integration
+/// review, item L7; see `reload_skills_for_def_continues_past_a_broken_instance`).
+/// Only the two def-wide lookups before the loop (this def's effective
+/// content, this def's instance list) are still fatal — there is nothing
+/// per-instance left to try without them.
+pub(crate) async fn reload_skills_for_def(
+    state: &AppState,
+    agent_def_id: &str,
+) -> Result<(), AppError> {
+    let (skill_body, skill_ids) = repo::skill::content_for_agent(&state.db, agent_def_id).await?;
+    let body = if skill_body.is_empty() {
+        NO_SKILLS_PLACEHOLDER
+    } else {
+        skill_body.as_str()
+    };
+
+    for instance in repo::workspace_agent::list_by_agent_def(&state.db, agent_def_id).await? {
+        let session = match repo::session::get_by_instance(&state.db, &instance.id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                eprintln!(
+                    "[skill] reload_skills_for_def: no session for workspace_agent id={} — skipping instance",
+                    instance.id
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[skill] reload_skills_for_def: get_by_instance({}) failed: {e:?} — skipping instance",
+                    instance.id
+                );
+                continue;
+            }
+        };
+
+        let previous_ids: Vec<String> = session
+            .launched_skill_ids
+            .as_deref()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        // Mirrors `write_skill_sidecar`'s own path construction (agentctx.rs)
+        // — duplicated rather than refactoring that reviewed function, per
+        // this task's additive-only constraint on agentctx.rs.
+        let sidecar_path = dirs::data_dir()
+            .map(|d| d.join("Conclave").join("skills").join(format!("{}.md", instance.id)));
+        let previous_body = sidecar_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        if previous_ids == skill_ids && previous_body.as_deref() == Some(body) {
+            continue;
+        }
+
+        let path = match crate::engine::agentctx::write_skill_sidecar(&instance.id, body) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "[skill] reload_skills_for_def: write_skill_sidecar({}) failed: {e:?} — skipping instance",
+                    instance.id
+                );
+                continue;
+            }
+        };
+
+        if state.runtime.is_live(&instance.id) {
+            let nudge = crate::engine::agentctx::skills_updated_prompt(&path);
+            super::snapshot::submit_line(&state.runtime, &instance.id, &nudge).await;
+            if let Err(e) =
+                repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await
+            {
+                eprintln!(
+                    "[skill] reload_skills_for_def: set_launched_skill_ids({}) failed: {e:?}",
+                    instance.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Detached tail for a skill mutation (`agent.save`, `skill.save`/`delete`):
+/// resolves the shared [`AppState`] from the [`tauri::AppHandle`] (mirrors
+/// `run_respawn_resume`'s pattern) rather than borrowing it, so the caller's
+/// IPC handler can return immediately. Reloads each def SEQUENTIALLY, not
+/// concurrently — a single skill can touch many defs across many workspaces,
+/// and a live instance's PTY writes must stay orderly (Task 3 risk ledger).
+/// Best-effort: a reload failure is logged UNCONDITIONALLY (mirrors
+/// `run_respawn_resume`'s pattern), not propagated — the mutation that
+/// triggered this already succeeded and returned to its caller, and a
+/// debug-only log would make a failed live-reload invisible in a release
+/// build (Mellow's integration review, item L4).
+pub(crate) async fn run_reload_skills(app: tauri::AppHandle, agent_def_ids: Vec<String>) {
+    use tauri::Manager;
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    for agent_def_id in agent_def_ids {
+        if let Err(e) = reload_skills_for_def(&state, &agent_def_id).await {
+            eprintln!("[skill] reload_skills_for_def({agent_def_id}) failed: {e:?}");
+        }
+    }
+}
+
 /// Spawn (or attach to) the live session for a workspace_agent instance.
 ///
 /// Maps to `instance.spawn` on the IPC bus and returns the `Session` row.
@@ -199,6 +319,15 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // `[1m]`); POSIX-escape any embedded quote so it can't break out.
             let shell_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
 
+            // Resolved BEFORE preamble assembly (not just before the PATH
+            // export, as before Task 5) so a PATH-fallback sentence naming
+            // this exact path can be appended to the preamble itself: the
+            // launch shell's PATH export is only best-effort, since the
+            // harness's own tool shells re-source rc files that frequently
+            // RESET PATH instead of appending to it. The preamble (system-
+            // prompt layer, present every turn) is the reliable channel.
+            let conclave_bin = crate::engine::agentctx::ensure_conclave_shim();
+
             // Awareness briefing — injected via each harness's system-prompt layer
             // (NOT a chat turn), so it survives `/clear`. See engine::agentctx.
             let preamble = crate::engine::agentctx::bootstrap_preamble(
@@ -211,6 +340,14 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
             let (preamble, skill_ids) =
                 apply_skills_to_preamble(state, &def.id, &id, preamble).await?;
+
+            let preamble = match &conclave_bin {
+                Some(bin) => format!(
+                    "{preamble} {}",
+                    crate::engine::agentctx::conclave_path_sentence(&bin.join("conclave"))
+                ),
+                None => preamble,
+            };
 
             let mut launch = String::from(base);
             if base == "claude" {
@@ -264,8 +401,10 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // resolve. The login+interactive shell sources its rc files BEFORE
             // running this `-c` command, so prepending the export here wins over
             // whatever PATH the rc files set. Best-effort: if the CLI binary isn't
-            // found beside the app, skip it and launch without `conclave`.
-            if let Some(bin) = crate::engine::agentctx::ensure_conclave_shim() {
+            // found beside the app, skip it and launch without `conclave` (the
+            // preamble then carries no PATH-fallback sentence either, since
+            // there is no path to point at).
+            if let Some(bin) = &conclave_bin {
                 launch = format!(
                     "export PATH={}:\"$PATH\"; {}",
                     shell_quote(&bin.to_string_lossy()),
@@ -1341,6 +1480,277 @@ mod tests {
             .expect("spawn failed");
         assert!(out.get("id").is_some());
         assert!(state.runtime.is_live(&id));
+    }
+
+    /// Shared setup for the `reload_skills_for_def` tests: a `cli` instance
+    /// and its `id` + `agent_def_id` + expected sidecar path. Callers must
+    /// hold a `fixture_skills_dir`/`empty_skills_dir` guard for the whole
+    /// test — this fn only builds the DB rows, it doesn't own the builtin
+    /// dir override.
+    async fn reload_fixture(state: &AppState) -> (String, String, std::path::PathBuf) {
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let inst_id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+        let path = dirs::data_dir()
+            .expect("data dir")
+            .join("Conclave")
+            .join("skills")
+            .join(format!("{inst_id}.md"));
+        (inst_id, def.id, path)
+    }
+
+    /// A dead instance's sidecar is rewritten with the current effective
+    /// content, but `launched_skill_ids` is left untouched — spawn recomputes
+    /// it fresh on the next launch (Task 3 risk ledger).
+    #[tokio::test]
+    async fn reload_skills_for_def_rewrites_dead_instance_sidecar_only() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("reload-dead");
+        let state = AppState::for_tests().await;
+        let (inst_id, def_id, path) = reload_fixture(&state).await;
+
+        reload_skills_for_def(&state, &def_id)
+            .await
+            .expect("reload failed");
+
+        let contents = std::fs::read_to_string(&path).expect("sidecar must exist");
+        assert!(
+            contents.contains("Mandatory fixture content."),
+            "{contents}"
+        );
+
+        let session = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        assert!(
+            session.launched_skill_ids.is_none(),
+            "dead instance must not have launched_skill_ids touched: {:?}",
+            session.launched_skill_ids
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A LIVE instance gets the sidecar rewritten, the nudge injected
+    /// (best-effort via a placeholder backend — not asserted directly, see
+    /// risk ledger), and `launched_skill_ids` refreshed so the staleness
+    /// badge clears.
+    #[tokio::test]
+    async fn reload_skills_for_def_refreshes_live_instance() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("reload-live");
+        let state = AppState::for_tests().await;
+        let (inst_id, def_id, path) = reload_fixture(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        state
+            .runtime
+            .register(&inst_id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+
+        reload_skills_for_def(&state, &def_id)
+            .await
+            .expect("reload failed");
+
+        let contents = std::fs::read_to_string(&path).expect("sidecar must exist");
+        assert!(
+            contents.contains("Mandatory fixture content."),
+            "{contents}"
+        );
+
+        let refreshed = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let ids: Vec<String> = refreshed
+            .launched_skill_ids
+            .as_deref()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        assert!(
+            ids.contains(&"fix-mandatory".to_string()),
+            "launched_skill_ids must refresh for a live instance: {ids:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// When the sidecar's CURRENT content already matches what a fresh
+    /// compute would produce (and the id set already matches what's
+    /// recorded as launched), reload must be a true no-op — guards against
+    /// nudging a live agent on every unrelated `agent.save` edit. Proven via
+    /// a read-only file: if `reload` attempted a write anyway, it would
+    /// error (proving the short-circuit fired, not just that a rewrite
+    /// happened to produce identical bytes).
+    #[tokio::test]
+    async fn reload_skills_for_def_skips_when_unchanged() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("reload-unchanged");
+        let state = AppState::for_tests().await;
+        let (inst_id, def_id, path) = reload_fixture(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        // Simulate a prior successful spawn: the sidecar already holds the
+        // CURRENT effective content and `launched_skill_ids` already
+        // matches the CURRENT effective id set — nothing has drifted.
+        let (body, ids) = repo::skill::content_for_agent(&state.db, &def_id)
+            .await
+            .expect("content_for_agent failed");
+        crate::engine::agentctx::write_skill_sidecar(&inst_id, &body).expect("write failed");
+        repo::session::set_launched_skill_ids(&state.db, &session.id, &ids)
+            .await
+            .expect("set_launched_skill_ids failed");
+
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).expect("set readonly failed");
+
+        let result = reload_skills_for_def(&state, &def_id).await;
+
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).expect("restore perms failed");
+
+        result.expect("reload must not attempt to rewrite an unchanged sidecar");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// PLAN BUG (found in lead integration review 2026-07-03): comparing the
+    /// skill-ID SET alone is wrong — a `skill.save` content edit on an
+    /// already-attached custom skill keeps the id set byte-for-byte
+    /// identical, so an id-only guard silently skips the entire
+    /// content-edit reload path, the feature's main use case. The guard must
+    /// also compare the freshly computed body against the sidecar's CURRENT
+    /// file content.
+    #[tokio::test]
+    async fn reload_skills_for_def_rewrites_on_content_only_edit() {
+        let _fx = repo::skill::test_support::empty_skills_dir("reload-content-edit");
+        let state = AppState::for_tests().await;
+        let (inst_id, def_id, path) = reload_fixture(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &inst_id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        state
+            .runtime
+            .register(&inst_id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+
+        let skill = repo::skill::create(&state.db, "Custom", None, "version one")
+            .await
+            .expect("create failed");
+        repo::skill::set_custom_attachments(&state.db, &def_id, std::slice::from_ref(&skill.id))
+            .await
+            .expect("attach failed");
+
+        // Baseline reload: writes "version one" and records the (unchanging)
+        // id set.
+        reload_skills_for_def(&state, &def_id)
+            .await
+            .expect("reload failed");
+        let baseline = std::fs::read_to_string(&path).expect("sidecar must exist");
+        assert!(baseline.contains("version one"), "{baseline}");
+
+        // Content-only edit: SAME skill id, different content — the
+        // effective id set `reload_skills_for_def` computes is identical
+        // before and after this edit.
+        repo::skill::update(&state.db, &skill.id, "Custom", None, "version two")
+            .await
+            .expect("update failed")
+            .expect("row exists");
+
+        reload_skills_for_def(&state, &def_id)
+            .await
+            .expect("reload failed");
+        let updated = std::fs::read_to_string(&path).expect("sidecar must exist");
+        assert!(
+            updated.contains("version two") && !updated.contains("version one"),
+            "content edit must rewrite the sidecar even though the id set didn't change: {updated}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Mellow's integration review, item L7: a per-instance failure must not
+    /// deny reload to its siblings. The broken instance here has its
+    /// `session` row deleted out from under it (an orphaned/corrupted row —
+    /// the one thing `reload_skills_for_def` genuinely cannot proceed past
+    /// for THAT instance) alongside a healthy sibling of the SAME def; the
+    /// healthy instance must still get its sidecar rewritten, and the call
+    /// overall must not error.
+    #[tokio::test]
+    async fn reload_skills_for_def_continues_past_a_broken_instance() {
+        let _fx = repo::skill::test_support::fixture_skills_dir("reload-partial-failure");
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+
+        // Broken: instantiated (so it's a real workspace_agent of this def),
+        // then its session row is deleted out from under it.
+        let broken_id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+        sqlx::query("DELETE FROM session WHERE workspace_agent_id = ?")
+            .bind(&broken_id)
+            .execute(&state.db)
+            .await
+            .expect("delete session failed");
+
+        // Healthy sibling of the SAME def, in a SECOND workspace —
+        // `instantiate` is idempotent per (workspace_id, agent_def_id), so
+        // reusing `ws` here would just return the broken instance again.
+        // Created AFTER the broken one, so the old `?`-propagating code
+        // (which aborts the whole loop on the first error) would never
+        // reach it.
+        let ws2 = workspace::create(&state.db, "WS2", "/tmp/ws2", None)
+            .await
+            .expect("create workspace failed");
+        let healthy_id = workspace_agent::instantiate(&state.db, &ws2.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+        let healthy_path = dirs::data_dir()
+            .expect("data dir")
+            .join("Conclave")
+            .join("skills")
+            .join(format!("{healthy_id}.md"));
+
+        reload_skills_for_def(&state, &def.id)
+            .await
+            .expect("one broken instance must not abort reload for its siblings");
+
+        let contents = std::fs::read_to_string(&healthy_path).expect("healthy sidecar must exist");
+        assert!(contents.contains("Mandatory fixture content."), "{contents}");
+        let _ = std::fs::remove_file(&healthy_path);
     }
 
     #[tokio::test]

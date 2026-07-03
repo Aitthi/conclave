@@ -53,8 +53,14 @@ New `pub(crate) async fn reload_skills_for_def(state: &AppState, agent_def_id: &
    `state.runtime.is_live(id)`: inject `skills_updated_prompt` via
    `super::snapshot::submit_line`, then `repo::session::set_launched_skill_ids` (session.rs:203)
    so the staleness badge clears. Dead instances: rewrite only (spawn recomputes anyway).
-4. Skip everything when the effective skill-id set is unchanged for that def (guard against
-   nudging on unrelated `agent.save` edits).
+4. Skip an instance ONLY when nothing effective changed: the skill-id set matches the launched
+   snapshot AND the freshly computed body equals the current sidecar file's content (missing
+   file = changed). Comparing ids alone is WRONG — a `skill.save` content edit keeps the id set
+   identical, and an id-only guard silently kills the entire content-edit reload path.
+   [PLAN BUG, found in lead review 2026-07-03: the original wording here said "skip when the
+   skill-id set is unchanged" — implemented faithfully, then caught in integration review.
+   Guard so it can't recur: a test named for the scenario — content-only edit MUST rewrite the
+   sidecar and nudge live instances — written failing-first.]
 
 Call sites, each detached (`tauri::async_runtime::spawn`, mirroring `snapshot.rs`'s tails) so
 the IPC call returns promptly:
@@ -110,6 +116,16 @@ every turn) is the reliable channel.
 - **Instances launched before Task 1** have no pointer in their preamble when skill-less; the
   nudge carries the full path precisely so these still find the file.
 - **agentctx.rs is under review** (bb `review:skills-survive-clear`) — additive edits only.
+
+## Accepted known risks (lead ruling, 2026-07-03 post-review)
+
+- **Cross-task PTY injection race** (review L3): two near-simultaneous skill mutations can each
+  spawn a detached reload whose `submit_line` calls interleave into one live TUI. Accepted —
+  low probability, self-heals, same posture as the existing compact/restart injections. Revisit
+  only on a live repro (a per-instance stdin lock is the known fix).
+- **Non-atomic sidecar write** (review L5): `std::fs::write` truncates then writes; a concurrent
+  read can see partial content. Accepted — next reload self-heals via the content-compare guard.
+  Known fix if ever needed: temp file + atomic rename.
 
 ## Definition of done
 

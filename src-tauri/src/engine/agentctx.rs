@@ -243,6 +243,23 @@ file NOW before continuing: any copy of it already in your context is stale."
     )
 }
 
+/// PATH-fallback sentence (ADR 0004 Task 5): appended to the preamble when
+/// [`ensure_conclave_shim`] succeeds, so the `conclave` binary is reachable
+/// even when the launch shell's PATH export gets reset by the harness's own
+/// tool shells re-sourcing rc files (a real field bug — agents hit `conclave:
+/// command not found` and burn a turn hunting for it). Names the binary's
+/// full path plainly and tells the agent to run it via that path directly,
+/// quoted (the path may contain spaces) — never to go search for it. Runs
+/// the same `sanitize_field` pipeline as `skill_pointer_sentence` so a
+/// pathological path can't reintroduce a newline or '='.
+pub fn conclave_path_sentence(path: &std::path::Path) -> String {
+    let path = sanitize_field(&path.display().to_string());
+    format!(
+        "The conclave binary's full path is `{path}`; if `conclave` is ever not found on PATH, run \
+it via this full path, quoted, instead of searching for it."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::bootstrap_preamble;
@@ -392,6 +409,55 @@ mod tests {
         assert!(s.contains("UPDATED"), "{s}");
         assert!(s.contains("re-read"), "{s}");
         assert!(s.contains("stale"), "{s}");
+    }
+
+    /// ADR 0004 Task 5: the field bug this exists for is a launch shell's
+    /// PATH export getting reset by the harness's own re-sourced rc files.
+    /// The preamble (system-prompt layer, present every turn) is the
+    /// reliable fallback channel, so this sentence must survive the same
+    /// single-line/`=`-free hostile-path gauntlet as `skill_pointer_sentence`.
+    #[test]
+    fn conclave_path_sentence_is_single_line_and_equals_free() {
+        let s = super::conclave_path_sentence(std::path::Path::new("/tmp/a=b\nc/conclave"));
+        assert!(!s.contains('\n'), "no newline: {s}");
+        assert!(!s.contains('='), "no '=': {s}");
+    }
+
+    #[test]
+    fn conclave_path_sentence_names_the_path() {
+        let s = super::conclave_path_sentence(std::path::Path::new(
+            "/Users/x/Library/Application Support/Conclave/bin/conclave",
+        ));
+        // Backtick-wrapped (Mellow's L2 review): `sanitize_field` doesn't
+        // strip backticks, so the path's boundary mid-sentence stays
+        // unambiguous even with spaces in it (as this fixture path has).
+        assert!(
+            s.contains("`/Users/x/Library/Application Support/Conclave/bin/conclave`"),
+            "{s}"
+        );
+    }
+
+    /// Must not just name the path — it must tell the agent to RUN it via
+    /// that path when `conclave` isn't found, not go hunting for the binary
+    /// (which burns a turn, the exact field bug this fixes).
+    #[test]
+    fn conclave_path_sentence_instructs_running_via_full_path_not_searching() {
+        let s = super::conclave_path_sentence(std::path::Path::new("/tmp/conclave"));
+        assert!(s.contains("not found"), "{s}");
+        assert!(s.contains("run it via this full path"), "{s}");
+    }
+
+    /// The full assembled preamble (bootstrap + skill pointer + conclave path
+    /// sentence) must stay single-line/`=`-free even under hostile input in
+    /// every component — this is the invariant the whole feature protects.
+    #[test]
+    fn full_preamble_with_conclave_path_sentence_stays_single_line_and_equals_free() {
+        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
+        let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
+        let conclave = super::conclave_path_sentence(std::path::Path::new("/tmp/a=b\nc/conclave"));
+        let combined = format!("{p} {pointer} {conclave}");
+        assert!(!combined.contains('\n'), "no newline: {combined}");
+        assert!(!combined.contains('='), "no '=': {combined}");
     }
 
     #[test]

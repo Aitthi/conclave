@@ -278,6 +278,14 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     // create/update call above) come from one shared split of `skillIds`.
     repo::skill::set_custom_attachments(&state.db, &row.id, &filtered_custom_skill_ids).await?;
 
+    // Live-reload the sidecar for every instance of this def (ADR 0004):
+    // detached so the IPC call returns promptly. No-op in a test AppState
+    // (no AppHandle set) — covered directly by `reload_skills_for_def`'s own
+    // unit tests instead.
+    if let Some(app) = state.app().cloned() {
+        tauri::async_runtime::spawn(super::instance::run_reload_skills(app, vec![row.id.clone()]));
+    }
+
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
 }
 

@@ -73,6 +73,14 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         )
         .await?
         .ok_or_else(|| AppError::NotFound(format!("skill id={id} not found")))?;
+
+        // A content edit affects every def currently attached to it
+        // (ADR 0004): live-reload them all, detached, sequentially.
+        if let Some(app) = state.app().cloned() {
+            let affected = repo::skill::agent_def_ids_by_skill(&state.db, id).await?;
+            tauri::async_runtime::spawn(super::instance::run_reload_skills(app, affected));
+        }
+
         return serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()));
     }
 
@@ -101,7 +109,17 @@ pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError>
     repo::skill::get(&state.db, &req.id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("skill id={} not found", req.id)))?;
+
+    // Capture the affected defs BEFORE deleting — `agent_skill` rows
+    // reference this skill and cascade away with it, so the reverse query
+    // would come back empty afterward.
+    let affected = repo::skill::agent_def_ids_by_skill(&state.db, &req.id).await?;
     repo::skill::delete(&state.db, &req.id).await?;
+
+    if let Some(app) = state.app().cloned() {
+        tauri::async_runtime::spawn(super::instance::run_reload_skills(app, affected));
+    }
+
     Ok(Value::Null)
 }
 
