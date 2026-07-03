@@ -16,17 +16,21 @@ import {
   Trash2,
   Scale,
   Gauge,
+  History,
+  RotateCcw,
 } from "lucide-react";
 import { ipc, useMessageInjected, useSessionContext, useSnapshotCreated } from "../ipc";
 import type {
   AgentDefinition,
   InterAgentMessage,
   Session,
+  Skill,
   Snapshot,
   WorkspaceAgent,
 } from "../ipc";
 import type { RoutingTarget } from "./RoutingPicker";
 import { timeHint } from "../lib/timeHint";
+import { computeSkillsStale } from "../lib/skills";
 import { DeferredNote } from "./DeferredNote";
 
 // ---------------------------------------------------------------------------
@@ -52,6 +56,9 @@ interface ContextDrawerProps {
   roster: RoutingTarget[];
   /** The active session, when one has been spawned (for context meter). */
   session?: Session | null;
+  /** Skill ids the live session actually launched with (undefined before any
+   *  launch) — drives the Skills section's "restart to apply" drift hint. */
+  launchedSkillIds?: string[];
 }
 
 // How many recent inbox/outbox rows the Messages log shows.
@@ -82,7 +89,14 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function ContextDrawer({ def, status, instanceId, roster, session }: ContextDrawerProps) {
+export function ContextDrawer({
+  def,
+  status,
+  instanceId,
+  roster,
+  session,
+  launchedSkillIds,
+}: ContextDrawerProps) {
   // Simplest collapse affordance: internal open/closed state. The header
   // `panel-right` button toggles it; collapsed → a thin strip to reopen.
   // Scope: this state is workspace-scoped — it persists across tab switches
@@ -127,6 +141,105 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   // Refetch when an injection involving this instance fires (in OR out).
   useMessageInjected(instanceId, () => refetch());
 
+  // ── Skills (REAL — the agent's effective skill set) ───────────────────────
+  // `def.skillIds` is annotated by `agentDef.list` (mandatory builtins +
+  // selected optional builtins + attached custom, in launch order); the skill
+  // catalog is fetched once to resolve ids → names/kind. Only `cli` agents
+  // consume skills at launch (the spawn path injects them via the sidecar), so
+  // the section renders real chips for cli and an honest note otherwise.
+  const [skillCatalog, setSkillCatalog] = useState<Skill[] | null>(null);
+  useEffect(() => {
+    ipc.skill
+      .list()
+      .then((rows) => {
+        if (mounted.current) setSkillCatalog(rows);
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: skill.list failed", err);
+        }
+      });
+  }, []);
+  const skillsById = useMemo(
+    () => new Map((skillCatalog ?? []).map((s) => [s.id, s])),
+    [skillCatalog],
+  );
+  const effectiveSkillIds = def.skillIds ?? [];
+  // Drift: the live session launched with a DIFFERENT set than the def now
+  // carries — a restart re-applies the current set (same basis as the Roster's
+  // stale badge).
+  const skillsStale = computeSkillsStale(def, launchedSkillIds);
+
+  // ── Session (restart · resume) ─────────────────────────────────────────────
+  // Restart is save-gated and destructive (kills the process), so it sits
+  // behind a Yes/No confirm like Compact. Resume is non-destructive (types the
+  // resume prompt into the live terminal) and only enabled once a handoff
+  // snapshot exists to resume from.
+  const [restartConfirming, setRestartConfirming] = useState(false);
+  // null = not restarting; "saving" = waiting for the agent's handoff save;
+  // "respawning" = process killed (or was dead), fresh spawn booting.
+  const [restartPhase, setRestartPhase] = useState<"saving" | "respawning" | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+
+  const doRestart = useCallback(() => {
+    setRestartConfirming(false);
+    setSessionError(null);
+    ipc.instance
+      .restart({ workspaceAgentId: instanceId })
+      .then((res) => {
+        if (mounted.current) setRestartPhase(res.phase);
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: instance.restart failed", err);
+        }
+        if (mounted.current) setSessionError("Couldn't restart this agent");
+      });
+  }, [instanceId]);
+
+  const doResume = useCallback(() => {
+    setSessionError(null);
+    setResumeBusy(true);
+    ipc.snapshot
+      .resume({ instanceId })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: snapshot.resume failed", err);
+        }
+        if (mounted.current) setSessionError("Couldn't resume this agent");
+      })
+      .finally(() => {
+        // Brief lockout — the prompt was typed; there's no completion event to
+        // wait on (the agent simply starts working in its terminal).
+        setTimeout(() => {
+          if (mounted.current) setResumeBusy(false);
+        }, 3_000);
+      });
+  }, [instanceId]);
+
+  // Progress tracking for the restart loop, driven by the instance status prop:
+  // the save phase ends when the backend kills the process (status → idle), and
+  // the respawn phase ends when the fresh spawn reports running.
+  useEffect(() => {
+    if (restartPhase === "saving" && status === "idle") setRestartPhase("respawning");
+    else if (restartPhase === "respawning" && status === "running") setRestartPhase(null);
+  }, [status, restartPhase]);
+
+  // Failsafe: an agent that never saves its handoff (ignores the prompt, arm
+  // expires server-side) would leave "Restarting…" pulsing forever — time it
+  // out well past the backend's TTL window and surface an honest error.
+  useEffect(() => {
+    if (restartPhase === null) return;
+    const t = setTimeout(() => {
+      if (mounted.current) {
+        setRestartPhase(null);
+        setSessionError("Restart didn't complete — check the agent's terminal");
+      }
+    }, 240_000);
+    return () => clearTimeout(t);
+  }, [restartPhase]);
+
   // ── Live context meter ─────────────────────────────────────────────────────
   // Seed from the spawned `session` prop (a fresh session reports 0 tokens), then
   // track live `session:context` estimates. HONESTY: this is an ESTIMATE derived
@@ -160,6 +273,11 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
     setCompacting(false);
     setSelectedSnap(null);
     setRowBusy(null);
+    setHasHandoff(false);
+    setRestartConfirming(false);
+    setRestartPhase(null);
+    setResumeBusy(false);
+    setSessionError(null);
     // `session` is intentionally read but excluded from deps — we re-seed only on
     // identity change of the session id, not on every new session object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -171,6 +289,9 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
   // response can't overwrite a newer one. Refetches on session change AND on each
   // `snapshot:created` (so an auto-compact snapshot appears live).
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  // Whether ANY handoff snapshot exists for this session (computed from the
+  // FULL list, before the display slice) — gates the Session section's Resume.
+  const [hasHandoff, setHasHandoff] = useState(false);
   const [snapshotError, setSnapshotError] = useState(false);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   // Compact-loop UI: a Yes/No confirm gate (the loop CLEARS the agent, so we
@@ -195,6 +316,7 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
       .then((rows) => {
         if (mounted.current && mine === snapSeq.current) {
           setSnapshots(rows.slice(0, SNAPSHOT_LOG_LIMIT));
+          setHasHandoff(rows.some((r) => r.type === "handoff"));
           setSnapshotError(false); // a successful list dismisses a stale create-error
         }
       })
@@ -506,16 +628,135 @@ export function ContextDrawer({ def, status, instanceId, roster, session }: Cont
               </DeferredNote>
             </div>
 
-            {/* Skills — DEFERRED to M5 (no skill join tables yet) */}
+            {/* Skills — REAL (the def's effective launch set, annotated by
+                `agentDef.list`; names resolved via the skill catalog). Only cli
+                agents consume skills at launch, so chat gets an honest note. */}
             <div>
-              <SectionLabel>Skills</SectionLabel>
-              <DeferredNote>
-                <span className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Not configured yet — coming in M5
-                </span>
-              </DeferredNote>
+              <SectionLabel>
+                <span>Skills</span>
+                {def.type === "cli" && effectiveSkillIds.length > 0 && (
+                  <span className="normal-case tracking-normal text-[10.5px] font-medium text-text-muted">
+                    {effectiveSkillIds.length}
+                  </span>
+                )}
+              </SectionLabel>
+              {def.type !== "cli" ? (
+                <DeferredNote>
+                  <span className="flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Skills are injected for CLI agents only
+                  </span>
+                </DeferredNote>
+              ) : effectiveSkillIds.length === 0 ? (
+                <DeferredNote>
+                  <span className="flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    No skills attached
+                  </span>
+                </DeferredNote>
+              ) : (
+                <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1.5">
+                  {effectiveSkillIds.map((id) => {
+                    const sk = skillsById.get(id);
+                    return (
+                      <div key={id} className="flex items-center gap-2">
+                        <Sparkles className="w-3.5 h-3.5 text-accent shrink-0" />
+                        <span
+                          className="text-[12px] font-medium truncate flex-1 min-w-0"
+                          title={sk?.description ?? undefined}
+                        >
+                          {sk?.name ?? id}
+                        </span>
+                        {sk && (
+                          <span className="text-[9.5px] text-text-tertiary uppercase tracking-wider shrink-0">
+                            {sk.kind === "builtin"
+                              ? sk.mandatory
+                                ? "builtin · always"
+                                : "builtin"
+                              : "custom"}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {skillsStale && (
+                    <div className="text-[10.5px] text-warning leading-snug pt-1.5 mt-0.5 border-t border-overlay/[0.06]">
+                      Launched with a different skill set — Restart · resume applies the
+                      current one.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            {/* Session — restart · resume controls for a live CLI agent. Resume
+                types the "read your last handoff" prompt into the terminal
+                (non-destructive); Restart is the save-gated kill → respawn →
+                resume loop, so it sits behind a confirm like Compact. */}
+            {def.type === "cli" && session && (
+              <div>
+                <SectionLabel>Session</SectionLabel>
+                <div className="rounded-xl ring-hair bg-surface p-2.5 space-y-1.5 text-[11.5px]">
+                  {restartConfirming ? (
+                    <>
+                      <div className="text-[10.5px] text-text-secondary leading-snug">
+                        The agent saves a handoff, its process is killed and relaunched,
+                        then it resumes from that handoff. Continue?
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={doRestart}
+                          className="text-[11px] font-medium text-accent hover:underline flex items-center gap-1"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          Restart
+                        </button>
+                        <button
+                          onClick={() => setRestartConfirming(false)}
+                          className="text-[11px] text-text-tertiary hover:text-text-secondary"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </>
+                  ) : restartPhase !== null ? (
+                    <div className="text-[10.5px] text-text-secondary leading-snug flex items-start gap-1.5">
+                      <RotateCcw className="w-3 h-3 animate-pulse shrink-0 mt-0.5" />
+                      {restartPhase === "saving"
+                        ? "Restarting — the agent is saving its handoff, then its process relaunches. Watch the terminal."
+                        : "Restarting — respawning the process. Watch the terminal."}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={doResume}
+                        disabled={!hasHandoff || resumeBusy || status !== "running"}
+                        title={
+                          hasHandoff
+                            ? "Ask the agent to reload its last handoff and continue"
+                            : "No handoff snapshot to resume from yet"
+                        }
+                        className="text-[11px] font-medium text-accent hover:underline disabled:opacity-40 disabled:hover:no-underline flex items-center gap-1"
+                      >
+                        <History className="w-3 h-3" />
+                        {resumeBusy ? "Resuming…" : "Resume last handoff"}
+                      </button>
+                      <button
+                        onClick={() => setRestartConfirming(true)}
+                        title="Save a handoff, restart the process, resume from it"
+                        className="ml-auto text-[11px] font-medium text-text-secondary hover:text-text-primary flex items-center gap-1"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        Restart · resume
+                      </button>
+                    </div>
+                  )}
+                  {sessionError && (
+                    <div className="text-[10.5px] text-danger">{sessionError}</div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Memory · snapshots — REAL (M4.1 snapshot manager). Shown for both
                 cli and chat agents, but only once a real session exists (we never

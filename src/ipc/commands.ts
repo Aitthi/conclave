@@ -114,6 +114,16 @@ export interface Commands {
     req: { workspaceAgentId: string };
     res: Session;
   };
+  "instance.restart": {
+    // Restart a CLI agent's process and resume it from a saved handoff.
+    // Live agent → save-gated: the backend injects "save your handoff", and the
+    // kill → respawn → resume tail fires only once the save lands (phase
+    // "saving"). Dead agent → respawns immediately and resumes if a handoff
+    // exists (phase "respawning"). Returns as soon as the loop is armed; the
+    // rest plays out in the agent's terminal.
+    req: { workspaceAgentId: string };
+    res: { status: "restarting"; phase: "saving" | "respawning"; instanceId: string };
+  };
   "instance.remove": {
     req: { workspaceAgentId: string };
     res: void;
@@ -172,6 +182,14 @@ export interface Commands {
     // Returns immediately once the save prompt is injected; the loop then runs in
     // the agent's terminal. `status` is a fixed acknowledgement, not progress.
     res: { status: "compacting"; instanceId: string };
+  };
+  "snapshot.resume": {
+    // Inject the resume prompt into a live agent so it reloads the last handoff
+    // saved for its session (`conclave snapshot last`) and continues from it.
+    // Non-destructive (nothing killed or cleared). NotFound when the agent is
+    // not running or no handoff snapshot exists.
+    req: { instanceId: string };
+    res: { status: "resuming"; instanceId: string };
   };
   // Memory-list row actions (replacing the timeline screen).
   "snapshot.delete": {
@@ -268,6 +286,7 @@ export const ipc = {
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
+    restart: (req: Commands["instance.restart"]["req"]) => call("instance.restart", req),
     remove: (req: Commands["instance.remove"]["req"]) => call("instance.remove", req),
   },
   session: {
@@ -288,6 +307,7 @@ export const ipc = {
     list: (req: Commands["snapshot.list"]["req"]) => call("snapshot.list", req),
     read: (req: Commands["snapshot.read"]["req"]) => call("snapshot.read", req),
     compact: (req: Commands["snapshot.compact"]["req"]) => call("snapshot.compact", req),
+    resume: (req: Commands["snapshot.resume"]["req"]) => call("snapshot.resume", req),
     delete: (req: Commands["snapshot.delete"]["req"]) => call("snapshot.delete", req),
     send: (req: Commands["snapshot.send"]["req"]) => call("snapshot.send", req),
   },

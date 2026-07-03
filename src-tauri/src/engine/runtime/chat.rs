@@ -77,6 +77,7 @@ pub fn spawn_chat(session_id: &str, provider: Provider, model: String) -> ChatBa
 
     let handle = LiveHandle {
         session_id: session_id.to_owned(),
+        epoch: 0, // stamped by Runtime::register
         stdin_tx,
         shutdown: Box::new(move || loop_abort.abort()),
         // Chat backends have no PTY — resize is a no-op.
@@ -107,7 +108,7 @@ mod tests {
         let mut output_rx = backend.output_rx;
 
         let rt = Runtime::new();
-        assert!(rt.register("inst-1", backend.handle));
+        assert!(rt.register("inst-1", backend.handle).is_some());
         rt.send_stdin("inst-1", "hi").expect("send_stdin");
 
         // Collect exactly the two deltas this single turn produces, then tear
@@ -133,7 +134,7 @@ mod tests {
         let mut output_rx = backend.output_rx;
 
         let rt = Runtime::new();
-        assert!(rt.register("inst-1", backend.handle));
+        assert!(rt.register("inst-1", backend.handle).is_some());
 
         rt.send_stdin("inst-1", "first").expect("send_stdin 1");
         assert_eq!(output_rx.recv().await.as_deref(), Some("1"));

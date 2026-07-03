@@ -14,6 +14,9 @@ use tauri::AppHandle;
 
 /// How long a compact stays armed. A never-saving agent must not leave a stale
 /// arm that later hijacks an unrelated manual `snapshot save` into a `/clear`.
+/// The restart arm shares this TTL — same "stale arm must not hijack a later
+/// unrelated save" rationale, and a restart's kill is even more destructive
+/// than a `/clear`.
 const COMPACT_PENDING_TTL: Duration = Duration::from_secs(300);
 
 pub struct AppState {
@@ -47,6 +50,13 @@ pub struct AppState {
     /// (`COMPACT_PENDING_TTL`) guards against a never-saving agent leaving a stale
     /// arm that a later unrelated manual save would trip.
     compact_pending: Mutex<HashMap<String, Instant>>,
+
+    /// Instances with a restart ARMED: the agent's next `conclave snapshot save`
+    /// triggers kill → respawn → resume instead of `/clear` + restore (see
+    /// `commands::instance::restart`). Same consume-once + TTL discipline as
+    /// `compact_pending`; kept as a SEPARATE map so arming a restart can never
+    /// be consumed as a compact (or vice versa).
+    restart_pending: Mutex<HashMap<String, Instant>>,
 }
 
 impl AppState {
@@ -63,6 +73,7 @@ impl AppState {
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
             compact_pending: Mutex::new(HashMap::new()),
+            restart_pending: Mutex::new(HashMap::new()),
         }
     }
 
@@ -128,6 +139,26 @@ impl AppState {
         }
         false
     }
+
+    /// Arm a restart for `instance_id`: the agent's next handoff save triggers
+    /// kill → respawn → resume (see `commands::instance::restart`). Overwrites
+    /// any prior arm.
+    pub fn mark_restart_pending(&self, instance_id: &str) {
+        if let Ok(mut m) = self.restart_pending.lock() {
+            m.insert(instance_id.to_owned(), Instant::now());
+        }
+    }
+
+    /// Consume a pending restart for `instance_id` — same semantics as
+    /// [`Self::take_compact_pending`] (consume-once, TTL-guarded).
+    pub fn take_restart_pending(&self, instance_id: &str) -> bool {
+        if let Ok(mut m) = self.restart_pending.lock() {
+            if let Some(armed) = m.remove(instance_id) {
+                return armed.elapsed() < COMPACT_PENDING_TTL;
+            }
+        }
+        false
+    }
 }
 
 /// Test-only constructor: builds an `AppState` backed by an in-memory
@@ -141,6 +172,7 @@ impl AppState {
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
             compact_pending: Mutex::new(HashMap::new()),
+            restart_pending: Mutex::new(HashMap::new()),
         }
     }
 }

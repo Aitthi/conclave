@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
-import { ipc, useSessionOutput } from "../ipc";
+import { ipc, useSessionOutput, useSessionStatus } from "../ipc";
 import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
 
 interface TerminalProps {
@@ -33,6 +33,12 @@ interface TerminalProps {
 export function Terminal({ sessionId }: TerminalProps) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XtermTerminal | null>(null);
+  // Re-push the current size to the PTY (set inside the mount effect). A
+  // RESPAWN on the same session id (restart · resume) creates a fresh PTY at
+  // the 80×24 default while this component — keyed by sessionId — stays
+  // mounted, so no ResizeObserver ever fires; without this the relaunched TUI
+  // lays out at the wrong size until a manual window resize.
+  const repushSizeRef = useRef<(() => void) | null>(null);
 
   // Drag a file onto the terminal → type its shell-quoted path into the PTY at
   // the cursor (no submit), exactly like dropping a file into a real terminal.
@@ -202,6 +208,17 @@ export function Terminal({ sessionId }: TerminalProps) {
       observer.observe(el);
     }, 200);
 
+    // Expose the respawn re-fit: forget the dedup baseline and re-run the
+    // first-sizing jiggle so the FRESH PTY (default 80×24) both receives the
+    // real dims and gets a guaranteed SIGWINCH even if they happen to match.
+    repushSizeRef.current = () => {
+      lastCols = 0;
+      lastRows = 0;
+      firstSizing = true;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applyResize, 300);
+    };
+
     return () => {
       clearTimeout(initialTimer);
       clearTimeout(resizeTimer);
@@ -209,12 +226,19 @@ export function Terminal({ sessionId }: TerminalProps) {
       observer.disconnect();
       el.removeEventListener("wheel", wheelHandler);
       dataSub.dispose();
+      repushSizeRef.current = null;
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
       // touch a disposed terminal.
       termRef.current = null;
       term.dispose();
     };
   }, [sessionId]);
+
+  // A `running` status on this session means a backend (re)spawned. For the
+  // respawn case the PTY is brand-new — re-push the on-screen size to it.
+  useSessionStatus(sessionId, (e) => {
+    if (e.status === "running") repushSizeRef.current?.();
+  });
 
   // Stream output chunks for this session into the terminal. The hook already
   // filters by sessionId, so we write every delivered chunk verbatim.

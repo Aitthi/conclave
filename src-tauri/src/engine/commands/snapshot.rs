@@ -307,7 +307,8 @@ fn clear_command(_cli_kind: Option<&str>) -> &'static str {
 /// (`\r`) sent as a SEPARATE write after a short beat, so Codex's paste-burst
 /// detection treats it as a real Enter (mirrors [`super::message::inject`]).
 /// Best-effort: a dead/closed backend is ignored — the caller owns liveness.
-async fn submit_line(runtime: &Runtime, instance_id: &str, text: &str) {
+/// `pub(crate)`: also used by the restart loop in `commands::instance`.
+pub(crate) async fn submit_line(runtime: &Runtime, instance_id: &str, text: &str) {
     if runtime.send_stdin(instance_id, text).is_ok() {
         tokio::time::sleep(Duration::from_millis(40)).await;
         let _ = runtime.send_stdin(instance_id, "\r");
@@ -350,12 +351,23 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     )
     .await?;
 
-    // If a compact is armed for this agent, THIS save is the trigger: now that the
-    // handoff is durably persisted, fire `/clear` + restore. Doing it here — not in
-    // a poll from `compact` — is what guarantees `/clear` runs strictly AFTER the
-    // save completes (the agent has finished writing and called us). Detached so
-    // the agent's `snapshot save` returns promptly.
-    if state.take_compact_pending(&req.instance_id) {
+    // If a restart or compact is armed for this agent, THIS save is the trigger:
+    // now that the handoff is durably persisted, fire the destructive tail.
+    // Doing it here — not in a poll from `compact`/`restart` — is what
+    // guarantees the kill / `/clear` runs strictly AFTER the save completes
+    // (the agent has finished writing and called us). Detached so the agent's
+    // `snapshot save` returns promptly. Restart is checked FIRST: it is the
+    // stronger operation, and the two arms live in separate maps so a compact
+    // arm can never be consumed as a restart (or vice versa).
+    if state.take_restart_pending(&req.instance_id) {
+        if let Some(app) = state.app().cloned() {
+            tauri::async_runtime::spawn(super::instance::run_respawn_resume(
+                app,
+                req.instance_id.clone(),
+                true, // kill the live process first — the handoff is saved.
+            ));
+        }
+    } else if state.take_compact_pending(&req.instance_id) {
         if let Some(clear_cmd) = resolve_clear_cmd(&state.db, &req.instance_id).await {
             let runtime = state.runtime.clone();
             let instance_id = req.instance_id.clone();
@@ -435,6 +447,49 @@ pub async fn compact(state: &AppState, payload: Value) -> Result<Value, AppError
     .await;
 
     Ok(json!({ "status": "compacting", "instanceId": req.instance_id }))
+}
+
+/// Inject the resume prompt into a live agent so it reloads the last handoff
+/// saved for its session (`conclave snapshot last`) and continues from it.
+/// Maps to `snapshot.resume` — the UI's "Resume" action for an agent that came
+/// back with an empty context (e.g. after the whole app was relaunched).
+///
+/// Non-destructive: nothing is killed or cleared; the prompt is just typed into
+/// the live terminal. Errors: agent not running → NotFound; no handoff snapshot
+/// to resume from → NotFound (injecting the prompt would only confuse the
+/// agent — `conclave snapshot last` would come back empty).
+pub async fn resume(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: InstanceReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    if !state.runtime.is_live(&req.instance_id) {
+        return Err(AppError::NotFound(format!(
+            "instance {} is not running — spawn it first",
+            req.instance_id
+        )));
+    }
+
+    let session = repo::session::get_by_instance(&state.db, &req.instance_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("no session for instance id={}", req.instance_id))
+        })?;
+    repo::snapshot::latest_handoff_for_session(&state.db, &session.id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "no handoff to resume from for instance id={}",
+                req.instance_id
+            ))
+        })?;
+
+    submit_line(
+        &state.runtime,
+        &req.instance_id,
+        &agentctx::resume_restore_prompt(),
+    )
+    .await;
+    Ok(json!({ "status": "resuming", "instanceId": req.instance_id }))
 }
 
 /// Resolve the harness-specific clear command for an instance (`instance → def →
@@ -776,6 +831,81 @@ mod tests {
             !state.take_compact_pending("i1"),
             "second take is empty — arm consumed"
         );
+    }
+
+    /// The restart arm mirrors the compact arm's consume-once semantics AND is
+    /// isolated from it: arming a restart must not be consumable as a compact
+    /// (or vice versa) — the two tails are very different in destructiveness.
+    #[tokio::test]
+    async fn restart_pending_arm_is_consumed_once_and_isolated() {
+        let state = AppState::for_tests().await;
+        assert!(!state.take_restart_pending("i1"), "nothing armed yet");
+        state.mark_restart_pending("i1");
+        assert!(
+            !state.take_compact_pending("i1"),
+            "a restart arm must not be consumable as a compact"
+        );
+        assert!(state.take_restart_pending("i1"), "armed → first take true");
+        assert!(
+            !state.take_restart_pending("i1"),
+            "second take is empty — arm consumed"
+        );
+    }
+
+    /// resume on a non-running agent → NotFound (no terminal to type into).
+    #[tokio::test]
+    async fn resume_not_running_not_found() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        let err = resume(&state, json!({ "instanceId": inst }))
+            .await
+            .expect_err("resume must fail when the agent is not live");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// resume on a live agent with NO handoff → NotFound (there is nothing for
+    /// `conclave snapshot last` to return — injecting would only confuse it).
+    #[tokio::test]
+    async fn resume_without_handoff_not_found() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        let session = session::get_by_instance(&state.db, &inst)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        assert!(state
+            .runtime
+            .register(&inst, crate::engine::runtime::LiveHandle::placeholder(&session.id))
+            .is_some());
+
+        let err = resume(&state, json!({ "instanceId": inst }))
+            .await
+            .expect_err("resume must fail with no handoff to resume from");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// resume on a live agent WITH a handoff injects the prompt (absorbed by the
+    /// placeholder backend) and acknowledges with status "resuming".
+    #[tokio::test]
+    async fn resume_with_handoff_ok() {
+        let state = AppState::for_tests().await;
+        let inst = fixture_instance(&state).await;
+        save(&state, json!({ "instanceId": inst, "text": "next: finish the parser" }))
+            .await
+            .expect("save failed");
+        let session = session::get_by_instance(&state.db, &inst)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        assert!(state
+            .runtime
+            .register(&inst, crate::engine::runtime::LiveHandle::placeholder(&session.id))
+            .is_some());
+
+        let out = resume(&state, json!({ "instanceId": inst }))
+            .await
+            .expect("resume failed");
+        assert_eq!(out.get("status").and_then(Value::as_str), Some("resuming"));
     }
 
     #[test]

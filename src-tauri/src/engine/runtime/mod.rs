@@ -24,6 +24,7 @@ pub mod provider;
 pub mod pty;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -63,6 +64,12 @@ impl std::error::Error for StdinError {}
 pub struct LiveHandle {
     /// The `session` row id this live handle drives.
     session_id: String,
+    /// Registration generation, stamped by [`Runtime::register`] (0 until then).
+    /// Lets a backend's detached cleanup (`unregister_epoch`) tear down ONLY the
+    /// registration it belongs to: after a programmatic kill → respawn on the
+    /// same instance id, the OLD forwarder's late EOF must not unregister (and
+    /// kill) the NEW generation's backend.
+    epoch: u64,
     /// Sender half of the backend stdin channel; the spawned task / PTY writer
     /// owns the rx. This is the universal stdin path used by [`Runtime::send_stdin`].
     stdin_tx: UnboundedSender<String>,
@@ -88,6 +95,7 @@ impl LiveHandle {
         let abort = spawn_placeholder_backend(rx);
         LiveHandle {
             session_id: session_id.to_owned(),
+            epoch: 0,
             stdin_tx,
             shutdown: Box::new(move || abort.abort()),
             resize: Box::new(|_, _| {}),
@@ -98,6 +106,8 @@ impl LiveHandle {
 /// Live-session registry keyed by instance id (`workspace_agent` id).
 pub struct Runtime {
     sessions: Mutex<HashMap<String, LiveHandle>>,
+    /// Monotonic registration counter — the source of [`LiveHandle::epoch`].
+    next_epoch: AtomicU64,
 }
 
 impl Runtime {
@@ -105,46 +115,49 @@ impl Runtime {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            next_epoch: AtomicU64::new(0),
         }
     }
 
     /// Register a pre-built live session [`LiveHandle`] for `instance_id`.
     ///
-    /// If the instance is already live, returns `false` and does nothing
+    /// If the instance is already live, returns `None` and does nothing
     /// (idempotent — the caller decides what to do, and the passed `handle` is
     /// dropped, running its shutdown closure to tear down the now-orphaned
-    /// backend). Otherwise stores the handle and returns `true`.
+    /// backend). Otherwise stamps the handle with a fresh registration epoch,
+    /// stores it, and returns `Some(epoch)`. The caller hands that epoch to the
+    /// backend's detached cleanup so it can [`Self::unregister_epoch`] ONLY its
+    /// own generation (see [`LiveHandle::epoch`]).
     ///
     /// The caller builds the backend (PTY child via [`pty::spawn_cli`], or the
     /// placeholder via [`LiveHandle::placeholder`]) and hands the resulting
     /// handle here, keeping this registry free of backend-specific concerns.
     ///
-    /// `#[must_use]`: the bool distinguishes "registered" from "already live".
-    /// Ignoring it lets a caller racing a concurrent `register` double-persist
-    /// status / double-emit events.
+    /// `#[must_use]`: `Some`/`None` distinguishes "registered" from "already
+    /// live". Ignoring it lets a caller racing a concurrent `register`
+    /// double-persist status / double-emit events.
     #[must_use]
-    pub fn register(&self, instance_id: &str, handle: LiveHandle) -> bool {
+    pub fn register(&self, instance_id: &str, mut handle: LiveHandle) -> Option<u64> {
         // Decide under the guard, but run the orphaned handle's shutdown closure
         // (which may kill a PTY child) AFTER releasing the lock — the same
         // never-hold-the-mutex-across-teardown discipline as `unregister`.
-        let displaced = {
+        let (registered, displaced) = {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if guard.contains_key(instance_id) {
-                Some(handle)
+                (None, Some(handle))
             } else {
+                let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+                handle.epoch = epoch;
                 guard.insert(instance_id.to_owned(), handle);
-                None
+                (Some(epoch), None)
             }
         };
-        match displaced {
-            // Already live: tear down the orphaned backend the caller just built
-            // (its own `Drop` does not run the shutdown closure).
-            Some(orphan) => {
-                (orphan.shutdown)();
-                false
-            }
-            None => true,
+        // Already live: tear down the orphaned backend the caller just built
+        // (its own `Drop` does not run the shutdown closure).
+        if let Some(orphan) = displaced {
+            (orphan.shutdown)();
         }
+        registered
     }
 
     /// Remove and tear down the live session for `instance_id`.
@@ -163,6 +176,33 @@ impl Runtime {
         let removed = {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             guard.remove(instance_id)
+        };
+        match removed {
+            Some(handle) => {
+                (handle.shutdown)();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Like [`Self::unregister`], but tears down the live session ONLY if its
+    /// registration epoch matches `epoch` — i.e. it is still the same generation
+    /// the caller belongs to. This is the safe cleanup for a backend's detached
+    /// forwarder: after a kill → respawn on the same instance id, the OLD
+    /// forwarder's late EOF finds a NEWER epoch registered and backs off instead
+    /// of killing the fresh backend.
+    ///
+    /// `#[must_use]`: same double-teardown / double-emit rationale as
+    /// [`Self::unregister`].
+    #[must_use]
+    pub fn unregister_epoch(&self, instance_id: &str, epoch: u64) -> bool {
+        let removed = {
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.get(instance_id) {
+                Some(h) if h.epoch == epoch => guard.remove(instance_id),
+                _ => None,
+            }
         };
         match removed {
             Some(handle) => {
@@ -275,13 +315,17 @@ mod tests {
     #[tokio::test]
     async fn register_then_live() {
         let rt = Runtime::new();
-        assert!(rt.register("inst-1", LiveHandle::placeholder("sess-1")));
+        assert!(rt
+            .register("inst-1", LiveHandle::placeholder("sess-1"))
+            .is_some());
         assert!(rt.is_live("inst-1"));
         assert_eq!(rt.live_count(), 1);
         assert_eq!(rt.session_id("inst-1"), Some("sess-1".to_owned()));
 
-        // Duplicate register is a no-op and returns false.
-        assert!(!rt.register("inst-1", LiveHandle::placeholder("sess-other")));
+        // Duplicate register is a no-op and returns None.
+        assert!(rt
+            .register("inst-1", LiveHandle::placeholder("sess-other"))
+            .is_none());
         assert_eq!(rt.live_count(), 1);
         assert_eq!(rt.session_id("inst-1"), Some("sess-1".to_owned()));
     }
@@ -289,7 +333,9 @@ mod tests {
     #[tokio::test]
     async fn unregister_removes() {
         let rt = Runtime::new();
-        assert!(rt.register("inst-1", LiveHandle::placeholder("sess-1")));
+        assert!(rt
+            .register("inst-1", LiveHandle::placeholder("sess-1"))
+            .is_some());
 
         assert!(rt.unregister("inst-1"));
         assert!(!rt.is_live("inst-1"));
@@ -297,6 +343,32 @@ mod tests {
 
         // Unregistering again returns false.
         assert!(!rt.unregister("inst-1"));
+    }
+
+    /// The kill → respawn race guard: an OLD generation's epoch must not be able
+    /// to unregister (and kill) the NEW generation registered under the same
+    /// instance id, while the matching epoch still tears down normally.
+    #[tokio::test]
+    async fn unregister_epoch_only_matches_own_generation() {
+        let rt = Runtime::new();
+        let old = rt
+            .register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("first register");
+
+        // Kill + respawn (same instance id, same session id — a restart).
+        assert!(rt.unregister("inst-1"));
+        let new = rt
+            .register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("respawn register");
+        assert_ne!(old, new, "each registration gets a fresh epoch");
+
+        // The old forwarder's late EOF: must back off, the new backend survives.
+        assert!(!rt.unregister_epoch("inst-1", old));
+        assert!(rt.is_live("inst-1"));
+
+        // The new generation's own cleanup still works.
+        assert!(rt.unregister_epoch("inst-1", new));
+        assert!(!rt.is_live("inst-1"));
     }
 
     #[tokio::test]
@@ -308,7 +380,9 @@ mod tests {
         assert!(matches!(err, StdinError::NotLive));
 
         // Registered → Ok.
-        assert!(rt.register("inst-1", LiveHandle::placeholder("sess-1")));
+        assert!(rt
+            .register("inst-1", LiveHandle::placeholder("sess-1"))
+            .is_some());
         assert!(rt.send_stdin("inst-1", "hi").is_ok());
     }
 
@@ -318,7 +392,9 @@ mod tests {
         let rt = Runtime::new();
         for i in 0..16 {
             let inst = format!("inst-{i}");
-            assert!(rt.register(&inst, LiveHandle::placeholder(&format!("sess-{i}"))));
+            assert!(rt
+                .register(&inst, LiveHandle::placeholder(&format!("sess-{i}")))
+                .is_some());
         }
         assert_eq!(rt.live_count(), 16);
         for i in 0..16 {
@@ -339,7 +415,9 @@ mod tests {
             let rt = Arc::clone(&rt);
             handles.push(tokio::spawn(async move {
                 let inst = format!("inst-{i}");
-                assert!(rt.register(&inst, LiveHandle::placeholder(&format!("sess-{i}"))));
+                assert!(rt
+                    .register(&inst, LiveHandle::placeholder(&format!("sess-{i}")))
+                    .is_some());
                 // Odd-numbered instances tear themselves down again.
                 if i % 2 == 1 {
                     assert!(rt.unregister(&inst));

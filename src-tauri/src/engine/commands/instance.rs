@@ -21,6 +21,19 @@ const FLUSH_CHARS: usize = 400;
 /// Auto-compact trigger as a whole percent of the context limit (≈90%).
 const AUTO_COMPACT_PCT: i64 = 90;
 
+// ── Restart · resume constants ────────────────────────────────────────────────
+
+/// Settle after the agent's handoff save before killing its process, so the
+/// harness finishes rendering the "saved" confirmation (mirrors the compact
+/// loop's `COMPACT_SETTLE_MS`).
+const RESTART_SETTLE_MS: u64 = 2_000;
+
+/// Delay between respawning the CLI and typing the resume prompt into it. A
+/// fresh spawn boots a login+interactive shell (rc files) and then the TUI —
+/// typing before the TUI reads stdin risks the prompt landing garbled. Generous
+/// on purpose; a restart is a rare, human-triggered operation.
+const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
+
 // ── Request types ────────────────────────────────────────────────────────────
 
 /// Payload for `instance.list` — filter by workspace.
@@ -311,12 +324,12 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // Register; if we lost a race with a concurrent spawn, the handle is
             // dropped (its shutdown closure tears down the just-spawned child)
             // and we return the existing session without double-persisting.
-            if !state.runtime.register(&id, backend.handle) {
+            let Some(epoch) = state.runtime.register(&id, backend.handle) else {
                 return serde_json::to_value(&session)
                     .map_err(|e| AppError::Internal(e.to_string()));
-            }
+            };
             repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
-            Some(backend.output_rx)
+            Some((backend.output_rx, epoch))
         }
         "chat" => {
             // Resolve the provider from the agent's `provider_id`. The API key
@@ -343,17 +356,18 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
             // Same lost-race handling as the CLI branch: the dropped handle's
             // shutdown closure aborts the just-spawned chat loop.
-            if !state.runtime.register(&id, backend.handle) {
+            let Some(epoch) = state.runtime.register(&id, backend.handle) else {
                 return serde_json::to_value(&session)
                     .map_err(|e| AppError::Internal(e.to_string()));
-            }
-            Some(backend.output_rx)
+            };
+            Some((backend.output_rx, epoch))
         }
         _ => {
             // orchestrator / unknown: placeholder backend (fusion arrives in M4).
-            if !state
+            if state
                 .runtime
                 .register(&id, runtime::LiveHandle::placeholder(&session.id))
+                .is_none()
             {
                 return serde_json::to_value(&session)
                     .map_err(|e| AppError::Internal(e.to_string()));
@@ -386,7 +400,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
     // real context window — and tools like Claude Code track and display their
     // own context. Estimating from those bytes produced a meter that visibly
     // disagreed with the child's own `/context`, so we don't fabricate one.
-    if let Some(output_rx) = output_rx {
+    if let Some((output_rx, epoch)) = output_rx {
         let track_context = def.r#type == "chat";
         tokio::spawn(forward_session_output(
             state.db.clone(),
@@ -396,6 +410,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             session.id.clone(),
             output_rx,
             track_context,
+            epoch,
         ));
     }
 
@@ -452,6 +467,12 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
 /// but never count it, persist a token estimate, or emit `session:context` —
 /// the right-hand meter then stays hidden rather than showing a fabricated
 /// figure that contradicts the child's own context display.
+///
+/// `epoch` is this forwarder's registration generation (from `register`): the
+/// EOF cleanup uses `unregister_epoch` so a LATE EOF — after a programmatic
+/// kill → respawn reused the same instance id (see [`restart`]) — cannot tear
+/// down the new generation's backend.
+#[allow(clippy::too_many_arguments)]
 async fn forward_session_output(
     db: sqlx::SqlitePool,
     runtime: Arc<runtime::Runtime>,
@@ -460,6 +481,7 @@ async fn forward_session_output(
     session_id: String,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
     track_context: bool,
+    epoch: u64,
 ) {
     // Read the session's context limit once (default if unset or on error) — it
     // drives both the live meter denominator and the auto-compact threshold.
@@ -514,8 +536,9 @@ async fn forward_session_output(
             }
         }
     }
-    // Child exited / EOF. Idempotent self-termination cleanup.
-    if runtime.unregister(&instance_id) {
+    // Child exited / EOF. Idempotent self-termination cleanup — epoch-guarded so
+    // a late EOF after a restart respawn can't kill the new generation.
+    if runtime.unregister_epoch(&instance_id, epoch) {
         let _ = repo::workspace_agent::set_status(&db, &instance_id, "idle").await;
         if let Some(app) = &app {
             let _ = bus::session_status(
@@ -626,6 +649,147 @@ pub async fn stop(state: &AppState, payload: Value) -> Result<Value, AppError> {
     );
 
     Ok(Value::Null)
+}
+
+/// Restart a CLI agent's process and resume it from a saved handoff.
+///
+/// Maps to `instance.restart` on the IPC bus. Two paths:
+///
+/// - **Live agent** (the normal case): arm a restart
+///   ([`AppState::mark_restart_pending`]) and inject the "save your handoff"
+///   prompt. The kill → respawn → resume tail fires from the `snapshot.save`
+///   handler once the agent has actually persisted its handoff — the same
+///   save-gated ordering as the compact loop, so a restart can never destroy
+///   uncaptured context. An agent that ignores the prompt is simply never
+///   restarted (the arm expires via TTL).
+/// - **Not live**: nothing to save — respawn immediately and, if the session
+///   has a handoff snapshot, inject the resume prompt once the CLI has booted.
+///
+/// Returns `{ status: "restarting", phase: "saving" | "respawning" }`.
+/// CLI agents only: chat/orchestrator have no PTY process or handoff loop.
+pub async fn restart(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: InstanceReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let id = req.workspace_agent_id;
+
+    let instance = repo::workspace_agent::get(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    let def = repo::agent_definition::get(&state.db, &instance.agent_def_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "agent_definition id={} not found",
+                instance.agent_def_id
+            ))
+        })?;
+    if def.r#type != "cli" {
+        return Err(AppError::Invalid(
+            "restart · resume applies to CLI agents only".into(),
+        ));
+    }
+
+    if state.runtime.is_live(&id) {
+        // Save-gated: arm FIRST, then inject — a fast agent that saves the
+        // instant it reads the prompt must find the arm set (mirrors compact).
+        state.mark_restart_pending(&id);
+        super::snapshot::submit_line(
+            &state.runtime,
+            &id,
+            &crate::engine::agentctx::restart_save_prompt(),
+        )
+        .await;
+        return Ok(serde_json::json!({
+            "status": "restarting", "phase": "saving", "instanceId": id
+        }));
+    }
+
+    // Not live: respawn now; the tail resolves the app-managed state itself.
+    let Some(app) = state.app().cloned() else {
+        return Err(AppError::Internal(
+            "restart requires the app runtime (no AppHandle set)".into(),
+        ));
+    };
+    tauri::async_runtime::spawn(run_respawn_resume(app, id.clone(), false));
+    Ok(serde_json::json!({
+        "status": "restarting", "phase": "respawning", "instanceId": id
+    }))
+}
+
+/// The restart tail: (optionally) kill the live backend, respawn it, and — if
+/// the session has a handoff to come back to — inject the resume prompt once
+/// the CLI has booted. Runs as a detached task (spawned by [`restart`] for a
+/// dead agent, or by the `snapshot.save` handler once a restart-armed agent has
+/// persisted its handoff), so it resolves the shared [`AppState`] from the
+/// `AppHandle` rather than borrowing it.
+///
+/// The kill → immediate respawn on the same instance id is safe because the old
+/// forwarder's late EOF cleanup is epoch-guarded (`unregister_epoch`) — it can
+/// no longer tear down the new generation's backend.
+pub(crate) async fn run_respawn_resume(
+    app: tauri::AppHandle,
+    instance_id: String,
+    kill_first: bool,
+) {
+    use tauri::Manager;
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+
+    if kill_first {
+        // Let the agent render its "saved" confirmation, then kill its process.
+        tokio::time::sleep(std::time::Duration::from_millis(RESTART_SETTLE_MS)).await;
+        if state.runtime.unregister(&instance_id) {
+            // Mirror `stop`: persist + emit idle so the UI sees the transition.
+            let _ = repo::workspace_agent::set_status(&state.db, &instance_id, "idle").await;
+            if let Ok(Some(session)) =
+                repo::session::get_by_instance(&state.db, &instance_id).await
+            {
+                state.emit(
+                    bus::SESSION_STATUS,
+                    bus::SessionStatus {
+                        session_id: session.id,
+                        status: "idle".into(),
+                    },
+                );
+            }
+        }
+    }
+
+    // Decide the resume injection BEFORE respawning: does a handoff exist?
+    let has_handoff = match repo::session::get_by_instance(&state.db, &instance_id).await {
+        Ok(Some(s)) => repo::snapshot::latest_handoff_for_session(&state.db, &s.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        _ => false,
+    };
+
+    if let Err(e) = spawn(
+        &state,
+        serde_json::json!({ "workspaceAgentId": instance_id }),
+    )
+    .await
+    {
+        eprintln!("restart: respawn failed for instance {instance_id}: {e}");
+        return;
+    }
+
+    // Fresh start with nothing to resume from — done after the respawn.
+    if !has_handoff {
+        return;
+    }
+
+    // Give the CLI time to boot before typing the resume prompt into its TUI.
+    tokio::time::sleep(std::time::Duration::from_millis(RESTART_BOOT_SETTLE_MS)).await;
+    if !state.runtime.is_live(&instance_id) {
+        return; // died during boot — nothing to resume.
+    }
+    super::snapshot::submit_line(
+        &state.runtime,
+        &instance_id,
+        &crate::engine::agentctx::resume_restore_prompt(),
+    )
+    .await;
 }
 
 /// Payload for `session.resize` — the frontend terminal's current size.
@@ -802,9 +966,10 @@ mod tests {
             .expect("session exists");
 
         // Put the instance in the live+running state the forwarder expects.
-        assert!(state
+        let epoch = state
             .runtime
-            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
         workspace_agent::set_status(&state.db, &id, "running")
             .await
             .expect("set running");
@@ -818,6 +983,7 @@ mod tests {
             session.id.clone(),
             rx,
             true, // chat backend — context tracking enabled.
+            epoch,
         ));
 
         drop(tx); // EOF → forwarder runs its idle cleanup.
@@ -843,9 +1009,10 @@ mod tests {
             .expect("get_by_instance failed")
             .expect("session exists");
 
-        assert!(state
+        let epoch = state
             .runtime
-            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
         workspace_agent::set_status(&state.db, &id, "running")
             .await
             .expect("set running");
@@ -859,6 +1026,7 @@ mod tests {
             session.id.clone(),
             rx,
             true, // chat backend — context tracking enabled.
+            epoch,
         ));
 
         // Push > FLUSH_CHARS (400) chars so a flush fires.
@@ -894,9 +1062,10 @@ mod tests {
             .expect("get_by_instance failed")
             .expect("session exists");
 
-        assert!(state
+        let epoch = state
             .runtime
-            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
         workspace_agent::set_status(&state.db, &id, "running")
             .await
             .expect("set running");
@@ -910,6 +1079,7 @@ mod tests {
             session.id.clone(),
             rx,
             true, // chat backend — context tracking enabled.
+            epoch,
         ));
 
         // 720_000 chars / 4 = 180_000 tokens = 90% of the 200_000 default limit.
@@ -956,9 +1126,10 @@ mod tests {
             .expect("get_by_instance failed")
             .expect("session exists");
 
-        assert!(state
+        let epoch = state
             .runtime
-            .register(&id, runtime::LiveHandle::placeholder(&session.id)));
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
         workspace_agent::set_status(&state.db, &id, "running")
             .await
             .expect("set running");
@@ -976,6 +1147,7 @@ mod tests {
             session.id.clone(),
             rx,
             false, // CLI/PTY backend — context tracking disabled.
+            epoch,
         ));
 
         // Well over FLUSH_CHARS: a tracked forwarder would persist ~250 tokens.
@@ -1140,6 +1312,71 @@ mod tests {
             item["launchedSkillIds"].as_array().map(|a| a.len()),
             Some(1)
         );
+    }
+
+    /// restart on an unknown instance → NotFound (no arm, no tail).
+    #[tokio::test]
+    async fn restart_unknown_instance_not_found() {
+        let state = AppState::for_tests().await;
+        let err = restart(&state, json!({ "workspaceAgentId": "nope" }))
+            .await
+            .expect_err("restart must fail for an unknown instance");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// restart is CLI-only: an orchestrator instance → Invalid (no PTY process
+    /// or handoff loop to restart).
+    #[tokio::test]
+    async fn restart_non_cli_invalid() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await; // orchestrator type
+        let err = restart(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect_err("restart must reject non-cli agents");
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    /// restart on a LIVE cli agent is save-gated: it arms the restart, injects
+    /// the save prompt (absorbed by the placeholder backend here), reports
+    /// phase "saving" — and does NOT kill the process before the save lands.
+    #[tokio::test]
+    async fn restart_live_cli_arms_and_reports_saving() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        assert!(state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .is_some());
+
+        let out = restart(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("restart failed");
+        assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
+        assert!(
+            state.take_restart_pending(&id),
+            "restart must be armed for the next save"
+        );
+        assert!(
+            state.runtime.is_live(&id),
+            "a live agent must NOT be killed before its handoff is saved"
+        );
+    }
+
+    /// restart on a dead cli agent needs the app runtime to drive the detached
+    /// respawn tail; without an AppHandle (tests) it surfaces an honest
+    /// Internal error instead of silently doing nothing.
+    #[tokio::test]
+    async fn restart_dead_cli_without_app_handle_is_internal() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let err = restart(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect_err("restart of a dead agent must fail without an AppHandle");
+        assert!(matches!(err, AppError::Internal(_)));
     }
 
     #[tokio::test]

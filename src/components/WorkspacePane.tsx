@@ -31,6 +31,9 @@ interface AgentTab {
   type: AgentDefinition["type"];
   status: WorkspaceAgent["status"];
   def: AgentDefinition;
+  /** Skill ids the live session actually launched with (undefined before any
+   *  launch) — feeds the Context drawer's Skills section drift hint. */
+  launchedSkillIds?: string[];
 }
 
 // Status dot colors (matches Roster / AppShell tokens).
@@ -116,6 +119,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
             type: def.type,
             status: inst.status,
             def,
+            launchedSkillIds: inst.launchedSkillIds,
           });
         }
         setTabs(agentTabs);
@@ -212,11 +216,19 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
     ipc.instance
       .list({ workspaceId })
       .then((instances) => {
-        const byId = new Map(instances.map((i) => [i.id, i.status]));
+        const byId = new Map(instances.map((i) => [i.id, i]));
         setTabs((prev) =>
           prev.map((t) => {
             const next = byId.get(t.instanceId);
-            return next && next !== t.status ? { ...t, status: next } : t;
+            if (!next) return t;
+            // Patch status AND launchedSkillIds: a (re)spawn records a fresh
+            // launch snapshot, and the Context drawer's Skills drift hint must
+            // clear/appear accordingly. Identity-guarded to avoid re-renders on
+            // unchanged rows.
+            const skillsChanged =
+              JSON.stringify(next.launchedSkillIds) !== JSON.stringify(t.launchedSkillIds);
+            if (next.status === t.status && !skillsChanged) return t;
+            return { ...t, status: next.status, launchedSkillIds: next.launchedSkillIds };
           }),
         );
       })
@@ -392,6 +404,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId }: WorkspacePanePro
           instanceId={activeTab.instanceId}
           roster={roster}
           session={activeSession}
+          launchedSkillIds={activeTab.launchedSkillIds}
         />
       )}
     </div>

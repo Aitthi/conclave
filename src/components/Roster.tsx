@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Waypoints, Terminal, Search, Folder, Plus, Layers, X, Pencil } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
+import { computeSkillsStale } from "../lib/skills";
 
 // ---------------------------------------------------------------------------
 // View model for one agent row — derived from ipc.instance.list ⨝ ipc.agentDef.list.
@@ -40,23 +41,6 @@ function deriveMeta(def: AgentDefinition): string {
     case "chat":
       return def.role ?? def.model ?? "Chat";
   }
-}
-
-// A `cli` instance is "stale" when its definition's current FULL skill id
-// set (builtin + attached custom, same basis/order as the launch snapshot —
-// see AgentDefinition.skillIds' doc comment) differs from what its session
-// actually launched with. Order matters (mirrors
-// repo::skill::content_for_agent's deterministic ordering), so this is a
-// straight array comparison, not a set comparison. `undefined`
-// launchedSkillIds (never launched yet) is never stale — nothing to compare
-// against.
-function computeSkillsStale(def: AgentDefinition, inst: WorkspaceAgent): boolean {
-  if (def.type !== "cli") return false;
-  if (inst.launchedSkillIds === undefined) return false;
-  const current = def.skillIds ?? [];
-  const launched = inst.launchedSkillIds;
-  if (current.length !== launched.length) return true;
-  return current.some((id, i) => id !== launched[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +256,7 @@ export function Roster({
             type: def.type,
             status: inst.status,
             meta: deriveMeta(def),
-            skillsStale: computeSkillsStale(def, inst),
+            skillsStale: computeSkillsStale(def, inst.launchedSkillIds),
           });
         }
         setEntries(rosterEntries);

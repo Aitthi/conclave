@@ -95,6 +95,43 @@ decisions it records."
         .to_string()
 }
 
+/// The restart "save" prompt — injected when the user triggers Restart · resume
+/// on a LIVE agent. Same contract as [`compact_save_prompt`] (the agent's
+/// `conclave snapshot save` is the trigger the loop waits on), but honest about
+/// what follows: the PROCESS is killed and relaunched, not just `/clear`ed.
+/// Single line, mirroring `inject`.
+#[must_use]
+pub fn restart_save_prompt() -> String {
+    "[conclave restart] Your process is about to be RESTARTED (killed and relaunched); your \
+context will not survive. Write the RICHEST handoff you can for a reader with ZERO memory of \
+this conversation — follow your Strategic Compact skill's seven sections if you have it, else \
+cover: the exact next step and any half-finished edit FIRST, then goal/authority/peers, every \
+decision with its why, open threads with your defaults, hard-won gotchas and failed approaches, \
+done work as commit SHAs, and pointers. Do not economize tokens — the only limit is a HARD CAP \
+of 10k tokens (~40,000 characters). REFERENCE commit SHAs and file paths instead of pasting \
+their contents, and REDACT secrets (API keys, tokens, passwords). Then persist it by running \
+this single command (do not just print it): `conclave snapshot save <your full handoff text>`. \
+After it confirms, stop and wait for the restart."
+        .to_string()
+}
+
+/// The resume prompt — injected into a freshly (re)launched agent so it reloads
+/// the last handoff saved for its session and continues instead of starting
+/// over. Used by the restart loop's respawn tail AND by the standalone
+/// `snapshot.resume` command (e.g. after the whole app was relaunched and the
+/// agent came back with an empty context). Single line, same rationale as
+/// [`compact_save_prompt`].
+#[must_use]
+pub fn resume_restore_prompt() -> String {
+    "[conclave resume] Your process was restarted and this is a fresh context. Restore your \
+working state: run `conclave snapshot last` to read the last handoff saved for you, then VERIFY \
+it against reality before acting — git log the SHAs it names and re-read the blackboard keys it \
+watches; the world may have moved while you were gone. Then continue the task from the EXACT \
+next step it describes. Do not restart work that the handoff says is done, and do not re-open \
+decisions it records."
+        .to_string()
+}
+
 /// Ensure a `conclave` command exists on a dedicated shim directory and return
 /// that directory (to be prepended to the spawned agent's PATH). The shim is a
 /// symlink to the sibling `conclave-cli` binary, refreshed each call so it always
@@ -232,6 +269,19 @@ mod tests {
         // Each must name the exact command the agent has to run.
         assert!(save.contains("conclave snapshot save"));
         assert!(restore.contains("conclave snapshot last"));
+    }
+
+    #[test]
+    fn restart_resume_prompts_are_single_line_and_name_the_commands() {
+        let save = super::restart_save_prompt();
+        let resume = super::resume_restore_prompt();
+        assert!(!save.contains('\n'), "restart save prompt must be one line");
+        assert!(!resume.contains('\n'), "resume prompt must be one line");
+        // Each must name the exact command the agent has to run.
+        assert!(save.contains("conclave snapshot save"));
+        assert!(resume.contains("conclave snapshot last"));
+        // The restart save prompt must be honest that the PROCESS dies.
+        assert!(save.contains("RESTARTED"), "{save}");
     }
 
     #[test]

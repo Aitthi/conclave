@@ -35,6 +35,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         // ── instance ──────────────────────────────────────────────────────
         "instance.list" => instance::list(state, payload).await,
         "instance.spawn" => instance::spawn(state, payload).await,
+        "instance.restart" => instance::restart(state, payload).await,
         "instance.remove" => instance::remove(state, payload).await,
         "session.resize" => instance::resize(state, payload).await,
 
@@ -56,6 +57,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "snapshot.save" => snapshot::save(state, payload).await,
         "snapshot.last" => snapshot::last(state, payload).await,
         "snapshot.compact" => snapshot::compact(state, payload).await,
+        "snapshot.resume" => snapshot::resume(state, payload).await,
         "snapshot.delete" => snapshot::delete(state, payload).await,
         "snapshot.send" => snapshot::send(state, payload).await,
 

@@ -435,7 +435,8 @@ mod tests {
             .id;
         assert!(state
             .runtime
-            .register(&to, LiveHandle::placeholder(&session_id)));
+            .register(&to, LiveHandle::placeholder(&session_id))
+            .is_some());
 
         let val = inject(
             &state,

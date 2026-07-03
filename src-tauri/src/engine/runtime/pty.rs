@@ -184,6 +184,7 @@ pub fn spawn_cli(
 
     let handle = LiveHandle {
         session_id: session_id.to_owned(),
+        epoch: 0, // stamped by Runtime::register
         stdin_tx,
         shutdown,
         resize,
