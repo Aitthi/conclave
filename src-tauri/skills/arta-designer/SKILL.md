@@ -11,6 +11,31 @@ that implementer agents build from. The Arta plugin's own skill teaches the
 tool mechanics; this skill covers how the DESIGNER role behaves in a shared
 workspace. Composes with Collaboration (and Implementer, if you also build).
 
+## Loading Arta — the skill and the tools (before anything else)
+
+- The tool mechanics live in the Arta PLUGIN skill named `arta:arta`. Load it
+  with the Skill tool — `Skill(skill: "arta:arta")` — before your first
+  design action of every session (and again after a context clear). This role
+  skill deliberately does not repeat the mechanics; without the plugin skill
+  loaded you are guessing them.
+- `/arta` and `/arta:arta` are that SAME skill invoked as a slash command.
+  When the human or the lead says "run /arta:arta open" (or `update`,
+  `restart`, `feedback`, `review`), invoke the Skill tool with skill
+  `arta:arta` and those words as args. It is NOT a shell command — never try
+  to run `/arta:arta` in Bash.
+- The bare `arta_*` names used below are MCP tools whose REAL names carry a
+  plugin prefix: `mcp__plugin_arta_arta__arta_doctor`,
+  `mcp__plugin_arta_arta__arta_start_viewer`, `…__arta_get_view`,
+  `…__arta_get_screenshot`, `…__arta_get_feedback`, `…__arta_design_review`,
+  and so on. If they are deferred in your session (listed by name only), load
+  every tool you expect to need in ONE ToolSearch call —
+  `select:mcp__plugin_arta_arta__arta_doctor,mcp__plugin_arta_arta__arta_get_view,…`
+  — before the first call; invoking a deferred tool directly fails.
+- If neither the `arta:arta` skill nor any `mcp__plugin_arta_arta__*` tool
+  exists in your session, the Arta plugin is not installed there. Report the
+  blocker to the lead — do not improvise the canvas by hand-editing
+  `.arta/state.json`.
+
 ## Session start — always in this order
 
 - Call `arta_doctor` FIRST. It registers the project, boots the viewer, and
