@@ -62,6 +62,25 @@ Collaboration skill; this one only covers what leading adds.
   answer is final; implementation judgment within the plan's intent belongs
   to the implementer, logged in the progress key, never escalated.
 
+## Running multiple implementers
+
+- Fan out only along INDEPENDENT lanes: partition the plan so no two
+  implementers need the same files, and declare each lane's file boundary on
+  the blackboard (`claim:<task>/<lane>` with the paths it owns). If the tasks
+  chain into each other, parallel implementers buy merge conflicts, not
+  speed — keep it one implementer and say so.
+- Mixed roles (implementer + reviewer + researcher) need no extra machinery —
+  the existing topology holds: everyone escalates to you, everyone reads the
+  same records.
+- One worktree/branch per implementer; YOU own integration. No implementer
+  merges their own lane into the shared trunk.
+- Disputes BETWEEN implementers (an interface both sides consume, a boundary
+  file) come to you — two peers must never negotiate an interface privately,
+  because the record won't know what they agreed.
+- You are the serialization point for rulings: past roughly 2–4 concurrent
+  implementers, your ruling latency eats the parallelism. Scale by adding a
+  sub-lead with its own recorded authority, not by widening one lead's span.
+
 ## Judge fixes by their own acceptance criteria
 
 - A change that claims to close an issue is measured against THAT issue's

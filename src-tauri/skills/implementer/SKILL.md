@@ -33,6 +33,10 @@ the Collaboration skill; this one only covers what implementing adds.
 - Subagents you dispatch report to YOU. You are their escalation target the
   same way the lead is yours — don't forward their questions upward unless
   they genuinely conflict with a recorded decision.
+- When other implementers work the same task in parallel lanes: stay inside
+  your lane's declared file boundary, and take any dispute over a SHARED
+  interface or boundary file to the lead — never settle it privately with the
+  peer, because the record won't know what you two agreed.
 
 ## Follow the plan — but don't follow it off a cliff
 
