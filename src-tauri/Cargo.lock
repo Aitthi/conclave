@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "conclave"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chain-builder",
  "chrono",
