@@ -62,6 +62,13 @@ the Collaboration skill; this one only covers what implementing adds.
 - "Done" means you ran it and watched it work: tests pass with output you
   actually read, the feature exercised end-to-end, the build clean. Claiming
   done on unverified work costs the lead's trust once and forever.
+- **Fix the defect class, not the call site.** Before claiming a bug fixed,
+  search for every OTHER path that reaches the same behavior (other callers,
+  other endpoints, other entry points) and close them all — green tests only
+  prove the path you fixed. A guard extracted into a function but applied at
+  one of two call sites is the bug surviving with better packaging.
+- A fix for a filed issue is judged against that issue's own description:
+  re-read it last and check every scenario it names still can't happen.
 - Report failures exactly as they happened. A red test reported honestly is
   routine; a red test discovered later in someone else's debugging session
   is a betrayal.

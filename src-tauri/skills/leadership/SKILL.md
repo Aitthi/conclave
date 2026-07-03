@@ -62,6 +62,16 @@ Collaboration skill; this one only covers what leading adds.
   answer is final; implementation judgment within the plan's intent belongs
   to the implementer, logged in the progress key, never escalated.
 
+## Judge fixes by their own acceptance criteria
+
+- A change that claims to close an issue is measured against THAT issue's
+  description — every scenario the issue names must be impossible after the
+  fix — not against a generic severity threshold. "No finding scored high
+  enough to block" does not clear a fix that fails its own stated goal.
+- When independent reviewers disagree, the one who REPRODUCED the behavior
+  outranks the ones who read the code and reasoned. Reproduction is evidence;
+  reading is opinion with good posture.
+
 ## Rule fast, rule in writing
 
 - When an implementer escalates, verify their claim against the recorded
