@@ -23,6 +23,7 @@ import { ipc, useMessageInjected, useSessionContext, useSnapshotCreated } from "
 import type {
   AgentDefinition,
   InterAgentMessage,
+  Role,
   Session,
   Skill,
   Snapshot,
@@ -164,6 +165,30 @@ export function ContextDrawer({
     () => new Map((skillCatalog ?? []).map((s) => [s.id, s])),
     [skillCatalog],
   );
+
+  // ── Role (ADR 0005) ───────────────────────────────────────────────────────
+  // Resolve `def.roleId` against the role catalog for the first-class role's
+  // name + one-paragraph description; fall back to the legacy free-text `role`
+  // label (which has no description) for role-less / pre-role-system agents.
+  const [roleCatalog, setRoleCatalog] = useState<Role[] | null>(null);
+  useEffect(() => {
+    ipc.role
+      .list()
+      .then((rows) => {
+        if (mounted.current) setRoleCatalog(rows);
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) {
+          console.error("ContextDrawer: role.list failed", err);
+        }
+      });
+  }, []);
+  const resolvedRole = def.roleId
+    ? (roleCatalog ?? []).find((r) => r.id === def.roleId)
+    : undefined;
+  const roleName = resolvedRole?.name ?? def.role;
+  const roleDescription = resolvedRole?.description;
+
   const effectiveSkillIds = def.skillIds ?? [];
   // Drift: the live session launched with a DIFFERENT set than the def now
   // carries — a restart re-applies the current set (same basis as the Roster's
@@ -1003,7 +1028,9 @@ export function ContextDrawer({
         </div>
         <div className="leading-tight flex-1 min-w-0">
           <div className="text-[12px] font-semibold truncate">{def.name}</div>
-          <div className="text-[10.5px] text-text-muted truncate">{status}</div>
+          <div className="text-[10.5px] text-text-muted truncate" title={roleDescription}>
+            {roleName ? `${roleName} · ${status}` : status}
+          </div>
         </div>
       </div>
       </aside>

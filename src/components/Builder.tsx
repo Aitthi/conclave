@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { X, Sparkles, Waypoints, MessageSquare, Terminal } from "lucide-react";
 import { ipc } from "../ipc";
-import type { AgentDefinition, Skill } from "../ipc";
+import type { AgentDefinition, Skill, Role } from "../ipc";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -126,7 +126,6 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
   // ── Form state (lazy-initialised from initialDef when editing) ─────────────
   const [name, setName] = useState(initialDef?.name ?? "");
-  const [role, setRole] = useState(initialDef?.role ?? "");
   const [agentType, setAgentType] = useState<AgentType>(initialDef?.type ?? "cli");
   const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
   const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
@@ -156,6 +155,15 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   // checklist below only ever tests membership against `kind === "custom"`
   // skills, so a builtin id in this state simply never matches any checkbox.
   const [skillIds, setSkillIds] = useState<string[]>(initialDef?.skillIds ?? []);
+  // ── Roles (ADR 0005) ─────────────────────────────────────────────────────────
+  const [allRoles, setAllRoles] = useState<Role[]>([]);
+  const [roleId, setRoleId] = useState<string>(initialDef?.roleId ?? "");
+  // Inline "Custom…" role editor state.
+  const [customRoleOpen, setCustomRoleOpen] = useState(false);
+  const [customRoleName, setCustomRoleName] = useState("");
+  const [customRoleDesc, setCustomRoleDesc] = useState("");
+  const [customRoleSkillIds, setCustomRoleSkillIds] = useState<string[]>([]);
+  const [savingRole, setSavingRole] = useState(false);
 
   useEffect(() => {
     ipc.skill
@@ -164,10 +172,60 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       .catch((err: unknown) => {
         if (import.meta.env.DEV) console.error("Builder: skill.list failed", err);
       });
+    ipc.role
+      .list()
+      .then(setAllRoles)
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) console.error("Builder: role.list failed", err);
+      });
   }, []);
+
+  // Pick a role: pre-select its default skills into the existing skill UI
+  // (additive union — the user can still toggle any of them before saving the
+  // agent). The COPY semantics from ADR 0005 live HERE, not in the engine.
+  function selectRole(id: string) {
+    setRoleId(id);
+    setCustomRoleOpen(false);
+    const picked = allRoles.find((r) => r.id === id);
+    if (picked) {
+      setSkillIds((prev) => Array.from(new Set([...prev, ...picked.skillIds])));
+    }
+  }
+
+  async function handleCreateCustomRole() {
+    if (!customRoleName.trim() || !customRoleDesc.trim()) {
+      setError("Custom role needs a name and a description");
+      return;
+    }
+    setSavingRole(true);
+    setError(null);
+    try {
+      const created = await ipc.role.save({
+        name: customRoleName.trim(),
+        description: customRoleDesc.trim(),
+        skillIds: customRoleSkillIds,
+      });
+      const refreshed = await ipc.role.list();
+      setAllRoles(refreshed);
+      setRoleId(created.id);
+      setSkillIds((prev) => Array.from(new Set([...prev, ...created.skillIds])));
+      setCustomRoleOpen(false);
+      setCustomRoleName("");
+      setCustomRoleDesc("");
+      setCustomRoleSkillIds([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingRole(false);
+    }
+  }
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const letter = name.trim().charAt(0).toUpperCase() || "?";
+  const selectedRole = allRoles.find((r) => r.id === roleId);
+  // Fall back to any legacy free-text label when no first-class role resolves.
+  const selectedRoleName = selectedRole?.name ?? (initialDef?.role || undefined);
+  const selectedRoleDescription = selectedRole?.description;
   // CLI launch config applies to claude-code + codex (custom isn't wired yet).
   const isClaudeCode = agentType === "cli" && cliKind === "claude-code";
   const isCodex = agentType === "cli" && cliKind === "codex";
@@ -195,12 +253,17 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
     setSaving(true);
     setError(null);
     try {
+      // First-class role (ADR 0005): send `roleId` + the role's display name as
+      // the legacy `role` fallback. With no role picked, preserve any existing
+      // legacy free-text label rather than clearing it (Phase B persists roleId;
+      // the engine ignores it until then). `selectedRole` is derived below.
       const def = await ipc.agentDef.save({
         // Pass `id` when editing so the backend upserts rather than inserts.
         id: initialDef?.id,
         name: name.trim(),
         type: agentType,
-        role: role.trim() || undefined,
+        role: selectedRole?.name ?? (initialDef?.role || undefined),
+        roleId: roleId || undefined,
         cliKind: agentType === "cli" ? cliKind : undefined,
         color: color || undefined,
         model: model.trim() || undefined,
@@ -332,15 +395,137 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
                   placeholder="Agent name"
                   className="w-full text-[14px] font-semibold tracking-tight bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
                 />
-                <input
-                  value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  placeholder="Role (optional)"
-                  className="w-full text-[11.5px] text-text-muted bg-transparent outline-none"
-                />
+                <div className="text-[11.5px] text-text-muted truncate">
+                  {selectedRoleName ?? "No role"}
+                </div>
               </div>
             </div>
 
+          </section>
+
+          {/* Role (ADR 0005) */}
+          <section>
+            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
+              Role
+            </div>
+            <select
+              value={roleId}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "__custom__") {
+                  setCustomRoleOpen(true);
+                  setRoleId("");
+                } else if (v === "") {
+                  setRoleId("");
+                  setCustomRoleOpen(false);
+                } else {
+                  selectRole(v);
+                }
+              }}
+              className="w-full text-[12.5px] bg-surface ring-1 ring-overlay/[0.08] rounded-lg px-2.5 py-1.5 outline-none focus:ring-accent"
+            >
+              <option value="">No role</option>
+              {allRoles.filter((r) => r.kind === "builtin").length > 0 && (
+                <optgroup label="Built-in">
+                  {allRoles
+                    .filter((r) => r.kind === "builtin")
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                </optgroup>
+              )}
+              {allRoles.filter((r) => r.kind === "custom").length > 0 && (
+                <optgroup label="Custom">
+                  {allRoles
+                    .filter((r) => r.kind === "custom")
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                </optgroup>
+              )}
+              <option value="__custom__">Custom…</option>
+            </select>
+            {selectedRoleDescription && (
+              <p className="mt-1.5 text-[11.5px] text-text-tertiary leading-snug">
+                {selectedRoleDescription}
+              </p>
+            )}
+
+            {/* Inline custom-role editor */}
+            {customRoleOpen && (
+              <div className="mt-2 rounded-xl ring-1 ring-overlay/[0.08] bg-surface p-3 space-y-2">
+                <input
+                  value={customRoleName}
+                  onChange={(e) => setCustomRoleName(e.target.value)}
+                  placeholder="Role name"
+                  className="w-full text-[12.5px] font-semibold bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
+                />
+                <textarea
+                  value={customRoleDesc}
+                  onChange={(e) => setCustomRoleDesc(e.target.value)}
+                  placeholder="One-paragraph job description (baked into the agent's preamble)"
+                  rows={3}
+                  className="w-full text-[12px] text-text-secondary bg-transparent outline-none ring-1 ring-overlay/[0.08] rounded-lg px-2 py-1.5 resize-none focus:ring-accent"
+                />
+                {allSkills.filter((s) => (s.kind === "builtin" && !s.mandatory) || s.kind === "custom").length > 0 && (
+                  <div>
+                    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1">
+                      Default skills
+                    </div>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {allSkills
+                        .filter((s) => (s.kind === "builtin" && !s.mandatory) || s.kind === "custom")
+                        .map((s) => {
+                          const checked = customRoleSkillIds.includes(s.id);
+                          return (
+                            <label
+                              key={s.id}
+                              className="flex items-center gap-2 text-[12px] text-text-secondary cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) =>
+                                  setCustomRoleSkillIds((prev) =>
+                                    e.target.checked
+                                      ? [...prev, s.id]
+                                      : prev.filter((id) => id !== s.id),
+                                  )
+                                }
+                              />
+                              {s.name}
+                            </label>
+                          );
+                        })}
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-center justify-end gap-2 pt-0.5">
+                  <button
+                    onClick={() => {
+                      setCustomRoleOpen(false);
+                      setCustomRoleName("");
+                      setCustomRoleDesc("");
+                      setCustomRoleSkillIds([]);
+                    }}
+                    className="text-[12px] font-medium text-text-secondary px-3 py-1 rounded-lg hover:bg-overlay/[0.05]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleCreateCustomRole}
+                    disabled={savingRole}
+                    className="text-[12px] font-semibold text-white bg-accent px-3 py-1 rounded-lg hover:brightness-105 disabled:opacity-60"
+                  >
+                    {savingRole ? "Creating…" : "Create role"}
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
 
           {/* Type */}

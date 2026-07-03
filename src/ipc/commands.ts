@@ -14,6 +14,7 @@ import type {
   FusionPanelResponse,
   Tool,
   Skill,
+  Role,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,9 @@ export interface Commands {
       name: string;
       type: "cli" | "chat" | "orchestrator";
       role?: string;
+      /** The chosen first-class role id (builtin slug or custom `Role.id`).
+       *  Persisted server-side in Phase B; harmlessly ignored until then. */
+      roleId?: string;
       cliKind?: "claude-code" | "codex" | "custom";
       color?: string;
       providerId?: string;
@@ -104,6 +108,18 @@ export interface Commands {
   };
   "skill.stopDraftSession": {
     req: { workspaceAgentId: string };
+    res: void;
+  };
+  "role.list": {
+    req: void;
+    res: Role[];
+  };
+  "role.save": {
+    req: { id?: string; name: string; description: string; skillIds?: string[] };
+    res: Role;
+  };
+  "role.delete": {
+    req: { id: string };
     res: void;
   };
   "instance.list": {
@@ -282,6 +298,11 @@ export const ipc = {
     syncDraft: (req: Commands["skill.syncDraft"]["req"]) => call("skill.syncDraft", req),
     stopDraftSession: (req: Commands["skill.stopDraftSession"]["req"]) =>
       call("skill.stopDraftSession", req),
+  },
+  role: {
+    list: () => call("role.list"),
+    save: (req: Commands["role.save"]["req"]) => call("role.save", req),
+    delete: (req: Commands["role.delete"]["req"]) => call("role.delete", req),
   },
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),

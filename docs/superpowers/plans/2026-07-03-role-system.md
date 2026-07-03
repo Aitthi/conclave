@@ -79,6 +79,14 @@ and two skills lists all four new fields.
 - `commands/agent.rs::save`: persist `role_id`; when a NEW definition is created with a role
   and the request carries no explicit skill list, attach the role's default skills (copy).
   Write `role` display-text from the role's name for fallback.
+  **REVIEW OBLIGATION (Mellow, bb review:role-system):** `repo::role` returns a role's
+  `skill_ids` UNFILTERED — the copy step here MUST drop ids that no longer resolve to an
+  existing skill (mirror `effective_builtin_skills`'s ignore-unknown behavior), and the UI
+  picker must do the same, else a role naming a deleted skill silently attaches nothing.
+  Test: role with one live + one deleted skill id → only the live one attaches.
+- `repo/workspace_agent.rs`: one-line comment on the roster's `INNER JOIN agent_definition`
+  stating it relies on the enforced FK + restricted (non-cascade) delete — if either changes,
+  agents silently vanish from the roster (review note 1).
 - `agentctx.rs::bootstrap_preamble` (additive; coordinate with the lead — Dew may still hold
   the file): bake the agent's own role name + description (sanitized), and extend the roster
   sentence: `conclave agent list` now shows each peer's role and skills — consult it before

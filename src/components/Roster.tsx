@@ -15,8 +15,13 @@ interface RosterEntry {
   color: string;
   type: AgentDefinition["type"];
   status: WorkspaceAgent["status"];
-  /** Subtitle derived honestly from the def — no fabricated strings. */
+  /** Subtitle derived honestly from the def / enriched roster — no fabricated
+   *  strings. Prefers the first-class role name (ADR 0005) over the legacy
+   *  free-text label. */
   meta: string;
+  /** The role's one-paragraph job description (first-class roles only), shown
+   *  on hover of the subtitle. */
+  roleDescription?: string;
   /** True when the def's CURRENT full skill id set (builtin + custom) differs
    *  from what the live session actually launched with — see
    *  Session.launchedSkillIds. Only meaningful for `type === "cli"` (the
@@ -117,7 +122,12 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
           {entry.name}
           {isCli && <Terminal className="w-3 h-3 text-text-muted shrink-0" />}
         </div>
-        <div className="text-[10.5px] text-text-muted truncate">{entry.meta}</div>
+        <div
+          className="text-[10.5px] text-text-muted truncate"
+          title={entry.roleDescription}
+        >
+          {entry.meta}
+        </div>
       </div>
 
       {confirming ? (
@@ -255,7 +265,10 @@ export function Roster({
             color: def.color ?? "#6e6e73",
             type: def.type,
             status: inst.status,
-            meta: deriveMeta(def),
+            // The enriched roster's resolved role name wins over the legacy
+            // free-text label; deriveMeta covers the role-less case.
+            meta: inst.roleName ?? deriveMeta(def),
+            roleDescription: inst.roleDescription,
             skillsStale: computeSkillsStale(def, inst.launchedSkillIds),
           });
         }

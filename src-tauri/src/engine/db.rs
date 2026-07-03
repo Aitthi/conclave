@@ -131,6 +131,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 8 {
+        sqlx::raw_sql(include_str!("migrations/0008_role_system.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 8;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -174,7 +183,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("table-count query failed");
-        assert_eq!(count, 19, "expected 19 tables, got {count}");
+        assert_eq!(count, 20, "expected 20 tables, got {count}");
     }
 
     /// Running migrate twice must not error and must leave user_version == 6.
@@ -202,15 +211,15 @@ mod tests {
         .await
         .expect("table-count query failed");
         assert_eq!(
-            count, 19,
-            "expected 19 tables after idempotent run, got {count}"
+            count, 20,
+            "expected 20 tables after idempotent run, got {count}"
         );
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 7, "user_version should be 7");
+        assert_eq!(version, 8, "user_version should be 8");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -335,7 +344,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -426,6 +435,44 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
+    }
+
+    /// Migration 0008 adds the `role` table (ADR 0005) and
+    /// `agent_definition.role_id`. Roles are first-class bundles; builtin roles
+    /// ship as a bundled folder so this table holds only custom roles.
+    #[tokio::test]
+    async fn migrate_adds_role_table_and_role_id_column() {
+        let pool = connect_in_memory().await;
+
+        // The role table exists and `skill_ids` defaults to '[]'.
+        sqlx::query(
+            "INSERT INTO role (id, name, description, created_at) \
+             VALUES ('r1', 'Custom', 'A custom role.', '2024-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert role should succeed");
+        let skill_ids: String =
+            sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
+                .fetch_one(&pool)
+                .await
+                .expect("select failed");
+        assert_eq!(skill_ids, "[]");
+
+        // agent_definition.role_id exists and defaults to NULL.
+        sqlx::query(
+            "INSERT INTO agent_definition (id, name, type, harness_mode, created_at) \
+             VALUES ('ad1', 'A', 'cli', 'own', '2024-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert agent_definition should succeed");
+        let role_id: Option<String> =
+            sqlx::query_scalar("SELECT role_id FROM agent_definition WHERE id = 'ad1'")
+                .fetch_one(&pool)
+                .await
+                .expect("select failed");
+        assert!(role_id.is_none());
     }
 }

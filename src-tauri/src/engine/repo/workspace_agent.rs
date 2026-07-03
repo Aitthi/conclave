@@ -114,11 +114,19 @@ pub async fn list_by_workspace(
         .map_err(cb_err)
 }
 
-/// Like [`WorkspaceAgentRow`] but annotated with the paired session's
-/// `launched_skill_ids` (raw JSON-array text, `None` before any launch). Used
-/// ONLY by `commands::instance::list` so the Roster can detect skill drift
-/// without a second IPC round-trip per instance.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+/// A self-describing roster entry (ADR 0005): a `workspace_agent` annotated
+/// with its paired session's `launched_skill_ids` (raw JSON text, `None`
+/// before any launch — so the Roster can detect skill drift without a second
+/// IPC round-trip) AND the resolved human-facing description of who the agent
+/// IS: its display name, its role name + one-paragraph description, and the
+/// NAMES (not ids) of the skills it launched with. Consumed by
+/// `commands::instance::list` and, through it, `conclave agent list` — so
+/// running agents can see who their peers are.
+///
+/// The four description fields (`name`, `role_name`, `role_description`,
+/// `skill_names`) are ADDITIVE — `id`/`status`/`launchedSkillIds` keep their
+/// exact names and meaning (the enriched JSON is consumed by live agents).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceAgentWithSkills {
     pub id: String,
@@ -126,6 +134,21 @@ pub struct WorkspaceAgentWithSkills {
     pub agent_def_id: String,
     pub status: String,
     pub added_at: String,
+    /// The agent definition's display name.
+    pub name: String,
+    /// The role's display name — from the resolved role (builtin or custom),
+    /// falling back to the legacy free-text `agent_definition.role` label when
+    /// no `role_id` is set (or it dangles). `None` for a role-less agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_name: Option<String>,
+    /// The role's one-paragraph job description. Only present when a
+    /// first-class role resolved (the legacy free-text fallback has none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_description: Option<String>,
+    /// The NAMES of the skills this agent launched with, in `launched_skill_ids`
+    /// order. Ids that no longer resolve to a shipped/DB skill (e.g. a deleted
+    /// custom skill) are dropped, mirroring the ignore-unknown pattern.
+    pub skill_names: Vec<String>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_launched_ids"
@@ -147,26 +170,100 @@ where
     }
 }
 
-/// Return all workspace_agents for a workspace (same ordering as
-/// `list_by_workspace`) LEFT JOINed with their session's `launched_skill_ids`.
-/// A workspace_agent with no session yet (should not normally happen —
-/// `instantiate` creates both atomically) yields `None`, same as one whose
-/// session simply hasn't launched.
+/// Raw roster row straight from SQL, before name-resolution. Private — callers
+/// get the enriched [`WorkspaceAgentWithSkills`].
+#[derive(sqlx::FromRow)]
+struct RosterQueryRow {
+    id: String,
+    workspace_id: String,
+    agent_def_id: String,
+    status: String,
+    added_at: String,
+    launched_skill_ids: Option<String>,
+    agent_name: String,
+    role_id: Option<String>,
+    role_text: Option<String>,
+}
+
+/// Return the self-describing roster for a workspace (same ordering as
+/// `list_by_workspace`): every `workspace_agent` LEFT JOINed with its session's
+/// `launched_skill_ids` and its `agent_definition`'s name + role, then enriched
+/// in Rust to resolve role name/description and skill NAMES.
+///
+/// Enrichment reads the builtin role/skill folders (sync, cheap) and the custom
+/// `role`/`skill` tables ONCE each, then resolves every row against those maps
+/// — no per-row query. Skill names come from the bundled reader (builtin) or
+/// the `skill` table (custom); a launched id that resolves to neither (a since-
+/// deleted custom skill) is dropped rather than surfaced as a bare id.
 pub async fn list_by_workspace_with_launched_skills(
     pool: &SqlitePool,
     workspace_id: &str,
 ) -> sqlx::Result<Vec<WorkspaceAgentWithSkills>> {
-    sqlx::query_as::<_, WorkspaceAgentWithSkills>(
+    let rows: Vec<RosterQueryRow> = sqlx::query_as(
         "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
-         sess.launched_skill_ids \
+         sess.launched_skill_ids, \
+         ad.name AS agent_name, ad.role_id AS role_id, ad.role AS role_text \
          FROM workspace_agent wa \
          LEFT JOIN session sess ON sess.workspace_agent_id = wa.id \
+         JOIN agent_definition ad ON ad.id = wa.agent_def_id \
          WHERE wa.workspace_id = ? \
          ORDER BY wa.added_at ASC, wa.id ASC",
     )
     .bind(workspace_id)
     .fetch_all(pool)
-    .await
+    .await?;
+
+    // Build id→name / id→role lookup maps ONCE (builtin folders + DB tables).
+    let skill_names: std::collections::HashMap<String, String> =
+        super::skill::list_builtin()
+            .into_iter()
+            .chain(super::skill::list(pool).await?)
+            .map(|s| (s.id, s.name))
+            .collect();
+    let roles: std::collections::HashMap<String, super::role::RoleRow> =
+        super::role::list_builtin()
+            .into_iter()
+            .chain(super::role::list(pool).await?)
+            .map(|r| (r.id.clone(), r))
+            .collect();
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let (role_name, role_description) = match r.role_id.as_deref() {
+                Some(rid) => match roles.get(rid) {
+                    Some(role) => (Some(role.name.clone()), Some(role.description.clone())),
+                    // Dangling role_id (shouldn't happen — delete NULLs it) —
+                    // fall back to the legacy free-text label.
+                    None => (r.role_text.clone(), None),
+                },
+                // No first-class role — the legacy free-text label, if any.
+                None => (r.role_text.clone(), None),
+            };
+
+            let skill_names_resolved = r
+                .launched_skill_ids
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|id| skill_names.get(&id).cloned())
+                .collect();
+
+            WorkspaceAgentWithSkills {
+                id: r.id,
+                workspace_id: r.workspace_id,
+                agent_def_id: r.agent_def_id,
+                status: r.status,
+                added_at: r.added_at,
+                name: r.agent_name,
+                role_name,
+                role_description,
+                skill_names: skill_names_resolved,
+                launched_skill_ids: r.launched_skill_ids,
+            }
+        })
+        .collect())
 }
 
 /// All instances of a given agent definition, across every workspace.
@@ -866,12 +963,17 @@ mod tests {
             .expect("get session failed")
             .expect("session exists");
 
-        // Before any launch snapshot: NULL.
+        // Before any launch snapshot: NULL. The agent display name resolves;
+        // a role-less agent carries no role fields.
         let before = list_by_workspace_with_launched_skills(&pool, &ws.id)
             .await
             .expect("query failed");
         assert_eq!(before.len(), 1);
         assert!(before[0].launched_skill_ids.is_none());
+        assert_eq!(before[0].name, "A");
+        assert!(before[0].role_name.is_none());
+        assert!(before[0].role_description.is_none());
+        assert!(before[0].skill_names.is_empty());
 
         crate::engine::repo::session::set_launched_skill_ids(
             &pool,
@@ -885,5 +987,168 @@ mod tests {
             .await
             .expect("query failed");
         assert_eq!(after[0].launched_skill_ids.as_deref(), Some(r#"["sk-1"]"#));
+        // "sk-1" resolves to no shipped/DB skill → dropped from skill_names.
+        assert!(
+            after[0].skill_names.is_empty(),
+            "an unresolvable launched id must be dropped, not surfaced as a bare id"
+        );
+    }
+
+    /// A3: the enriched roster resolves all four new fields — agent name, role
+    /// name, role description, and launched skill NAMES — for an agent that has
+    /// a first-class role and two attached custom skills.
+    #[tokio::test]
+    async fn roster_resolves_name_role_and_skill_names() {
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+
+        // A custom role and two custom skills.
+        let role = crate::engine::repo::role::create(
+            &pool,
+            "My Lead",
+            "Leads this particular effort.",
+            &[],
+        )
+        .await
+        .expect("create role failed");
+        let s1 = crate::engine::repo::skill::create(&pool, "First Skill", None, "c1")
+            .await
+            .expect("create skill failed");
+        let s2 = crate::engine::repo::skill::create(&pool, "Second Skill", None, "c2")
+            .await
+            .expect("create skill failed");
+
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Alice".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        // Persist role_id directly (Phase B wires agent.save; A3 only reads it).
+        sqlx::query("UPDATE agent_definition SET role_id = ? WHERE id = ?")
+            .bind(&role.id)
+            .bind(&def.id)
+            .execute(&pool)
+            .await
+            .expect("set role_id failed");
+
+        let inst = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+        let session = crate::engine::repo::session::get_by_instance(&pool, &inst.id)
+            .await
+            .expect("get session failed")
+            .expect("session exists");
+        crate::engine::repo::session::set_launched_skill_ids(
+            &pool,
+            &session.id,
+            &[s1.id.clone(), s2.id.clone()],
+        )
+        .await
+        .expect("set launched failed");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert_eq!(roster.len(), 1);
+        let entry = &roster[0];
+        assert_eq!(entry.name, "Alice");
+        assert_eq!(entry.role_name.as_deref(), Some("My Lead"));
+        assert_eq!(
+            entry.role_description.as_deref(),
+            Some("Leads this particular effort.")
+        );
+        assert_eq!(
+            entry.skill_names,
+            vec!["First Skill".to_string(), "Second Skill".to_string()],
+            "skill NAMES must resolve in launched-id order"
+        );
+
+        // camelCase contract for the new fields.
+        let json = serde_json::to_value(entry).expect("serialize failed");
+        assert!(json.get("roleName").is_some());
+        assert!(json.get("roleDescription").is_some());
+        assert!(json.get("skillNames").is_some());
+        assert!(json.get("role_name").is_none());
+    }
+
+    /// A builtin role id set on an agent_definition resolves to the bundled
+    /// role's name + description via the enriched roster.
+    #[tokio::test]
+    async fn roster_resolves_builtin_role() {
+        let _fx = crate::engine::repo::role::test_support::fixture_roles_dir("roster-builtin-role");
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Bob".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        sqlx::query("UPDATE agent_definition SET role_id = 'fix-lead' WHERE id = ?")
+            .bind(&def.id)
+            .execute(&pool)
+            .await
+            .expect("set role_id failed");
+        instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert_eq!(roster[0].role_name.as_deref(), Some("Fixture Lead"));
+        assert_eq!(
+            roster[0].role_description.as_deref(),
+            Some("Leads the fixture team.")
+        );
+    }
+
+    /// The legacy free-text `agent_definition.role` label is used when no
+    /// first-class `role_id` is set — with no role description.
+    #[tokio::test]
+    async fn roster_falls_back_to_legacy_role_text() {
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Carol".into(),
+                role: Some("Legacy Role Label".into()),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert_eq!(roster[0].role_name.as_deref(), Some("Legacy Role Label"));
+        assert!(
+            roster[0].role_description.is_none(),
+            "the legacy free-text label carries no description"
+        );
     }
 }

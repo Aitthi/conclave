@@ -5,6 +5,7 @@ pub mod fusion;
 pub mod instance;
 pub mod message;
 pub mod provider;
+pub mod role;
 pub mod skill;
 pub mod skill_draft;
 pub mod snapshot;

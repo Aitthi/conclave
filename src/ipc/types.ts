@@ -19,10 +19,31 @@ export interface Provider {
   status?: "connected" | "offline";
 }
 
+/** A first-class agent role (ADR 0005): a display name, a one-paragraph job
+ *  description baked verbatim into the preamble + roster, and a default skill
+ *  bundle. Builtin roles ship from a bundled folder (`kind: "builtin"`, id =
+ *  folder slug); custom roles are DB rows (`kind: "custom"`, id = uuid). */
+export interface Role {
+  id: string;
+  name: string;
+  description: string;
+  /** Default skill ids this role attaches when chosen (mandatory skills are
+   *  never listed — they attach to every agent regardless). Editable in the
+   *  Builder after picking a role; the final selection is what gets saved. */
+  skillIds: string[];
+  kind: "builtin" | "custom";
+}
+
 export interface AgentDefinition {
   id: string;
   name: string;
+  /** Legacy free-text role label — kept as a display fallback for rows with no
+   *  `roleId` (ADR 0005). New saves write both `roleId` and this (= the role's
+   *  display name). */
   role?: string;
+  /** The chosen first-class role: a builtin slug (e.g. "lead") or a custom
+   *  `Role.id`. Persisted server-side in Phase B; the Builder sends it on save. */
+  roleId?: string;
   type: "cli" | "chat" | "orchestrator";
   cliKind?: "claude-code" | "codex" | "custom";
   color?: string;
@@ -83,6 +104,18 @@ export interface WorkspaceAgent {
   agentDefId: string;
   status: "running" | "idle" | "waiting";
   addedAt: string;
+  /** Annotated by `instance.list` (ADR 0005 self-describing roster): the agent
+   *  definition's display name. */
+  name?: string;
+  /** Annotated by `instance.list`: the resolved role name (first-class role, or
+   *  the legacy free-text label), absent for a role-less agent. */
+  roleName?: string;
+  /** Annotated by `instance.list`: the role's one-paragraph job description —
+   *  only present when a first-class role resolved (legacy labels have none). */
+  roleDescription?: string;
+  /** Annotated by `instance.list`: the NAMES of the skills launched with, in
+   *  `launchedSkillIds` order (ids that no longer resolve are dropped). */
+  skillNames?: string[];
   /** Annotated by `instance.list`: skill ids used at the last launch (see
    *  Session.launchedSkillIds — same value, joined in for the Roster). */
   launchedSkillIds?: string[];

@@ -21,6 +21,7 @@ pub mod blackboard;
 pub mod fusion;
 pub mod inter_agent_message;
 pub mod provider;
+pub mod role;
 pub mod session;
 pub mod skill;
 pub mod snapshot;

@@ -17,6 +17,7 @@ export type {
   FusionPanelResponse,
   Tool,
   Skill,
+  Role,
 } from "./types";
 
 export type { Commands } from "./commands";
