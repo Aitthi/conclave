@@ -42,6 +42,10 @@ struct SaveAgentReq {
     #[serde(rename = "type")]
     agent_type: String,
     role: Option<String>,
+    /// The chosen first-class role id (builtin slug or custom `role.id`), ADR
+    /// 0005. Persisted on the definition; on a NEW definition with a role and
+    /// no explicit `skill_ids`, its default skill bundle is copied in.
+    role_id: Option<String>,
     cli_kind: Option<String>,
     color: Option<String>,
     provider_id: Option<String>,
@@ -189,12 +193,41 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         }
     }
 
+    // ── Role (ADR 0005) ──────────────────────────────────────────────────────
+    // Resolve the chosen first-class role (builtin folder or custom DB row).
+    // The legacy `role` free-text column becomes the role's display name (a
+    // sensible fallback label) when a role is chosen; otherwise it keeps
+    // whatever free text the request carried.
+    let is_new = req.id.is_none();
+    let role_id = nonblank(req.role_id.clone());
+    let resolved_role = match role_id.as_deref() {
+        Some(rid) => repo::role::find_any(&state.db, rid).await?,
+        None => None,
+    };
+    let role_display = resolved_role
+        .as_ref()
+        .map(|r| r.name.clone())
+        .or_else(|| nonblank(req.role.clone()));
+
     // Split the incoming skillIds into three groups: a real custom DB skill
     // id -> agent_skill (unchanged path); an OPTIONAL builtin's id (see ADR
     // 0003) -> agent_definition.selected_builtin_skill_ids; anything else (a
     // mandatory builtin id, an unknown/stale id) -> silently dropped, same
     // "filter to known ids" precedent as the pre-existing custom-only path.
-    let requested_skill_ids = req.skill_ids.unwrap_or_default();
+    //
+    // COPY semantics (ADR 0005): on a NEW definition that chose a role but sent
+    // NO explicit skill list, seed the requested ids from the role's default
+    // bundle. The split below already drops any id that no longer resolves to a
+    // live optional-builtin or custom skill, so a role naming a since-deleted
+    // skill silently attaches nothing rather than a dangling id (review
+    // obligation). The UI does the same filter before this ever arrives.
+    let requested_skill_ids = match req.skill_ids {
+        Some(ids) => ids,
+        None => match (is_new, &resolved_role) {
+            (true, Some(role)) => role.skill_ids.clone(),
+            _ => Vec::new(),
+        },
+    };
     let optional_builtin_ids: std::collections::HashSet<String> = repo::skill::list_builtin()
         .into_iter()
         .filter(|s| !s.mandatory)
@@ -222,7 +255,8 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
 
     let input = AgentDefinitionInput {
         name: req.name,
-        role: req.role,
+        role: role_display,
+        role_id,
         agent_type: req.agent_type,
         cli_kind: req.cli_kind,
         color: req.color,
@@ -418,6 +452,83 @@ mod tests {
             .await
             .expect("query failed");
         assert!(attached_after.is_empty());
+    }
+
+    /// ADR 0005 copy semantics + Mellow's review obligation: creating a NEW
+    /// definition with a role and NO explicit skill list copies the role's
+    /// default bundle — but ONLY the ids that still resolve to a live skill. A
+    /// role naming one live and one since-deleted custom skill attaches only
+    /// the live one, and persists `role_id` + the role's name as the fallback
+    /// display label.
+    #[tokio::test]
+    async fn save_copies_role_default_skills_filtering_deleted_ids() {
+        let state = AppState::for_tests().await;
+        let live = repo::skill::create(&state.db, "Live Skill", None, "c")
+            .await
+            .expect("create skill failed");
+        let role = repo::role::create(
+            &state.db,
+            "Copy Role",
+            "Bundles one live and one dead skill.",
+            &[live.id.clone(), "deleted-skill-id".to_string()],
+        )
+        .await
+        .expect("create role failed");
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas", "type": "cli", "harnessMode": "own",
+                "roleId": role.id,
+                // No skillIds -> the engine copies the role's default bundle.
+            }),
+        )
+        .await
+        .expect("create agent failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        assert_eq!(created["roleId"], role.id, "role_id must persist");
+        assert_eq!(
+            created["role"], "Copy Role",
+            "the legacy display label must fall back to the role's name"
+        );
+
+        let attached = repo::skill::attached_to_agent(&state.db, &id)
+            .await
+            .expect("query failed");
+        assert_eq!(attached.len(), 1, "only the live skill must attach");
+        assert_eq!(attached[0].id, live.id);
+    }
+
+    /// An explicit `skillIds` list (even empty) overrides the role copy — the
+    /// role bundle is a DEFAULT the caller can replace, not a forced set.
+    #[tokio::test]
+    async fn save_explicit_skill_ids_override_role_copy() {
+        let state = AppState::for_tests().await;
+        let live = repo::skill::create(&state.db, "Live", None, "c")
+            .await
+            .expect("create skill failed");
+        let role = repo::role::create(&state.db, "R", "desc", &[live.id.clone()])
+            .await
+            .expect("create role failed");
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas", "type": "cli", "harnessMode": "own",
+                "roleId": role.id, "skillIds": [],
+            }),
+        )
+        .await
+        .expect("create failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+        let attached = repo::skill::attached_to_agent(&state.db, &id)
+            .await
+            .expect("query failed");
+        assert!(
+            attached.is_empty(),
+            "explicit [] must override the role's default bundle"
+        );
     }
 
     #[tokio::test]

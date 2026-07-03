@@ -180,6 +180,13 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       });
   }, []);
 
+  // Keep only skill ids that still resolve to an existing skill (mirror the
+  // engine's copy filter — ADR 0005 review obligation): a role naming a since-
+  // deleted skill must pre-select nothing for that id, not a dangling checkbox.
+  function liveSkillIds(ids: string[]): string[] {
+    return ids.filter((id) => allSkills.some((s) => s.id === id));
+  }
+
   // Pick a role: pre-select its default skills into the existing skill UI
   // (additive union — the user can still toggle any of them before saving the
   // agent). The COPY semantics from ADR 0005 live HERE, not in the engine.
@@ -188,7 +195,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
     setCustomRoleOpen(false);
     const picked = allRoles.find((r) => r.id === id);
     if (picked) {
-      setSkillIds((prev) => Array.from(new Set([...prev, ...picked.skillIds])));
+      setSkillIds((prev) => Array.from(new Set([...prev, ...liveSkillIds(picked.skillIds)])));
     }
   }
 
@@ -208,7 +215,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       const refreshed = await ipc.role.list();
       setAllRoles(refreshed);
       setRoleId(created.id);
-      setSkillIds((prev) => Array.from(new Set([...prev, ...created.skillIds])));
+      setSkillIds((prev) => Array.from(new Set([...prev, ...liveSkillIds(created.skillIds)])));
       setCustomRoleOpen(false);
       setCustomRoleName("");
       setCustomRoleDesc("");

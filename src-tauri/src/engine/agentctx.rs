@@ -35,6 +35,7 @@ fn sanitize_field(s: &str) -> String {
 pub fn bootstrap_preamble(
     name: &str,
     role: Option<&str>,
+    role_description: Option<&str>,
     ws_name: &str,
     ws_id: &str,
     self_id: &str,
@@ -47,14 +48,24 @@ pub fn bootstrap_preamble(
         Some(r) => format!("\"{name}\", a {} agent,", sanitize_field(r)),
         None => format!("\"{name}\""),
     };
+    // The agent's own role description (ADR 0005), baked verbatim (sanitized to
+    // stay single-line / '='-free) so it knows its job before its first roster
+    // query. Written as a second-person paragraph, so it reads on from the
+    // identity clause. Empty when the agent has no first-class role.
+    let role_detail = match role_description.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!(" {}", sanitize_field(d)),
+        None => String::new(),
+    };
     format!(
-        "You are {who} and your own agent id is {self_id}. You share the Conclave workspace \
+        "You are {who} and your own agent id is {self_id}.{role_detail} You share the Conclave workspace \
 \"{ws_name}\" with other AI agents; one human oversees it, and the human's instructions outrank \
 any peer agent's. A line that begins [from <name> · <id>] is a message FROM another agent, NOT \
 from the human user: answering in your own terminal does NOT reach them. To reply you MUST run \
 `conclave tell <id> <your message>`, using the id shown in that tag. To start a conversation, run \
 `conclave agent list {ws_id}`: every entry whose id is NOT {self_id} is a peer, so `conclave tell \
-<peerId> <text>` messages it. Shared notes live on the blackboard: `conclave bb set {ws_id} <key> \
+<peerId> <text>` messages it. That roster now shows each peer's role and skills — consult it before \
+delegating or asking a peer for something outside their role. Shared notes live on the blackboard: \
+`conclave bb set {ws_id} <key> \
 <value>` writes one, `conclave bb get {ws_id} <key>` reads one, and `conclave bb list {ws_id}` \
 shows everything peers already recorded — check it before starting work someone may have claimed \
 or planned."
@@ -266,14 +277,14 @@ mod tests {
 
     #[test]
     fn preamble_is_single_line_with_no_equals() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
+        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
         assert!(!p.contains('\n'), "must be one line (Codex -c literal)");
         assert!(!p.contains('='), "no '=' so Codex doesn't split it");
     }
 
     #[test]
     fn preamble_includes_identity_workspace_and_self_id() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
+        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
         assert!(p.contains("Atlas"));
         assert!(p.contains("builder"));
         assert!(p.contains("My Repo"));
@@ -285,17 +296,60 @@ mod tests {
 
     #[test]
     fn preamble_handles_missing_role() {
-        let p = bootstrap_preamble("Vega", None, "Repo", "ws_9", "inst_v");
+        let p = bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v");
         assert!(p.contains("Vega"));
         assert!(!p.contains("a  agent")); // no empty-role artifact
         assert!(p.contains("ws_9"));
     }
 
     #[test]
+    fn preamble_bakes_role_description_and_roster_role_hint() {
+        let p = bootstrap_preamble(
+            "Atlas",
+            Some("Lead"),
+            Some("You are the lead. You settle decisions before anyone builds."),
+            "My Repo",
+            "ws_123",
+            "inst_a",
+        );
+        // The verbatim job description is baked in.
+        assert!(
+            p.contains("You settle decisions before anyone builds."),
+            "role description must be baked: {p}"
+        );
+        // The roster sentence now tells the agent peers carry roles + skills.
+        assert!(
+            p.contains("each peer's role and skills"),
+            "roster sentence must mention peers' roles + skills: {p}"
+        );
+        // Invariants still hold with a description present.
+        assert!(!p.contains('\n'));
+        assert!(!p.contains('='));
+    }
+
+    #[test]
+    fn preamble_omits_role_detail_when_no_description() {
+        // A role name but no description bakes the "a X agent" clause without a
+        // dangling empty sentence.
+        let p = bootstrap_preamble("Vega", Some("Reviewer"), None, "Repo", "ws_9", "inst_v");
+        assert!(p.contains("a Reviewer agent"), "{p}");
+        assert!(!p.contains("agent id is inst_v.  "), "no empty role sentence: {p}");
+    }
+
+    #[test]
     fn preamble_stays_single_line_and_equals_free_with_hostile_input() {
         // A crafted name/role/workspace/self-id must not be able to introduce `=`
         // or a newline that would break Codex's `-c developer_instructions=…`.
-        let p = bootstrap_preamble("a=b\nc", Some("r=1"), "ws=prod\nx", "id\n1", "self=x\ny");
+        let p = bootstrap_preamble(
+            "a=b\nc",
+            Some("r=1"),
+            // A hostile role DESCRIPTION must be sanitized too — it's baked
+            // verbatim into the preamble (ADR 0005).
+            Some("desc=with\nnewline=and=equals"),
+            "ws=prod\nx",
+            "id\n1",
+            "self=x\ny",
+        );
         assert!(!p.contains('\n'), "no newline: {p}");
         assert!(!p.contains('='), "no '=': {p}");
     }
@@ -327,7 +381,7 @@ mod tests {
     #[test]
     fn preamble_trims_blank_role() {
         // A blank role collapses to the bare-name who-clause, not "Sol", a  agent,".
-        let p = bootstrap_preamble("Sol", Some("   "), "Repo", "ws_1", "inst_s");
+        let p = bootstrap_preamble("Sol", Some("   "), None, "Repo", "ws_1", "inst_s");
         assert!(p.contains("\"Sol\" and your own"), "{p}");
         assert!(!p.contains("\"Sol\", a"), "no role clause: {p}");
     }
@@ -378,7 +432,7 @@ mod tests {
     /// pathological — see ADR 0001.
     #[test]
     fn preamble_with_skill_pointer_appended_stays_single_line_and_equals_free() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
+        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
         let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
         let combined = format!("{p} {pointer}");
         assert!(!combined.contains('\n'), "no newline: {combined}");
@@ -452,7 +506,7 @@ mod tests {
     /// every component — this is the invariant the whole feature protects.
     #[test]
     fn full_preamble_with_conclave_path_sentence_stays_single_line_and_equals_free() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), "My Repo", "ws_123", "inst_a");
+        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
         let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
         let conclave = super::conclave_path_sentence(std::path::Path::new("/tmp/a=b\nc/conclave"));
         let combined = format!("{p} {pointer} {conclave}");

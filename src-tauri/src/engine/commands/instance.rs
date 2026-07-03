@@ -328,11 +328,27 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // prompt layer, present every turn) is the reliable channel.
             let conclave_bin = crate::engine::agentctx::ensure_conclave_shim();
 
+            // Resolve the agent's first-class role (ADR 0005) for the preamble:
+            // the role name drives the "a X agent" clause, its one-paragraph
+            // description is baked verbatim so the agent knows its job before
+            // its first roster query. Falls back to the legacy free-text `role`
+            // label (which has no description) when no role_id is set.
+            let resolved_role = match def.role_id.as_deref() {
+                Some(rid) => crate::engine::repo::role::find_any(&state.db, rid).await?,
+                None => None,
+            };
+            let role_name = resolved_role
+                .as_ref()
+                .map(|r| r.name.clone())
+                .or_else(|| def.role.clone());
+            let role_description = resolved_role.as_ref().map(|r| r.description.clone());
+
             // Awareness briefing — injected via each harness's system-prompt layer
             // (NOT a chat turn), so it survives `/clear`. See engine::agentctx.
             let preamble = crate::engine::agentctx::bootstrap_preamble(
                 &def.name,
-                def.role.as_deref(),
+                role_name.as_deref(),
+                role_description.as_deref(),
                 &ws.name,
                 &ws.id,
                 &id,

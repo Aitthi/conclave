@@ -199,6 +199,12 @@ pub async fn list_by_workspace_with_launched_skills(
     pool: &SqlitePool,
     workspace_id: &str,
 ) -> sqlx::Result<Vec<WorkspaceAgentWithSkills>> {
+    // The `JOIN agent_definition` below is an INNER join, safe ONLY because
+    // `workspace_agent.agent_def_id` is a NOT NULL foreign key whose parent
+    // delete is restricted (NO ACTION) — a definition can't be removed while an
+    // instance references it (agent_definition::delete removes instances first).
+    // If that FK is ever dropped or made ON DELETE SET NULL, a widowed instance
+    // would silently VANISH from the roster here; make it a LEFT JOIN then.
     let rows: Vec<RosterQueryRow> = sqlx::query_as(
         "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
          sess.launched_skill_ids, \

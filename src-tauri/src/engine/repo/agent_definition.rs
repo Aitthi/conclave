@@ -62,6 +62,11 @@ pub struct AgentDefRow {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// The chosen first-class role id (builtin slug or custom `role.id`) — see
+    /// ADR 0005. `None` for pre-role-system agents; the legacy `role` free-text
+    /// column above is the display fallback for those.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_id: Option<String>,
     #[serde(rename = "type")]
     pub r#type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +125,8 @@ pub struct AgentDefListItem {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_id: Option<String>,
     #[serde(rename = "type")]
     pub r#type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,10 +173,11 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 19] = [
+const COLS: [&str; 20] = [
     "id",
     "name",
     "role",
+    "role_id",
     "type",
     "cli_kind",
     "color",
@@ -198,6 +206,10 @@ const COLS: [&str; 19] = [
 pub struct AgentDefinitionInput {
     pub name: String,
     pub role: Option<String>,
+    /// The chosen first-class role id (builtin slug or custom `role.id`), ADR
+    /// 0005. `None` leaves the agent role-less (the `role` free-text above may
+    /// still carry a legacy display label).
+    pub role_id: Option<String>,
     pub agent_type: String,
     pub cli_kind: Option<String>,
     pub color: Option<String>,
@@ -248,7 +260,7 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
     // NOTE: this hardcoded column list must stay in sync with `COLS` (plus the
     // appended `in_workspaces` count) if the table's columns ever change.
     sqlx::query_as::<_, AgentDefListItem>(
-        "SELECT d.id, d.name, d.role, d.type, d.cli_kind, d.color, d.provider_id, d.model, \
+        "SELECT d.id, d.name, d.role, d.role_id, d.type, d.cli_kind, d.color, d.provider_id, d.model, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
          d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
          d.selected_builtin_skill_ids, \
@@ -297,6 +309,10 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
             (
                 "role",
                 input.role.clone().map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "role_id",
+                input.role_id.clone().map(Bind::Text).unwrap_or(Bind::Null),
             ),
             ("type", Bind::Text(input.agent_type.clone())),
             (
@@ -397,6 +413,7 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         id,
         name: input.name,
         role: input.role,
+        role_id: input.role_id,
         r#type: input.agent_type,
         cli_kind: input.cli_kind,
         color: input.color,
@@ -431,6 +448,10 @@ pub async fn update(
         .update([
             ("name", Bind::Text(input.name)),
             ("role", input.role.map(Bind::Text).unwrap_or(Bind::Null)),
+            (
+                "role_id",
+                input.role_id.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
             ("type", Bind::Text(input.agent_type)),
             (
                 "cli_kind",
@@ -521,6 +542,7 @@ mod tests {
         AgentDefinitionInput {
             name: name.to_owned(),
             role: None,
+            role_id: None,
             agent_type: agent_type.to_owned(),
             cli_kind: None,
             color: None,
@@ -551,6 +573,7 @@ mod tests {
             &AgentDefinitionInput {
                 name: "Atlas".into(),
                 role: Some("Code runner".into()),
+                role_id: None,
                 agent_type: "cli".into(),
                 cli_kind: Some("claude-code".into()),
                 color: Some("#ff7a45".into()),
@@ -641,6 +664,7 @@ mod tests {
             &AgentDefinitionInput {
                 name: "Nova-v2".into(),
                 role: Some("Planner".into()),
+                role_id: None,
                 agent_type: "orchestrator".into(),
                 cli_kind: None,
                 color: Some("#5e5ce6".into()),
@@ -736,6 +760,7 @@ mod tests {
             &AgentDefinitionInput {
                 name: "Sol".into(),
                 role: None,
+                role_id: None,
                 agent_type: "cli".into(),
                 cli_kind: Some("claude-code".into()),
                 color: None,
