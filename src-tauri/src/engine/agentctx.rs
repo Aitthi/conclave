@@ -714,6 +714,9 @@ text>`. After it confirms, stop and wait for the restart."
             "conclave-shim-race-test-{}",
             std::process::id()
         ));
+        // Pid-namespaced dirs recycle across reboots: clear debris from a
+        // crashed prior run so it can't trip the stray-temp assert below.
+        let _ = std::fs::remove_dir_all(&dir);
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).expect("create shim dir");
         let cli = dir.join("conclave-cli");
