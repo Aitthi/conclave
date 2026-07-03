@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   PanelRight,
   Bot,
@@ -31,6 +31,7 @@ import type { RoutingTarget } from "./RoutingPicker";
 import { timeHint } from "../lib/timeHint";
 import { computeSkillsStale } from "../lib/skills";
 import { DeferredNote } from "./DeferredNote";
+import { ClampText } from "./ClampText";
 
 // ---------------------------------------------------------------------------
 // Right-side Context drawer — shows the ACTIVE agent's configuration. The
@@ -70,46 +71,6 @@ const MESSAGE_LOG_LIMIT = 50;
 // agent just sent) — otherwise a background refetch would scroll-jack someone
 // reading older history.
 const NEAR_BOTTOM_PX = 40;
-
-/** One chat message's text, clamped to ~6 lines with a Show-more/less toggle
- *  that appears ONLY when the text actually overflows the clamp (measured, not
- *  guessed — so a long-but-short-lined message shows no dead toggle). Expand
- *  state lives per-bubble, so it resets for free when the message unmounts on
- *  an instance switch (no cross-instance state leak). */
-function ClampText({ text, outgoing }: { text: string; outgoing: boolean }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [clampable, setClampable] = useState(false);
-  // Measure while clamped (expanded starts false): the element overflows six
-  // lines iff its scroll height exceeds its clamped client height. Runs on text
-  // change only, so it is NOT re-measured (and hidden) after the user expands.
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el) setClampable(el.scrollHeight - el.clientHeight > 4);
-  }, [text]);
-  return (
-    <>
-      <div
-        ref={ref}
-        className={`whitespace-pre-wrap break-words leading-snug ${
-          expanded ? "" : "line-clamp-6"
-        }`}
-      >
-        {text}
-      </div>
-      {clampable && (
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          className={`mt-0.5 text-[10px] font-semibold ${
-            outgoing ? "text-white/80 hover:text-white" : "text-accent hover:underline"
-          }`}
-        >
-          {expanded ? "Show less" : "Show more"}
-        </button>
-      )}
-    </>
-  );
-}
 
 // How many recent snapshots the Memory section shows.
 const SNAPSHOT_LOG_LIMIT = 6;
