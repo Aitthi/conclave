@@ -62,6 +62,27 @@ Collaboration skill; this one only covers what leading adds.
   answer is final; implementation judgment within the plan's intent belongs
   to the implementer, logged in the progress key, never escalated.
 
+## When the lead implements directly
+
+- "Delegate and stay out" assumes an implementer who can actually take the
+  work. Three conditions make direct implementation the RIGHT call, not a
+  violation: (a) the work lies outside every implementer's workspace boundary
+  (an agent works in its workspace folder — do not send it outside), (b)
+  design and implementation are inseparable — the load-bearing problems will
+  only be DISCOVERED mid-build, so a plan written up front would be wrong by
+  its second task, or (c) the handoff (plan + context transfer + review round
+  trips) demonstrably costs more than the work itself.
+- Solo does not mean off the record: claim the work on the blackboard
+  (`claim:<task>` with your own id) and note WHY you are implementing it
+  yourself — "I was sure no one else would touch it" is confidence, not a
+  record. An unclaimed solo lane is invisible to every peer who might plan
+  around it.
+- Judge your own work by the same gate you would apply to an implementer's:
+  run the full verification (tests, build, lint) BEFORE reporting done, and
+  report the result as evidence, not assertion. Leading grants no exemption
+  from the acceptance criteria — if anything, the missing second pair of eyes
+  raises the bar.
+
 ## Running multiple implementers
 
 - Fan out only along INDEPENDENT lanes: partition the plan so no two
