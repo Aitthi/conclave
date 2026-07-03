@@ -1332,5 +1332,19 @@ mod tests {
             collab.description.is_some(),
             "collaboration must carry a description for the Skill Library"
         );
+
+        // ADR 0006: the standing self-triggered-restart rule lives in this
+        // skill (the sidecar layer that survives `/clear`), not a one-off
+        // chat directive — an agent that never re-reads a chat message still
+        // gets the rule via its standing instructions.
+        let compact = skills
+            .iter()
+            .find(|s| s.id == "strategic-compact")
+            .expect("the shipped strategic-compact skill must exist");
+        assert!(
+            compact.content.contains("conclave restart"),
+            "strategic-compact must name `conclave restart` (ADR 0006 self-triggered restart): {}",
+            compact.content
+        );
     }
 }

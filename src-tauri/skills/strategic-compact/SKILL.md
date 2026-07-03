@@ -52,6 +52,15 @@ up — the top sections are the ones whose loss is unrecoverable.
 - Estimate the cap by length: stay under ~40,000 characters. Well under is
   fine; over means the tail you wrote may be the part that gets you killed.
 
+## Self-triggered restart
+
+When your harness warns that context is nearly full (e.g. an auto-compact
+notice or a low-context warning), don't wait for a human to notice: run
+`conclave restart` yourself, read what it prints, then IMMEDIATELY write the
+seven-section handoff above and persist it with `conclave snapshot save`. The
+restart only fires after your save lands — stalling after the warning just
+leaves you degraded until you do.
+
 ## Restoring — trust, then verify
 
 After a clear you'll be told to run `conclave snapshot last`. Read it, then

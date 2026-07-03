@@ -159,6 +159,14 @@ impl AppState {
         }
         false
     }
+
+    /// The TTL a restart arm stays valid for. Exposed so a self-triggered
+    /// restart's returned instruction (ADR 0006) can surface the SAME
+    /// deadline `take_restart_pending` actually holds it to, rather than a
+    /// hand-copied literal that could silently drift from the real constant.
+    pub fn restart_pending_ttl(&self) -> Duration {
+        COMPACT_PENDING_TTL
+    }
 }
 
 /// Test-only constructor: builds an `AppState` backed by an in-memory

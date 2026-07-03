@@ -107,3 +107,15 @@ and two skills lists all four new fields.
 
 Phase A tasks green per the global gate with evidence in `progress:role-system`, then message
 the lead. Phase B starts only on `phase-b-clear`.
+
+## Status + deferred follow-ups (lead, 2026-07-03)
+
+Phase A landed as c0ac500, Phase B as e5703e5 — both reviewed SHIP (bb review:role-system).
+Non-blocking follow-ups from review, deferred to a future lane:
+
+- Cap custom `role.description` length at `role.save` (unbounded text bloats the codex `-c`
+  launch arg; few KB in practice, no ARG_MAX break today).
+- Optionally validate that `role_id` resolves at `agent.save` (today an unresolvable id is
+  persisted harmlessly; spawn falls back to the legacy `role` text).
+- Pre-existing (not Phase B): `agent.save` UPDATE with absent `skillIds` wipes attachments —
+  the UI always sends the list today; tighten if the API ever goes public.

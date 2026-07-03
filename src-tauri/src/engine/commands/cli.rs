@@ -294,9 +294,27 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             ))
         }
 
+        // ── restart (ADR 0006: self-triggered restart) ────────────────────
+        // Always self-targeting — `conclave-cli`'s `expand_self_args` fills
+        // the instance id from `CONCLAVE_INSTANCE_ID` before this ever runs,
+        // so a bare `conclave restart` (agent-typed) reaches here as
+        // `["restart", <selfId>]`.
+        "restart" => {
+            let instance_id = argv
+                .get(1)
+                .ok_or_else(|| AppError::Invalid("cli: restart <instanceId>".into()))?;
+            if argv.len() != 2 {
+                return Err(AppError::Invalid("cli: restart <instanceId>".into()));
+            }
+            Ok((
+                "instance.restart",
+                json!({ "workspaceAgentId": instance_id, "self": true }),
+            ))
+        }
+
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, run)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, run, restart)"
         ))),
     }
 }
@@ -708,6 +726,27 @@ mod tests {
     #[test]
     fn run_missing_orchestrator_is_invalid() {
         assert!(is_invalid(&["run"]));
+    }
+
+    // ── restart (ADR 0006: self-triggered restart) ─────────────────────────
+
+    #[test]
+    fn restart_maps_correctly() {
+        assert_eq!(ok_method(&["restart", "inst1"]), "instance.restart");
+        assert_eq!(
+            ok_params(&["restart", "inst1"]),
+            json!({ "workspaceAgentId": "inst1", "self": true })
+        );
+    }
+
+    #[test]
+    fn restart_missing_instance_id_is_invalid() {
+        assert!(is_invalid(&["restart"]));
+    }
+
+    #[test]
+    fn restart_extra_args_is_invalid() {
+        assert!(is_invalid(&["restart", "inst1", "extra"]));
     }
 
     // ── empty argv ────────────────────────────────────────────────────────

@@ -113,19 +113,68 @@ decisions it records."
 /// `conclave snapshot save` is the trigger the loop waits on), but honest about
 /// what follows: the PROCESS is killed and relaunched, not just `/clear`ed.
 /// Single line, mirroring `inject`.
+/// The "write your handoff, then persist it" instructions shared verbatim by
+/// [`restart_save_prompt`] (human-triggered, injected as a chat turn) and
+/// [`self_restart_instruction`] (ADR 0006, self-triggered — printed as
+/// `conclave restart`'s own command output) — factored out so the two paths
+/// can't silently drift apart.
+const HANDOFF_SAVE_INSTRUCTIONS: &str = "Write the RICHEST handoff you can for a reader with \
+ZERO memory of this conversation — follow your Strategic Compact skill's seven sections if you \
+have it, else cover: the exact next step and any half-finished edit FIRST, then \
+goal/authority/peers, every decision with its why, open threads with your defaults, hard-won \
+gotchas and failed approaches, done work as commit SHAs, and pointers. Do not economize tokens \
+— the only limit is a HARD CAP of 10k tokens (~40,000 characters). REFERENCE commit SHAs and \
+file paths instead of pasting their contents, and REDACT secrets (API keys, tokens, passwords). \
+Then persist it by running this single command (do not just print it): `conclave snapshot save \
+<your full handoff text>`.";
+
 #[must_use]
 pub fn restart_save_prompt() -> String {
-    "[conclave restart] Your process is about to be RESTARTED (killed and relaunched); your \
-context will not survive. Write the RICHEST handoff you can for a reader with ZERO memory of \
-this conversation — follow your Strategic Compact skill's seven sections if you have it, else \
-cover: the exact next step and any half-finished edit FIRST, then goal/authority/peers, every \
-decision with its why, open threads with your defaults, hard-won gotchas and failed approaches, \
-done work as commit SHAs, and pointers. Do not economize tokens — the only limit is a HARD CAP \
-of 10k tokens (~40,000 characters). REFERENCE commit SHAs and file paths instead of pasting \
-their contents, and REDACT secrets (API keys, tokens, passwords). Then persist it by running \
-this single command (do not just print it): `conclave snapshot save <your full handoff text>`. \
-After it confirms, stop and wait for the restart."
-        .to_string()
+    format!(
+        "[conclave restart] Your process is about to be RESTARTED (killed and relaunched); your \
+context will not survive. {HANDOFF_SAVE_INSTRUCTIONS} After it confirms, stop and wait for the \
+restart."
+    )
+}
+
+/// Render a duration for a human sentence — "5 minutes", "30 seconds", "1
+/// minute 30 seconds" — instead of a naive `secs / 60` which truncates a
+/// sub-minute TTL to a nonsensical "0 minutes" and silently drops a non-round
+/// one's remainder (integration review item G2b).
+fn humanize_duration(d: std::time::Duration) -> String {
+    fn unit(n: u64, word: &str) -> String {
+        format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+    }
+    let secs = d.as_secs();
+    let minutes = secs / 60;
+    let rest_secs = secs % 60;
+    match (minutes, rest_secs) {
+        (0, s) => unit(s, "second"),
+        (m, 0) => unit(m, "minute"),
+        (m, s) => format!("{} {}", unit(m, "minute"), unit(s, "second")),
+    }
+}
+
+/// The self-triggered restart instruction (ADR 0006): returned by
+/// `commands::instance::restart`'s `self: true` path as the `instruction`
+/// field, and printed VERBATIM by `conclave-cli`'s `restart` subcommand as
+/// plain command output — never injected as a chat turn, since the caller IS
+/// the agent, mid-turn; injecting would interleave with its own output.
+/// `arm_ttl` surfaces the restart arm's actual TTL (`AppState::restart_pending_ttl`),
+/// so a dawdling agent knows its real deadline rather than a hand-copied
+/// literal that could silently drift from it (Task 3 risk ledger). Also
+/// covers the late-save recovery path (integration review item G2): a save
+/// that lands after the arm expires must not leave the agent hanging.
+#[must_use]
+pub fn self_restart_instruction(arm_ttl: std::time::Duration) -> String {
+    let window = humanize_duration(arm_ttl);
+    format!(
+        "Your restart is now ARMED: save your handoff within {window}, or this arm expires and \
+no restart happens. {HANDOFF_SAVE_INSTRUCTIONS} The restart (kill, respawn, resume) fires \
+automatically once your save lands — after it confirms, stop and wait. If your save lands AFTER \
+the arm has already expired, nothing will fire: run `conclave restart` again to re-arm (it \
+returns this same instruction; your handoff is already saved, so re-arming costs nothing)."
+    )
 }
 
 /// The resume prompt — injected into a freshly (re)launched agent so it reloads
@@ -376,6 +425,104 @@ mod tests {
         assert!(resume.contains("conclave snapshot last"));
         // The restart save prompt must be honest that the PROCESS dies.
         assert!(save.contains("RESTARTED"), "{save}");
+    }
+
+    /// ADR 0006: the self-triggered restart instruction — returned by
+    /// `instance.restart`'s `self: true` path and printed VERBATIM as
+    /// `conclave restart`'s command output (never injected as a chat turn).
+    #[test]
+    fn self_restart_instruction_is_single_line_and_names_the_command() {
+        let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        assert!(!s.contains('\n'), "must be one line: {s}");
+        assert!(s.contains("conclave snapshot save"), "{s}");
+    }
+
+    /// The arm's TTL must be surfaced honestly so a dawdling agent knows its
+    /// deadline (Task 3 risk ledger) — computed from whatever `Duration` is
+    /// passed in, never a hand-copied literal.
+    #[test]
+    fn self_restart_instruction_surfaces_the_given_ttl_in_minutes() {
+        let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        assert!(s.contains("5 minutes"), "must surface the 5-minute TTL: {s}");
+
+        let s10 = super::self_restart_instruction(std::time::Duration::from_secs(600));
+        assert!(s10.contains("10 minutes"), "must surface a DIFFERENT TTL: {s10}");
+    }
+
+    /// Review item G2b: a naive `secs / 60` truncates a sub-minute TTL to
+    /// "0 minutes" (nonsensical) and silently drops the remainder of a
+    /// non-round one. Must render both sanely.
+    #[test]
+    fn self_restart_instruction_renders_sub_minute_and_non_round_ttls_sanely() {
+        let sub_minute = super::self_restart_instruction(std::time::Duration::from_secs(30));
+        assert!(
+            !sub_minute.contains("0 minutes"),
+            "a sub-minute TTL must not render as '0 minutes': {sub_minute}"
+        );
+        assert!(sub_minute.contains("30 seconds"), "{sub_minute}");
+
+        let non_round = super::self_restart_instruction(std::time::Duration::from_secs(90));
+        assert!(
+            non_round.contains("1 minute") && non_round.contains("30 seconds"),
+            "a non-round TTL must render both parts, not drop the remainder: {non_round}"
+        );
+
+        // Singular forms, not "1 minutes" / "1 seconds".
+        let one_minute = super::self_restart_instruction(std::time::Duration::from_secs(60));
+        assert!(one_minute.contains("1 minute"), "{one_minute}");
+        assert!(!one_minute.contains("1 minutes"), "{one_minute}");
+        let one_second = super::self_restart_instruction(std::time::Duration::from_secs(1));
+        assert!(one_second.contains("1 second"), "{one_second}");
+        assert!(!one_second.contains("1 seconds"), "{one_second}");
+    }
+
+    /// Review item G2: an agent whose save lands AFTER the arm's TTL expires
+    /// must not be left hanging forever — the instruction must tell it to
+    /// re-run `conclave restart` (cheap: the handoff is already saved, this
+    /// just re-arms) rather than unconditionally promising the restart fires.
+    #[test]
+    fn self_restart_instruction_covers_the_late_save_recovery_path() {
+        let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        assert!(
+            s.contains("expired") && s.contains("conclave restart"),
+            "must name the recovery path for a save that lands after expiry: {s}"
+        );
+    }
+
+    /// Guards against the two restart paths silently drifting apart: both
+    /// the human-triggered save prompt and the self-triggered instruction
+    /// must carry the SAME handoff-writing instructions (extracted into
+    /// `HANDOFF_SAVE_INSTRUCTIONS`).
+    #[test]
+    fn restart_save_prompt_and_self_restart_instruction_share_handoff_instructions() {
+        let save = super::restart_save_prompt();
+        let instruction = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        // A distinctive, unlikely-to-coincidentally-match substring from the
+        // shared handoff-writing instructions.
+        let marker = "HARD CAP of 10k tokens";
+        assert!(save.contains(marker), "{save}");
+        assert!(instruction.contains(marker), "{instruction}");
+    }
+
+    /// Review item G1: the exact wording is load-bearing (it's what a
+    /// restarting agent reads to decide what to do), so pin it to a frozen
+    /// baseline — a marker-substring check alone would miss an accidental
+    /// rewording elsewhere in the string.
+    #[test]
+    fn restart_save_prompt_matches_frozen_baseline() {
+        assert_eq!(
+            super::restart_save_prompt(),
+            "[conclave restart] Your process is about to be RESTARTED (killed and relaunched); \
+your context will not survive. Write the RICHEST handoff you can for a reader with ZERO memory \
+of this conversation — follow your Strategic Compact skill's seven sections if you have it, \
+else cover: the exact next step and any half-finished edit FIRST, then goal/authority/peers, \
+every decision with its why, open threads with your defaults, hard-won gotchas and failed \
+approaches, done work as commit SHAs, and pointers. Do not economize tokens — the only limit is \
+a HARD CAP of 10k tokens (~40,000 characters). REFERENCE commit SHAs and file paths instead of \
+pasting their contents, and REDACT secrets (API keys, tokens, passwords). Then persist it by \
+running this single command (do not just print it): `conclave snapshot save <your full handoff \
+text>`. After it confirms, stop and wait for the restart."
+        );
     }
 
     #[test]

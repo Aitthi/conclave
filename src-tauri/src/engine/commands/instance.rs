@@ -43,11 +43,17 @@ struct ListInstancesReq {
     workspace_id: String,
 }
 
-/// Payload for `instance.spawn` / `instance.stop` — target a single instance.
+/// Payload for `instance.spawn` / `instance.stop` / `instance.restart` —
+/// targets a single instance. `self_triggered` (wire field `self`) is only
+/// meaningful for `restart` (ADR 0006: the agent restarting itself vs. a
+/// human triggering it) — absent/false for every other use, which is the
+/// existing (human-triggered) behavior.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InstanceReq {
     workspace_agent_id: String,
+    #[serde(rename = "self", default)]
+    self_triggered: bool,
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -859,6 +865,25 @@ pub async fn restart(state: &AppState, payload: Value) -> Result<Value, AppError
         // Save-gated: arm FIRST, then inject — a fast agent that saves the
         // instant it reads the prompt must find the arm set (mirrors compact).
         state.mark_restart_pending(&id);
+
+        if req.self_triggered {
+            // ADR 0006: the caller IS the agent, mid-turn — it already knows
+            // a restart is coming (it triggered this itself), so injecting a
+            // prompt into its own TUI would interleave with its own output.
+            // Return the instruction as plain command output instead; the
+            // save-gated tail (snapshot.rs::save → take_restart_pending →
+            // run_respawn_resume) is unchanged and fires exactly as before
+            // once the agent's `conclave snapshot save` lands.
+            return Ok(serde_json::json!({
+                "status": "restarting",
+                "phase": "saving",
+                "instanceId": id,
+                "instruction": crate::engine::agentctx::self_restart_instruction(
+                    state.restart_pending_ttl()
+                ),
+            }));
+        }
+
         super::snapshot::submit_line(
             &state.runtime,
             &id,
@@ -1851,6 +1876,125 @@ mod tests {
             state.runtime.is_live(&id),
             "a live agent must NOT be killed before its handoff is saved"
         );
+    }
+
+    /// ADR 0006: a SELF-triggered restart on a live instance must NOT inject
+    /// anything into the agent's own TUI (the caller IS the agent, mid-turn —
+    /// injecting would interleave with its own output). It still arms the
+    /// restart and reports phase "saving", but returns an `instruction` field
+    /// instead. Proven via `LiveHandle::for_test`, whose receiver is NOT
+    /// drained by a background task (unlike `placeholder`) — an empty
+    /// `try_recv()` here proves nothing was ever sent, not just that it was
+    /// silently consumed.
+    #[tokio::test]
+    async fn restart_self_true_live_does_not_write_to_pty() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let (handle, mut rx) = runtime::LiveHandle::for_test(&session.id);
+        assert!(state.runtime.register(&id, handle).is_some());
+
+        let out = restart(
+            &state,
+            json!({ "workspaceAgentId": id, "self": true }),
+        )
+        .await
+        .expect("restart failed");
+
+        assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
+        assert!(
+            state.take_restart_pending(&id),
+            "self-triggered restart must still arm"
+        );
+        let instruction = out
+            .get("instruction")
+            .and_then(Value::as_str)
+            .expect("self-triggered restart must return an instruction");
+        assert!(instruction.contains("conclave snapshot save"), "{instruction}");
+        assert!(
+            rx.try_recv().is_err(),
+            "self-triggered restart must NOT write to the agent's own PTY"
+        );
+    }
+
+    /// The returned instruction's TTL must match `AppState::restart_pending_ttl`
+    /// exactly — computed here from the SAME accessor the production code
+    /// uses, never a hardcoded literal, so this test can't silently drift
+    /// from a future TTL change (Task 3 risk ledger).
+    #[tokio::test]
+    async fn restart_self_true_instruction_ttl_matches_restart_pending_ttl() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let (handle, _rx) = runtime::LiveHandle::for_test(&session.id);
+        assert!(state.runtime.register(&id, handle).is_some());
+
+        let out = restart(&state, json!({ "workspaceAgentId": id, "self": true }))
+            .await
+            .expect("restart failed");
+        let instruction = out.get("instruction").and_then(Value::as_str).unwrap();
+
+        let expected_minutes = state.restart_pending_ttl().as_secs() / 60;
+        assert!(
+            instruction.contains(&expected_minutes.to_string()),
+            "instruction must surface the real TTL ({expected_minutes} min): {instruction}"
+        );
+    }
+
+    /// Double trigger (risk ledger): the agent runs `conclave restart` twice
+    /// before saving. `mark_restart_pending` just overwrites the arm — the
+    /// second call must succeed and return the SAME instruction, not an
+    /// error.
+    #[tokio::test]
+    async fn restart_self_true_double_trigger_returns_same_instruction() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let (handle, _rx) = runtime::LiveHandle::for_test(&session.id);
+        assert!(state.runtime.register(&id, handle).is_some());
+
+        let first = restart(&state, json!({ "workspaceAgentId": id, "self": true }))
+            .await
+            .expect("first restart failed");
+        let second = restart(&state, json!({ "workspaceAgentId": id, "self": true }))
+            .await
+            .expect("second restart must not error");
+
+        assert_eq!(first.get("instruction"), second.get("instruction"));
+        assert!(state.take_restart_pending(&id), "must still be armed after the double trigger");
+    }
+
+    /// Contrast case for `restart_self_true_live_does_not_write_to_pty`: the
+    /// existing HUMAN-triggered path (no `self`) must still inject the save
+    /// prompt into the PTY, proven with the same observing handle.
+    #[tokio::test]
+    async fn restart_non_self_live_still_injects_prompt() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let (handle, mut rx) = runtime::LiveHandle::for_test(&session.id);
+        assert!(state.runtime.register(&id, handle).is_some());
+
+        let out = restart(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("restart failed");
+        assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
+        assert!(out.get("instruction").is_none(), "non-self path has no instruction field");
+
+        let sent = rx.try_recv().expect("non-self restart must inject the save prompt");
+        assert!(sent.contains("conclave snapshot save"), "{sent}");
     }
 
     /// restart on a dead cli agent needs the app runtime to drive the detached

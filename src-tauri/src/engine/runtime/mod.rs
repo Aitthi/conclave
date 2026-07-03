@@ -101,6 +101,29 @@ impl LiveHandle {
             resize: Box::new(|_, _| {}),
         }
     }
+
+    /// Test-only: like [`Self::placeholder`], but with NO drain task consuming
+    /// the channel — the paired receiver is handed back so a test can
+    /// `try_recv()`/`recv()` on it to observe (or prove the absence of)
+    /// anything sent via [`Runtime::send_stdin`]. `placeholder`'s drain task
+    /// swallows everything, making it impossible to tell "nothing was
+    /// written" from "something was written and silently dropped" — which is
+    /// exactly the distinction ADR 0006's self-triggered restart needs to
+    /// prove (it must NOT inject into a mid-turn agent's own TUI).
+    #[cfg(test)]
+    pub(crate) fn for_test(session_id: &str) -> (LiveHandle, UnboundedReceiver<String>) {
+        let (stdin_tx, rx) = mpsc::unbounded_channel::<String>();
+        (
+            LiveHandle {
+                session_id: session_id.to_owned(),
+                epoch: 0,
+                stdin_tx,
+                shutdown: Box::new(|| {}),
+                resize: Box::new(|_, _| {}),
+            },
+            rx,
+        )
+    }
 }
 
 /// Live-session registry keyed by instance id (`workspace_agent` id).

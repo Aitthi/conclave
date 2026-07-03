@@ -77,6 +77,7 @@ Subcommands:
   snapshot create <sessionId> <type> [label]
   snapshot save <text...>           (agent self-handoff; inside a spawned agent)
   snapshot last                     (read your latest handoff; inside a spawned agent)
+  restart                           (self-triggered restart; inside a spawned agent)
   run <orchestratorId> <prompt...>
   help
 
@@ -145,6 +146,15 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             // snapshot list/read/create carry an explicit id — leave untouched.
             _ => Ok(argv),
         },
+        // ADR 0006: self-triggered restart. Takes NO arguments — the target
+        // is always the calling agent, resolved from `CONCLAVE_INSTANCE_ID`.
+        Some("restart") => {
+            let me = require_self("restart")?;
+            if argv.len() != 1 {
+                return Err("conclave: restart (no arguments)".to_string());
+            }
+            Ok(vec!["restart".to_string(), me.to_string()])
+        }
         _ => Ok(argv),
     }
 }
@@ -155,6 +165,10 @@ enum OutMode {
     Terse,
     /// The carried-forward handoff text (`snapshot last`) — the agent reads this.
     Handoff,
+    /// The engine's `instruction` field (`restart`, ADR 0006) — the agent's next
+    /// step (write + save the handoff), printed verbatim so it reads as plain
+    /// command output rather than an injected chat turn.
+    Instruction,
     /// Pretty-printed JSON (everything else).
     Json,
 }
@@ -193,6 +207,8 @@ async fn main() -> ExitCode {
         OutMode::Terse
     } else if is_snapshot && sub == Some("last") {
         OutMode::Handoff
+    } else if argv.first().map(String::as_str) == Some("restart") {
+        OutMode::Instruction
     } else {
         OutMode::Json
     };
@@ -303,6 +319,18 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            // `restart`'s whole point is telling the agent what to do next —
+            // print that instruction, not the status/phase JSON row.
+            OutMode::Instruction => match result.get("instruction").and_then(Value::as_str) {
+                Some(text) => println!("{text}"),
+                None => {
+                    eprintln!(
+                        "conclave: restart response has no instruction field (status: {})",
+                        result.get("status").and_then(Value::as_str).unwrap_or("?")
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
             OutMode::Json => {
                 let pretty =
                     serde_json::to_string_pretty(result).expect("serialize result cannot fail");
@@ -368,6 +396,25 @@ mod tests {
     #[test]
     fn snapshot_last_without_instance_id_errors() {
         assert!(expand_self_args(v(&["snapshot", "last"]), None).is_err());
+    }
+
+    // ── restart (ADR 0006: self-triggered restart) ─────────────────────────
+
+    #[test]
+    fn restart_injects_instance_from_env() {
+        let out = expand_self_args(v(&["restart"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["restart", "self1"]));
+    }
+
+    #[test]
+    fn restart_without_instance_id_errors() {
+        assert!(expand_self_args(v(&["restart"]), None).is_err());
+        assert!(expand_self_args(v(&["restart"]), Some("")).is_err());
+    }
+
+    #[test]
+    fn restart_takes_no_arguments() {
+        assert!(expand_self_args(v(&["restart", "extra"]), Some("self1")).is_err());
     }
 
     #[test]
