@@ -207,7 +207,7 @@ records."
 /// than failing the spawn.
 #[cfg(unix)]
 pub fn ensure_conclave_shim() -> Option<PathBuf> {
-    use std::os::unix::fs::{symlink, DirBuilderExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     let exe = std::env::current_exe().ok()?;
     // `conclave-cli` (src/bin/conclave-cli.rs) is built as a sibling of the app
@@ -226,12 +226,42 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
         .create(&bin)
         .ok()?;
 
-    let link = bin.join("conclave");
-    // Refresh: a stale symlink (old build path) is replaced atomically enough for
-    // our purposes — remove then recreate.
-    let _ = std::fs::remove_file(&link);
-    symlink(&cli, &link).ok()?;
+    if !refresh_shim_link(&cli, &bin) {
+        return None;
+    }
     Some(bin)
+}
+
+/// (Re)point `<bin>/conclave` at `cli` via symlink-at-temp-name + rename:
+/// `rename(2)` atomically replaces the old link, so N concurrent spawns (the
+/// app respawning every agent at relaunch) each land a complete link and none
+/// ever observes EEXIST. The previous remove-then-recreate pair lost exactly
+/// that race — all but one concurrent spawn's `symlink` hit EEXIST and bailed
+/// to `None`, silently dropping the PATH export AND the preamble's
+/// path-fallback sentence for those agents. It also left a window with NO link
+/// on disk, during which a live agent's `conclave` invocation would fail to
+/// resolve. The temp name is unique per call (pid + process-wide counter):
+/// concurrent spawns share one pid, so the counter is what keeps their temp
+/// files from colliding.
+#[cfg(unix)]
+fn refresh_shim_link(cli: &std::path::Path, bin: &std::path::Path) -> bool {
+    use std::os::unix::fs::symlink;
+
+    static SHIM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = bin.join(format!(
+        ".conclave.tmp.{}.{}",
+        std::process::id(),
+        SHIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let link = bin.join("conclave");
+    if symlink(cli, &tmp).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, &link).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    true
 }
 
 #[cfg(not(unix))]
@@ -669,5 +699,48 @@ text>`. After it confirms, stop and wait for the restart."
         let contents = std::fs::read_to_string(&path).expect("read back failed");
         assert_eq!(contents, body);
         let _ = std::fs::remove_file(&path); // test cleanup
+    }
+
+    /// Regression for the app-relaunch respawn race: every agent's spawn calls
+    /// the shim refresh at once, and under the old remove-then-recreate pair
+    /// all but one hit EEXIST and reported failure — dropping the PATH export
+    /// and the preamble's path-fallback sentence for 3 of 4 agents in the
+    /// field. Every concurrent caller must succeed, and the link must resolve
+    /// to the CLI afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn refresh_shim_link_survives_concurrent_callers() {
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-shim-race-test-{}",
+            std::process::id()
+        ));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).expect("create shim dir");
+        let cli = dir.join("conclave-cli");
+        std::fs::write(&cli, b"#!/bin/sh\n").expect("write fake cli");
+
+        let results: Vec<bool> = std::thread::scope(|s| {
+            (0..8)
+                .map(|_| s.spawn(|| super::refresh_shim_link(&cli, &bin)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked"))
+                .collect()
+        });
+        assert!(
+            results.iter().all(|&ok| ok),
+            "every concurrent refresh must succeed: {results:?}"
+        );
+        let resolved = std::fs::read_link(bin.join("conclave")).expect("link exists");
+        assert_eq!(resolved, cli);
+        // No temp debris left behind (each loser renamed or cleaned up).
+        let stray: Vec<_> = std::fs::read_dir(&bin)
+            .expect("read shim dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "conclave")
+            .collect();
+        assert!(stray.is_empty(), "temp files left behind: {stray:?}");
+        let _ = std::fs::remove_dir_all(&dir); // test cleanup
     }
 }
