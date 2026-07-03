@@ -126,6 +126,37 @@ pub async fn list_for_instance(
     .await
 }
 
+/// List a whole workspace's inter-agent traffic: every message whose sender
+/// AND recipient both belong to the workspace, newest first, capped at
+/// `limit`. Feeds the Chat Hub's merged view; per-conversation narrowing is
+/// client-side.
+///
+/// Raw `sqlx::query_as` (not chain-builder): the membership filter is an
+/// `IN (subquery)` on two columns — the documented fallback case, same as
+/// `list_for_instance` above. The column list mirrors `InterAgentMessageRow`.
+#[allow(dead_code)] // consumed by commands::message::list_for_workspace, added next
+pub async fn list_for_workspace(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    limit: i64,
+) -> sqlx::Result<Vec<InterAgentMessageRow>> {
+    // Self-defend against a negative LIMIT (SQLite reads it as "unbounded"),
+    // mirroring list_for_instance.
+    let limit = limit.max(1);
+    sqlx::query_as::<_, InterAgentMessageRow>(
+        "SELECT id, from_instance_id, to_instance_id, text, status, auto_submitted, created_at \
+         FROM inter_agent_message \
+         WHERE from_instance_id IN (SELECT id FROM workspace_agent WHERE workspace_id = ?1) \
+           AND to_instance_id   IN (SELECT id FROM workspace_agent WHERE workspace_id = ?1) \
+         ORDER BY created_at DESC \
+         LIMIT ?2",
+    )
+    .bind(workspace_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -168,6 +199,88 @@ mod tests {
             .await
             .expect("instantiate failed")
             .id
+    }
+
+    /// Helper: create an agent_definition and instantiate it into an EXISTING
+    /// workspace — lets a test put two instances in the same workspace (the
+    /// original `fixture_instance` creates a fresh workspace per call).
+    async fn fixture_instance_in(pool: &SqlitePool, ws_id: &str, name: &str) -> String {
+        let def = agent_definition::create(
+            pool,
+            &AgentDefinitionInput {
+                name: name.into(),
+                role: None,
+                agent_type: "cli".into(),
+                cli_kind: None,
+                color: None,
+                provider_id: None,
+                model: None,
+                harness_mode: "own".into(),
+                share_blackboard: None,
+                auto_submit_injected: None,
+                allowed_senders: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        workspace_agent::instantiate(pool, ws_id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id
+    }
+
+    /// list_for_workspace returns only messages whose BOTH endpoints are in
+    /// the workspace — another workspace's traffic never leaks in.
+    #[tokio::test]
+    async fn list_for_workspace_scopes_to_the_workspace() {
+        let pool = connect_in_memory().await;
+        let ws1 = workspace::create(&pool, "WS1", "/tmp/ws1", None)
+            .await
+            .expect("ws1")
+            .id;
+        let ws2 = workspace::create(&pool, "WS2", "/tmp/ws2", None)
+            .await
+            .expect("ws2")
+            .id;
+        let a = fixture_instance_in(&pool, &ws1, "A").await;
+        let b = fixture_instance_in(&pool, &ws1, "B").await;
+        let x = fixture_instance_in(&pool, &ws2, "X").await;
+        let y = fixture_instance_in(&pool, &ws2, "Y").await;
+        create(&pool, &a, &b, "in ws1", "delivered", true)
+            .await
+            .expect("msg ws1");
+        create(&pool, &x, &y, "in ws2", "delivered", true)
+            .await
+            .expect("msg ws2");
+
+        let rows = list_for_workspace(&pool, &ws1, 50).await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "in ws1");
+    }
+
+    /// Newest first, capped at `limit`.
+    #[tokio::test]
+    async fn list_for_workspace_orders_newest_first_and_limits() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("ws")
+            .id;
+        let a = fixture_instance_in(&pool, &ws, "A").await;
+        let b = fixture_instance_in(&pool, &ws, "B").await;
+        for i in 0..3 {
+            create(&pool, &a, &b, &format!("m{i}"), "delivered", true)
+                .await
+                .expect("msg");
+            // created_at is RFC3339 with sub-second precision; a tiny sleep
+            // keeps the three timestamps strictly ordered.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let rows = list_for_workspace(&pool, &ws, 2).await.expect("list");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "m2");
+        assert_eq!(rows[1].text, "m1");
     }
 
     /// create returns a fully-populated row with the given fields.
