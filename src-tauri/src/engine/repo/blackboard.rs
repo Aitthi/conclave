@@ -178,6 +178,22 @@ pub async fn list(pool: &SqlitePool, workspace_id: &str) -> sqlx::Result<Vec<Bla
         .map_err(cb_err)
 }
 
+/// Delete a blackboard entry by (workspace_id, key). Returns `true` when a row
+/// was deleted, `false` when the key was absent.
+///
+/// Raw `sqlx` DELETE, mirroring `skill::delete`. The entry's activity rows go
+/// with it via `blackboard_activity.entry_id ON DELETE CASCADE` — deleting a
+/// key deliberately deletes its read/write history too (that's what "delete"
+/// means here; keep the key and overwrite its value if the history matters).
+pub async fn delete(pool: &SqlitePool, workspace_id: &str, key: &str) -> sqlx::Result<bool> {
+    let res = sqlx::query("DELETE FROM blackboard_entry WHERE workspace_id = ?1 AND key = ?2")
+        .bind(workspace_id)
+        .bind(key)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 /// List recent activity across THIS workspace's entries, newest-first, capped at
 /// `limit`.
 ///
@@ -382,6 +398,31 @@ mod tests {
             .expect("get missing")
             .is_none());
         assert_eq!(list_activity(&pool, &ws, 50).await.unwrap().len(), 1);
+    }
+
+    /// delete removes the row (and cascades its activity); missing key → false;
+    /// other workspaces' same-named keys untouched.
+    #[tokio::test]
+    async fn delete_removes_row_and_activity() {
+        let pool = connect_in_memory().await;
+        let ws1 = fixture_workspace(&pool).await;
+        let ws2 = fixture_workspace(&pool).await;
+        let agent = fixture_instance(&pool, &ws1, "Writer").await;
+
+        set(&pool, &ws1, "k", "\"v\"", Some(&agent))
+            .await
+            .expect("set ws1");
+        set(&pool, &ws2, "k", "\"v2\"", None).await.expect("set ws2");
+        assert_eq!(list_activity(&pool, &ws1, 50).await.unwrap().len(), 1);
+
+        assert!(delete(&pool, &ws1, "k").await.expect("delete"));
+        assert!(get(&pool, &ws1, "k", None).await.unwrap().is_none());
+        // Activity cascaded away with the entry.
+        assert!(list_activity(&pool, &ws1, 50).await.unwrap().is_empty());
+        // Same key in another workspace survives.
+        assert!(get(&pool, &ws2, "k", None).await.unwrap().is_some());
+        // Deleting again → false (already gone).
+        assert!(!delete(&pool, &ws1, "k").await.expect("re-delete"));
     }
 
     /// list is workspace-scoped and newest-first.

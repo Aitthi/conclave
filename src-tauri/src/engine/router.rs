@@ -47,6 +47,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "blackboard.list" => blackboard::list(state, payload).await,
         "blackboard.get" => blackboard::get(state, payload).await,
         "blackboard.set" => blackboard::set(state, payload).await,
+        "blackboard.delete" => blackboard::delete(state, payload).await,
 
         // ── snapshot ──────────────────────────────────────────────────────
         "snapshot.create" => snapshot::create(state, payload).await,

@@ -185,8 +185,24 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                     json!({ "workspaceId": workspace_id, "key": key, "value": value }),
                 ))
             }
+            // `delete` with an `rm` alias — agents type both; one wire method.
+            Some("delete") | Some("rm") => {
+                let workspace_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid("cli: bb delete <workspaceId> <key>".into())
+                })?;
+                let key = argv.get(3).ok_or_else(|| {
+                    AppError::Invalid("cli: bb delete <workspaceId> <key>".into())
+                })?;
+                if argv.len() != 4 {
+                    return Err(AppError::Invalid("cli: bb delete <workspaceId> <key>".into()));
+                }
+                Ok((
+                    "blackboard.delete",
+                    json!({ "workspaceId": workspace_id, "key": key }),
+                ))
+            }
             _ => Err(AppError::Invalid(
-                "cli: bb <list|get|set> — unknown bb subcommand".into(),
+                "cli: bb <list|get|set|delete> — unknown bb subcommand".into(),
             )),
         },
 
@@ -471,6 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn bb_delete_maps_correctly_with_rm_alias() {
+        assert_eq!(
+            ok_method(&["bb", "delete", "ws1", "mykey"]),
+            "blackboard.delete"
+        );
+        assert_eq!(
+            ok_params(&["bb", "delete", "ws1", "mykey"]),
+            json!({ "workspaceId": "ws1", "key": "mykey" })
+        );
+        assert_eq!(ok_method(&["bb", "rm", "ws1", "mykey"]), "blackboard.delete");
+    }
+
+    #[test]
+    fn bb_delete_missing_or_extra_args_is_invalid() {
+        assert!(is_invalid(&["bb", "delete", "ws1"]));
+        assert!(is_invalid(&["bb", "delete"]));
+        assert!(is_invalid(&["bb", "delete", "ws1", "key", "extra"]));
+    }
+
+    #[test]
     fn bb_set_maps_correctly() {
         assert_eq!(ok_method(&["bb", "set", "ws1", "k", "v"]), "blackboard.set");
         let params = ok_params(&["bb", "set", "ws1", "k", "v"]);
@@ -496,7 +532,9 @@ mod tests {
 
     #[test]
     fn bb_unknown_sub_is_invalid() {
-        assert!(is_invalid(&["bb", "delete", "ws1", "k"]));
+        // `delete` used to be the unknown-subcommand fixture here — it's a real
+        // subcommand now (see bb_delete_maps_correctly_with_rm_alias).
+        assert!(is_invalid(&["bb", "purge", "ws1", "k"]));
     }
 
     /// `bb set` JSON value coercion: numeric string → JSON number.

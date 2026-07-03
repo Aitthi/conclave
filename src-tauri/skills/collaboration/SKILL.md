@@ -46,6 +46,10 @@ work from degenerating into noise, duplicate work, or runaway conversations.
   SHAs, claims, blockers. It is not a chat log — conversations go through
   `conclave tell`.
 - Prefer overwriting your own stale keys over adding near-duplicates.
+- Delete keys that are truly finished (`conclave bb delete <ws> <key>`) —
+  but only your OWN keys, and only when nothing will ever need them again.
+  A completed task others may still reference keeps a short done-marker
+  value instead; deleting a key erases its history with it.
 
 ## Escalation
 

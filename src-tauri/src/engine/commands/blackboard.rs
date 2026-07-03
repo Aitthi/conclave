@@ -159,6 +159,42 @@ pub async fn get(state: &AppState, payload: Value) -> Result<Value, AppError> {
     })
 }
 
+/// Payload for `blackboard.delete`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteReq {
+    workspace_id: String,
+    key: String,
+    deleter_id: Option<String>,
+}
+
+/// Delete a blackboard key from a workspace. When `deleterId` is supplied it
+/// must belong to the workspace (access scope, same rule as set/get). Returns
+/// `{ deleted: bool, key }` — `deleted: false` means the key was already absent
+/// (not an error: delete is idempotent).
+///
+/// The entry's activity history is deleted with it (DB cascade). Deletion
+/// itself is NOT logged — the activity table only attributes reads/writes to a
+/// LIVING entry; an agent that needs a tombstone should `set` a done-marker
+/// value instead of deleting.
+///
+/// Errors mirror [`set`] (with a deleter instead of a writer).
+pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let DeleteReq {
+        workspace_id,
+        key,
+        deleter_id,
+    } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+
+    require_workspace(state, &workspace_id).await?;
+    if let Some(deleter) = &deleter_id {
+        enforce_scope(state, &workspace_id, deleter, "deleter").await?;
+    }
+
+    let deleted = repo::blackboard::delete(&state.db, &workspace_id, &key).await?;
+    Ok(json!({ "deleted": deleted, "key": key }))
+}
+
 /// Payload for `blackboard.list`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,6 +409,41 @@ mod tests {
             .expect("list");
         let acts = listed.get("activity").and_then(Value::as_array).unwrap();
         assert_eq!(acts.len(), 1, "missing-key read must not add activity");
+    }
+
+    /// delete removes the key (idempotent), enforces deleter scope.
+    #[tokio::test]
+    async fn delete_roundtrip_and_scope() {
+        let state = AppState::for_tests().await;
+        let ws1 = fixture_workspace(&state).await;
+        let ws2 = fixture_workspace(&state).await;
+        let foreigner = fixture_instance(&state, &ws2, "Foreign").await;
+        set(&state, json!({ "workspaceId": ws1, "key": "k", "value": 1 }))
+            .await
+            .expect("set");
+
+        // Foreign deleter → Invalid, key survives.
+        let err = delete(
+            &state,
+            json!({ "workspaceId": ws1, "key": "k", "deleterId": foreigner }),
+        )
+        .await
+        .expect_err("cross-workspace deleter must fail");
+        assert!(matches!(err, AppError::Invalid(_)));
+
+        // User delete → deleted:true, then get → null, re-delete → deleted:false.
+        let r = delete(&state, json!({ "workspaceId": ws1, "key": "k" }))
+            .await
+            .expect("delete");
+        assert_eq!(r.get("deleted").and_then(Value::as_bool), Some(true));
+        assert!(get(&state, json!({ "workspaceId": ws1, "key": "k" }))
+            .await
+            .expect("get")
+            .is_null());
+        let r2 = delete(&state, json!({ "workspaceId": ws1, "key": "k" }))
+            .await
+            .expect("re-delete");
+        assert_eq!(r2.get("deleted").and_then(Value::as_bool), Some(false));
     }
 
     /// Access scope: a writer from another workspace → Invalid.

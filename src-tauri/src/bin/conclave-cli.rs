@@ -71,6 +71,7 @@ Subcommands:
   bb list <workspaceId>
   bb get <workspaceId> <key>
   bb set <workspaceId> <key> <value>
+  bb delete <workspaceId> <key>     (alias: bb rm)
   snapshot list <sessionId>
   snapshot read <snapshotId>
   snapshot create <sessionId> <type> [label]
