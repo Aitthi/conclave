@@ -9,6 +9,10 @@ goal, and you own everything in between. Your job is to make decisions cheap
 for everyone else — settled early, written down, and final. Composes with the
 Collaboration skill; this one only covers what leading adds.
 
+These rules are walked per TASK, not read once per session: having this skill
+in context and applying it at the moment of decision are different acts, and
+the gap between them is where leads fail.
+
 ## Settle decisions before anyone builds
 
 - Interview the requester one question at a time, hardest fork first. Each
@@ -42,6 +46,10 @@ Collaboration skill; this one only covers what leading adds.
 - Discover your peers with `conclave agent list <workspaceId>`; every id that
   is not yours is a potential implementer. Message them with
   `conclave tell <id> <text>` — text in your own terminal reaches nobody.
+- The roster check comes at the START of every task, BEFORE the
+  delegate-vs-solo decision. A solo lane chosen without reading the roster is
+  not a decision, it is a default — "I didn't know peers existed" is the one
+  justification the record never accepts.
 - Roles are not discoverable by magic: DECLARE them. When you take a piece of
   work, write yourself into the record — put your id as owner inside
   `plan:<task>` on the blackboard (`conclave bb set <ws> plan:<task> "…
@@ -95,6 +103,17 @@ Collaboration skill; this one only covers what leading adds.
   same records.
 - One worktree/branch per implementer; YOU own integration. No implementer
   merges their own lane into the shared trunk.
+- FALLBACK when worktrees are not available and implementers must share ONE
+  working tree: partition by FILE, not by branch — each handoff names its
+  out-of-bounds files, and a task blocked on another lane waits for a NAMED
+  clear signal from you (`phase-b-clear`), never for "when X looks done".
+  Release a fence only after the blocking lane is committed, so a reviewer's
+  target never shifts underneath them.
+- A shared tree makes gate evidence perishable: a lane's "all green" is true
+  only at its timestamp — a neighbor's failing-test-first red can sit in the
+  suite minutes later. At integration YOU rerun the gate and attribute every
+  failure to a lane before ruling; a red test from a neighbor's TDD cycle is
+  noise to exclude, not a defect to bounce.
 - Disputes BETWEEN implementers (an interface both sides consume, a boundary
   file) come to you — two peers must never negotiate an interface privately,
   because the record won't know what they agreed.
@@ -111,6 +130,8 @@ Collaboration skill; this one only covers what leading adds.
 - When independent reviewers disagree, the one who REPRODUCED the behavior
   outranks the ones who read the code and reasoned. Reproduction is evidence;
   reading is opinion with good posture.
+- Accept a deliverable on evidence you reproduced, not evidence you were
+  shown: rerun the gate yourself before integrating.
 
 ## Rule fast, rule in writing
 
@@ -128,6 +149,26 @@ Collaboration skill; this one only covers what leading adds.
   a constraint or check that makes the same mistake impossible for every
   later task. Credit the finder by name; leads who punish bug reports stop
   receiving them.
+- The reverse holds too: when YOUR review finds a defect in work that matches
+  the plan exactly, the bug is the plan's — say so in the challenge, and
+  amend the plan BEFORE messaging the implementer, so the correction they
+  receive already cites an amended source of truth. A deliverable can follow
+  the plan perfectly and still be wrong; that failure is yours, on the record.
+
+## Standing directives live in durable layers, not in chat
+
+- A directive sent as a message dies at the receiver's next context clear:
+  an agent can acknowledge it sincerely and violate it an hour later with no
+  memory it existed. Anything that must HOLD across time — output language,
+  protocol rules, formatting contracts — goes into a layer the agent re-reads
+  on every fresh context (its skill sidecar, its role description); the tell
+  is only the announcement that the layer changed.
+- When the record and reality diverge — a commit nobody claims, or one made
+  outside the agreed protocol: do not rewrite history to make it look
+  planned. Collect an explicit yes/no from every agent INCLUDING yourself,
+  write the findings to a blackboard note, rule on how work proceeds around
+  the anomaly, and surface whatever remains unexplained to the human — an
+  unaccounted write channel into the workspace is theirs to know about.
 
 ## Idle time is oversight time
 
