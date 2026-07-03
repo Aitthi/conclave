@@ -201,6 +201,16 @@ export function useMessageInjected(
 }
 
 /**
+ * Subscribe to EVERY inter-agent injection, unfiltered — the Chat Hub shows a
+ * whole workspace's traffic, so it refetches on any injection rather than
+ * filtering per instance (its query is workspace-scoped server-side; a
+ * cross-workspace event costs one cheap, seq-guarded refetch).
+ */
+export function useAnyMessageInjected(cb: (event: MessageInjectedEvent) => void): void {
+  useEvent<MessageInjectedEvent>(EVENT_NAMES.messageInjected, cb);
+}
+
+/**
  * Subscribe to all fusion stage events (not filtered by runId because a
  * single fusion run covers all stages; callers can filter if needed).
  */

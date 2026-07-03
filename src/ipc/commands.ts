@@ -160,6 +160,10 @@ export interface Commands {
     req: { instanceId: string; limit?: number };
     res: InterAgentMessage[];
   };
+  "message.listForWorkspace": {
+    req: { workspaceId: string; limit?: number };
+    res: InterAgentMessage[];
+  };
   "blackboard.list": {
     req: { workspaceId: string };
     res: { entries: BlackboardEntry[]; activity: BlackboardActivity[] };
@@ -317,6 +321,8 @@ export const ipc = {
     send: (req: Commands["message.send"]["req"]) => call("message.send", req),
     inject: (req: Commands["message.inject"]["req"]) => call("message.inject", req),
     list: (req: Commands["message.list"]["req"]) => call("message.list", req),
+    listForWorkspace: (req: Commands["message.listForWorkspace"]["req"]) =>
+      call("message.listForWorkspace", req),
   },
   blackboard: {
     list: (req: Commands["blackboard.list"]["req"]) => call("blackboard.list", req),

@@ -40,5 +40,6 @@ export {
   useSessionContext,
   useFusionStage,
   useMessageInjected,
+  useAnyMessageInjected,
   useSnapshotCreated,
 } from "./events";
