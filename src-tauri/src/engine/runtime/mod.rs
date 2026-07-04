@@ -25,6 +25,7 @@ pub mod chat;
 pub mod embedder;
 pub mod provider;
 pub mod pty;
+pub mod sandbox_config;
 // T2 lands the codec before the T4 exact-search consumer.
 #[allow(dead_code)]
 pub mod vec_codec;
