@@ -119,3 +119,18 @@ tasks; when unsure, `task list` first. Point to the deeper skills by name
 - Builtin skill ordering is fixed id order (folder name); `tool-map` sorts
   after `strategic-compact` — acceptable, do not rename folders to game order.
 - Reaches agents on next rebuild+relaunch, same as 3274567.
+
+## POST-LAND ledger (2026-07-05)
+
+- MERGED @ f077cc2 (lane head 625e725, Dew). Mellow LAND PASS 0 blocking.
+- Mid-lane history, all on the task ledger: human widened scope to ALL
+  `conclave help` subcommands (plan amended abf4cdb BEFORE messaging, per
+  protocol); two message-crossings with Dew, both ruled non-defect.
+- Mellow RECORD-GAP finding (credited): lane gates were pinned at merge-base
+  c102c62 because `task gate` ran on UNCOMMITTED changes — the gate records
+  HEAD at run time. Closed by Mellow's repro at 625e725 and lead post-merge
+  gates: cargo test 0 @ f077cc2, clippy -D warnings 0 @ f077cc2.
+- Deferred Low (next skill-prose pass, joins close-vs-merged Low from
+  2026-07-04-plan-skills-task-verbs.md): tool-map/implementer prose should
+  say COMMIT FIRST, THEN GATE so ledger evidence pins to the reviewed SHA.
+- Adoption unchanged: reaches agents on next rebuild + relaunch.
