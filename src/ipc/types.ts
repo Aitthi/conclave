@@ -282,26 +282,60 @@ export interface Task {
   slug: string;
   title: string;
   state: TaskState;
-  /** The lead who owns escalations for this task; null until assigned. */
-  ownerAgentId: string | null;
-  /** The agent who claimed and builds it; null until claimed. */
-  implementerAgentId: string | null;
+  /** The lead who owns escalations for this task. Optional: Lane A omits the
+   *  field entirely when absent (never serialises `null`) — lead ruling. */
+  ownerAgentId?: string;
+  /** The agent who claimed and builds it. Omitted until claimed. */
+  implementerAgentId?: string;
   /** Path prefixes this task's lane owns (the frozen `file_boundary` JSON array). */
   fileBoundary: string[];
-  /** Free-text pointer to the design canon (proto path / SHA); null for non-UI work. */
-  designCanon: string | null;
+  /** Free-text pointer to the design canon (proto path / SHA). Omitted for
+   *  non-UI work. */
+  designCanon?: string;
   /** The task's written plan text. */
   plan: string;
   createdAt: string;
   updatedAt: string;
 }
 
+/** The NEWEST gate result on a task — `task.list` carries only the latest so
+ *  rows stay O(tasks) not O(events); full gate history lives in `task.get`
+ *  (lead ruling on the badge escalation). Derived from a `task_event(kind=
+ *  'gate')` payload `{cmd,exit,sha,tail,cwd}`. EVIDENCE: `sha` pins the commit
+ *  it ran at, so a shared-tree "all green" can be checked against the commit
+ *  that produced it. The human-facing label is derived client-side from `cmd`
+ *  (no stored `label`). Omitted when the task has run no gate. */
+export interface TaskLastGate {
+  cmd: string;
+  /** process exit code — 0 = green, non-zero = red. */
+  exit: number;
+  /** `git rev-parse HEAD` captured when the gate ran. */
+  sha: string;
+  createdAt: string;
+}
+
+/** A challenge summary derived from `task_event(kind='challenge')` and its
+ *  resolving `kind='ruling'` — `open` = awaiting a ruling, `ruled` = resolved.
+ *  `deadlineAt` is an ISO timestamp (absent = advisory); the client computes
+ *  minutes-remaining live, since a server-sent countdown is stale on arrival
+ *  (lead ruling). */
+export interface TaskChallengeBadge {
+  /** the challenge event's id — stable render key + the ruling's target. */
+  id: string;
+  status: "open" | "ruled";
+  claim: string;
+  deadlineAt?: string;
+}
+
 /** A `task.list` row — the frozen task shape plus the count of its logged events
- *  (so the board can badge activity without a per-task `task.get`). Field name
- *  `eventCount` is Lane D's chosen default, flagged to the lead + Lane A for
- *  camelCase parity (frozen shape says only "event counts included"). */
+ *  and the derived badges the board renders per card. `eventCount` is the
+ *  lead-ruled field @ 5e3e27e; `lastGate`/`challenges` are the lead's ruling on
+ *  Lane D's badge escalation: the newest gate only (bounded), and the challenge
+ *  set (always present, `[]` when none). Lane A derives both during list. */
 export interface TaskListRow extends Task {
   eventCount: number;
+  lastGate?: TaskLastGate;
+  challenges: TaskChallengeBadge[];
 }
 
 export type TaskEventKind = "note" | "state" | "gate" | "challenge" | "ruling";
@@ -313,8 +347,8 @@ export interface TaskEvent {
   id: string;
   taskId: string;
   kind: TaskEventKind;
-  /** The agent who produced the event; null for system-generated entries. */
-  actorAgentId: string | null;
+  /** The agent who produced the event. Omitted for system-generated entries. */
+  actorAgentId?: string;
   payload: unknown;
   createdAt: string;
 }

@@ -22,6 +22,8 @@ export type {
   MemoryGraphEdge,
   TaskState,
   Task,
+  TaskLastGate,
+  TaskChallengeBadge,
   TaskListRow,
   TaskEventKind,
   TaskEvent,
