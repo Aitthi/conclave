@@ -192,3 +192,31 @@ only — stays a confirmed-correct omission.
 **New guard — design-acceptance gate:** before ANY future human smoke of a lane that has
 an `.arta/proto` design record, Arta pixel-reviews the actual rendering against the proto
 and records PASS at `bb review:<lane>-design`. A lane without that key is not smoke-ready.
+
+## Smoke round 2 — 2026-07-04 10:44: F-s1..F-s4 ACCEPTED · new human-directed finding F-s5
+
+Human relaunched the fix-round-2 build (`966c4a0`, installed 10:36:47) and reviewed the
+live rail. No finding was raised against F-s1..F-s4 — the human moved straight to
+requesting an enhancement, so round-2 fixes are accepted. One new directive keeps the
+lane open for fix round 3:
+
+- **F-s5 — Per-message recipient chip (RULING R10, human-directed; supersedes R9's
+  tooltip-only clause).** Human (10:44–10:45 screenshots + message): recipient must be
+  visible WITHOUT hovering — "ขอ profile + name เล็กๆ บนหัว message ฝังขวา จะได้รู้ว่าส่งให้ใคร
+  โดยไม่ต้อง hover". The rail's broadcast fan-out renders 3 identical bubbles with no
+  visible recipient; tooltip-only honesty (R9) is not enough.
+  Fix (`ChatRail.tsx` per-message loop, currently :328-343): each message row gains a
+  small right-aligned recipient line ABOVE its bubble — recipient `Avatar` at size 4 +
+  recipient name, `text-[10px] text-text-tertiary`, `justify-end` within the group's
+  `max-w-[82%]` column. Keep the `title` tooltip (harmless redundancy). Reference look:
+  the room-switcher DM chip (small avatar + name) the human pointed at in the 10:44
+  screenshot — but no live dot and no pill border; this is metadata, not a control.
+  R10 scope notes: (a) R9's NO-DEDUP clause still stands — fan-out stays 3 bubbles,
+  each now labeled with its own recipient; (b) the proto has no recipient element at
+  all, so this is a DELIBERATE human-directed delta from the proto — Arta's design
+  gate must treat it as canon, and the proto should be updated to match so the design
+  record stays truthful.
+
+Round-3 flow: Dew implements F-s5 → Mellow re-review → Arta updates proto + design
+gate PASS at `bb review:right-rail-chats-design` → lead reruns tsc/vite → rebuild,
+install, human re-smoke.
