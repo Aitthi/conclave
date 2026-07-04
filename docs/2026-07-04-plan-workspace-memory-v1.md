@@ -46,6 +46,12 @@ Everything else from the scope report's rulings stands:
    the app-support dir, then everything is offline.
 8. Branch discipline: one branch per lane, lead merges. Commit with a pathspec
    (shared tree): `git commit -- <your files>`.
+9. Migrations are NOT auto-discovered: `db::migrate`
+   (`src-tauri/src/engine/db.rs`) registers each one explicitly with an
+   `if version < N { include_str!(...); PRAGMA user_version = N; }` block.
+   **Any task that adds a migration also owns adding its version block in
+   `db.rs`** — a migration file without its `db.rs` block never runs.
+   (Guard added 2026-07-04 after Dabin caught this gap in T2's file boundary.)
 
 ## Interface contract (fixed — escalate to lead before deviating)
 
@@ -137,7 +143,9 @@ GO/NO-GO ruling by lead. Estimate: 1–2 days.
 ### T2 — Migration + repo (lane: Dabin, branch `feat/memory-repo`)
 
 Files: `migrations/0009_memory_system.sql`, `repo/memory.rs` (+ `repo/mod.rs`
-line), BLOB codec module `engine/runtime/vec_codec.rs`.
+line), BLOB codec module `engine/runtime/vec_codec.rs`, and the
+`if version < 9` registration block in `engine/db.rs` (see global
+constraint 9; T5's `0010` migration likewise owns its `version < 10` block).
 
 - Codec: `encode(&[f32]) -> Vec<u8>` / `decode(&[u8], dim) -> Result<Vec<f32>>`,
   little-endian, with round-trip + wrong-length tests.
