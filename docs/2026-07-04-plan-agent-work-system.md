@@ -144,6 +144,9 @@ r5 rebuild (Dew) off main including this program + memory-graph; then install (s
 
 ### POST-LAND ledger
 
+- **PROGRAM CODE-COMPLETE @ 7ab08a7** — all four lanes landed and PASSed (A 29a1053, B 7ab08a7, C ef07b35, D 657d7b4). Remaining: r5 rebuild + install (Dew), live-pixel confirms for LaneBoard + memory-graph ride the relaunch.
+- **Lane B MERGED @ 7ab08a7** (4dcc48d, Dew; Mellow LAND PASS 0 open after one CHANGES-REQUESTED round: AUTO markers on the 2 timer texts — blocking per lead's attribution-ruling condition — and TASK_CHANGED emit after auto-default ruling, both fixed + regression-tested; lead-reproduced 563 lib / 40 bin / clippy clean). Design note on record: timer notifications are attributed to a real involved party (`from_instance_id` NOT NULL, no system identity) and carry an explicit `AUTO` body marker; `notify_watchers` is attributed to the real acting verb-runner, no marker by design.
+
 - **Lane A MERGED @ 29a1053** (ebddbf8, Dew; Mellow LAND PASS held-lifted 0 blocking; lead-reproduced 547 lib / 40 bin / clippy clean; post-merge tsc 0 + vite clean). Three mid-flight spec amendments (derive-in-list, gate rc propagation, deadlineAt-at-insert + lastGates per-cmd) absorbed with zero drift findings. Latent Low from first LAND round, superseded: gate rc propagation was ruled IN before merge, no open items.
 - **Lane D MERGED @ 657d7b4** (5052a84, Tiësto; Arta fidelity ACCEPT @ canon fa4929b, F1 resolved via lastGates amendment; Mellow LAND PASS 0 blocking; lead-ran tsc 0 + vite clean on merged main). Cross-lane A↔D wire contract verified closed both sides. Caveat: live-pixel confirm defers to r5 relaunch (running app is an old inode — memory-graph precedent). Doc-rot nit (mock header `lastGate?`) fixed at integration.
 - **Lane C MERGED @ ef07b35** (e1ab408, Guetta; Mellow LAND PASS 0 blocking; lead-reproduced 475/21/4 + clippy clean). Two latent Lows on record, deferred follow-ups, non-blocking:
