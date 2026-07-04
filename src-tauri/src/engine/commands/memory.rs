@@ -1352,4 +1352,193 @@ mod tests {
         assert!(parse_search(json!({ "workspaceId": "ws", "query": "q", "limit": 101 })).is_err());
         assert!(parse_remember(json!({ "workspaceId": "ws", "text": " " })).is_err());
     }
+
+    // ── T6 validation: real model, offline behavior, corrupt/missing cache ──
+    //
+    // These use the REAL FastembedEmbedder (not FakeEmbedder) against a
+    // dedicated on-disk cache dir and are NOT part of the normal
+    // `cargo test --lib` gate. Run manually, in order — see each test's
+    // `#[ignore]` message for the exact invocation.
+
+    fn t6_validation_cache_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join("conclave-t6-validation-cache")
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads the real MiniLM model on first run (network required); run \
+                BEFORE t6_search_and_status_work_offline; invoke: cargo test --lib \
+                commands::memory::tests::t6_remember_downloads_model_once -- --ignored --nocapture"]
+    async fn t6_remember_downloads_model_once() {
+        let cache_dir = t6_validation_cache_dir();
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let embedder: Arc<dyn Embedder> = Arc::new(
+            crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir.clone()),
+        );
+        let workspace_id = fixture_workspace(&state, "t6-offline").await;
+
+        assert!(!embedder.is_ready(), "cold cache must not report ready");
+
+        let result = remember_with_embedder(
+            &state,
+            json!({ "workspaceId": workspace_id, "text": "remember this offline" }),
+            Arc::clone(&embedder),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("remember should succeed (downloads the model on first use)");
+        assert!(result.get("id").is_some());
+        assert!(
+            embedder.is_ready(),
+            "model must report ready after a successful embed"
+        );
+        println!("[T6] remember downloaded the model and stored one chunk");
+    }
+
+    #[tokio::test]
+    #[ignore = "run AFTER t6_remember_downloads_model_once (same fixed cache dir must \
+                already be warm); invoke with the WHOLE PROCESS offline to prove no \
+                network dependency remains: HTTP_PROXY=http://127.0.0.1:1 \
+                HTTPS_PROXY=http://127.0.0.1:1 cargo test --lib \
+                commands::memory::tests::t6_search_and_status_work_offline -- --ignored --nocapture"]
+    async fn t6_search_and_status_work_offline() {
+        let cache_dir = t6_validation_cache_dir();
+        assert!(
+            cache_dir.join("models--Xenova--all-MiniLM-L6-v2").exists(),
+            "run t6_remember_downloads_model_once first to warm this cache dir"
+        );
+
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let embedder: Arc<dyn Embedder> =
+            Arc::new(crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir));
+        let workspace_id = fixture_workspace(&state, "t6-offline-search").await;
+
+        // Fresh in-memory DB (AppState::for_tests), so this must re-remember
+        // in THIS process — still must be network-free, since the model
+        // itself is what's cached, not any particular remembered text.
+        remember_with_embedder(
+            &state,
+            json!({ "workspaceId": workspace_id, "text": "offline remember" }),
+            Arc::clone(&embedder),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("remember must succeed fully offline once the model is cached");
+
+        let hits = search_with_embedder(
+            &state,
+            json!({ "workspaceId": workspace_id, "query": "offline" }),
+            Arc::clone(&embedder),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("search must succeed fully offline");
+        assert!(!hits["hits"].as_array().expect("hits array").is_empty());
+
+        let status = status_with_embedder(
+            &state,
+            json!({ "workspaceId": workspace_id }),
+            Arc::clone(&embedder),
+        )
+        .await
+        .expect("status must succeed fully offline");
+        assert_eq!(status["modelReady"], json!(true));
+        println!("[T6] remember/search/status all succeeded fully offline");
+    }
+
+    #[tokio::test]
+    #[ignore = "run AFTER t6_remember_downloads_model_once (needs a warm cache dir); \
+                deletes then corrupts a cached model file and checks recovery \
+                behavior; invoke: cargo test --lib commands::memory::tests::\
+                t6_corrupt_and_missing_model_file_recover_cleanly -- --ignored --nocapture"]
+    async fn t6_corrupt_and_missing_model_file_recover_cleanly() {
+        let cache_dir = t6_validation_cache_dir();
+        let repo_dir = cache_dir.join("models--Xenova--all-MiniLM-L6-v2");
+        assert!(
+            repo_dir.exists(),
+            "run t6_remember_downloads_model_once first to warm this cache dir"
+        );
+
+        // ── DELETE: the whole cache is gone -> modelReady must go false,
+        // and the status handler itself must not error or hang.
+        let backup = cache_dir.with_extension("bak");
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::rename(&cache_dir, &backup).expect("move cache dir aside");
+
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let deleted_embedder: Arc<dyn Embedder> = Arc::new(
+            crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir.clone()),
+        );
+        assert!(
+            !deleted_embedder.is_ready(),
+            "a deleted cache must report modelReady=false"
+        );
+
+        let workspace_id = fixture_workspace(&state, "t6-corrupt").await;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            status_with_embedder(
+                &state,
+                json!({ "workspaceId": workspace_id }),
+                Arc::clone(&deleted_embedder),
+            ),
+        )
+        .await
+        .expect("status must not hang with a missing model cache")
+        .expect("status handler itself must not error even with a missing model");
+        assert_eq!(status["modelReady"], json!(false));
+        println!("[T6] deleted cache: modelReady=false, status did not error or hang");
+
+        // ── restore, then CORRUPT one blob file in place (files present,
+        // content garbage) ──────────────────────────────────────────────
+        std::fs::rename(&backup, &cache_dir).expect("restore cache dir");
+        let blobs_dir = repo_dir.join("blobs");
+        let blob = std::fs::read_dir(&blobs_dir)
+            .expect("read blobs dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.is_file() && !path.to_string_lossy().ends_with(".lock"))
+            .expect("at least one non-lock blob file in the warm cache");
+        let original = std::fs::read(&blob).expect("read original blob");
+        std::fs::write(&blob, b"not a valid onnx model, corrupted for T6 validation")
+            .expect("corrupt blob");
+
+        let corrupt_embedder: Arc<dyn Embedder> = Arc::new(
+            crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir.clone()),
+        );
+        // Documented behavior (is_model_downloaded is an existence check, not
+        // an integrity check): files are present, so a corrupt-but-present
+        // cache still reports ready. The real failure surfaces on the next
+        // embed call, checked below — NOT as modelReady=false.
+        assert!(
+            corrupt_embedder.is_ready(),
+            "corrupt-but-present cache still reports ready (by design, see is_model_downloaded doc)"
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            remember_with_embedder(
+                &state,
+                json!({ "workspaceId": workspace_id, "text": "should fail cleanly" }),
+                Arc::clone(&corrupt_embedder),
+                Arc::clone(&cache),
+            ),
+        )
+        .await
+        .expect("remember against a corrupted model must not hang");
+        assert!(
+            result.is_err(),
+            "a corrupted model file must fail loudly, not silently succeed"
+        );
+        println!(
+            "[T6] corrupted blob: remember failed cleanly (not hung) with {:?}",
+            result.unwrap_err()
+        );
+
+        // Leave the fixture cache dir valid for a later manual rerun.
+        std::fs::write(&blob, original).expect("restore original blob");
+    }
 }
