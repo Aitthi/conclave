@@ -284,6 +284,45 @@
   }
 }
 
+/* ─── Memory knowledge-graph sliders (Graph settings panel) ──────────
+   Ported from the Arta proto (.arta/proto/theme.css @ 73ac6fa · B3). Proto
+   tokens are remapped to the app's flipping semantic tokens: the track rides
+   `--color-overlay` (inverts with the theme), the thumb border is the raised
+   surface, and the accent thumb is unchanged. Native range inputs can't be
+   styled inline, so this is the one proto class that has to live in CSS. */
+.gr-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-overlay) 10%, transparent);
+  outline: none;
+  cursor: pointer;
+}
+.gr-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  border: 2px solid var(--color-surface-raised);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 40%, transparent);
+  transition: filter 0.12s;
+}
+.gr-range::-webkit-slider-thumb:hover {
+  filter: brightness(1.15);
+}
+.gr-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  border: 2px solid var(--color-surface-raised);
+  cursor: pointer;
+}
+
 /* ─── Base Styles ────────────────────────────────────────────────── */
 
 body,

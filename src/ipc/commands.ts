@@ -15,6 +15,8 @@ import type {
   Tool,
   Skill,
   Role,
+  MemoryGraphNode,
+  MemoryGraphEdge,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -221,6 +223,13 @@ export interface Commands {
     req: { instanceId: string; snapshotId: string };
     res: { status: "sent"; instanceId: string };
   };
+  // Knowledge-graph over the workspace semantic memory store. Nodes are chunks
+  // (keyed by UUID); edges (`wiki`/`related`) are derived backend-side at query
+  // time (ADR 0007). Empty store → `{ nodes: [], edges: [] }`, never an error.
+  "memory.graph": {
+    req: { workspaceId: string };
+    res: { nodes: MemoryGraphNode[]; edges: MemoryGraphEdge[] };
+  };
   "fusion.run": {
     req: { orchestratorId: string; prompt: string };
     res: FusionRun;
@@ -337,6 +346,9 @@ export const ipc = {
     resume: (req: Commands["snapshot.resume"]["req"]) => call("snapshot.resume", req),
     delete: (req: Commands["snapshot.delete"]["req"]) => call("snapshot.delete", req),
     send: (req: Commands["snapshot.send"]["req"]) => call("snapshot.send", req),
+  },
+  memory: {
+    graph: (req: Commands["memory.graph"]["req"]) => call("memory.graph", req),
   },
   fusion: {
     run: (req: Commands["fusion.run"]["req"]) => call("fusion.run", req),
