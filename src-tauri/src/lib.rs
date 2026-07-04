@@ -53,6 +53,13 @@ pub fn run() {
                     engine::uds::socket_path(),
                 ));
             }
+
+            // Task stall + challenge-default timer (ADR 0008 Lane B) — a
+            // single app-wide background loop, same spawn idiom as the UDS
+            // server above.
+            let timer_state = std::sync::Arc::clone(&state);
+            tauri::async_runtime::spawn(engine::runtime::task_timer::run(timer_state));
+
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
