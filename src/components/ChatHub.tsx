@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MessageSquare, MoveRight, Search, X } from "lucide-react";
+import { MessageSquare, Search, X } from "lucide-react";
 import { timeHint } from "../lib/timeHint";
 import { ClampText } from "./ClampText";
 import { derivePairs, pairKeyOf } from "../lib/chatPairs";
+import { clockLabel, dayLabel, group } from "../lib/chatFeed";
 import { useWorkspaceChat, type AgentIdentity } from "../lib/useWorkspaceChat";
 
 // ---------------------------------------------------------------------------
@@ -24,8 +25,13 @@ interface ChatHubProps {
 const NEAR_BOTTOM_PX = 40;
 
 /** Small colored avatar square, initial-letter, matching Blackboard's. */
-function Avatar({ identity, size = 5 }: { identity: AgentIdentity; size?: 4 | 5 }) {
-  const cls = size === 5 ? "w-5 h-5 text-[10px] rounded-md" : "w-4 h-4 text-[9px] rounded-[5px]";
+function Avatar({ identity, size = 5 }: { identity: AgentIdentity; size?: 4 | 5 | 7 }) {
+  const cls =
+    size === 7
+      ? "w-7 h-7 text-[12px] rounded-[8px]"
+      : size === 5
+        ? "w-5 h-5 text-[10px] rounded-md"
+        : "w-4 h-4 text-[9px] rounded-[5px]";
   return (
     <span
       className={`${cls} text-white grid place-items-center font-bold shrink-0`}
@@ -65,6 +71,7 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
         identityOf(m.toInstanceId).name.toLowerCase().includes(q),
     );
   }, [messages, selectedPair, search, identityOf]);
+  const groups = useMemo(() => group(visible), [visible]);
 
   // ── Auto-scroll (near-bottom guarded, ported from the drawer timeline). ────
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -115,7 +122,7 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-2 bg-overlay/[0.05] rounded-lg px-2.5 h-7 w-44">
+          <div className="flex items-center gap-2 bg-overlay/[0.05] rounded-lg px-2.5 h-7 w-52">
             <Search className="w-[13px] h-[13px] text-text-muted shrink-0" />
             <input
               value={search}
@@ -136,7 +143,7 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
 
       <div className="flex-1 flex min-h-0">
         {/* ── Sidebar: All + conversation pairs, most-recent first. ── */}
-        <aside className="w-[220px] border-r border-overlay/[0.06] overflow-y-auto scroll-thin p-2 space-y-0.5 shrink-0">
+        <aside className="w-[240px] border-r border-overlay/[0.06] overflow-y-auto scroll-thin p-2 space-y-0.5 shrink-0">
           <button
             onClick={() => setSelectedPair(null)}
             className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors ${
@@ -147,7 +154,13 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
               <MessageSquare className="w-3 h-3" />
             </div>
             <span className="text-[12px] font-semibold">All</span>
+            <span className="ml-auto text-[10px] text-text-tertiary font-mono tabular-nums">
+              {messages.length}
+            </span>
           </button>
+          <div className="px-2 pt-2 pb-1 text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+            Conversations
+          </div>
           {pairs.map((p) => (
             <button
               key={p.key}
@@ -185,31 +198,70 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
               {search.trim() ? "No messages match the search" : "No messages yet"}
             </div>
           ) : selectedPair === null ? (
-            // All view — a feed: every row left-aligned with sender → recipient
-            // chrome (a hub has no "self", so bubble sides would be a lie).
-            visible.map((m) => {
-              const from = identityOf(m.fromInstanceId);
-              const to = identityOf(m.toInstanceId);
+            // All view — a feed: sender-group headers, day dividers, the
+            // recipient carried by the chip below each bubble (a hub has no
+            // "self", so bubble sides would be a lie).
+            groups.map((g, gi) => {
+              const from = identityOf(g.fromInstanceId);
+              const prevGroup = groups[gi - 1];
+              const showDivider =
+                gi === 0 ||
+                (prevGroup &&
+                  dayLabel(prevGroup.items[0].createdAt) !== dayLabel(g.items[0].createdAt));
               return (
-                <div key={m.id} className="flex gap-2.5">
-                  <Avatar identity={from} />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 text-[10.5px] mb-0.5">
-                      <span className="font-semibold text-text-secondary">{from.name}</span>
-                      <MoveRight className="w-3 h-3 text-text-tertiary shrink-0" />
-                      <span className="font-semibold text-text-secondary">{to.name}</span>
-                      <span className="text-[9.5px] text-text-tertiary ml-auto shrink-0">
-                        {timeHint(m.createdAt)}
+                <div key={`${g.fromInstanceId}-${g.items[0].id}`}>
+                  {showDivider && (
+                    <div className="flex items-center gap-2 justify-center py-1">
+                      <span className="h-px flex-1 bg-overlay/[0.06]" />
+                      <span className="text-[10.5px] text-text-tertiary font-mono tabular-nums">
+                        {dayLabel(g.items[0].createdAt)}
                       </span>
-                      {m.status === "queued" && (
-                        <span className="text-[9.5px] text-warning shrink-0">queued</span>
-                      )}
+                      <span className="h-px flex-1 bg-overlay/[0.06]" />
                     </div>
-                    <div
-                      className="rounded-xl bg-overlay/[0.05] px-3 py-2 text-[12px] text-text-primary"
-                      style={{ borderLeft: `2px solid ${from.color}` }}
-                    >
-                      <ClampText text={m.text} outgoing={false} lines={12} />
+                  )}
+                  <div className="flex gap-2.5">
+                    <Avatar identity={from} size={7} />
+                    <div className="min-w-0 flex flex-col gap-1 items-start" style={{ maxWidth: "72%" }}>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-[12.5px] font-semibold text-text-primary">
+                          {from.name}
+                        </span>
+                        {from.role && <span className="text-[10px] text-text-tertiary">{from.role}</span>}
+                        <span className="text-[10px] text-text-tertiary font-mono tabular-nums">
+                          {clockLabel(g.items[0].createdAt)}
+                        </span>
+                      </div>
+                      {g.items.map((m) => {
+                        const to = identityOf(m.toInstanceId);
+                        return (
+                          <div key={m.id} className="flex flex-col gap-0.5 items-start self-stretch">
+                            <div
+                              className="rounded-md border border-overlay/[0.06] bg-surface-raised px-[0.72rem] py-2 text-[0.84rem] leading-[1.5] text-text-primary"
+                              title={`→ ${to.name}`}
+                            >
+                              <ClampText text={m.text} outgoing={false} lines={12} />
+                            </div>
+                            <div className="flex items-center gap-1 self-stretch">
+                              {m.status === "queued" && (
+                                <span className="text-[9px] text-warning">queued</span>
+                              )}
+                              {m.autoSubmitted && (
+                                <span className="text-[9px] text-text-tertiary">injected</span>
+                              )}
+                              <span className="text-[10px] text-text-tertiary font-mono tabular-nums">
+                                {clockLabel(m.createdAt)}
+                              </span>
+                              <span
+                                className="ml-auto flex items-center gap-1 text-[10px] text-text-tertiary"
+                                title={`→ ${to.name}`}
+                              >
+                                <Avatar identity={to} size={4} />
+                                <span>{to.name}</span>
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -217,44 +269,53 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
             })
           ) : (
             // Pair view — a conversation: stable side per participant
-            // (pair-key order: lexicographically-first id on the left).
-            visible.map((m) => {
-              const onLeft = m.fromInstanceId === leftIdOfPair;
-              const from = identityOf(m.fromInstanceId);
+            // (pair-key order: lexicographically-first id on the left). No
+            // recipient chip — the pair implies it.
+            groups.map((g, gi) => {
+              const onLeft = g.fromInstanceId === leftIdOfPair;
+              const from = identityOf(g.fromInstanceId);
+              const prevGroup = groups[gi - 1];
+              const showDivider =
+                gi === 0 ||
+                (prevGroup &&
+                  dayLabel(prevGroup.items[0].createdAt) !== dayLabel(g.items[0].createdAt));
               return (
-                <div
-                  key={m.id}
-                  className={`flex flex-col ${onLeft ? "items-start" : "items-end"}`}
-                >
-                  <div className="flex items-center gap-1 mb-0.5 px-0.5 max-w-[72%]">
-                    <span
-                      className="w-1.5 h-1.5 rounded-full shrink-0"
-                      style={{ backgroundColor: from.color }}
-                    />
-                    <span className="text-[10px] font-semibold text-text-secondary truncate">
-                      {from.name}
-                    </span>
-                  </div>
-                  <div
-                    className={`max-w-[72%] rounded-2xl bg-overlay/[0.05] px-3 py-2 text-[12px] text-text-primary ${
-                      onLeft ? "rounded-bl-md" : "rounded-br-md"
-                    }`}
-                    style={
-                      onLeft
-                        ? { borderLeft: `2px solid ${from.color}` }
-                        : { borderRight: `2px solid ${from.color}` }
-                    }
-                  >
-                    <ClampText text={m.text} outgoing={false} lines={12} />
-                  </div>
-                  <div
-                    className={`flex items-center gap-1.5 mt-0.5 px-0.5 text-[9px] text-text-tertiary ${
-                      onLeft ? "" : "flex-row-reverse"
-                    }`}
-                  >
-                    <span>{timeHint(m.createdAt)}</span>
-                    {m.status === "queued" && <span className="text-warning">queued</span>}
-                    {m.autoSubmitted && <span>injected</span>}
+                <div key={`${g.fromInstanceId}-${g.items[0].id}`}>
+                  {showDivider && (
+                    <div className="flex items-center gap-2 justify-center py-1">
+                      <span className="h-px flex-1 bg-overlay/[0.06]" />
+                      <span className="text-[10.5px] text-text-tertiary font-mono tabular-nums">
+                        {dayLabel(g.items[0].createdAt)}
+                      </span>
+                      <span className="h-px flex-1 bg-overlay/[0.06]" />
+                    </div>
+                  )}
+                  <div className={`flex flex-col gap-1 ${onLeft ? "items-start" : "items-end"}`}>
+                    <div className="flex items-center gap-1.5">
+                      <Avatar identity={from} size={5} />
+                      <span className="text-[11px] font-semibold text-text-primary">{from.name}</span>
+                      <span className="text-[10px] text-text-tertiary font-mono tabular-nums">
+                        {clockLabel(g.items[0].createdAt)}
+                      </span>
+                    </div>
+                    {g.items.map((m) => (
+                      <div
+                        key={m.id}
+                        className={`flex flex-col gap-0.5 ${onLeft ? "items-start" : "items-end"}`}
+                        style={{ maxWidth: "72%" }}
+                      >
+                        <div className="rounded-md border border-overlay/[0.06] bg-surface-raised px-[0.72rem] py-2 text-[0.84rem] leading-[1.5] text-text-primary">
+                          <ClampText text={m.text} outgoing={false} lines={12} />
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[9px] text-text-tertiary">
+                          {m.status === "queued" && <span className="text-warning">queued</span>}
+                          {m.autoSubmitted && <span>injected</span>}
+                          <span className="text-[10px] font-mono tabular-nums">
+                            {clockLabel(m.createdAt)}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               );
