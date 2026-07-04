@@ -4,6 +4,8 @@ pub mod cli;
 pub mod fusion;
 pub mod instance;
 pub mod memory;
+#[cfg(test)]
+mod memory_bench;
 pub mod message;
 pub mod provider;
 pub mod role;
