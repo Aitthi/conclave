@@ -282,12 +282,14 @@ async fn run_bench() -> BenchResult {
 
 // --- Pinned regression floors -------------------------------------------------
 //
-// Pure-cosine baseline (Task 1). All six semantic queries rank #1; every
-// exact-token query fails (five fall outside the top ten, q10 lands at rank 7
-// by chance) — 6/12 in the top five. Do not lower without a per-query
-// justification recorded in the task notes.
-const BASELINE_R_AT_5: f64 = 0.5;
-const BASELINE_MRR: f64 = 0.5104;
+// Hybrid BM25+vector floor (Task 2). The keyword stage lifts every exact-token
+// gold fact to rank #1 — R@5 0.50 → 1.00, MRR 0.5104 → 1.00 vs the pure-cosine
+// baseline (Task 1). Pinned at the ceiling: any ranker that drops an
+// exact-token query back below the top five (e.g. deleting the BM25 term)
+// fails this floor. Do not lower without a per-query justification recorded in
+// the task notes.
+const BASELINE_R_AT_5: f64 = 1.0;
+const BASELINE_MRR: f64 = 1.0;
 
 #[tokio::test]
 async fn retrieval_regression_floor() {
@@ -314,6 +316,23 @@ async fn retrieval_regression_floor() {
                 Some(0),
                 "semantic query {} must rank its gold fact first",
                 outcome.qid
+            );
+        }
+    }
+
+    // Discrimination: the hybrid contract is that every exact-token query
+    // retrieves its gold fact into the top five. Under pure cosine these rank
+    // by noise (five of six fall outside the top ten) — so deleting the BM25
+    // term fails this assertion. This is what makes the bench a real guard and
+    // not a rubber stamp.
+    for outcome in &result.per_query {
+        if outcome.kind == QueryKind::ExactToken {
+            assert!(
+                matches!(outcome.rank, Some(rank) if rank < 5),
+                "exact-token query {} must retrieve its gold fact into the top five \
+                 (hybrid keyword stage); got rank {:?}",
+                outcome.qid,
+                outcome.rank
             );
         }
     }

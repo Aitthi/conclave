@@ -1,9 +1,17 @@
-//! Explicit workspace-memory command handlers and exact vector search.
+//! Explicit workspace-memory command handlers and hybrid vector+keyword search.
+//!
+//! Retrieval is two-stage ([`score_cached`]): exact brute-force cosine pulls
+//! the top candidates, then each is re-scored as `0.6·cosine + 0.4·bm25_norm`
+//! (Okapi BM25 over the candidate set only) and the top `limit` returned. Pure
+//! cosine underweights exact tokens — UUIDs, error codes, crate names — which
+//! are the shape of our memories; the keyword term lifts those. The fused
+//! `score` stays a single f32, so the result shape is unchanged.
 //!
 //! Embedding inference is deliberately separated from persistence/scoring:
 //! the production wrappers obtain vectors from the runtime embedder, while
 //! [`remember_with_embedding`] and [`search_with_embedding`] provide the
-//! deterministic seam used by this lane's tests and benchmarks.
+//! deterministic seam used by this module's tests and the retrieval bench
+//! ([`super::memory_bench`]).
 
 use crate::engine::{
     repo::{
@@ -34,6 +42,21 @@ const MAX_CACHED_WORKSPACES: usize = 4;
 const RELATED_SIMILARITY_THRESHOLD: f32 = 0.45;
 /// Per-node cap on `related` edges before threshold filtering.
 const RELATED_TOP_K: usize = 3;
+
+/// Hybrid-rank fusion weights (task `memory-hybrid-bench`). Pure cosine
+/// underweights exact tokens — proper nouns, UUIDs, error codes, crate names —
+/// which is the shape of our memories, so search re-ranks the cosine
+/// candidates with a keyword term. `0.6/0.4` are MemPalace's defaults, adopted
+/// as a starting point and validated by the retrieval bench
+/// (`commands/memory_bench.rs`); they are constants, not config surface.
+const COSINE_WEIGHT: f32 = 0.6;
+const BM25_WEIGHT: f32 = 0.4;
+/// Okapi BM25 term-frequency saturation (`k1`) and length-normalization (`b`).
+const BM25_K1: f32 = 1.2;
+const BM25_B: f32 = 0.75;
+/// Stage-1 candidate floor: pull at least this many cosine neighbours (or
+/// `4·limit` when larger) into the keyword re-rank, capped at the corpus size.
+const HYBRID_CANDIDATE_FLOOR: usize = 50;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -575,12 +598,27 @@ async fn load_workspace_cache(
     }
 }
 
-fn score_cached(
+/// Lowercase, split on non-alphanumeric boundaries, drop empties. Deliberately
+/// dumb and deterministic — no stemming, no stopword list — so `SqlSafeStr`,
+/// `RFC3339`, and `q8` survive as single matchable tokens.
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Stage 1 of the hybrid rank: exact brute-force cosine over every row, keeping
+/// the `target` best as re-rank candidates. Bounded heap holds memory to
+/// `target`; ties break on chunk id so the candidate set is deterministic. A
+/// non-finite score is a hard error, as it was for the pre-hybrid path. Returns
+/// candidates already sorted best-cosine-first.
+fn cosine_candidates(
     query: &[f32],
     rows: &[CachedMemory],
-    limit: usize,
-) -> Result<Vec<SearchHit>, AppError> {
-    let mut heap = BinaryHeap::<Reverse<RankedHit>>::with_capacity(limit + 1);
+    target: usize,
+) -> Result<Vec<RankedHit>, AppError> {
+    let mut heap = BinaryHeap::<Reverse<RankedHit>>::with_capacity(target + 1);
     for (row_index, row) in rows.iter().enumerate() {
         let score = query
             .iter()
@@ -594,7 +632,7 @@ fn score_cached(
             )));
         }
 
-        let should_insert = heap.len() < limit
+        let should_insert = heap.len() < target
             || heap.peek().is_some_and(|worst| {
                 score.total_cmp(&worst.0.score) == Ordering::Greater
                     || (score.total_cmp(&worst.0.score) == Ordering::Equal && row.id < worst.0.id)
@@ -605,7 +643,7 @@ fn score_cached(
                 score,
                 row_index,
             };
-            if heap.len() == limit {
+            if heap.len() == target {
                 heap.pop();
             }
             heap.push(Reverse(candidate));
@@ -614,14 +652,132 @@ fn score_cached(
 
     let mut ranked: Vec<RankedHit> = heap.into_iter().map(|Reverse(ranked)| ranked).collect();
     ranked.sort_unstable_by(|left, right| right.cmp(left));
-    Ok(ranked
+    Ok(ranked)
+}
+
+/// Okapi BM25 relevance of one candidate document to the query terms, computed
+/// over the candidate set only (no global keyword index). `document_frequency`
+/// counts how many candidates contain each term; `average_length` and
+/// `candidate_count` describe the candidate set. Returns the raw (un-normalized)
+/// score.
+fn bm25_score(
+    document: &[String],
+    query_terms: &[String],
+    document_frequency: &HashMap<&str, usize>,
+    average_length: f32,
+    candidate_count: f32,
+) -> f32 {
+    if document.is_empty() || query_terms.is_empty() {
+        return 0.0;
+    }
+    let length = document.len() as f32;
+    let average_length = if average_length > 0.0 { average_length } else { 1.0 };
+    query_terms
+        .iter()
+        .map(|term| {
+            let term_frequency = document
+                .iter()
+                .filter(|token| token.as_str() == term.as_str())
+                .count() as f32;
+            if term_frequency == 0.0 {
+                return 0.0;
+            }
+            let df = *document_frequency.get(term.as_str()).unwrap_or(&0) as f32;
+            // BM25+ IDF: the `+1` inside the log keeps it non-negative even when
+            // a term appears in more than half the candidate set.
+            let idf = ((candidate_count - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let denominator =
+                term_frequency + BM25_K1 * (1.0 - BM25_B + BM25_B * length / average_length);
+            idf * (term_frequency * (BM25_K1 + 1.0)) / denominator
+        })
+        .sum()
+}
+
+/// Two-stage hybrid rank. Stage 1 pulls the top cosine candidates; stage 2
+/// re-scores each as `0.6·cosine + 0.4·bm25_norm` (BM25 normalized to `[0,1]`
+/// by the max over the candidate set) and returns the top `limit`. Ties break
+/// on chunk id, so the same store and query always yield the same ranking. The
+/// returned `score` is the single fused value — the search result shape is
+/// unchanged from the pre-hybrid pure-cosine path.
+fn score_cached(
+    query: &[f32],
+    query_text: &str,
+    rows: &[CachedMemory],
+    limit: usize,
+) -> Result<Vec<SearchHit>, AppError> {
+    let target = (4 * limit).max(HYBRID_CANDIDATE_FLOOR).min(rows.len());
+    let candidates = cosine_candidates(query, rows, target)?;
+
+    let query_terms: Vec<String> = {
+        let mut terms = tokenize(query_text);
+        terms.sort();
+        terms.dedup();
+        terms
+    };
+    let documents: Vec<Vec<String>> = candidates
+        .iter()
+        .map(|candidate| tokenize(&rows[candidate.row_index].text))
+        .collect();
+    let candidate_count = candidates.len() as f32;
+    let average_length = if candidates.is_empty() {
+        0.0
+    } else {
+        documents.iter().map(Vec::len).sum::<usize>() as f32 / candidate_count
+    };
+    let mut document_frequency: HashMap<&str, usize> = HashMap::new();
+    for term in &query_terms {
+        let occurrences = documents
+            .iter()
+            .filter(|document| document.iter().any(|token| token == term))
+            .count();
+        if occurrences > 0 {
+            document_frequency.insert(term.as_str(), occurrences);
+        }
+    }
+
+    let raw_bm25: Vec<f32> = documents
+        .iter()
+        .map(|document| {
+            bm25_score(
+                document,
+                &query_terms,
+                &document_frequency,
+                average_length,
+                candidate_count,
+            )
+        })
+        .collect();
+    let max_bm25 = raw_bm25.iter().copied().fold(0.0f32, f32::max);
+
+    let mut fused: Vec<(usize, String, f32)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(candidate_index, candidate)| {
+            let bm25_norm = if max_bm25 > 0.0 {
+                raw_bm25[candidate_index] / max_bm25
+            } else {
+                0.0
+            };
+            let score = COSINE_WEIGHT * candidate.score + BM25_WEIGHT * bm25_norm;
+            (candidate.row_index, candidate.id.clone(), score)
+        })
+        .collect();
+    fused.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+
+    Ok(fused
         .into_iter()
-        .map(|ranked| {
-            let row = &rows[ranked.row_index];
+        .take(limit)
+        .map(|(row_index, _, score)| {
+            let row = &rows[row_index];
             SearchHit {
                 id: row.id.clone(),
                 text: row.text.clone(),
-                score: ranked.score,
+                score,
                 source_kind: row.source_kind.clone(),
                 source_id: row.source_id.clone(),
                 created_at: row.created_at.clone(),
@@ -630,11 +786,13 @@ fn score_cached(
         .collect())
 }
 
-/// Exact top-k search for a precomputed query embedding.
+/// Hybrid top-k search for a precomputed query embedding.
 ///
 /// Repository reads remain async and workspace-scoped. Each bounded page is
-/// moved to `spawn_blocking` for BLOB decode, and cached dot-product scoring
-/// also runs there, keeping CPU-heavy work off Tokio executor threads.
+/// moved to `spawn_blocking` for BLOB decode, and the two-stage cosine+BM25
+/// scoring ([`score_cached`]) also runs there, keeping CPU-heavy work off
+/// Tokio executor threads. The raw query text is threaded through for the
+/// keyword stage.
 async fn search_with_embedding(
     state: &AppState,
     req: SearchReq,
@@ -660,11 +818,13 @@ async fn search_with_embedding(
                 .await?;
         let generation = cached.generation;
         let query = query.clone();
-        let hits = tokio::task::spawn_blocking(move || score_cached(&query, &cached.rows, limit))
-            .await
-            .map_err(|error| {
-                AppError::Internal(format!("memory search worker failed: {error}"))
-            })??;
+        let query_text = req.query.clone();
+        let hits =
+            tokio::task::spawn_blocking(move || score_cached(&query, &query_text, &cached.rows, limit))
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!("memory search worker failed: {error}"))
+                })??;
 
         if cache.generation(&req.workspace_id) == generation {
             return Ok(json!({ "hits": hits }));
@@ -1545,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_heap_matches_full_sort_reference() {
+    fn cosine_candidates_bounded_heap_matches_full_sort_reference() {
         let query = fake_embedding("query", DIMENSION);
         let rows: Vec<CachedMemory> = (0..50)
             .map(|index| {
@@ -1578,12 +1738,59 @@ mod tests {
                 .then_with(|| left.0.cmp(&right.0))
         });
 
-        let actual: Vec<(String, f32)> = score_cached(&query, &rows, 7)
-            .expect("score")
+        let actual: Vec<(String, f32)> = cosine_candidates(&query, &rows, 7)
+            .expect("cosine candidates")
             .into_iter()
             .map(|hit| (hit.id, hit.score))
             .collect();
         assert_eq!(actual, expected[..7]);
+    }
+
+    fn cached_row(id: &str, text: &str, vector: Vec<f32>) -> CachedMemory {
+        CachedMemory {
+            id: id.into(),
+            text: text.into(),
+            vector,
+            source_kind: "manual".into(),
+            source_id: None,
+            created_at: "2026-07-04T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn hybrid_lifts_token_match_above_higher_cosine() {
+        // `higher` wins on pure cosine (dot 1.0 vs 0.6) but shares no query
+        // token; `lower` shares the rare token, so the BM25 stage must flip
+        // them: fused(lower) = 0.6·0.6 + 0.4·1.0 = 0.76 > fused(higher) = 0.6.
+        let query = vec![1.0f32, 0.0];
+        let rows = vec![
+            cached_row("higher", "beta zebra", vec![1.0, 0.0]),
+            cached_row("lower", "alpha unicorn", vec![0.6, 0.8]),
+        ];
+        let hits = score_cached(&query, "unicorn", &rows, 2).expect("hybrid score");
+        assert_eq!(hits[0].id, "lower", "token match must outrank higher cosine");
+        assert_eq!(hits[1].id, "higher");
+        assert!(hits[0].score > hits[1].score);
+
+        // With no shared token the keyword term is zero, so pure cosine order
+        // stands (fused = 0.6·cosine, a monotonic scaling).
+        let plain = score_cached(&query, "gamma", &rows, 2).expect("hybrid score");
+        assert_eq!(plain[0].id, "higher");
+        assert_eq!(plain[1].id, "lower");
+    }
+
+    #[test]
+    fn hybrid_ranking_is_deterministic() {
+        let query = vec![0.5f32, 0.5];
+        let rows = vec![
+            cached_row("a", "shared token alpha", vec![1.0, 0.0]),
+            cached_row("b", "shared token beta", vec![0.0, 1.0]),
+            cached_row("c", "unrelated gamma", vec![0.5, 0.5]),
+        ];
+        let first = score_cached(&query, "shared token", &rows, 3).expect("first");
+        let second = score_cached(&query, "shared token", &rows, 3).expect("second");
+        let ids = |hits: &[SearchHit]| hits.iter().map(|h| h.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&first), ids(&second), "same store + query ⇒ same ranking");
     }
 
     async fn insert_benchmark_fixture(
