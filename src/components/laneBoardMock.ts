@@ -1,13 +1,15 @@
 // ── Lane Board development mock (ADR 0008, Lane D) ──────────────────────────
 // Returns the EXACT frozen wire shape (plan §Frozen > Response shapes) so the
-// LaneBoard renders real-looking data before Lane A's `task.*` handlers merge.
-// At integration this whole module is deleted and the component swaps to
-// `ipc.task.list` / `ipc.task.get`. Nothing here touches the backend.
+// LaneBoard renders real-looking data. Lane A's real `task.*` handlers are live;
+// the board reads `ipc.task.list` and only falls back to this mock in plain
+// `vite` dev (no Tauri backend) — see LaneBoard.load(). Nothing here touches the
+// backend.
 //
-// Contract parity with the lead's frozen rulings (@ 5e3e27e + the badge ruling):
-//   • task.list → TaskListRow[]: frozen Task + `eventCount` + `lastGates[]` + `challenges[]`
-//     (newest gate only, omitted when none) + `challenges` (always [], deadlineAt
-//     ISO) — optional task fields are OMITTED when absent, never null.
+// Contract parity with the lead's frozen rulings (@ 5e3e27e + the badge ruling
+// amended @ 066e199):
+//   • task.list → TaskListRow[]: frozen Task + `eventCount` + `lastGates` (newest
+//     gate per distinct cmd, cap 6, always []) + `challenges` (always [],
+//     deadlineAt ISO) — optional task fields are OMITTED when absent, never null.
 //   • task.get  → { task, events } with events sorted `createdAt` DESC, each
 //     payload a parsed JSON OBJECT.
 // Data mirrors the canon's dogfood set (.arta/proto/lib/laneBoard.ts) so the dev
