@@ -1011,4 +1011,17 @@ mod tests {
         let value = result.expect("exec ws list should succeed");
         assert!(value.is_array(), "workspace.list returns an array: {value}");
     }
+
+    #[tokio::test]
+    async fn exec_memory_status_returns_ok_object() {
+        let state = AppState::for_tests().await;
+        let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+
+        let result = exec(&state, json!({ "argv": ["memory", "status", &ws.id] })).await;
+        let value = result.expect("exec memory status should succeed");
+        assert!(value.is_object(), "memory.status returns an object: {value}");
+        assert_eq!(value["chunks"], json!(0));
+    }
 }

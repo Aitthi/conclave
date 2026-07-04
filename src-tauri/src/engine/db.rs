@@ -158,6 +158,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 11 {
+        sqlx::raw_sql(include_str!("migrations/0011_seed_memory_tool.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 11;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -204,7 +213,7 @@ mod tests {
         assert_eq!(count, 22, "expected 22 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 10.
+    /// Running migrate twice must not error and must leave user_version == 11.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -237,7 +246,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 10, "user_version should be 10");
+        assert_eq!(version, 11, "user_version should be 11");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -248,6 +257,49 @@ mod tests {
         assert_eq!(
             tool_count, 1,
             "seed must not duplicate after idempotent run"
+        );
+    }
+
+    /// Structural guard (global constraint 9, "Ordering rule" — added after a
+    /// migration-sequencing near-miss flagged during memory-v1 T5): migration
+    /// files must be numbered contiguously from 0001 with NO gaps, and a
+    /// fresh `migrate()` must land `user_version` at exactly the max file
+    /// number. A skipped-version state (e.g. a migration merged before its
+    /// predecessor's `if version < N` block landed in `db.rs`) fails THIS
+    /// gate instead of silently shipping — see the ordering-rule doc above.
+    #[tokio::test]
+    async fn migration_files_are_contiguous_and_migrate_reaches_the_max() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/migrations");
+        let mut numbers: Vec<u32> = std::fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .filter_map(|name| name.get(0..4).and_then(|prefix| prefix.parse::<u32>().ok()))
+            .collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+
+        assert!(!numbers.is_empty(), "no migration files found in {dir:?}");
+        assert_eq!(numbers[0], 1, "migrations must start at 0001");
+        for pair in numbers.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 1,
+                "migration numbering has a gap between {:04} and {:04} — a merged \
+                 migration file with no db.rs version<N block, or vice versa",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        let max_number = *numbers.last().expect("checked non-empty above");
+        let pool = connect_in_memory().await;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .expect("user_version query failed");
+        assert_eq!(
+            version, i64::from(max_number),
+            "a fresh migrate() must land user_version at the highest migration file number"
         );
     }
 
@@ -273,6 +325,34 @@ mod tests {
             .expect("second migrate must be a no-op");
 
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tool WHERE id = 'tool-conclave'")
+            .fetch_one(&pool)
+            .await
+            .expect("count query failed");
+        assert_eq!(count, 1, "INSERT OR IGNORE must not duplicate the row");
+    }
+
+    /// Migration 0011 seeds exactly one `tool-memory` core row (independently
+    /// toggleable per agent, unlike `tool-conclave`'s whole-cli-surface row);
+    /// running migrate again leaves exactly one row.
+    #[tokio::test]
+    async fn migrate_seeds_core_memory_tool() {
+        let pool = connect_in_memory().await;
+
+        let (id, is_core, kind): (String, i64, String) =
+            sqlx::query_as("SELECT id, is_core, kind FROM tool WHERE id = 'tool-memory'")
+                .fetch_one(&pool)
+                .await
+                .expect("memory tool row should exist after migration");
+
+        assert_eq!(id, "tool-memory");
+        assert_eq!(is_core, 1, "is_core must be 1");
+        assert_eq!(kind, "builtin");
+
+        migrate(&pool)
+            .await
+            .expect("second migrate must be a no-op");
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tool WHERE id = 'tool-memory'")
             .fetch_one(&pool)
             .await
             .expect("count query failed");
@@ -362,7 +442,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -453,7 +533,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -562,7 +642,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
