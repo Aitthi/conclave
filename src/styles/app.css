@@ -55,6 +55,9 @@
   --color-status-running: #30d158;
   --color-status-waiting: #ff9f0a;
   --color-status-idle: #c7c7cc;
+  /* Agent actively emitting (R-act-1): yellow-gold amber, deliberately
+     yellower than --color-status-waiting so working never reads as waiting. */
+  --color-status-working: #ffb224;
 
   /* Agent identity colors — stable across themes */
   --color-agent-maestro: #5e5ce6;
@@ -194,49 +197,88 @@
   border-radius: 9999px;
 }
 
-/* Roster agent working-state dot (R-act-1, plan 2026-07-04-agent-activity-
-   indicator, F2 — direction from Arta's proto b9ab709). A steady core (the
-   existing status dot, colored via inline style) plus a slow expanding halo
-   for an agent that emitted output within the last 5s. `color: currentColor`
-   on the dot's own inline style feeds the halo, so it matches whichever
-   status color is already showing (running=green, waiting=orange) rather
-   than a hardcoded hue. No layout shift — the halo is a scaled ::after over
-   the same slot the plain dot already occupies. */
-.roster-dot-working {
-  position: relative;
+/* Roster agent working-state sub-line (R-act-1, plan:working-indicator-
+   restyle, round 2 — human-directed, SUPERSEDES the F2 green-halo dot). The
+   right status dot stays exactly as-is (green running / gray idle / orange
+   waiting) — working is a layered, orthogonal signal: an amber
+   (--color-status-working) sub-line under the name/role, a slow-spinning icon
+   plus a "working" label with a cycling ellipsis. The row expands only while
+   working (grid-rows 0fr → 1fr slide-in) so idle rows stay compact; no
+   permanent reserved blank line under every agent. */
+.roster-working-slot {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.16s ease;
 }
-.roster-dot-working::after {
+.roster-working-slot.is-working {
+  grid-template-rows: 1fr;
+}
+.roster-working {
+  overflow: hidden;
+  min-height: 0;
+}
+.roster-working-content {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding-top: 2px;
+  color: var(--color-status-working);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.roster-working-icon {
+  animation: roster-working-spin 1.6s linear infinite;
+  flex: none;
+}
+/* Variant A (shipped): cycling ellipsis via animated `content` on ::after.
+   Known WebKit risk (risk ledger, plan:working-indicator-restyle) — content-
+   keyframe animation may render static (no dots) in the app's WKWebView.
+   Fidelity bar for whichever variant ships: bb review:working-indicator-
+   gatebar. If smoke shows this static, swap to Variant B (pre-approved,
+   Arta): 3 real dot glyphs, staggered OPACITY-FADE only — never the .typing
+   translateY bob (that reads as chat-typing, wrong glyph) — same reserved
+   1.1ch width so "working" never jitters. */
+.roster-working-label::after {
   content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 9999px;
-  background: currentColor;
-  animation: roster-dot-halo 1.6s ease-out infinite;
-  will-change: transform, opacity;
+  display: inline-block;
+  width: 1.1ch;
+  text-align: left;
+  animation: roster-working-dots 1.5s infinite;
 }
-@keyframes roster-dot-halo {
+@keyframes roster-working-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes roster-working-dots {
   0% {
-    transform: scale(1);
-    opacity: 0.5;
+    content: "";
   }
-  70% {
-    transform: scale(2.8);
-    opacity: 0;
+  25% {
+    content: ".";
   }
+  50% {
+    content: "..";
+  }
+  75%,
   100% {
-    transform: scale(2.8);
-    opacity: 0;
+    content: "...";
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  /* Working stays distinguishable from quiet-running WITHOUT motion: the halo
-     stops expanding and becomes a persistent ring around the core instead. */
-  .roster-dot-working::after {
+  /* Working stays legible WITHOUT motion: the icon stops spinning and the
+     label shows a full, static "working..." — colour + icon + text still
+     carry the signal, distinct from the bare waiting dot. */
+  .roster-working-slot {
+    transition: none;
+  }
+  .roster-working-icon {
     animation: none;
-    inset: -3px;
-    background: transparent;
-    border: 1.5px solid currentColor;
-    opacity: 0.62;
+  }
+  .roster-working-label::after {
+    content: "...";
+    animation: none;
   }
 }
 

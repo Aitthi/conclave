@@ -9,6 +9,7 @@ import {
   MessageSquare,
   X,
   Pencil,
+  LoaderCircle,
 } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type {
@@ -112,6 +113,23 @@ function AgentAvatar({ entry, size = "md" }: AgentAvatarProps) {
   );
 }
 
+// Amber "working" sub-line (R-act-1, plan:working-indicator-restyle, round 2 —
+// supersedes the F2 green-halo dot). Rendered for every row; the grid-rows
+// slot only opens while `working` is true, so idle rows stay compact and the
+// slide-in is animated rather than an instant layout jump.
+function WorkLine({ working }: { working: boolean }) {
+  return (
+    <div className={`roster-working-slot${working ? " is-working" : ""}`} aria-hidden={!working}>
+      <div className="roster-working">
+        <div className="roster-working-content">
+          <LoaderCircle className="w-[11px] h-[11px] roster-working-icon" />
+          <span className="roster-working-label">working</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface AgentRowProps {
   entry: RosterEntry;
   isSelected: boolean;
@@ -157,6 +175,7 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
         >
           {entry.meta}
         </div>
+        <WorkLine working={entry.working} />
       </div>
 
       {confirming ? (
@@ -167,29 +186,27 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
             onRemove();
           }}
           disabled={removing}
-          className="text-[10.5px] font-semibold text-white bg-danger px-2 py-0.5 rounded-md shrink-0 disabled:opacity-50"
+          className="text-[10.5px] font-semibold text-white bg-danger px-2 py-0.5 rounded-md shrink-0 disabled:opacity-50 self-start"
           title="Confirm removal from this workspace"
         >
           {removing ? "Removing…" : "Remove"}
         </button>
       ) : (
         <>
-          {/* Status dot — hidden on hover to make room for the remove affordance.
-              Working (R-act-1) adds a halo via `.roster-dot-working`'s ::after,
-              using `color: currentColor` so it matches whatever status color is
-              already showing (running=green, waiting=orange) — no layout shift,
-              no motion for prefers-reduced-motion (persistent ring instead). */}
+          {/* Status dot — unchanged by working (R-act-1 now reads via the amber
+              WorkLine sub-line above, not this dot); still hidden on hover to
+              make room for the remove affordance. `self-start` keeps it pinned
+              to the name line instead of stretching to the row's full height
+              when the WorkLine slot opens. */}
           <span
-            className={`w-2 h-2 rounded-full shrink-0 group-hover:hidden${
-              entry.working ? " roster-dot-working" : ""
-            }`}
-            style={{ backgroundColor: statusColor, color: statusColor }}
+            className="w-2 h-2 rounded-full shrink-0 group-hover:hidden self-start mt-0.5"
+            style={{ backgroundColor: statusColor }}
             role="img"
             aria-label={entry.working ? "working" : entry.status}
           />
           {entry.skillsStale && (
             <span
-              className="text-[9px] font-semibold text-warning bg-warning/[0.1] px-1.5 py-px rounded-md shrink-0"
+              className="text-[9px] font-semibold text-warning bg-warning/[0.1] px-1.5 py-px rounded-md shrink-0 self-start"
               title="This agent's skills changed since it last launched — restart to apply"
             >
               Restart to apply
@@ -200,7 +217,7 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
               e.stopPropagation();
               setConfirming(true);
             }}
-            className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md text-text-muted hover:bg-overlay/[0.06] hover:text-danger shrink-0"
+            className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md text-text-muted hover:bg-overlay/[0.06] hover:text-danger shrink-0 self-start"
             title="Remove from workspace"
             aria-label={`Remove ${entry.name} from workspace`}
           >
