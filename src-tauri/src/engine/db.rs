@@ -149,6 +149,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 10 {
+        sqlx::raw_sql(include_str!("migrations/0010_memory_search_index.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 10;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -195,7 +204,7 @@ mod tests {
         assert_eq!(count, 22, "expected 22 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 9.
+    /// Running migrate twice must not error and must leave user_version == 10.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -228,7 +237,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 9, "user_version should be 9");
+        assert_eq!(version, 10, "user_version should be 10");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -353,7 +362,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -444,7 +453,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -553,6 +562,46 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
+    }
+
+    /// Migration 0010 adds the composite index required for workspace-scoped
+    /// keyset scans without a per-page temporary B-tree sort.
+    #[tokio::test]
+    async fn migrate_adds_memory_search_index() {
+        let pool = connect_in_memory().await;
+
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_memory_chunk_ws_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("index lookup");
+        assert_eq!(index_count, 1, "memory search index must exist");
+
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN \
+             SELECT id, embedding, dimension FROM memory_chunk \
+             WHERE workspace_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT 512",
+        )
+        .bind("workspace")
+        .bind("cursor")
+        .fetch_all(&pool)
+        .await
+        .expect("query plan");
+        let details: Vec<&str> = plan.iter().map(|row| row.3.as_str()).collect();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_memory_chunk_ws_id")),
+            "query must use the composite index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("TEMP B-TREE")),
+            "query must not sort each page into a temp B-tree: {details:?}"
+        );
     }
 }
