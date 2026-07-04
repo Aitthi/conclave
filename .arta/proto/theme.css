@@ -97,6 +97,36 @@ body {
 .presence { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 999px;
   border: 2px solid var(--color-rail); }
 
+/* ---------- roster activity dots (agent working-state) ----------
+   Mirrors the real app Roster's plain 8px status dot (Roster.tsx STATUS_COLOR,
+   NO ring) and adds the WORKING treatment: a steady green core plus a slow
+   expanding halo — an agent that emitted PTY output within the last 5s. Three
+   states read at a glance: working (halo), running-quiet (plain green), idle
+   (plain gray). No layout shift — the halo is a scaled ::after, not box flow.
+   The core sits in the same w-2 h-2 slot the app already renders, so it hides
+   on row-hover with the dot (never fights the remove affordance). */
+.rdot { position: relative; width: 8px; height: 8px; border-radius: 999px; flex: none; }
+.rdot-lg { width: 11px; height: 11px; }               /* legend swatch scale */
+.rdot-running { background: #30d158; }                /* session live, quiet at prompt */
+.rdot-idle    { background: #c7c7cc; }                /* no live session */
+.rdot-waiting { background: #ff9f0a; }                /* awaiting input (unchanged app state) */
+.rdot-working { background: #30d158; }                /* live + actively emitting */
+.rdot-working::after {
+  content: ""; position: absolute; inset: 0; border-radius: 999px;
+  background: #30d158; animation: work-halo 1.6s ease-out infinite; will-change: transform, opacity;
+}
+@keyframes work-halo {
+  0%   { transform: scale(1);   opacity: 0.5; }
+  70%  { transform: scale(2.8); opacity: 0; }
+  100% { transform: scale(2.8); opacity: 0; }
+}
+/* Static-ring rendering for the legend swatch that demonstrates the
+   reduced-motion fallback regardless of the OS setting. */
+.rdot-ring::before {
+  content: ""; position: absolute; inset: -3px; border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, #30d158 62%, transparent);
+}
+
 /* ---------- rows ---------- */
 .row { display: flex; gap: 0.7rem; padding: 0.62rem 0.7rem; border-radius: var(--radius-md); cursor: pointer;
   transition: background .12s ease, box-shadow .12s ease; border: 1px solid transparent; }
@@ -193,4 +223,10 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .row, .seg-btn, .chip, .send { transition: none; }
   .typing i { animation: none; }
+  /* Working stays distinguishable from quiet-running WITHOUT motion: the halo
+     stops expanding and becomes a persistent ring around the green core. */
+  .rdot-working::after {
+    animation: none; inset: -3px; background: transparent; transform: none; opacity: 1;
+    border: 1.5px solid color-mix(in srgb, #30d158 62%, transparent);
+  }
 }

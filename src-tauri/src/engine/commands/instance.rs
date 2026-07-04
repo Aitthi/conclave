@@ -14,6 +14,12 @@ use std::sync::Arc;
 /// Rough characters-per-token ratio for the streamed-output estimate.
 const CHARS_PER_TOKEN: usize = 4;
 
+/// R-act-1: an instance reads as `working` iff its last recorded activity
+/// (`Runtime::mark_activity`, stamped per streamed chunk) is within this
+/// window. `Roster.tsx`'s `WORKING_WINDOW_MS` mirrors this value — keep them
+/// in sync if it ever changes.
+const WORKING_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Persist + emit the context estimate once this many new chars accumulate
 /// (≈100 tokens between writes).
 const FLUSH_CHARS: usize = 400;
@@ -67,9 +73,26 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: ListInstancesReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
-    let rows =
+    let mut rows =
         repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, &req.workspace_id)
             .await?;
+
+    // Enrich live instances only (R-act-2: pull-model, no Rust timers) —
+    // `working`/`lastActivityAt`/`sessionId` stay `None` for a dead instance,
+    // which the repo layer already initialized.
+    for row in &mut rows {
+        if state.runtime.is_live(&row.id) {
+            row.session_id = state.runtime.session_id(&row.id);
+            row.working = Some(match state.runtime.last_activity(&row.id) {
+                Some(last) => {
+                    row.last_activity_at =
+                        Some(chrono::DateTime::<chrono::Utc>::from(last).to_rfc3339());
+                    last.elapsed().unwrap_or(std::time::Duration::MAX) <= WORKING_WINDOW
+                }
+                None => false,
+            });
+        }
+    }
 
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -675,6 +698,10 @@ async fn forward_session_output(
     let mut last_flush_chars: usize = 0;
 
     while let Some(chunk) = output_rx.recv().await {
+        // Stamp activity first (R-act-1): any chunk at all counts as "working",
+        // independent of context tracking / emission below.
+        runtime.mark_activity(&instance_id);
+
         // Count before moving `chunk` into the emit — avoids cloning every chunk
         // just to measure it. `chars().count()` (not `len()`) so multi-byte UTF-8
         // output isn't over-counted in the ≈4-chars/token estimate.

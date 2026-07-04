@@ -131,6 +131,12 @@ pub struct Runtime {
     sessions: Mutex<HashMap<String, LiveHandle>>,
     /// Monotonic registration counter — the source of [`LiveHandle::epoch`].
     next_epoch: AtomicU64,
+    /// Last-activity timestamp per instance — a NEW, orthogonal, in-memory-only
+    /// signal (R-act-1): "working" iff a PTY/stream chunk arrived within the
+    /// last `WORKING_WINDOW` (commands::instance). Independent of `sessions`
+    /// (no session ⇒ no activity, but a live, quiet session has no entry
+    /// either), so it gets its own mutex rather than living on `LiveHandle`.
+    activity: Mutex<HashMap<String, std::time::SystemTime>>,
 }
 
 impl Runtime {
@@ -139,7 +145,27 @@ impl Runtime {
         Self {
             sessions: Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(0),
+            activity: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Record that `instance_id` just emitted output, timestamped now.
+    pub fn mark_activity(&self, instance_id: &str) {
+        let mut guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(instance_id.to_owned(), std::time::SystemTime::now());
+    }
+
+    /// The last-activity timestamp recorded for `instance_id`, if any.
+    pub fn last_activity(&self, instance_id: &str) -> Option<std::time::SystemTime> {
+        let guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(instance_id).copied()
+    }
+
+    /// Drop the activity entry for `instance_id` — a dead session must read as
+    /// not-working immediately, not linger until its last stamp ages out.
+    fn clear_activity(&self, instance_id: &str) {
+        let mut guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(instance_id);
     }
 
     /// Register a pre-built live session [`LiveHandle`] for `instance_id`.
@@ -202,6 +228,7 @@ impl Runtime {
         };
         match removed {
             Some(handle) => {
+                self.clear_activity(instance_id);
                 (handle.shutdown)();
                 true
             }
@@ -229,6 +256,7 @@ impl Runtime {
         };
         match removed {
             Some(handle) => {
+                self.clear_activity(instance_id);
                 (handle.shutdown)();
                 true
             }
@@ -309,6 +337,10 @@ impl Drop for Runtime {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             guard.drain().map(|(_, handle)| handle).collect()
         };
+        {
+            let mut guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clear();
+        }
         for handle in handles {
             (handle.shutdown)();
         }
@@ -407,6 +439,44 @@ mod tests {
             .register("inst-1", LiveHandle::placeholder("sess-1"))
             .is_some());
         assert!(rt.send_stdin("inst-1", "hi").is_ok());
+    }
+
+    #[tokio::test]
+    async fn activity_mark_then_read_roundtrip() {
+        let rt = Runtime::new();
+        assert_eq!(rt.last_activity("inst-1"), None);
+        rt.mark_activity("inst-1");
+        assert!(rt.last_activity("inst-1").is_some());
+    }
+
+    #[tokio::test]
+    async fn activity_unknown_instance_is_none() {
+        let rt = Runtime::new();
+        assert_eq!(rt.last_activity("never-registered"), None);
+    }
+
+    #[tokio::test]
+    async fn activity_cleared_on_unregister() {
+        let rt = Runtime::new();
+        rt.register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("register");
+        rt.mark_activity("inst-1");
+        assert!(rt.last_activity("inst-1").is_some());
+
+        assert!(rt.unregister("inst-1"));
+        assert_eq!(rt.last_activity("inst-1"), None);
+    }
+
+    #[tokio::test]
+    async fn activity_cleared_on_unregister_epoch() {
+        let rt = Runtime::new();
+        let epoch = rt
+            .register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("register");
+        rt.mark_activity("inst-1");
+
+        assert!(rt.unregister_epoch("inst-1", epoch));
+        assert_eq!(rt.last_activity("inst-1"), None);
     }
 
     /// Bulk single-threaded registration — 16 distinct instances coexist.

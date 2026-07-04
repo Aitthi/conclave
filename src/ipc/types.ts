@@ -119,6 +119,16 @@ export interface WorkspaceAgent {
   /** Annotated by `instance.list`: skill ids used at the last launch (see
    *  Session.launchedSkillIds — same value, joined in for the Roster). */
   launchedSkillIds?: string[];
+  /** Annotated by `instance.list`, live instances only (R-act-1): whether the
+   *  backend emitted output within the last `WORKING_WINDOW` (5s). */
+  working?: boolean;
+  /** Annotated by `instance.list`, live instances only: ISO-8601 UTC of the
+   *  last recorded activity. */
+  lastActivityAt?: string;
+  /** Annotated by `instance.list`, live instances only: the live session id —
+   *  maps a `session:output` event (which carries only `sessionId`) back to
+   *  this roster row. */
+  sessionId?: string;
 }
 
 export interface Session {

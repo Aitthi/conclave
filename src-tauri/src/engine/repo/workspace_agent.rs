@@ -154,6 +154,20 @@ pub struct WorkspaceAgentWithSkills {
         serialize_with = "serialize_launched_ids"
     )]
     pub launched_skill_ids: Option<String>,
+    /// Whether the live backend emitted output within `WORKING_WINDOW`
+    /// (commands::instance) — `Some` only for currently-live instances.
+    /// Always `None` here (this repo layer stays DB-pure); the HANDLER
+    /// (`commands::instance::list`) populates it from `Runtime`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working: Option<bool>,
+    /// ISO-8601 UTC of the last recorded activity — handler-populated, see
+    /// `working`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// The live session id (for mapping `session:output` events back to this
+    /// row) — handler-populated, see `working`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Same shape as `session::serialize_json_text` — kept local (small, trivial,
@@ -267,6 +281,9 @@ pub async fn list_by_workspace_with_launched_skills(
                 role_description,
                 skill_names: skill_names_resolved,
                 launched_skill_ids: r.launched_skill_ids,
+                working: None,
+                last_activity_at: None,
+                session_id: None,
             }
         })
         .collect())
