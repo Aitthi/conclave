@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 use unicode_normalization::UnicodeNormalization;
@@ -26,6 +26,14 @@ use unicode_normalization::UnicodeNormalization;
 const DEFAULT_SEARCH_LIMIT: usize = 8;
 const MAX_SEARCH_LIMIT: usize = 100;
 const MAX_CACHED_WORKSPACES: usize = 4;
+
+/// `memory.graph` `related`-edge threshold (ADR 0007). Tuned against the real
+/// workspace `11ecf99b-53f4-4c24-b538-b19e5933a9e3` store (11 chunks, 55
+/// pairs): 0.45 yields 7 edges with max node degree 2 — neither fully
+/// connected nor edgeless, and well under [`RELATED_TOP_K`] per node.
+const RELATED_SIMILARITY_THRESHOLD: f32 = 0.45;
+/// Per-node cap on `related` edges before threshold filtering.
+const RELATED_TOP_K: usize = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -770,6 +778,136 @@ pub async fn status(state: &AppState, payload: Value) -> Result<Value, AppError>
     status_with_embedder(state, payload, Arc::clone(&state.memory_embedder)).await
 }
 
+/// Extract normalized `[[token]]` wiki-link tokens from one chunk's text:
+/// trimmed, lowercased, de-duplicated within the chunk. A hand-rolled bracket
+/// scan rather than the `regex` crate — no new dependencies (ADR 0007).
+fn wiki_tokens(text: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            break;
+        };
+        let token = after[..end].trim().to_lowercase();
+        if !token.is_empty() {
+            tokens.insert(token);
+        }
+        rest = &after[end + 2..];
+    }
+    tokens
+}
+
+/// `memory.graph` — nodes and derived edges for the knowledge-graph view
+/// (ADR 0007). Edges are computed fresh on every call, never persisted:
+///
+/// - `wiki`: chunks sharing at least one identical `[[token]]`.
+/// - `related`: cosine similarity between stored embeddings (already
+///   L2-normalized at write time, so dot product is cosine similarity),
+///   per-node top-[`RELATED_TOP_K`] at or above [`RELATED_SIMILARITY_THRESHOLD`],
+///   skipping any pair already linked by `wiki`, deduped symmetrically.
+///
+/// An empty or missing index returns `{ nodes: [], edges: [] }`, never an
+/// error.
+pub async fn graph(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: WorkspaceReq =
+        serde_json::from_value(payload).map_err(|error| AppError::Invalid(error.to_string()))?;
+    require_workspace(state, &req.workspace_id).await?;
+
+    let Some(index) = repo::memory::get_index(&state.db, &req.workspace_id).await? else {
+        return Ok(json!({ "nodes": [], "edges": [] }));
+    };
+    let index_dimension = usize::try_from(index.dimension).map_err(|_| {
+        AppError::Invalid(format!(
+            "memory index dimension {} is invalid",
+            index.dimension
+        ))
+    })?;
+
+    let total = repo::memory::count(&state.db, &req.workspace_id).await?;
+    let rows = repo::memory::list_for_graph(&state.db, &req.workspace_id).await?;
+    if total > rows.len() as i64 {
+        eprintln!(
+            "[memory] graph truncated workspace {} to {} of {total} chunks (cap {})",
+            req.workspace_id,
+            rows.len(),
+            repo::memory::GRAPH_NODE_CAP
+        );
+    }
+
+    let mut vectors = Vec::with_capacity(rows.len());
+    let mut nodes = Vec::with_capacity(rows.len());
+    let mut tokens_by_chunk = Vec::with_capacity(rows.len());
+    for row in &rows {
+        vectors.push(vec_codec::decode(&row.embedding, index_dimension)?);
+        tokens_by_chunk.push(wiki_tokens(&row.text));
+        nodes.push(json!({
+            "id": row.id,
+            "text": row.text,
+            "sourceKind": row.source_kind,
+            "sourceId": row.source_id,
+            "createdAt": row.created_at,
+            "updatedAt": row.updated_at,
+        }));
+    }
+
+    // `wiki` edges: inverted token index, then every pair sharing a token.
+    let mut token_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (chunk_index, tokens) in tokens_by_chunk.iter().enumerate() {
+        for token in tokens {
+            token_index.entry(token.as_str()).or_default().push(chunk_index);
+        }
+    }
+    let mut wiki_pairs: HashSet<(usize, usize)> = HashSet::new();
+    for indices in token_index.values() {
+        for left in 0..indices.len() {
+            for right in (left + 1)..indices.len() {
+                wiki_pairs.insert((indices[left].min(indices[right]), indices[left].max(indices[right])));
+            }
+        }
+    }
+
+    let mut edges: Vec<Value> = wiki_pairs
+        .iter()
+        .map(|&(a, b)| json!({ "a": rows[a].id, "b": rows[b].id, "rel": "wiki" }))
+        .collect();
+
+    // `related` edges: per-node top-k above threshold, excluding `wiki` pairs,
+    // then deduped symmetrically (keeping the higher score if both directions
+    // independently selected the pair).
+    let mut related_pairs: HashMap<(usize, usize), f32> = HashMap::new();
+    for i in 0..rows.len() {
+        let mut scored: Vec<(usize, f32)> = (0..rows.len())
+            .filter(|&j| j != i && !wiki_pairs.contains(&(i.min(j), i.max(j))))
+            .map(|j| {
+                let score = vectors[i]
+                    .iter()
+                    .zip(vectors[j].iter())
+                    .map(|(left, right)| left * right)
+                    .sum::<f32>();
+                (j, score)
+            })
+            .filter(|&(_, score)| score >= RELATED_SIMILARITY_THRESHOLD)
+            .collect();
+        scored.sort_unstable_by(|left, right| right.1.total_cmp(&left.1));
+        scored.truncate(RELATED_TOP_K);
+        for (j, score) in scored {
+            let key = (i.min(j), i.max(j));
+            related_pairs
+                .entry(key)
+                .and_modify(|existing| *existing = existing.max(score))
+                .or_insert(score);
+        }
+    }
+    edges.extend(
+        related_pairs
+            .into_iter()
+            .map(|((a, b), score)| json!({ "a": rows[a].id, "b": rows[b].id, "rel": "related", "score": score })),
+    );
+
+    Ok(json!({ "nodes": nodes, "edges": edges }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,6 +1340,208 @@ mod tests {
         .await
         .expect("clear route");
         assert_eq!(cleared, json!({ "deleted": 0 }));
+    }
+
+    // ── memory.graph (ADR 0007) ──────────────────────────────────────────
+
+    fn basis_vector(index: usize) -> Vec<f32> {
+        let mut vector = vec![0.0f32; DIMENSION];
+        vector[index] = 1.0;
+        vector
+    }
+
+    async fn insert_chunk(
+        state: &AppState,
+        workspace_id: &str,
+        text: &str,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> memory::UpsertChunkResult {
+        memory::upsert_chunk(
+            &state.db,
+            UpsertChunkInput {
+                workspace_id,
+                model_id: MODEL,
+                source_kind: "manual",
+                source_id: None,
+                text,
+                embedding,
+                content_hash,
+            },
+        )
+        .await
+        .expect("upsert chunk fixture")
+    }
+
+    #[tokio::test]
+    async fn graph_empty_index_returns_empty_arrays_not_error() {
+        let state = AppState::for_tests().await;
+        let workspace_id = fixture_workspace(&state, "graph-empty").await;
+
+        let result =
+            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
+                .await
+                .expect("graph on empty index");
+        assert_eq!(result, json!({ "nodes": [], "edges": [] }));
+    }
+
+    #[tokio::test]
+    async fn graph_derives_wiki_edges_case_insensitively_and_ignores_untokened_chunks() {
+        let state = AppState::for_tests().await;
+        let workspace_id = fixture_workspace(&state, "graph-wiki").await;
+
+        // Orthogonal embeddings hold `related` cosine similarity at exactly 0
+        // for every pair, isolating this test to `wiki`-edge derivation.
+        let a = insert_chunk(&state, &workspace_id, "loves [[Alpha]] concept", &basis_vector(0), "wiki-a").await;
+        let b = insert_chunk(&state, &workspace_id, "shares [[alpha]] too", &basis_vector(1), "wiki-b").await;
+        insert_chunk(&state, &workspace_id, "no tokens here", &basis_vector(2), "wiki-c").await;
+
+        let result =
+            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
+                .await
+                .expect("graph");
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 3);
+
+        let edges = result["edges"].as_array().unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "only a/b share a token; orthogonal embeddings score 0 for `related`: {edges:?}"
+        );
+        assert_eq!(edges[0]["rel"], "wiki");
+        assert!(edges[0].get("score").is_none(), "wiki edges carry no score");
+        let endpoints: HashSet<&str> = [
+            edges[0]["a"].as_str().unwrap(),
+            edges[0]["b"].as_str().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            endpoints,
+            HashSet::from([a.row.id.as_str(), b.row.id.as_str()])
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_related_edges_skip_wiki_pairs_and_score_cosine_similarity() {
+        let state = AppState::for_tests().await;
+        let workspace_id = fixture_workspace(&state, "graph-related").await;
+
+        // p/q are wiki-linked AND identical in direction (cosine 1.0) — the
+        // `related` edge between them must be suppressed. r shares no token
+        // but is also identical in direction, so it gets `related` edges to
+        // both p and q. s is orthogonal to everything and stays isolated.
+        let p = insert_chunk(&state, &workspace_id, "[[shared]] one", &basis_vector(0), "rel-p").await;
+        let q = insert_chunk(&state, &workspace_id, "[[shared]] two", &basis_vector(0), "rel-q").await;
+        let r = insert_chunk(&state, &workspace_id, "no tokens, same direction", &basis_vector(0), "rel-r").await;
+        insert_chunk(&state, &workspace_id, "no tokens, orthogonal", &basis_vector(1), "rel-s").await;
+
+        let result =
+            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
+                .await
+                .expect("graph");
+        let edges = result["edges"].as_array().unwrap().clone();
+        assert_eq!(edges.len(), 3, "{edges:?}");
+
+        let wiki: Vec<&Value> = edges.iter().filter(|edge| edge["rel"] == "wiki").collect();
+        assert_eq!(wiki.len(), 1);
+        let wiki_endpoints: HashSet<&str> = [
+            wiki[0]["a"].as_str().unwrap(),
+            wiki[0]["b"].as_str().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            wiki_endpoints,
+            HashSet::from([p.row.id.as_str(), q.row.id.as_str()])
+        );
+
+        let related: Vec<&Value> = edges.iter().filter(|edge| edge["rel"] == "related").collect();
+        assert_eq!(related.len(), 2, "{related:?}");
+        for edge in &related {
+            let score = edge["score"].as_f64().expect("related edge carries a score");
+            assert!(
+                (score - 1.0).abs() < 1e-4,
+                "identical unit vectors must score ~1.0 cosine, got {score}"
+            );
+            let endpoints: HashSet<&str> =
+                [edge["a"].as_str().unwrap(), edge["b"].as_str().unwrap()]
+                    .into_iter()
+                    .collect();
+            assert!(
+                endpoints.contains(r.row.id.as_str()),
+                "both related edges must touch r: {endpoints:?}"
+            );
+            assert!(
+                !(endpoints.contains(p.row.id.as_str()) && endpoints.contains(q.row.id.as_str())),
+                "p-q must stay wiki-only, never duplicated as related"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_related_edges_cap_at_top_k_per_node() {
+        let state = AppState::for_tests().await;
+        let workspace_id = fixture_workspace(&state, "graph-topk").await;
+
+        // All vectors live in the (dim0, dim1) unit circle, so cosine
+        // similarity between any two is exactly cos(angle difference).
+        // Clusters (b1,b2)/(c1,c2)/(d1,d2)/(e1,e2) are each mutually closer
+        // than any of them are to `a`, so none of their own top-K picks
+        // reach back to `a` — any edge touching `a` can only come from `a`'s
+        // own top-RELATED_TOP_K selection among all candidates above
+        // threshold.
+        let angled = |degrees: f64| -> Vec<f32> {
+            let radians = degrees.to_radians();
+            let mut vector = vec![0.0f32; DIMENSION];
+            vector[0] = radians.cos() as f32;
+            vector[1] = radians.sin() as f32;
+            vector
+        };
+
+        let a = insert_chunk(&state, &workspace_id, "a", &angled(0.0), "topk-a").await;
+        let b1 = insert_chunk(&state, &workspace_id, "b1", &angled(6.0), "topk-b1").await;
+        let b2 = insert_chunk(&state, &workspace_id, "b2", &angled(7.0), "topk-b2").await;
+        let c1 = insert_chunk(&state, &workspace_id, "c1", &angled(20.0), "topk-c1").await;
+        insert_chunk(&state, &workspace_id, "c2", &angled(21.0), "topk-c2").await;
+        let d1 = insert_chunk(&state, &workspace_id, "d1", &angled(34.0), "topk-d1").await;
+        let d2 = insert_chunk(&state, &workspace_id, "d2", &angled(35.0), "topk-d2").await;
+        let e1 = insert_chunk(&state, &workspace_id, "e1", &angled(48.0), "topk-e1").await;
+        let e2 = insert_chunk(&state, &workspace_id, "e2", &angled(49.0), "topk-e2").await;
+
+        let result =
+            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
+                .await
+                .expect("graph");
+        let edges = result["edges"].as_array().unwrap();
+
+        let a_id = json!(a.row.id);
+        let a_edges: Vec<&Value> = edges
+            .iter()
+            .filter(|edge| edge["a"] == a_id || edge["b"] == a_id)
+            .collect();
+        assert_eq!(
+            a_edges.len(),
+            RELATED_TOP_K,
+            "node a must cap at its own top-{RELATED_TOP_K}, got {a_edges:?}"
+        );
+
+        let a_neighbors: HashSet<&str> = a_edges
+            .iter()
+            .flat_map(|edge| [edge["a"].as_str().unwrap(), edge["b"].as_str().unwrap()])
+            .filter(|id| *id != a.row.id)
+            .collect();
+        assert_eq!(
+            a_neighbors,
+            HashSet::from([b1.row.id.as_str(), b2.row.id.as_str(), c1.row.id.as_str()]),
+            "a's top-3 by cosine must be its 3 closest angles (b1, b2, c1)"
+        );
+        for excluded in [&d1.row.id, &d2.row.id, &e1.row.id, &e2.row.id] {
+            assert!(
+                !a_neighbors.contains(excluded.as_str()),
+                "farther clusters must not reach back to a via their own top-k: {excluded}"
+            );
+        }
     }
 
     #[test]
