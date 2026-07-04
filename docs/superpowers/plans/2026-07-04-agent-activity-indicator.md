@@ -124,10 +124,18 @@ existing one). Constraints (lead):
 ## Risk ledger
 
 - **Idle-TUI noise (top risk):** if an idle Claude Code repaints
-  periodically, everyone reads as permanently working. Dew verifies FIRST
-  (B2 done → watch a live idle agent's `conclave agent list` output for
-  ~60 s). If noisy: raise the window and/or ignore chunks < 16 bytes —
-  escalate to lead with the observed cadence before choosing.
+  periodically, everyone reads as permanently working. Dew verifies FIRST,
+  via an ISOLATED harness — spawn a real `claude` process through
+  `pty::spawn_cli` in a scratch dir (cargo-level, ignored-by-default test or
+  a one-off bin; never the shared app/DB), let the initial paint settle,
+  then record chunk timestamps+sizes for ~60 s of idle. (Amended after
+  Dew's escalation: the original "watch a live agent via conclave agent
+  list" needed the enriched build installed, which conflicts with the
+  single-combined-restart directive; deferring the check past that restart
+  would push F2 into a second build — worse. Isolated PTY observation
+  measures the same phenomenon without either cost.) If noisy: raise the
+  window and/or ignore chunks < 16 bytes — escalate to lead with the
+  observed cadence before choosing.
 - The `session:output` payload delivers full chunks to every listener;
   Roster's handler must do a cheap map lookup only — no state churn when
   the entry is already working (skip the setState if unchanged, re-arm the
