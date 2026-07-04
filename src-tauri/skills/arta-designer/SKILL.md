@@ -92,7 +92,10 @@ workspace. Composes with Collaboration (and Implementer, if you also build).
 
 - When the design settles, write the handoff onto the blackboard
   (`design:<project>`: what's designed, where the files are, what's open)
-  and tell the lead it's ready for implementation planning.
+  and tell the lead it's ready for implementation planning. PIN the proto
+  commit SHA in that key — a canon without a pinned commit drifts as the
+  proto iterates, and the implementer can't tell which version they owe
+  fidelity to.
 - After handoff, design changes are CHANGES to a record other agents build
   from: route them through the lead, don't silently reshape screens an
   implementer is translating into production code.

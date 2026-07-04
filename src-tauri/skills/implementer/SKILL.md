@@ -21,6 +21,22 @@ the Collaboration skill; this one only covers what implementing adds.
 - Work isolated (a worktree or branch). The main branch stays clean until
   integration is an explicit decision, not a side effect.
 
+## UI work builds from the design record, not from imagination
+
+- If the task touches anything the user sees, find the design record BEFORE
+  the first edit: `design:*` keys on the blackboard, and the Arta canvas —
+  `.arta/proto/screens/<screen>.tsx` plus `.arta/snapshots/<screen>.png`.
+  The proto `.tsx` is canon: tokens, spacing, copy, states, icons — read the
+  file itself, not just the screenshot.
+- A plan for visual work that names no design canon is a GAP to escalate to
+  the lead, never permission to style it yourself — "I made it look
+  reasonable" is how the app drifts from the design.
+- Deviating from the canon is a design change: escalate to the designer named
+  in the plan (the lead rules ties) before building the deviation. Expect a
+  design-acceptance gate comparing your build against the pinned proto commit
+  at merge time — building without reading the proto is failing that gate in
+  advance.
+
 ## Know who to ask — it is written down, not guessed
 
 - Your escalation target is named in the handoff message and in the

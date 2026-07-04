@@ -40,6 +40,11 @@ the gap between them is where leads fail.
   implementer hits it prepared instead of surprised.
 - Global constraints go in ONE section every task inherits — a rule stated
   once per task will be violated by the task where you forgot to repeat it.
+- A lane that touches anything the user sees names its DESIGN CANON in the
+  plan key: the proto file under `.arta/proto/screens/`, the pinned commit
+  SHA, and the designer as the design-escalation target. A UI plan without a
+  canon hands the implementer a license to improvise — the drift you find at
+  the design gate was created here.
 
 ## Know who is who — and make sure they know too
 
