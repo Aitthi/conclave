@@ -286,6 +286,73 @@ mod tests {
         assert!(result.is_err(), "bogus command should fail to spawn");
     }
 
+    /// R-act-1 empirical risk check (docs/superpowers/plans/2026-07-04-
+    /// agent-activity-indicator.md, risk ledger, amended 020260d after Dew's
+    /// escalation): does an idle `claude` CLI TUI keep repainting on its own,
+    /// which would make `working` read as permanently true?
+    ///
+    /// ISOLATED — never touches the shared app/DB: spawns a real `claude` in a
+    /// scratch temp dir via the same `spawn_cli` production code path, lets the
+    /// initial paint settle (no chunk for 2s), then records (elapsed_ms,
+    /// byte_len) for every chunk over a 60s idle window with NO stdin sent.
+    /// Explicitly tears the child down at the end via the handle's shutdown
+    /// closure (accessible here — `pty` is a descendant of `runtime`, where
+    /// `LiveHandle`'s fields are declared private-to-module-tree).
+    ///
+    /// `#[ignore]`: spawns a real, short-lived, billed Claude session — never
+    /// runs in normal `cargo test`, only `cargo test -- --ignored` on demand.
+    /// Observational only (no assertion) — the escalation decision on the
+    /// recorded cadence is manual, per the risk ledger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "spawns a real `claude` process — manual-only idle-noise check"]
+    async fn idle_claude_output_cadence_over_60s() {
+        let scratch = std::env::temp_dir().join(format!("conclave-idle-check-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+
+        let mut backend = spawn_cli("idle-check", "claude", &[], scratch.to_str().unwrap(), &[])
+            .expect("spawn_cli failed — is `claude` on PATH?");
+
+        // Drain until 2s pass with no new chunk — the initial paint has settled.
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), backend.output_rx.recv())
+                .await
+            {
+                Ok(Some(_chunk)) => continue,
+                Ok(None) => panic!("claude exited during initial paint"),
+                Err(_) => break, // 2s quiet
+            }
+        }
+
+        // Idle observation window: no stdin sent, just record what arrives.
+        let start = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(60);
+        let mut observations: Vec<(u128, usize)> = Vec::new();
+        while start.elapsed() < window {
+            let remaining = window - start.elapsed();
+            match tokio::time::timeout(remaining.min(std::time::Duration::from_secs(1)), backend.output_rx.recv())
+                .await
+            {
+                Ok(Some(chunk)) => observations.push((start.elapsed().as_millis(), chunk.len())),
+                Ok(None) => break, // child exited on its own
+                Err(_) => {}       // 1s tick, nothing arrived — keep polling
+            }
+        }
+
+        eprintln!(
+            "IDLE-CHECK: {} chunk(s) over {}s idle: {:?}",
+            observations.len(),
+            window.as_secs(),
+            observations
+        );
+
+        // Explicit teardown — kill + reap the child, abort the writer task.
+        let CliBackend { handle, .. } = backend;
+        let LiveHandle { shutdown, .. } = handle;
+        shutdown();
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// A 3-byte glyph split across two reads must reassemble intact — the bug
     /// behind the post-resize fragments. "─" (U+2500) is `E2 94 80`; feeding the
     /// first two bytes then the last must yield exactly "─", never U+FFFD.
