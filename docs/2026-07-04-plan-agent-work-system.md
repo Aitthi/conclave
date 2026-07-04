@@ -136,3 +136,10 @@ Acceptance: tsc 0 in main repo post-merge, canon fidelity gate by Arta (token pa
 ## Post-land
 
 r5 rebuild (Dew) off main including this program + memory-graph; then install (supersedes held r4). Memory: each lane saves its hard-won lessons at close (`conclave memory remember`).
+
+### POST-LAND ledger
+
+- **Lane C MERGED @ ef07b35** (e1ab408, Guetta; Mellow LAND PASS 0 blocking; lead-reproduced 475/21/4 + clippy clean). Two latent Lows on record, deferred follow-ups, non-blocking:
+  - L1: `lane guard install` writes `<common>/hooks/pre-commit` directly and does not honor `core.hooksPath` — silent no-op if a checkout ever sets it (e.g. husky). Inert in this repo today. Follow-up: warn-if-set at install time.
+  - L2: hook `while read` mishandles git-quoted paths (embedded newline in filename) — theoretical bypass on pathological filenames only, non-adversarial input, negligible.
+  - Hard-won (saved to memory by Guetta): worktree self-skip must compare RAW `git rev-parse --git-dir` vs `--git-common-dir`, never absolutised paths — macOS `/tmp`→`/var` symlinks desync the compare and falsely skip the shared checkout.
