@@ -91,7 +91,7 @@ Subcommands:
   task claim    <workspaceId> <slug>          (inside a spawned agent)
   task state    <workspaceId> <slug> <state>  (inside a spawned agent)
   task note     <workspaceId> <slug> <text...>          (inside a spawned agent)
-  task gate     <workspaceId> <slug> -- <cmd...>        (inside a spawned agent; runs <cmd> here, exits with <cmd>'s exit code)
+  task gate     <workspaceId> <slug> -- <cmd...>        (inside a spawned agent; runs <cmd> here, exits with <cmd>'s exit code; each word after -- is passed verbatim, not re-parsed by a shell — for shell syntax use: -- sh -c \"…\")
   task challenge <workspaceId> <slug> --claim t --evidence t --proposal t --default t [--deadline-min N]
   task rule     <workspaceId> <slug> <challengeEventId> <text...>  (inside a spawned agent)
   task close    <workspaceId> <slug>          (inside a spawned agent)
@@ -620,12 +620,52 @@ fn tail_bytes(text: &str, max_bytes: usize) -> String {
 /// Gate tail is capped at 2000 bytes (ADR 0008: "truncate tail to 2000 bytes").
 const GATE_TAIL_MAX_BYTES: usize = 2000;
 
+/// Quote `word` as a single POSIX shell word: wrapped in single quotes with
+/// any embedded `'` rewritten to the standard `'\''` escape (close the quote,
+/// emit an escaped literal quote, reopen). Single quotes disable all shell
+/// expansion, so the result always reaches `sh` as exactly `word`, one token
+/// — this is what makes an argv word survive `sh -lc` verbatim regardless of
+/// spaces or other metacharacters inside it.
+fn shell_quote_word(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// Join `words` into a command line where EVERY word is quoted (see
+/// [`shell_quote_word`]) — this is what actually gets executed, so a word
+/// containing a space (e.g. a path under "Application Support") reaches `sh`
+/// as one token instead of being split back apart.
+fn shell_join(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| shell_quote_word(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// True if writing `word` bare into a command line (no quotes) would be
+/// tokenized or expanded differently than the literal text. Used only to
+/// decide whether the RECORDED `cmd` should show the quoted form — for a
+/// space-free, metacharacter-free command like `cargo test` the ledger must
+/// stay exactly as human-readable as it is today.
+fn word_needs_quoting(word: &str) -> bool {
+    word.is_empty()
+        || word.chars().any(|c| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | ','))
+        })
+}
+
 /// `task gate <workspaceId> <slug> -- <cmd...>` — ADR 0008's risk ledger is
 /// explicit that gates NEVER run engine-side (the command is the CALLING
 /// agent's own privilege, no escalation), so `conclave-cli` runs it HERE, in
 /// the agent's real shell/cwd, and ships the already-computed evidence over
 /// the wire. Requires `CONCLAVE_INSTANCE_ID` (gate results are always
 /// attributed) — same requirement as `tell`/`restart`.
+///
+/// Words after `--` are argv words, passed to the shell VERBATIM (one word
+/// each) via [`shell_join`] — never re-joined-then-re-parsed, which is what
+/// used to split a space-containing word (e.g. a path under "Application
+/// Support") back apart. An agent that wants shell syntax (pipes, `&&`,
+/// redirects) composes it explicitly: `-- sh -c "<snippet>"`.
 ///
 /// Returns the fully-expanded wire form
 /// `["task","gate",actorId,workspaceId,slug,cmd,exit,sha,cwd,tail]` plus the
@@ -642,7 +682,7 @@ fn run_task_gate(
         "conclave: `task gate` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
             .to_string()
     })?;
-    let usage = "conclave: task gate <workspaceId> <slug> -- <cmd...>";
+    let usage = "conclave: task gate <workspaceId> <slug> -- <cmd...> (words after -- are passed verbatim; for shell syntax use -- sh -c \"…\")";
     let workspace_id = argv.get(2).ok_or(usage)?.clone();
     let slug = argv.get(3).ok_or(usage)?.clone();
     let dash_pos = argv
@@ -654,7 +694,18 @@ fn run_task_gate(
     if cmd_words.is_empty() {
         return Err(usage.to_string());
     }
-    let cmd = cmd_words.join(" ");
+    // Each word after `--` is an argv word passed to the shell verbatim, one
+    // token — `exec_cmd` quotes every word so a space (or other
+    // metacharacter) inside a word can never be re-split by `sh -lc`. The
+    // RECORDED `cmd` stays the plain join for the common space-free case
+    // (`cargo test` must keep reading as `cargo test`, not `'cargo' 'test'`);
+    // it only switches to the quoted form when some word actually needed it.
+    let exec_cmd = shell_join(cmd_words);
+    let recorded_cmd = if cmd_words.iter().any(|w| word_needs_quoting(w)) {
+        exec_cmd.clone()
+    } else {
+        cmd_words.join(" ")
+    };
 
     let cwd = std::env::current_dir()
         .map_err(|e| format!("conclave: task gate: cannot resolve cwd: {e}"))?;
@@ -664,10 +715,10 @@ fn run_task_gate(
     // pipes ourselves.
     let output = std::process::Command::new("sh")
         .arg("-lc")
-        .arg(format!("{cmd} 2>&1"))
+        .arg(format!("{exec_cmd} 2>&1"))
         .current_dir(&cwd)
         .output()
-        .map_err(|e| format!("conclave: task gate: failed to run '{cmd}': {e}"))?;
+        .map_err(|e| format!("conclave: task gate: failed to run '{exec_cmd}': {e}"))?;
     // A killed-by-signal command has no exit code; -1 records "abnormal
     // termination" rather than fabricating a plausible-looking 0/1.
     let exit_code = output.status.code().unwrap_or(-1);
@@ -693,7 +744,7 @@ fn run_task_gate(
             me.to_string(),
             workspace_id,
             slug,
-            cmd,
+            recorded_cmd,
             exit_code.to_string(),
             sha,
             cwd.to_string_lossy().into_owned(),
@@ -1225,6 +1276,54 @@ mod tests {
         assert_eq!(truncated.len(), 5);
     }
 
+    // ── shell_quote_word / shell_join ───────────────────────────────────────
+
+    #[test]
+    fn shell_quote_word_wraps_a_plain_word_in_single_quotes() {
+        assert_eq!(super::shell_quote_word("cargo"), "'cargo'");
+    }
+
+    #[test]
+    fn shell_quote_word_keeps_a_space_containing_word_intact() {
+        assert_eq!(
+            super::shell_quote_word("/tmp/dir with space/tool"),
+            "'/tmp/dir with space/tool'"
+        );
+    }
+
+    #[test]
+    fn shell_quote_word_escapes_embedded_single_quotes() {
+        assert_eq!(super::shell_quote_word("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_quote_word_handles_the_empty_word() {
+        assert_eq!(super::shell_quote_word(""), "''");
+    }
+
+    #[test]
+    fn shell_join_quotes_every_word() {
+        assert_eq!(
+            super::shell_join(&v(&["cargo", "test"])),
+            "'cargo' 'test'"
+        );
+    }
+
+    #[test]
+    fn shell_join_of_a_space_containing_path_stays_one_token() {
+        // Regression shape of the original bug: the conclave binary itself
+        // lives under "Application Support" — joining must not produce a
+        // string `sh` would split at the "Application"/"Support" boundary.
+        let joined = super::shell_join(&v(&[
+            "/tmp/dir with space/tool",
+            "status",
+        ]));
+        assert_eq!(joined, "'/tmp/dir with space/tool' 'status'");
+        // A naive unquoted join (the pre-fix behavior) would NOT contain the
+        // path as one intact quoted token.
+        assert_ne!(joined, "/tmp/dir with space/tool status");
+    }
+
     // ── run_task_gate ─────────────────────────────────────────────────────
 
     #[test]
@@ -1269,6 +1368,47 @@ mod tests {
             super::run_task_gate(&argv, Some("self1")).expect("gate run must not error");
         assert_eq!(out[6], "1", "false exits 1");
         assert_eq!(exit_code, 1, "returned exit code must propagate the red gate");
+    }
+
+    #[test]
+    fn run_task_gate_survives_a_space_containing_path_regression() {
+        // Regression test for the live bug: a path with a space (like the
+        // conclave binary's own install path under "Application Support")
+        // must reach `sh` as ONE word, not be split back apart.
+        let dir = std::env::temp_dir().join("conclave cli test dir");
+        std::fs::create_dir_all(&dir).expect("mkdir fixture failed");
+        let script = dir.join("tool.sh");
+        std::fs::write(&script, "#!/bin/sh\necho ran-ok\n").expect("write fixture failed");
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod fixture failed");
+
+        let argv = v(&[
+            "task",
+            "gate",
+            "ws1",
+            "t1",
+            "--",
+            script.to_str().unwrap(),
+            "status",
+        ]);
+        let (out, exit_code) =
+            super::run_task_gate(&argv, Some("self1")).expect("gate run failed");
+        assert_eq!(exit_code, 0, "the space-containing path must resolve, not 127");
+        assert_eq!(out[6], "0");
+        assert!(
+            out[9].contains("ran-ok"),
+            "tail must show the script actually ran: {:?}",
+            out[9]
+        );
+        // The recorded cmd shows the quoted form since a word needed it.
+        assert!(
+            out[5].starts_with('\''),
+            "recorded cmd for a space-containing word must be quoted: {:?}",
+            out[5]
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup failed");
     }
 
     // ── resolve_task_create_plan_file ─────────────────────────────────────
