@@ -14,6 +14,7 @@ import { Settings } from "./Settings";
 import { WorkspacePane } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
 import { ChatHub } from "./ChatHub";
+import { MemoryGraph } from "./MemoryGraph";
 
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
@@ -30,6 +31,10 @@ export function AppShell() {
   // ── Chat Hub state — shares the center pane with the Blackboard, so
   //    opening one closes the other. ────────────────────────────────────────
   const [showChat, setShowChat] = useState(false);
+
+  // ── Memory graph state — a third center-pane destination, mutually
+  //    exclusive with the Blackboard and Chat Hub (same toggle pattern). ─────
+  const [showMemory, setShowMemory] = useState(false);
 
   // Bumped whenever the set of agents in the active workspace changes (add via
   // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
@@ -111,6 +116,7 @@ export function AppShell() {
     setSelectedId(null);
     // Switching workspace returns to that workspace's agent pane.
     setShowBlackboard(false);
+    setShowMemory(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
       // Ignore — the workspace just can't be found in the DB (stale id).
     });
@@ -172,9 +178,10 @@ export function AppShell() {
               folderPath={activeWorkspace?.folderPath}
               selectedId={selectedId}
               onSelect={(id) => {
-                // Selecting an agent returns from the Blackboard/Chat to the pane.
+                // Selecting an agent returns from any center-pane screen to the pane.
                 setShowBlackboard(false);
                 setShowChat(false);
+                setShowMemory(false);
                 setSelectedId(id);
               }}
               // "Create new agent…" (from inside the picker) still opens the Builder.
@@ -194,15 +201,27 @@ export function AppShell() {
                 activeWorkspaceId
                   ? () => {
                       setShowChat(false);
+                      setShowMemory(false);
                       setShowBlackboard((v) => !v);
                     }
                   : undefined
               }
               blackboardOpen={showBlackboard}
+              onOpenMemory={
+                activeWorkspaceId
+                  ? () => {
+                      setShowBlackboard(false);
+                      setShowChat(false);
+                      setShowMemory((v) => !v);
+                    }
+                  : undefined
+              }
+              memoryOpen={showMemory}
               onOpenChat={
                 activeWorkspaceId
                   ? () => {
                       setShowBlackboard(false);
+                      setShowMemory(false);
                       setShowChat((v) => !v);
                     }
                   : undefined
@@ -227,6 +246,13 @@ export function AppShell() {
                 workspaceName={activeWorkspace?.name}
                 onClose={() => setShowBlackboard(false)}
               />
+            ) : showMemory && activeWorkspaceId ? (
+              <MemoryGraph
+                key={activeWorkspaceId}
+                workspaceId={activeWorkspaceId}
+                workspaceName={activeWorkspace?.name}
+                onClose={() => setShowMemory(false)}
+              />
             ) : activeWorkspaceId ? (
               // Remount per workspace AND per agents change so the pane refetches
               // its tabs when an agent is added/removed.
@@ -236,6 +262,7 @@ export function AppShell() {
                 focusInstanceId={selectedId}
                 onOpenChat={() => {
                   setShowBlackboard(false);
+                  setShowMemory(false);
                   setShowChat(true);
                 }}
               />

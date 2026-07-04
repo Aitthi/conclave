@@ -18,6 +18,8 @@ export type {
   Tool,
   Skill,
   Role,
+  MemoryGraphNode,
+  MemoryGraphEdge,
 } from "./types";
 
 export type { Commands } from "./commands";
