@@ -1,6 +1,6 @@
 # ADR 0007 — Memory knowledge-graph view: data binding & edge derivation
 
-Date: 2026-07-04 · Status: accepted · Owner: Detoro (lead) · Design: Arta, proto pinned @ c134d01
+Date: 2026-07-04 · Status: accepted · Owner: Detoro (lead) · Design: Arta, proto pinned @ 73ac6fa (superseded c134d01)
 
 ## Context
 
@@ -44,12 +44,12 @@ the lead in bb key `design:memory`.
    implementation. Rejected: adding d3-force (a dep for 40 lines we already
    have, curated-deps rule).
 
-## Deferred (non-blocking)
+## Deferred — RESOLVED by Arta @ 73ac6fa (2026-07-04)
 
-- "Shared protocol" hue is close to Arta's sky — Arta picks a distinct hue and
-  patches the proto; frontend uses the proto's current hue until then.
-- Rail button icon/placement — Arta's call; default: adjacent to the
-  Blackboard toggle.
+- "Shared protocol" hue → macOS system purple `#bf5af0` (new `--color-a-violet`
+  token), clearly off the sky/indigo cluster.
+- Rail button → Memory destination with the Network glyph, directly below
+  Blackboard (Blackboard → Memory → Chat), pairing the two record surfaces.
 
 ## Consequences
 

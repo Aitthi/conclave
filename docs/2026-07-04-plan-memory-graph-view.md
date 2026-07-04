@@ -6,14 +6,17 @@ Decisions: `docs/adr/0007-memory-graph-view.md` · Design record: bb `design:mem
 ## DESIGN CANON
 
 `.arta/proto/screens/memory-graph.tsx` + `.arta/proto/lib/memoryGraph.ts` +
-`.arta/snapshots/memory-graph.png`, pinned @ **c134d01**. Design escalations →
+`.arta/proto/components/AppShell.tsx` (rail placement) +
+`.arta/snapshots/memory-graph.png`, pinned @ **73ac6fa** (supersedes c134d01:
+Shared-protocol violet `--color-a-violet` #bf5af0 + Memory rail button, Network
+glyph, directly below Blackboard). Design escalations →
 Arta (688719b6-741d-43e1-bc6c-9a2e78d4e21b). Spec/plan escalations → lead.
 Implementation judgment within this plan's intent: implementer's, logged in the
 lane's progress key, never escalated.
 
 ## GLOBAL CONSTRAINTS (every task inherits)
 
-- Build against the canon @ c134d01. No visual improvisation; token parity
+- Build against the canon @ 73ac6fa. No visual improvisation; token parity
   with shipped siblings over literal class copying (see role-picker lesson in
   workspace memory).
 - **No new dependencies.** Do not import react-flow (present but wrong look,
@@ -96,8 +99,8 @@ call locally if needed; do not commit the mock).
     client-side; the store has no titles).
   - radius by degree (from edges), colour by author: resolve `sourceId` →
     workspace-agent name+color via the roster IPC the `Roster` component
-    already uses. `sourceId` null/unresolved → "Shared" group (keep the
-    proto's current hue until Arta's ruling lands).
+    already uses. `sourceId` null/unresolved → "Shared" group in violet
+    `#bf5af0` per canon @ 73ac6fa (`--color-a-violet` in proto theme.css).
   - detail card links list = this node's edges → click walks to that node.
     Key EVERYTHING by chunk UUID — the proto's kebab slugs are mock-only
     (id-mismatch trap from workspace memory).
@@ -106,7 +109,8 @@ call locally if needed; do not commit the mock).
 - **B4** `AppShell.tsx` + `Rail.tsx`: Memory destination as a center-pane
   toggle following the Blackboard pattern exactly (state in AppShell, button
   in Rail, workspace-scoped, mutually exclusive with Blackboard/ChatHub).
-  Placement default: adjacent to the Blackboard toggle (Arta may adjust).
+  Placement per canon @ 73ac6fa: Network glyph, directly below Blackboard
+  (Blackboard → Memory → Chat) — see `.arta/proto/components/AppShell.tsx`.
 - **B5** States: 0 nodes → honest empty state (store empty / no workspace);
   search filter dims non-matches per proto.
 - **B6** Gate: `npx tsc --noEmit` + `npm run build`. Worktrees have no
