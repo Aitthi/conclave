@@ -146,3 +146,45 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - **`Resume` gating crosses bars**: the drawer computed `hasHandoff` once (`ContextDrawer.tsx:314`) and gated Session's Resume with it. Solved structurally by Task 5 Step 1 (`useSessionSnapshots`, single instance in `WorkspacePane`) — found blocking in plan review by Mellow (F2); do not regress to per-bar fetches.
 - **No human sender-detection needed (R8)**: do not port `ChatView`'s user/assistant sides into the rail — the message table has no human identity, and inventing one would violate the honesty rule.
 - **ChatHub refactor (Task 1) must be behavior-preserving** — it shipped reviewed at `c5465d1`; any visible change there is a defect.
+
+## Smoke findings — 2026-07-04 human GUI smoke: FAIL (visual fidelity)
+
+Human verdict on the installed build (relaunch 10:16): the rail "doesn't look like
+the .arta design". Lead compared the live screenshot against the canonical proto
+(`.arta/proto/screens/chats.tsx` + `theme.css`). Structure (header / chips / meta
+line / stream / footer, popover bars) matches; the MESSAGE RENDERING does not.
+Plan-attribution: Task 3 said "Layout per proto `chats.tsx`" but did not spell out
+the bubble/header spec, and no design-acceptance gate existed before the human
+smoke — that gap is the lead's; the guard below closes it.
+
+**Findings (fix round 2, owner Dew, reviewer Mellow, design sign-off Arta):**
+
+- **F-s1 — Bubble style.** Shipped (`ChatRail.tsx` message div): ChatHub carryover —
+  `bg-overlay/[0.05]` + `borderLeft: 2px solid <sender color>`, effectively full-width.
+  Canon (proto `.msg`, `theme.css:116` + `chats.tsx:104`): radius-md, `padding 0.5rem 0.72rem`,
+  `1px solid` soft border, raised background, text `0.84rem/1.5`, container `max-width: 82%`,
+  **no colored left border**. Map to real tokens per Global Constraints (app.css wins on VALUES;
+  proto wins on STRUCTURE).
+- **F-s2 — Per-message recipient rows (RULING R9).** Shipped renders a `→ recipient · reltime`
+  line above every message in `#workspace`; the proto has no recipient line anywhere.
+  R9: drop the arrow rows; recipient honesty moves to a `title` tooltip on the bubble
+  (`→ <name>`). Broadcast fan-out (same text sent to 3 peers = 3 bubbles) is accepted
+  Phase-1 data reality — do NOT dedup/merge; that would fabricate a channel-send that
+  doesn't exist in the data.
+- **F-s3 — Group header.** Proto (`chats.tsx:105-109`): one header per sender-group —
+  `name · role · HH:MM` (absolute clock time of the group's first message; day context
+  comes from the divider). Shipped: name only, relative times per message. Fix: header gains
+  role + absolute `HH:MM`; per-message time rows go away with F-s2. `AgentIdentity`
+  (`useWorkspaceChat.ts`) is `{name, color}` — extend it with `role` IF the hook's agent
+  source already carries one; if it doesn't, escalate to lead before inventing a lookup.
+- **F-s4 — Rail width.** Shipped `w-[300px]`; canon `w-[380px]` (proto `AppShell.tsx:167`).
+
+**Confirmed-correct omissions (do not "fix"):** no filter button (R7), unread label hidden
+at zero, no system pills (no system rows in `InterAgentMessage`), no typing indicator (R2).
+
+**Timeline note:** proto `chats.tsx`/`data.ts` last edited 09:38, AFTER Task 3's commit
+(09:36) — Arta to confirm whether the 09:38 iteration changed anything beyond the above.
+
+**New guard — design-acceptance gate:** before ANY future human smoke of a lane that has
+an `.arta/proto` design record, Arta pixel-reviews the actual rendering against the proto
+and records PASS at `bb review:<lane>-design`. A lane without that key is not smoke-ready.
