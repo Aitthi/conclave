@@ -202,7 +202,7 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
             className="w-2 h-2 rounded-full shrink-0 group-hover:hidden self-start mt-0.5"
             style={{ backgroundColor: statusColor }}
             role="img"
-            aria-label={entry.working ? "working" : entry.status}
+            aria-label={entry.status}
           />
           {entry.skillsStale && (
             <span
