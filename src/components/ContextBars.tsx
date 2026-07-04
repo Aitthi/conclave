@@ -24,9 +24,9 @@ import type { SessionSnapshots } from "../lib/useSessionSnapshots";
 
 // ---------------------------------------------------------------------------
 // Center-pane top/bottom context bars — slim, click-to-open popovers that
-// replace the old ContextDrawer's always-open sections (design: bb design:
-// right-rail-chat; plan Task 5/6). Content + guards are MOVED from
-// ContextDrawer.tsx, not rewritten (risk ledger: 997 lines of guarded code).
+// replace the old Context drawer's always-open sections (design: bb design:
+// right-rail-chat; plan Task 5/6). Content + guards are MOVED from the
+// drawer, not rewritten (risk ledger: 997 lines of guarded code).
 // ---------------------------------------------------------------------------
 
 interface ContextTopBarProps {
@@ -63,7 +63,7 @@ export function ContextTopBar({
   }, []);
 
   // ── Skills (REAL — the agent's effective skill set), moved verbatim from
-  //    ContextDrawer.tsx. ────────────────────────────────────────────────────
+  //    the old Context drawer. ──────────────────────────────────────────────
   const [skillCatalog, setSkillCatalog] = useState<Skill[] | null>(null);
   useEffect(() => {
     ipc.skill

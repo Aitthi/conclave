@@ -1,6 +1,7 @@
 // Compact relative-ish time hint from an ISO datetime string ("just now" /
 // "5m" / "3h" / "2d"). Best-effort, never throws — falls back to the raw
-// string when it can't be parsed. Shared by ContextDrawer and Blackboard.
+// string when it can't be parsed. Shared by ChatRail, ContextBars, ChatHub,
+// and Blackboard.
 export function timeHint(iso: string): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return iso;

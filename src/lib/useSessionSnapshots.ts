@@ -18,7 +18,7 @@ export interface SessionSnapshots {
 
 /**
  * Single shared fetcher for a session's snapshot list + handoff flag —
- * extracted from `ContextDrawer.tsx` (lines 281-332, behavior-preserving).
+ * extracted from the old Context drawer (behavior-preserving).
  * `WorkspacePane` holds ONE instance per active session and passes it to
  * both the top bar (Resume gates on `hasHandoff`) and the bottom bar
  * (snapshot popover) — two hook calls would mean two fetchers racing each

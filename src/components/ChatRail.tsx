@@ -19,7 +19,7 @@ import type { RoutingTarget } from "./RoutingPicker";
 // ---------------------------------------------------------------------------
 // ChatRail — the right rail's read-only, real-time viewer of agent traffic
 // (design: bb design:right-rail-chat; plan: docs/superpowers/plans/2026-07-04
-// -right-rail-chats.md Task 3). Replaces ContextDrawer. R8 (human directive):
+// -right-rail-chats.md Task 3). Replaces the old Context drawer. R8 (human directive):
 // agents only — the human never appears here (their direct sends never enter
 // InterAgentMessage). DM rooms render EXACTLY like the channel, just filtered
 // — Slack-style, no "mine"/two-sided pair-view semantics (plan guard 932f2b4).
