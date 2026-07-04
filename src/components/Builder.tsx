@@ -1,5 +1,18 @@
 import { useEffect, useState } from "react";
-import { X, Sparkles, Waypoints, MessageSquare, Terminal } from "lucide-react";
+import {
+  X,
+  Sparkles,
+  Waypoints,
+  MessageSquare,
+  Terminal,
+  Compass,
+  ShieldCheck,
+  Hammer,
+  PenTool,
+  Microscope,
+  Plus,
+  UserPen,
+} from "lucide-react";
 import { ipc } from "../ipc";
 import type { AgentDefinition, Skill, Role } from "../ipc";
 
@@ -28,6 +41,27 @@ const COLOR_SWATCHES = [
   "#0fa3a3",
   "#ff3b30",
 ];
+
+// ── Builtin role card looks (ADR 0005) ───────────────────────────────────────
+
+/**
+ * The backend `Role` (id / name / description / skillIds / kind) carries no
+ * icon or tagline — the card design (Arta proto @ a24f482) assigns one per
+ * builtin role id. Custom (user-created) roles have no designed look, so they
+ * fall back to a neutral icon + generic tagline; their real content shows in
+ * the selected-role callout via `description`.
+ */
+const BUILTIN_ROLE_LOOKS: Record<string, { Icon: typeof Compass; tagline: string }> = {
+  lead: { Icon: Compass, tagline: "Settles & delegates work" },
+  reviewer: { Icon: ShieldCheck, tagline: "Grills work with evidence" },
+  implementer: { Icon: Hammer, tagline: "Builds the recorded plan" },
+  designer: { Icon: PenTool, tagline: "Designs on the canvas" },
+  researcher: { Icon: Microscope, tagline: "Investigates open questions" },
+};
+
+function roleLook(role: Role): { Icon: typeof Compass; tagline: string } {
+  return BUILTIN_ROLE_LOOKS[role.id] ?? { Icon: UserPen, tagline: "Custom role" };
+}
 
 // ── Claude Code config presets ───────────────────────────────────────────────
 
@@ -232,7 +266,23 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const selectedRole = allRoles.find((r) => r.id === roleId);
   // Fall back to any legacy free-text label when no first-class role resolves.
   const selectedRoleName = selectedRole?.name ?? (initialDef?.role || undefined);
-  const selectedRoleDescription = selectedRole?.description;
+  // Cards are rendered builtin-first, then custom, then the dashed "Custom…"
+  // create card (stable sort keeps each group's list order from role.list).
+  const orderedRoles = [...allRoles].sort(
+    (a, b) => (a.kind === "builtin" ? 0 : 1) - (b.kind === "builtin" ? 0 : 1),
+  );
+  // Mandatory skills attach to every agent regardless of role — shown as the
+  // "always on" note in the callout (derived, not hardcoded).
+  const mandatorySkillNames = allSkills
+    .filter((s) => s.kind === "builtin" && s.mandatory)
+    .map((s) => s.name);
+  // The selected role's default skills, resolved to display names (ids that no
+  // longer resolve to a skill are dropped — they wouldn't pre-select either).
+  const attachSkillNames = selectedRole
+    ? selectedRole.skillIds
+        .map((id) => allSkills.find((s) => s.id === id)?.name)
+        .filter((n): n is string => Boolean(n))
+    : [];
   // CLI launch config applies to claude-code + codex (custom isn't wired yet).
   const isClaudeCode = agentType === "cli" && cliKind === "claude-code";
   const isCodex = agentType === "cli" && cliKind === "codex";
@@ -410,56 +460,132 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
 
           </section>
 
-          {/* Role (ADR 0005) */}
+          {/* Role (ADR 0005) — card grid (matches the Type cards below), with a
+              quiet "No role" toggle in the header and a "Custom…" create card. */}
           <section>
-            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
-              Role
-            </div>
-            <select
-              value={roleId}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "__custom__") {
-                  setCustomRoleOpen(true);
-                  setRoleId("");
-                } else if (v === "") {
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+                Role
+              </span>
+              <button
+                type="button"
+                onClick={() => {
                   setRoleId("");
                   setCustomRoleOpen(false);
-                } else {
-                  selectRole(v);
-                }
-              }}
-              className="w-full text-[12.5px] bg-surface ring-1 ring-overlay/[0.08] rounded-lg px-2.5 py-1.5 outline-none focus:ring-accent"
-            >
-              <option value="">No role</option>
-              {allRoles.filter((r) => r.kind === "builtin").length > 0 && (
-                <optgroup label="Built-in">
-                  {allRoles
-                    .filter((r) => r.kind === "builtin")
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name}
-                      </option>
-                    ))}
-                </optgroup>
-              )}
-              {allRoles.filter((r) => r.kind === "custom").length > 0 && (
-                <optgroup label="Custom">
-                  {allRoles
-                    .filter((r) => r.kind === "custom")
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name}
-                      </option>
-                    ))}
-                </optgroup>
-              )}
-              <option value="__custom__">Custom…</option>
-            </select>
-            {selectedRoleDescription && (
-              <p className="mt-1.5 text-[11.5px] text-text-tertiary leading-snug">
-                {selectedRoleDescription}
-              </p>
+                }}
+                className={`text-[11px] font-medium transition-colors ${
+                  roleId === "" && !customRoleOpen
+                    ? "text-accent"
+                    : "text-text-tertiary hover:text-text-secondary"
+                }`}
+              >
+                No role
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              {orderedRoles.map((r) => {
+                const { Icon, tagline } = roleLook(r);
+                const active = roleId === r.id && !customRoleOpen;
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => selectRole(r.id)}
+                    aria-pressed={active}
+                    className={`relative rounded-xl p-2.5 text-left transition-all ring-1 ${
+                      active
+                        ? "ring-accent/40 bg-accent/[0.06]"
+                        : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
+                    }`}
+                  >
+                    <Icon
+                      className={`w-[17px] h-[17px] mb-1.5 ${
+                        active ? "text-accent" : "text-text-secondary"
+                      }`}
+                    />
+                    <div className="text-[12.5px] font-semibold leading-tight">{r.name}</div>
+                    <div className="text-[11px] text-text-tertiary leading-snug mt-0.5">
+                      {tagline}
+                    </div>
+                  </button>
+                );
+              })}
+
+              {/* Custom… — dashed action card that opens the inline role editor. */}
+              <button
+                type="button"
+                onClick={() => {
+                  setCustomRoleOpen(true);
+                  setRoleId("");
+                }}
+                aria-pressed={customRoleOpen}
+                className={`relative rounded-xl p-2.5 text-left transition-all border border-dashed ${
+                  customRoleOpen
+                    ? "border-accent/60 bg-accent/[0.06]"
+                    : "border-overlay/[0.12] hover:bg-overlay/[0.02]"
+                }`}
+              >
+                <Plus
+                  className={`w-[17px] h-[17px] mb-1.5 ${
+                    customRoleOpen ? "text-accent" : "text-text-secondary"
+                  }`}
+                />
+                <div className="text-[12.5px] font-semibold leading-tight">Custom…</div>
+                <div className="text-[11px] text-text-tertiary leading-snug mt-0.5">
+                  Define your own role
+                </div>
+              </button>
+            </div>
+
+            {/* Selected-role callout: description + attached skills + always-on note. */}
+            {selectedRole && (
+              <div className="mt-2.5 rounded-xl ring-1 ring-overlay/[0.08] bg-surface p-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  {(() => {
+                    const { Icon } = roleLook(selectedRole);
+                    return <Icon className="w-3.5 h-3.5 text-accent shrink-0" />;
+                  })()}
+                  <span className="text-[12.5px] font-semibold">{selectedRole.name}</span>
+                </div>
+                <p className="text-[11.5px] text-text-tertiary leading-relaxed">
+                  {selectedRole.description}
+                </p>
+                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+                    Attaches
+                  </span>
+                  {attachSkillNames.length > 0 ? (
+                    attachSkillNames.map((s) => (
+                      <span
+                        key={s}
+                        className="text-[11px] font-medium px-2 py-0.5 rounded-md ring-1 ring-accent/40 bg-accent/[0.08] text-accent"
+                      >
+                        {s}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[11px] text-text-tertiary italic">
+                      mandatory skills only
+                    </span>
+                  )}
+                </div>
+                {mandatorySkillNames.length > 0 && (
+                  <div className="mt-1.5 text-[10.5px] text-text-tertiary leading-snug">
+                    + {mandatorySkillNames.join(", ")}
+                    <span className="opacity-70"> · always on</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* No-role empty note. */}
+            {!selectedRole && !customRoleOpen && (
+              <div className="mt-2.5 rounded-xl border border-dashed border-overlay/[0.12] bg-surface p-3 text-[11.5px] text-text-tertiary leading-relaxed">
+                No role: the agent runs with only the mandatory
+                {mandatorySkillNames.length > 0 ? ` ${mandatorySkillNames.join(" and ")} ` : " "}
+                skills, and no job description in its preamble.
+              </div>
             )}
 
             {/* Inline custom-role editor */}
