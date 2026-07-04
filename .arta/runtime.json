@@ -11,6 +11,10 @@
       "title": "Right rail · Chats"
     },
     {
+      "id": "role-picker",
+      "title": "Edit agent · Role picker"
+    },
+    {
       "id": "roster-activity",
       "title": "Roster · Activity states"
     }
@@ -18,7 +22,7 @@
   "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "02:39:47 PM",
-  "reportedAt": "2026-07-04T07:39:47.221Z",
+  "updatedAt": "03:05:22 PM",
+  "reportedAt": "2026-07-04T08:05:22.822Z",
   "gates": []
 }
