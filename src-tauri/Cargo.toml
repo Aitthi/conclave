@@ -3,7 +3,7 @@ name = "conclave"
 version = "0.2.0"
 description = "Conclave — multi-agent terminal + AI chat workspace for macOS"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 # Two bin targets exist (the GUI app `conclave` + the `conclave-cli` client),
 # so `cargo run` / `tauri dev` would otherwise be ambiguous. The GUI is the
 # default; build the CLI explicitly with `cargo build --bin conclave-cli`.
@@ -38,4 +38,8 @@ portable-pty = "0.9.0"
 futures-util = "0.3.32"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 keyring = { version = "3", features = ["apple-native"] }
+# Default features disabled: `hf-hub-native-tls`/`ort-download-binaries-native-tls`
+# pull in a second TLS stack (OpenSSL) alongside the rustls-tls `reqwest` already
+# uses above; `image-models` is unused (text embedding only, v1 uses MiniLM only).
+fastembed = { version = "5.17", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 
