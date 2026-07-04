@@ -508,7 +508,7 @@ mod tests {
         let live = repo::skill::create(&state.db, "Live", None, "c")
             .await
             .expect("create skill failed");
-        let role = repo::role::create(&state.db, "R", "desc", &[live.id.clone()])
+        let role = repo::role::create(&state.db, "R", "desc", std::slice::from_ref(&live.id))
             .await
             .expect("create role failed");
 
