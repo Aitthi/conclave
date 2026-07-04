@@ -7,7 +7,7 @@ import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
 import { FusionView } from "./FusionView";
 import { ChatRail } from "./ChatRail";
-import { ContextTopBar } from "./ContextBars";
+import { ContextTopBar, ContextBottomBar } from "./ContextBars";
 import { useSessionSnapshots } from "../lib/useSessionSnapshots";
 import type { RoutingTarget } from "./RoutingPicker";
 
@@ -378,6 +378,17 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
                     {/* keyed by sessionId so a RESPAWN (new session) remounts, but a
                         tab switch (same sessionId) does NOT. */}
                     <Terminal key={sid} sessionId={sid} />
+                    {/* Bottom context bar — ONLY for the active tab (guarantees a
+                        single live snapshot/meter consumer even though every cli
+                        tab's div is always mounted). */}
+                    {isActive && (
+                      <ContextBottomBar
+                        def={tab.def}
+                        instanceId={tab.instanceId}
+                        session={activeSession}
+                        snapshots={sessionSnapshots}
+                      />
+                    )}
                     <StdinBar sessionId={sid} instanceId={tab.instanceId} roster={roster} />
                   </>
                 ) : (
@@ -404,23 +415,40 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
               Couldn't open session: {activeError}
             </div>
           ) : activeSessionId ? (
-            <ChatView
-              key={activeSessionId}
-              sessionId={activeSessionId}
-              instanceId={activeTab.instanceId}
-              roster={roster}
-              agentName={activeTab.name}
-              agentColor={activeTab.color}
-            />
+            <>
+              <ContextBottomBar
+                def={activeTab.def}
+                instanceId={activeTab.instanceId}
+                session={activeSession}
+                snapshots={sessionSnapshots}
+              />
+              <ChatView
+                key={activeSessionId}
+                sessionId={activeSessionId}
+                instanceId={activeTab.instanceId}
+                roster={roster}
+                agentName={activeTab.name}
+                agentColor={activeTab.color}
+              />
+            </>
           ) : (
             <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
               Opening session…
             </div>
           )
         ) : activeTab.type === "orchestrator" ? (
-          // Orchestrator → Fusion pipeline UI (drives the real M4.3 backend via
-          // the instance id; it doesn't need the placeholder session object).
-          <FusionView instanceId={activeTab.instanceId} def={activeTab.def} roster={roster} />
+          <>
+            <ContextBottomBar
+              def={activeTab.def}
+              instanceId={activeTab.instanceId}
+              session={activeSession}
+              snapshots={sessionSnapshots}
+            />
+            {/* Orchestrator → Fusion pipeline UI (drives the real M4.3 backend
+                via the instance id; it doesn't need the placeholder session
+                object itself). */}
+            <FusionView instanceId={activeTab.instanceId} def={activeTab.def} roster={roster} />
+          </>
         ) : null}
       </main>
 
