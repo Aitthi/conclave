@@ -42,6 +42,23 @@ const EMBEDDING_COLS: [&str; 8] = [
     "created_at",
 ];
 
+const GRAPH_COLS: [&str; 8] = [
+    "id",
+    "text",
+    "embedding",
+    "dimension",
+    "source_kind",
+    "source_id",
+    "created_at",
+    "updated_at",
+];
+
+/// Cap on the number of chunks [`list_for_graph`] returns in one call. The
+/// knowledge-graph view needs the whole workspace at once (edges are derived
+/// over every pair), so — unlike [`list_embeddings`] — this is not
+/// keyset-paginated; see ADR 0007's O(n²) cost note.
+pub const GRAPH_NODE_CAP: i64 = 2000;
+
 /// The model identity pinned to one workspace's memory index.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +99,22 @@ pub struct MemoryEmbeddingRow {
     pub source_kind: String,
     pub source_id: Option<String>,
     pub created_at: String,
+}
+
+/// One row returned by [`list_for_graph`] for the knowledge-graph view.
+///
+/// Distinct from [`MemoryEmbeddingRow`] because the graph view also needs
+/// `updated_at` (node recency), which the exact-search path never reads.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct MemoryGraphRow {
+    pub id: String,
+    pub text: String,
+    pub embedding: Vec<u8>,
+    pub dimension: i64,
+    pub source_kind: String,
+    pub source_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Inputs required to atomically upsert a memory chunk.
@@ -264,6 +297,28 @@ pub async fn list_embeddings(
         )));
     }
     Ok(rows)
+}
+
+/// Read up to [`GRAPH_NODE_CAP`] chunks for the knowledge-graph view.
+///
+/// Unlike [`list_embeddings`], this has no model/dimension identity to
+/// validate against — the caller derives edges from whatever is stored, and
+/// an empty or missing index simply yields an empty list. Returns rows
+/// ordered by ascending id so a caller can tell truncation happened by
+/// comparing the returned length against [`count`].
+pub async fn list_for_graph(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<MemoryGraphRow>, AppError> {
+    QueryBuilder::<Sqlite>::table("memory_chunk")
+        .select(GRAPH_COLS)
+        .where_eq("workspace_id", workspace_id)
+        .order_by("id", Order::Asc)
+        .limit(GRAPH_NODE_CAP)
+        .fetch_all::<MemoryGraphRow, _>(pool)
+        .await
+        .map_err(cb_err)
+        .map_err(AppError::from)
 }
 
 /// Delete one chunk from exactly one workspace.
@@ -596,6 +651,51 @@ mod tests {
         assert_eq!(clear_workspace(&pool, &ws1).await.unwrap(), 1);
         assert_eq!(count(&pool, &ws1).await.unwrap(), 0);
         assert_eq!(count(&pool, &ws2).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_for_graph_returns_updated_at_and_is_workspace_scoped() {
+        let pool = connect_in_memory().await;
+        let ws1 = fixture_workspace(&pool, "graph-ws1").await;
+        let ws2 = fixture_workspace(&pool, "graph-ws2").await;
+        let ws1_chunk = upsert_fixture(&pool, &ws1, "ws1 text", "graph-hash").await;
+        upsert_fixture(&pool, &ws2, "ws2 text", "graph-hash").await;
+
+        let rows = list_for_graph(&pool, &ws1).await.expect("list for graph");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, ws1_chunk.row.id);
+        assert_eq!(rows[0].updated_at, ws1_chunk.row.updated_at);
+        assert_eq!(rows[0].created_at, ws1_chunk.row.created_at);
+    }
+
+    #[tokio::test]
+    async fn list_for_graph_reflects_updates_to_existing_chunks() {
+        let pool = connect_in_memory().await;
+        let workspace_id = fixture_workspace(&pool, "graph-update").await;
+        let first = upsert_fixture(&pool, &workspace_id, "one", "same-hash").await;
+        let embedding = fake_embedding("one edited", DIMENSION);
+        let second = upsert_chunk(
+            &pool,
+            UpsertChunkInput {
+                workspace_id: &workspace_id,
+                model_id: MODEL,
+                source_kind: "manual",
+                source_id: None,
+                text: "one edited",
+                embedding: &embedding,
+                content_hash: "same-hash",
+            },
+        )
+        .await
+        .expect("re-upsert same content hash");
+
+        let rows = list_for_graph(&pool, &workspace_id)
+            .await
+            .expect("list for graph");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, first.row.id);
+        assert_eq!(rows[0].text, "one edited");
+        assert_eq!(rows[0].updated_at, second.row.updated_at);
     }
 
     #[tokio::test]

@@ -95,12 +95,18 @@ Requires the Conclave app to be running.
 /// - `tell <toInstanceId> <text...>` → `tell <selfId> <toInstanceId> <text...>`
 /// - `snapshot save <text...>`       → `snapshot save <selfId> <text...>`
 /// - `snapshot last`                 → `snapshot last <selfId>`
+/// - `memory remember <workspaceId> <text...>` →
+///   `memory remember <selfId-or-"-"> <workspaceId> <text...>` (ADR 0007:
+///   optional author stamping — unlike the forms above, this one does NOT
+///   require a known instance id; outside a spawned agent it injects the
+///   sentinel `"-"` so the chunk saves as `manual`, same as today).
 ///
 /// Everything else (including `snapshot list/read/create`, which take an explicit
 /// id) passes through untouched.
 ///
-/// Errors (as a user-facing string) when one of these forms is used without a
-/// known instance id (i.e. run outside a spawned agent) or with missing args.
+/// Errors (as a user-facing string) when `tell`/`snapshot save`/`snapshot last`/
+/// `restart` are used without a known instance id (i.e. run outside a spawned
+/// agent), or when any of these forms is missing required arguments.
 fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Vec<String>, String> {
     // Resolve the caller's own instance id, or a user-facing error naming `cmd`.
     let require_self = |cmd: &str| -> Result<&str, String> {
@@ -158,6 +164,25 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
                 return Err("conclave: restart (no arguments)".to_string());
             }
             Ok(vec!["restart".to_string(), me.to_string()])
+        }
+        // ADR 0007: author stamping. Unlike `tell`/`snapshot save`/`restart`,
+        // `memory remember` is valid both inside a spawned agent AND from a
+        // plain terminal — stamping the author is optional enrichment, not a
+        // requirement. When `CONCLAVE_INSTANCE_ID` is set, inject it as the
+        // author slot; otherwise inject the sentinel "-" (never a real
+        // instance id, which is always a UUID) so the server keeps the chunk
+        // `manual` rather than fabricating an author.
+        Some("memory") if argv.get(1).map(String::as_str) == Some("remember") => {
+            if argv.len() < 4 {
+                return Err("conclave: memory remember <workspaceId> <text...>".to_string());
+            }
+            let author = self_instance.filter(|s| !s.is_empty()).unwrap_or("-");
+            let mut out = Vec::with_capacity(argv.len() + 1);
+            out.push("memory".to_string());
+            out.push("remember".to_string());
+            out.push(author.to_string()); // author (injected from env, or "-")
+            out.extend_from_slice(&argv[2..]); // workspaceId + text...
+            Ok(out)
         }
         _ => Ok(argv),
     }
@@ -431,6 +456,46 @@ mod tests {
             expand_self_args(create.clone(), Some("self1")).unwrap(),
             create
         );
+    }
+
+    // ── memory remember (ADR 0007: optional author stamping) ───────────────
+
+    #[test]
+    fn memory_remember_injects_instance_from_env() {
+        let out = expand_self_args(v(&["memory", "remember", "ws1", "hi", "there"]), Some("self1"))
+            .unwrap();
+        assert_eq!(
+            out,
+            v(&["memory", "remember", "self1", "ws1", "hi", "there"])
+        );
+    }
+
+    #[test]
+    fn memory_remember_injects_sentinel_without_instance_id() {
+        let out = expand_self_args(v(&["memory", "remember", "ws1", "hi"]), None).unwrap();
+        assert_eq!(out, v(&["memory", "remember", "-", "ws1", "hi"]));
+    }
+
+    #[test]
+    fn memory_remember_injects_sentinel_with_empty_instance_id() {
+        let out = expand_self_args(v(&["memory", "remember", "ws1", "hi"]), Some("")).unwrap();
+        assert_eq!(out, v(&["memory", "remember", "-", "ws1", "hi"]));
+    }
+
+    #[test]
+    fn memory_remember_missing_text_errors_even_without_instance_id() {
+        assert!(expand_self_args(v(&["memory", "remember", "ws1"]), None).is_err());
+    }
+
+    #[test]
+    fn memory_search_delete_status_pass_through_untouched() {
+        let search = v(&["memory", "search", "ws1", "query"]);
+        assert_eq!(
+            expand_self_args(search.clone(), Some("self1")).unwrap(),
+            search
+        );
+        let status = v(&["memory", "status", "ws1"]);
+        assert_eq!(expand_self_args(status.clone(), None).unwrap(), status);
     }
 
     #[test]

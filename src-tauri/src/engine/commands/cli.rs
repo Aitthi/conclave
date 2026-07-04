@@ -279,20 +279,31 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
 
         // ── memory ────────────────────────────────────────────────────────
         "memory" => match argv.get(1).map(String::as_str) {
+            // `memory remember <author> <workspaceId> <text...>` — the
+            // `<author>` slot is filled by `conclave-cli`'s `expand_self_args`
+            // from the caller's own `CONCLAVE_INSTANCE_ID` when set, or the
+            // sentinel "-" outside a spawned agent (ADR 0007: we do not
+            // fabricate authors — unset stays `manual`). "-" can never
+            // collide with a real instance id, which is always a UUID.
             Some("remember") => {
-                let workspace_id = argv.get(2).ok_or_else(|| {
+                let author = argv.get(2).ok_or_else(|| {
                     AppError::Invalid("cli: memory remember <workspaceId> <text...>".into())
                 })?;
-                if argv.len() < 4 {
+                let workspace_id = argv.get(3).ok_or_else(|| {
+                    AppError::Invalid("cli: memory remember <workspaceId> <text...>".into())
+                })?;
+                if argv.len() < 5 {
                     return Err(AppError::Invalid(
                         "cli: memory remember <workspaceId> <text...>".into(),
                     ));
                 }
-                let text = argv[3..].join(" ");
-                Ok((
-                    "memory.remember",
-                    json!({ "workspaceId": workspace_id, "text": text }),
-                ))
+                let text = argv[4..].join(" ");
+                let mut params = json!({ "workspaceId": workspace_id, "text": text });
+                if author != "-" {
+                    params["sourceKind"] = json!("agent");
+                    params["sourceId"] = json!(author);
+                }
+                Ok(("memory.remember", params))
             }
             Some("search") => {
                 let workspace_id = argv.get(2).ok_or_else(|| {
@@ -792,30 +803,50 @@ mod tests {
     // ── memory ────────────────────────────────────────────────────────────
 
     #[test]
-    fn memory_remember_maps_correctly() {
+    fn memory_remember_maps_correctly_without_author() {
+        // "-" sentinel: `conclave-cli` injects this outside a spawned agent.
         assert_eq!(
-            ok_method(&["memory", "remember", "ws1", "hello"]),
+            ok_method(&["memory", "remember", "-", "ws1", "hello"]),
             "memory.remember"
         );
         assert_eq!(
-            ok_params(&["memory", "remember", "ws1", "hello"]),
+            ok_params(&["memory", "remember", "-", "ws1", "hello"]),
             json!({ "workspaceId": "ws1", "text": "hello" })
         );
     }
 
     #[test]
+    fn memory_remember_stamps_agent_author_when_present() {
+        let params = ok_params(&["memory", "remember", "inst1", "ws1", "hello"]);
+        assert_eq!(
+            params,
+            json!({
+                "workspaceId": "ws1",
+                "text": "hello",
+                "sourceKind": "agent",
+                "sourceId": "inst1",
+            })
+        );
+    }
+
+    #[test]
     fn memory_remember_joins_multiword_text() {
-        let params = ok_params(&["memory", "remember", "ws1", "hello", "there", "world"]);
+        let params = ok_params(&["memory", "remember", "-", "ws1", "hello", "there", "world"]);
         assert_eq!(params["text"], json!("hello there world"));
     }
 
     #[test]
     fn memory_remember_missing_text_is_invalid() {
-        assert!(is_invalid(&["memory", "remember", "ws1"]));
+        assert!(is_invalid(&["memory", "remember", "-", "ws1"]));
     }
 
     #[test]
     fn memory_remember_missing_workspace_is_invalid() {
+        assert!(is_invalid(&["memory", "remember", "-"]));
+    }
+
+    #[test]
+    fn memory_remember_missing_author_is_invalid() {
         assert!(is_invalid(&["memory", "remember"]));
     }
 
