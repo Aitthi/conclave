@@ -1,17 +1,21 @@
-import { Search, Terminal, Layers } from "lucide-react";
+import { Search, Terminal, Layers, LoaderCircle } from "lucide-react";
 import { agents, avClass } from "../lib/data";
 
 export const meta = { title: "Roster · Activity states" };
 
-/* Agent working-state indicator (plan F1, agent-activity-indicator @ 64f7a10).
-   Direction: the left-sidebar status dot gains a WORKING treatment, a steady
-   green core with a slow expanding halo, shown for an agent that emitted PTY
-   output within the last 5s (lead ruling R-act-1). Three states read at a
-   glance in the 266px sidebar: working (halo) / running-quiet (plain green,
-   the app's current dot) / idle (plain gray). No layout shift (the halo is a
-   scaled ::after), and the dot hides on row-hover with the remove affordance
-   just as today. A prefers-reduced-motion fallback swaps the halo for a
-   persistent green ring, so working stays distinct without any animation. */
+/* Agent working-state indicator, round 2 (human-directed, supersedes the F2
+   green halo in plan:agent-activity-indicator).
+   Direction: the small right-side dot was too subtle. A working agent, one
+   whose backend emitted PTY output in the last 5s, now shows an amber sub-line
+   under its name/role: a slow-spinning amber icon plus a "working" label with a
+   cycling ellipsis, clearly visible in the 266px sidebar. The right status dot
+   is unchanged (green running, gray idle, orange waiting) and still hides on
+   row-hover with the remove affordance. Amber (#ffb224) is a yellow-gold,
+   deliberately yellower than waiting-orange (#ff9f0a); the icon and animated
+   text are the real differentiator from the bare, static waiting dot. The row
+   expands only while working (grid-rows 0fr->1fr slide-in) so idle rows stay
+   compact. A prefers-reduced-motion fallback stops the spin and shows a static
+   "working..." so the signal survives without any animation. */
 
 type State = "working" | "running" | "idle" | "waiting";
 
@@ -22,13 +26,31 @@ const rows: { id: string; state: State }[] = [
   { id: "arta", state: "idle" },
 ];
 
+// The right-side dot reflects the persistent SESSION state; a working agent's
+// session is live, so its dot stays green (running). Working layers on top.
+const dotState = (s: State): State => (s === "working" ? "running" : s);
+
 function Dot({ state, lg }: { state: State; lg?: boolean }) {
   return <span className={`rdot ${lg ? "rdot-lg" : ""} rdot-${state}`} aria-label={state} />;
+}
+
+function WorkLine({ on }: { on: boolean }) {
+  return (
+    <div className={`rwork-slot ${on ? "is-working" : ""}`} aria-hidden={!on}>
+      <div className="rwork">
+        <div className="rwork-inner">
+          <LoaderCircle size={11} className="rwork-ico" />
+          <span className="rwork-label">working</span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Row({ id, state }: { id: string; state: State }) {
   const a = agents[id];
   const isCli = a.role !== "Designer"; // stand-in: most swarm agents are CLI
+  const working = state === "working";
   return (
     <div className="group flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors hover:bg-[var(--color-hover)]">
       <span className={`av av-md ${avClass[a.color]}`}>{a.initials}</span>
@@ -38,11 +60,14 @@ function Row({ id, state }: { id: string; state: State }) {
           {isCli && <Terminal size={12} className="faint shrink-0" />}
         </div>
         <div className="text-[0.66rem] dim truncate">{a.role}</div>
+        <WorkLine on={working} />
       </div>
       {/* Status dot — hidden on hover to free the remove affordance (app parity). */}
-      <span className="group-hover:hidden"><Dot state={state} /></span>
+      <span className="group-hover:hidden self-start mt-0.5">
+        <Dot state={dotState(state)} />
+      </span>
       <button
-        className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md faint hover:bg-[var(--color-hover)] shrink-0"
+        className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md faint hover:bg-[var(--color-hover)] shrink-0 self-start"
         title="Remove from workspace"
       >
         <span className="text-[0.9rem] leading-none">×</span>
@@ -97,54 +122,59 @@ export default function RosterActivity() {
         </div>
       </aside>
 
-      {/* main — the direction explained: enlarged states + reduced-motion fallback */}
+      {/* main — the direction explained: amber working line + reduced-motion fallback */}
       <main className="flex-1 min-w-0 overflow-y-auto scroll-thin px-8 py-7">
         <div className="max-w-[520px]">
           <h1 className="heading text-[1.06rem] font-semibold tracking-tight">Working-state indicator</h1>
           <p className="dim text-[0.8rem] leading-relaxed mt-1.5">
-            The sidebar status dot signals who is <span className="heading font-medium">actively working</span> right now: an
-            agent whose backend emitted output in the last 5&nbsp;seconds. Motion carries the signal; colour still separates
-            live from idle. Watch Detoro &amp; Mellow pulse in the roster at left.
+            The sidebar now says who is <span className="heading font-medium">actively working</span> in words, not just a
+            dot: an agent whose backend emitted output in the last 5&nbsp;seconds shows an amber
+            <span className="heading font-medium"> working…</span> line under its name. Watch Detoro &amp; Mellow at left.
           </p>
 
           <div className="mt-6 rounded-lg p-4" style={{ background: "var(--color-sidebar)", border: "1px solid var(--color-border)" }}>
             <div className="label faint pb-1">States</div>
             <div className="divide-y" style={{ borderColor: "var(--color-border-soft)" }}>
               <Legend
-                swatch={<Dot state="working" lg />}
+                swatch={<LoaderCircle size={12} className="rwork-ico" style={{ color: "var(--color-working)" }} />}
                 name="Working"
-                desc="Session live and emitting output (≤ 5s). Steady green core + slow expanding halo."
+                desc="Session live and emitting output (≤ 5s). Green dot stays; an amber spinner + “working…” line appears under the name."
               />
               <Legend
                 swatch={<Dot state="running" lg />}
                 name="Running · quiet"
-                desc="Session alive but idle at its prompt. The app's current static green dot, unchanged."
+                desc="Session alive but idle at its prompt. The app’s static green dot, no sub-line."
               />
               <Legend
                 swatch={<Dot state="idle" lg />}
                 name="Idle"
-                desc="No live session. The app's current static gray dot, unchanged."
+                desc="No live session. The app’s static gray dot, unchanged."
               />
               <Legend
-                swatch={<span className="rdot rdot-lg rdot-running rdot-ring" aria-label="working (reduced motion)" />}
+                swatch={<Dot state="waiting" lg />}
+                name="Waiting"
+                desc="Awaiting input. Static orange dot, no motion, no sub-line, never confused with amber working."
+              />
+              <Legend
+                swatch={<LoaderCircle size={12} style={{ color: "var(--color-working)" }} />}
                 name="Working · reduced motion"
-                desc="prefers-reduced-motion: the halo becomes a persistent green ring, still distinct from quiet, with no animation."
+                desc="prefers-reduced-motion: the icon stops spinning and the label reads a static “working…”, still amber and legible."
               />
             </div>
           </div>
 
           <div className="mt-5 text-[0.72rem] faint leading-relaxed space-y-1.5">
             <p>
-              <span className="dim font-medium">No layout shift.</span> The halo is a scaled pseudo-element, so rows never
-              reflow as agents start and stop working.
+              <span className="dim font-medium">Amber ≠ orange.</span> Working amber (#ffb224) is a yellow-gold; the spinner
+              and animated text set it apart from the bare, static waiting-orange dot at a glance.
+            </p>
+            <p>
+              <span className="dim font-medium">Expands, not reserved.</span> The line slides the row open only while working
+              (grid-rows 0fr→1fr); idle rows stay compact instead of carrying a permanent blank slot.
             </p>
             <p>
               <span className="dim font-medium">Hover parity.</span> The dot still hides on row-hover to reveal the remove
-              button; the working signal never fights that affordance.
-            </p>
-            <p>
-              <span className="dim font-medium">Waiting</span> (orange) stays exactly as it is. Working is an orthogonal
-              signal layered only on live sessions.
+              button; the amber line reads on the left, clear of that affordance.
             </p>
           </div>
         </div>

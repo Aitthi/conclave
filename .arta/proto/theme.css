@@ -32,6 +32,9 @@
   --color-accent-ink: #ffffff;
   --color-live: #30d158;       /* --color-status-running */
   --color-queued: #ff9f0a;     /* --color-status-waiting */
+  --color-working: #ffb224;    /* agent actively emitting: yellow-gold amber,
+                                  deliberately yellower than --color-queued so
+                                  working never reads as waiting */
   --color-rose: #ff453a;
 
   /* per-agent identity colours (from --color-agent-*) */
@@ -110,21 +113,32 @@ body {
 .rdot-running { background: #30d158; }                /* session live, quiet at prompt */
 .rdot-idle    { background: #c7c7cc; }                /* no live session */
 .rdot-waiting { background: #ff9f0a; }                /* awaiting input (unchanged app state) */
-.rdot-working { background: #30d158; }                /* live + actively emitting */
-.rdot-working::after {
-  content: ""; position: absolute; inset: 0; border-radius: 999px;
-  background: #30d158; animation: work-halo 1.6s ease-out infinite; will-change: transform, opacity;
-}
-@keyframes work-halo {
-  0%   { transform: scale(1);   opacity: 0.5; }
-  70%  { transform: scale(2.8); opacity: 0; }
-  100% { transform: scale(2.8); opacity: 0; }
-}
-/* Static-ring rendering for the legend swatch that demonstrates the
-   reduced-motion fallback regardless of the OS setting. */
-.rdot-ring::before {
-  content: ""; position: absolute; inset: -3px; border-radius: 999px;
-  border: 1.5px solid color-mix(in srgb, #30d158 62%, transparent);
+.rdot-working { background: #30d158; }                /* session still live green; the amber sub-line below carries "working" */
+
+/* ---------- working sub-line (amber, agent actively emitting) ----------
+   Human-directed round 2, SUPERSEDES the green expanding halo. Working now
+   reads as an amber sub-line under the name/role: a small slow-spinning amber
+   icon plus a "working" label with a cycling ellipsis, so activity is legible
+   at a glance in the 266px column rather than a subtle dot. Amber (#ffb224) is
+   a yellow-gold, deliberately yellower than waiting-orange (#ff9f0a); the icon
+   and animated text are the real differentiator from the bare, static waiting
+   dot. The row expands only while working (grid-rows 0fr->1fr slide-in) so idle
+   rows stay compact, with no permanent reserved blank line under every agent. */
+.rwork-slot { display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows .16s ease; }
+.rwork-slot.is-working { grid-template-rows: 1fr; }
+.rwork { overflow: hidden; min-height: 0; }
+.rwork-inner { display: flex; align-items: center; gap: 0.3rem; padding-top: 2px;
+  color: var(--color-working); font-size: 0.62rem; font-weight: 600; letter-spacing: 0.01em; }
+.rwork-ico { animation: rwork-spin 1.6s linear infinite; flex: none; }
+.rwork-label::after { content: ""; display: inline-block; width: 1.1ch; text-align: left;
+  animation: rwork-dots 1.5s infinite; }
+@keyframes rwork-spin { to { transform: rotate(360deg); } }
+@keyframes rwork-dots {
+  0%        { content: ""; }
+  25%       { content: "."; }
+  50%       { content: ".."; }
+  75%, 100% { content: "..."; }
 }
 
 /* ---------- rows ---------- */
@@ -223,10 +237,10 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .row, .seg-btn, .chip, .send { transition: none; }
   .typing i { animation: none; }
-  /* Working stays distinguishable from quiet-running WITHOUT motion: the halo
-     stops expanding and becomes a persistent ring around the green core. */
-  .rdot-working::after {
-    animation: none; inset: -3px; background: transparent; transform: none; opacity: 1;
-    border: 1.5px solid color-mix(in srgb, #30d158 62%, transparent);
-  }
+  .rwork-slot { transition: none; }
+  /* Working stays legible WITHOUT motion: the amber icon stops spinning and the
+     label shows a full, static "working..." — colour + icon + text still carry
+     the signal, distinct from the bare waiting dot. */
+  .rwork-ico { animation: none; }
+  .rwork-label::after { content: "..."; animation: none; }
 }
