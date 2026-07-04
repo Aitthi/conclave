@@ -144,3 +144,15 @@ real relaunch — verify per workspace memory rule).
   stale, not real.
 - O(n²) similarity is fine at this scale; if a workspace ever exceeds ~2k
   chunks, cap and `log` the truncation — never truncate silently.
+
+## POST-LAND LEDGER (2026-07-04, shipped @ dcc3627)
+
+- Arta design gate: ACCEPT, 0 fidelity findings (bb `review:memory-graph-design`).
+- Mellow LAND: PASS, 0 blocking. One latent Low on record:
+  `MemoryGraph.tsx` ControlPanel groups render `key={g.name}` while groups
+  dedupe by `sourceId` — two distinct instances resolving to the same display
+  name would collide on the React key. Unreachable today (all-manual store →
+  single Shared group); fix opportunistically next time the file is touched
+  (key by the dedupe key, not the display name).
+- Live-pixel confirmation of the shipped view rides the next app relaunch
+  (relaunch-verification rule) — non-blocking caveat, not a gate failure.
