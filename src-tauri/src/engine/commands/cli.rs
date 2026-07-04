@@ -277,6 +277,95 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── memory ────────────────────────────────────────────────────────
+        "memory" => match argv.get(1).map(String::as_str) {
+            Some("remember") => {
+                let workspace_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid("cli: memory remember <workspaceId> <text...>".into())
+                })?;
+                if argv.len() < 4 {
+                    return Err(AppError::Invalid(
+                        "cli: memory remember <workspaceId> <text...>".into(),
+                    ));
+                }
+                let text = argv[3..].join(" ");
+                Ok((
+                    "memory.remember",
+                    json!({ "workspaceId": workspace_id, "text": text }),
+                ))
+            }
+            Some("search") => {
+                let workspace_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid(
+                        "cli: memory search <workspaceId> <query...> [--limit N]".into(),
+                    )
+                })?;
+                let mut query_words = argv.get(3..).unwrap_or(&[]);
+                if query_words.is_empty() {
+                    return Err(AppError::Invalid(
+                        "cli: memory search <workspaceId> <query...> [--limit N]".into(),
+                    ));
+                }
+
+                // A trailing `--limit N` pair is stripped from the query
+                // words before joining — everything else is the query text.
+                let mut limit: Option<i64> = None;
+                if query_words.len() >= 2
+                    && query_words[query_words.len() - 2] == "--limit"
+                {
+                    let raw = &query_words[query_words.len() - 1];
+                    let parsed = raw.parse::<i64>().map_err(|_| {
+                        AppError::Invalid(format!(
+                            "cli: memory search --limit expects an integer, got '{raw}'"
+                        ))
+                    })?;
+                    limit = Some(parsed);
+                    query_words = &query_words[..query_words.len() - 2];
+                }
+                if query_words.is_empty() {
+                    return Err(AppError::Invalid(
+                        "cli: memory search <workspaceId> <query...> [--limit N]".into(),
+                    ));
+                }
+
+                let query = query_words.join(" ");
+                let mut params = json!({ "workspaceId": workspace_id, "query": query });
+                if let Some(limit) = limit {
+                    params["limit"] = json!(limit);
+                }
+                Ok(("memory.search", params))
+            }
+            Some("delete") => {
+                let workspace_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid("cli: memory delete <workspaceId> <chunkId>".into())
+                })?;
+                let id = argv.get(3).ok_or_else(|| {
+                    AppError::Invalid("cli: memory delete <workspaceId> <chunkId>".into())
+                })?;
+                if argv.len() != 4 {
+                    return Err(AppError::Invalid(
+                        "cli: memory delete <workspaceId> <chunkId>".into(),
+                    ));
+                }
+                Ok((
+                    "memory.delete",
+                    json!({ "workspaceId": workspace_id, "id": id }),
+                ))
+            }
+            Some("status") => {
+                let workspace_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid("cli: memory status <workspaceId>".into())
+                })?;
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: memory status <workspaceId>".into()));
+                }
+                Ok(("memory.status", json!({ "workspaceId": workspace_id })))
+            }
+            _ => Err(AppError::Invalid(
+                "cli: memory <remember|search|delete|status> — unknown memory subcommand".into(),
+            )),
+        },
+
         // ── run ───────────────────────────────────────────────────────────
         "run" => {
             let orchestrator_id = argv
@@ -314,7 +403,7 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
 
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, run, restart)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, memory, run, restart)"
         ))),
     }
 }
@@ -700,6 +789,136 @@ mod tests {
         assert!(is_invalid(&["snapshot", "last", "inst1", "extra"]));
     }
 
+    // ── memory ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn memory_remember_maps_correctly() {
+        assert_eq!(
+            ok_method(&["memory", "remember", "ws1", "hello"]),
+            "memory.remember"
+        );
+        assert_eq!(
+            ok_params(&["memory", "remember", "ws1", "hello"]),
+            json!({ "workspaceId": "ws1", "text": "hello" })
+        );
+    }
+
+    #[test]
+    fn memory_remember_joins_multiword_text() {
+        let params = ok_params(&["memory", "remember", "ws1", "hello", "there", "world"]);
+        assert_eq!(params["text"], json!("hello there world"));
+    }
+
+    #[test]
+    fn memory_remember_missing_text_is_invalid() {
+        assert!(is_invalid(&["memory", "remember", "ws1"]));
+    }
+
+    #[test]
+    fn memory_remember_missing_workspace_is_invalid() {
+        assert!(is_invalid(&["memory", "remember"]));
+    }
+
+    #[test]
+    fn memory_search_maps_correctly_without_limit() {
+        assert_eq!(
+            ok_method(&["memory", "search", "ws1", "hello", "world"]),
+            "memory.search"
+        );
+        let params = ok_params(&["memory", "search", "ws1", "hello", "world"]);
+        assert_eq!(params["workspaceId"], json!("ws1"));
+        assert_eq!(params["query"], json!("hello world"));
+        assert!(params.get("limit").is_none(), "limit absent when not given");
+    }
+
+    #[test]
+    fn memory_search_strips_trailing_limit_flag() {
+        let params = ok_params(&["memory", "search", "ws1", "hello", "world", "--limit", "3"]);
+        assert_eq!(params["query"], json!("hello world"));
+        assert_eq!(params["limit"], json!(3));
+    }
+
+    #[test]
+    fn memory_search_single_word_query_with_limit() {
+        let params = ok_params(&["memory", "search", "ws1", "hello", "--limit", "5"]);
+        assert_eq!(params["query"], json!("hello"));
+        assert_eq!(params["limit"], json!(5));
+    }
+
+    #[test]
+    fn memory_search_non_integer_limit_is_invalid() {
+        assert!(is_invalid(&[
+            "memory", "search", "ws1", "hello", "--limit", "abc"
+        ]));
+    }
+
+    #[test]
+    fn memory_search_limit_flag_without_query_is_invalid() {
+        // `--limit 3` alone, with nothing left over for the query.
+        assert!(is_invalid(&["memory", "search", "ws1", "--limit", "3"]));
+    }
+
+    #[test]
+    fn memory_search_missing_query_is_invalid() {
+        assert!(is_invalid(&["memory", "search", "ws1"]));
+    }
+
+    #[test]
+    fn memory_search_missing_workspace_is_invalid() {
+        assert!(is_invalid(&["memory", "search"]));
+    }
+
+    #[test]
+    fn memory_search_literal_dash_dash_limit_word_in_query_is_not_stripped_without_a_value() {
+        // "--limit" as the very LAST word (no value following it) must stay
+        // part of the query rather than being (invalidly) treated as a flag.
+        let params = ok_params(&["memory", "search", "ws1", "--limit"]);
+        assert_eq!(params["query"], json!("--limit"));
+        assert!(params.get("limit").is_none());
+    }
+
+    #[test]
+    fn memory_delete_maps_correctly() {
+        assert_eq!(
+            ok_method(&["memory", "delete", "ws1", "chunk1"]),
+            "memory.delete"
+        );
+        assert_eq!(
+            ok_params(&["memory", "delete", "ws1", "chunk1"]),
+            json!({ "workspaceId": "ws1", "id": "chunk1" })
+        );
+    }
+
+    #[test]
+    fn memory_delete_missing_or_extra_args_is_invalid() {
+        assert!(is_invalid(&["memory", "delete", "ws1"]));
+        assert!(is_invalid(&["memory", "delete"]));
+        assert!(is_invalid(&["memory", "delete", "ws1", "chunk1", "extra"]));
+    }
+
+    #[test]
+    fn memory_status_maps_correctly() {
+        assert_eq!(
+            ok_method(&["memory", "status", "ws1"]),
+            "memory.status"
+        );
+        assert_eq!(
+            ok_params(&["memory", "status", "ws1"]),
+            json!({ "workspaceId": "ws1" })
+        );
+    }
+
+    #[test]
+    fn memory_status_missing_or_extra_args_is_invalid() {
+        assert!(is_invalid(&["memory", "status"]));
+        assert!(is_invalid(&["memory", "status", "ws1", "extra"]));
+    }
+
+    #[test]
+    fn memory_unknown_sub_is_invalid() {
+        assert!(is_invalid(&["memory", "clear", "ws1"]));
+    }
+
     // ── run ───────────────────────────────────────────────────────────────
 
     #[test]
@@ -791,5 +1010,18 @@ mod tests {
         let result = exec(&state, json!({ "argv": ["ws", "list"] })).await;
         let value = result.expect("exec ws list should succeed");
         assert!(value.is_array(), "workspace.list returns an array: {value}");
+    }
+
+    #[tokio::test]
+    async fn exec_memory_status_returns_ok_object() {
+        let state = AppState::for_tests().await;
+        let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+
+        let result = exec(&state, json!({ "argv": ["memory", "status", &ws.id] })).await;
+        let value = result.expect("exec memory status should succeed");
+        assert!(value.is_object(), "memory.status returns an object: {value}");
+        assert_eq!(value["chunks"], json!(0));
     }
 }
