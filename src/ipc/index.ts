@@ -20,6 +20,13 @@ export type {
   Role,
   MemoryGraphNode,
   MemoryGraphEdge,
+  TaskState,
+  Task,
+  TaskLastGate,
+  TaskChallengeBadge,
+  TaskListRow,
+  TaskEventKind,
+  TaskEvent,
 } from "./types";
 
 export type { Commands } from "./commands";
@@ -33,6 +40,7 @@ export type {
   FusionStageEvent,
   MessageInjectedEvent,
   SnapshotCreatedEvent,
+  TaskChangedEvent,
 } from "./events";
 export {
   EVENT_NAMES,
@@ -44,4 +52,5 @@ export {
   useMessageInjected,
   useAnyMessageInjected,
   useSnapshotCreated,
+  useTaskChanged,
 } from "./events";

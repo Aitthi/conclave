@@ -15,6 +15,7 @@ import { WorkspacePane } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
 import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
+import { LaneBoard } from "./LaneBoard";
 
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
@@ -35,6 +36,10 @@ export function AppShell() {
   // ── Memory graph state — a third center-pane destination, mutually
   //    exclusive with the Blackboard and Chat Hub (same toggle pattern). ─────
   const [showMemory, setShowMemory] = useState(false);
+
+  // ── Lane Board state — a fourth center-pane destination (agent work system,
+  //    ADR 0008), mutually exclusive with Blackboard / Chat Hub / Memory. ──────
+  const [showLaneBoard, setShowLaneBoard] = useState(false);
 
   // Bumped whenever the set of agents in the active workspace changes (add via
   // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
@@ -117,6 +122,7 @@ export function AppShell() {
     // Switching workspace returns to that workspace's agent pane.
     setShowBlackboard(false);
     setShowMemory(false);
+    setShowLaneBoard(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
       // Ignore — the workspace just can't be found in the DB (stale id).
     });
@@ -182,6 +188,7 @@ export function AppShell() {
                 setShowBlackboard(false);
                 setShowChat(false);
                 setShowMemory(false);
+                setShowLaneBoard(false);
                 setSelectedId(id);
               }}
               // "Create new agent…" (from inside the picker) still opens the Builder.
@@ -202,6 +209,7 @@ export function AppShell() {
                   ? () => {
                       setShowChat(false);
                       setShowMemory(false);
+                      setShowLaneBoard(false);
                       setShowBlackboard((v) => !v);
                     }
                   : undefined
@@ -212,6 +220,7 @@ export function AppShell() {
                   ? () => {
                       setShowBlackboard(false);
                       setShowChat(false);
+                      setShowLaneBoard(false);
                       setShowMemory((v) => !v);
                     }
                   : undefined
@@ -222,11 +231,23 @@ export function AppShell() {
                   ? () => {
                       setShowBlackboard(false);
                       setShowMemory(false);
+                      setShowLaneBoard(false);
                       setShowChat((v) => !v);
                     }
                   : undefined
               }
               chatOpen={showChat}
+              onOpenLaneBoard={
+                activeWorkspaceId
+                  ? () => {
+                      setShowBlackboard(false);
+                      setShowChat(false);
+                      setShowMemory(false);
+                      setShowLaneBoard((v) => !v);
+                    }
+                  : undefined
+              }
+              laneBoardOpen={showLaneBoard}
               onEditWorkspace={
                 activeWorkspaceId ? () => setShowEditWorkspace(true) : undefined
               }
@@ -253,6 +274,13 @@ export function AppShell() {
                 workspaceName={activeWorkspace?.name}
                 onClose={() => setShowMemory(false)}
               />
+            ) : showLaneBoard && activeWorkspaceId ? (
+              <LaneBoard
+                key={activeWorkspaceId}
+                workspaceId={activeWorkspaceId}
+                workspaceName={activeWorkspace?.name}
+                onClose={() => setShowLaneBoard(false)}
+              />
             ) : activeWorkspaceId ? (
               // Remount per workspace AND per agents change so the pane refetches
               // its tabs when an agent is added/removed.
@@ -263,6 +291,7 @@ export function AppShell() {
                 onOpenChat={() => {
                   setShowBlackboard(false);
                   setShowMemory(false);
+                  setShowLaneBoard(false);
                   setShowChat(true);
                 }}
               />

@@ -67,22 +67,31 @@ export interface SnapshotCreatedEvent {
   triggerPct?: number;
 }
 
+export interface FusionStageEvent {
+  runId: string;
+  stage: "panel" | "judge" | "synthesize";
+  data?: unknown;
+}
+
 /**
- * A `task.*` mutating command ran (ADR 0008). Carries only identity + current
- * `state` — the Lane Board refetches/refreshes on any fire rather than
- * threading the mutation's details through the event.
+ * A task's identity or lifecycle changed (created, claimed, state moved, event
+ * logged) — ADR 0008 §Frozen bus. Emitted by every mutating `task.*` handler
+ * (Lane A emits; Lane B reuses). Carries just enough to let the Lane Board
+ * refetch the affected task without a payload diff: `workspaceId` scopes it,
+ * `slug`/`state` let the board update a row optimistically. camelCase serde,
+ * kept in sync with `engine/bus.rs` `TaskChanged` (serialisation tests enforce).
  */
 export interface TaskChangedEvent {
   workspaceId: string;
   taskId: string;
   slug: string;
-  state: string;
-}
-
-export interface FusionStageEvent {
-  runId: string;
-  stage: "panel" | "judge" | "synthesize";
-  data?: unknown;
+  state:
+    | "planned"
+    | "claimed"
+    | "in_progress"
+    | "review"
+    | "merged"
+    | "abandoned";
 }
 
 /**
@@ -246,4 +255,19 @@ export function useFusionStage(cb: (event: FusionStageEvent) => void): void {
  */
 export function useAnyTaskChanged(cb: (event: TaskChangedEvent) => void): void {
   useEvent<TaskChangedEvent>(EVENT_NAMES.taskChanged, cb);
+}
+
+/**
+ * Subscribe to task-changed events for a specific workspace — the Lane Board's
+ * live-refresh trigger. The callback fires for each `TaskChangedEvent` whose
+ * `workspaceId` matches, so a single subscription keeps one workspace's board
+ * current across every agent's `task.*` mutation.
+ */
+export function useTaskChanged(
+  workspaceId: string,
+  cb: (event: TaskChangedEvent) => void,
+): void {
+  useEvent<TaskChangedEvent>(EVENT_NAMES.taskChanged, (payload) => {
+    if (payload.workspaceId === workspaceId) cb(payload);
+  });
 }

@@ -260,3 +260,98 @@ export interface MemoryGraphEdge {
   /** Cosine similarity for `related` edges; absent for `wiki`. */
   score?: number;
 }
+
+// ── Agent Work System (task.*) — ADR 0008 ───────────────────────────────────
+// A claimable unit of work with a lifecycle state machine, a file boundary, an
+// optional design canon, and an append-only event log. Fields are the EXACT
+// frozen wire shape (plan §Frozen interfaces); Lane A's `task.*` handlers emit
+// this camelCase shape, Lane D codes against it.
+export type TaskState =
+  | "planned"
+  | "claimed"
+  | "in_progress"
+  | "review"
+  | "merged"
+  | "abandoned";
+
+export interface Task {
+  /** UUID — the task's stable identity. */
+  id: string;
+  workspaceId: string;
+  /** Short human key, unique within the workspace (the `<slug>` CLI arg). */
+  slug: string;
+  title: string;
+  state: TaskState;
+  /** The lead who owns escalations for this task. Optional: Lane A omits the
+   *  field entirely when absent (never serialises `null`) — lead ruling. */
+  ownerAgentId?: string;
+  /** The agent who claimed and builds it. Omitted until claimed. */
+  implementerAgentId?: string;
+  /** Path prefixes this task's lane owns (the frozen `file_boundary` JSON array). */
+  fileBoundary: string[];
+  /** Free-text pointer to the design canon (proto path / SHA). Omitted for
+   *  non-UI work. */
+  designCanon?: string;
+  /** The task's written plan text. */
+  plan: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The newest gate result PER DISTINCT command on a task — `task.list` carries
+ *  the latest of each `cmd` (cap 6), so a card shows `cargo test` + `clippy`
+ *  side by side like the canon, while rows stay bounded (not O(events)); full
+ *  gate history lives in `task.get` (lead ruling on the badge escalation, amended
+ *  from a single `lastGate` per Arta's F1). Derived from `task_event(kind=
+ *  'gate')` payloads `{cmd,exit,sha,tail,cwd}`. EVIDENCE: `sha` pins the commit
+ *  it ran at, so a shared-tree "all green" can be checked against the commit
+ *  that produced it. The human-facing label is derived client-side from `cmd`
+ *  (no stored `label`). */
+export interface TaskLastGate {
+  cmd: string;
+  /** process exit code — 0 = green, non-zero = red. */
+  exit: number;
+  /** `git rev-parse HEAD` captured when the gate ran. */
+  sha: string;
+  createdAt: string;
+}
+
+/** A challenge summary derived from `task_event(kind='challenge')` and its
+ *  resolving `kind='ruling'` — `open` = awaiting a ruling, `ruled` = resolved.
+ *  `deadlineAt` is an ISO timestamp (absent = advisory); the client computes
+ *  minutes-remaining live, since a server-sent countdown is stale on arrival
+ *  (lead ruling). */
+export interface TaskChallengeBadge {
+  /** the challenge event's id — stable render key + the ruling's target. */
+  id: string;
+  status: "open" | "ruled";
+  claim: string;
+  deadlineAt?: string;
+}
+
+/** A `task.list` row — the frozen task shape plus the count of its logged events
+ *  and the derived badges the board renders per card. `eventCount` is the
+ *  lead-ruled field @ 5e3e27e; `lastGates`/`challenges` are the lead's ruling on
+ *  Lane D's badge escalation (amended @ 066e199): the newest gate per distinct
+ *  cmd (cap 6) and the challenge set — both ALWAYS present (`[]` when none).
+ *  Lane A derives both during list. */
+export interface TaskListRow extends Task {
+  eventCount: number;
+  lastGates: TaskLastGate[];
+  challenges: TaskChallengeBadge[];
+}
+
+export type TaskEventKind = "note" | "state" | "gate" | "challenge" | "ruling";
+
+/** One append-only entry in a task's event log (the frozen `task_event` row,
+ *  camelCase). `payload` is opaque JSON whose shape varies by `kind` (e.g. a
+ *  `gate` event carries `{cmd,exit,sha,tail,cwd}`); callers narrow per kind. */
+export interface TaskEvent {
+  id: string;
+  taskId: string;
+  kind: TaskEventKind;
+  /** The agent who produced the event. Omitted for system-generated entries. */
+  actorAgentId?: string;
+  payload: unknown;
+  createdAt: string;
+}

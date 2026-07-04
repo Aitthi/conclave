@@ -7,6 +7,7 @@ import {
   Plus,
   Layers,
   Network,
+  Columns3,
   MessageSquare,
   X,
   Pencil,
@@ -258,6 +259,10 @@ interface RosterProps {
   onOpenChat?: () => void;
   /** Whether the Chat Hub is currently open (highlights the toggle). */
   chatOpen?: boolean;
+  /** Open the Lane Board (agent work system) screen. Absent → no workspace active. */
+  onOpenLaneBoard?: () => void;
+  /** Whether the Lane Board is currently shown (drives active styling). */
+  laneBoardOpen?: boolean;
   /** Open the rename/recolor/delete modal for the active workspace. */
   onEditWorkspace?: () => void;
 }
@@ -277,6 +282,8 @@ export function Roster({
   memoryOpen,
   onOpenChat,
   chatOpen,
+  onOpenLaneBoard,
+  laneBoardOpen,
   onEditWorkspace,
 }: RosterProps) {
   const [entries, setEntries] = useState<RosterEntry[]>([]);
@@ -641,6 +648,21 @@ export function Roster({
           <div className="flex-1 text-left leading-tight">
             <div className="text-[12.5px] font-semibold">Chat</div>
             <div className="text-[10.5px] text-text-muted">Agent conversations</div>
+          </div>
+        </button>
+        <button
+          onClick={onOpenLaneBoard}
+          disabled={!onOpenLaneBoard}
+          className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            laneBoardOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
+          }`}
+        >
+          <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
+            <Columns3 className="w-[14px] h-[14px]" />
+          </div>
+          <div className="flex-1 text-left leading-tight">
+            <div className="text-[12.5px] font-semibold">Lane board</div>
+            <div className="text-[10.5px] text-text-muted">Agent work system</div>
           </div>
         </button>
       </div>
