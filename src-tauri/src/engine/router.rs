@@ -1,6 +1,6 @@
 use crate::engine::commands::{
     agent, blackboard, cli, fusion, instance, memory, message, provider, role, skill, skill_draft,
-    snapshot, tool, workspace,
+    snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -74,6 +74,20 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "snapshot.resume" => snapshot::resume(state, payload).await,
         "snapshot.delete" => snapshot::delete(state, payload).await,
         "snapshot.send" => snapshot::send(state, payload).await,
+
+        // ── task (ADR 0008) ──────────────────────────────────────────────
+        "task.create" => task::create(state, payload).await,
+        "task.list" => task::list(state, payload).await,
+        "task.get" => task::get(state, payload).await,
+        "task.claim" => task::claim(state, payload).await,
+        "task.setState" => task::set_state(state, payload).await,
+        "task.note" => task::note(state, payload).await,
+        "task.gate" => task::gate(state, payload).await,
+        "task.challenge" => task::challenge(state, payload).await,
+        "task.rule" => task::rule(state, payload).await,
+        "task.close" => task::close(state, payload).await,
+        "task.watch" => task::watch(state, payload).await,
+        "task.unwatch" => task::unwatch(state, payload).await,
 
         // ── fusion ────────────────────────────────────────────────────────
         "fusion.run" => fusion::run(state, payload).await,

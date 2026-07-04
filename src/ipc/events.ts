@@ -12,6 +12,7 @@ export const EVENT_NAMES = {
   fusionStage: "fusion:stage",
   messageInjected: "message:injected",
   snapshotCreated: "snapshot:created",
+  taskChanged: "task:changed",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -64,6 +65,18 @@ export interface SnapshotCreatedEvent {
   type: "auto" | "manual" | "handoff";
   tokens?: number;
   triggerPct?: number;
+}
+
+/**
+ * A `task.*` mutating command ran (ADR 0008). Carries only identity + current
+ * `state` — the Lane Board refetches/refreshes on any fire rather than
+ * threading the mutation's details through the event.
+ */
+export interface TaskChangedEvent {
+  workspaceId: string;
+  taskId: string;
+  slug: string;
+  state: string;
 }
 
 export interface FusionStageEvent {
@@ -224,4 +237,13 @@ export function useAnyMessageInjected(cb: (event: MessageInjectedEvent) => void)
  */
 export function useFusionStage(cb: (event: FusionStageEvent) => void): void {
   useEvent<FusionStageEvent>(EVENT_NAMES.fusionStage, cb);
+}
+
+/**
+ * Subscribe to every `task:changed` event, unfiltered — the Lane Board shows a
+ * whole workspace's tasks, so it refetches on any change rather than
+ * filtering per task (mirrors `useAnyMessageInjected`'s Chat Hub rationale).
+ */
+export function useAnyTaskChanged(cb: (event: TaskChangedEvent) => void): void {
+  useEvent<TaskChangedEvent>(EVENT_NAMES.taskChanged, cb);
 }

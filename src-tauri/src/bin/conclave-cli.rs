@@ -85,6 +85,18 @@ Subcommands:
   lane start  <workspaceId> <slug>      (add lane worktree + claim task if present)
   lane finish <workspaceId> <slug>      (remove worktree + delete branch, after merge)
   lane guard install                    (install the shared-checkout commit-scope guard)
+  task create   <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]
+  task list     <workspaceId> [--state s]
+  task get      <workspaceId> <slug>
+  task claim    <workspaceId> <slug>          (inside a spawned agent)
+  task state    <workspaceId> <slug> <state>  (inside a spawned agent)
+  task note     <workspaceId> <slug> <text...>          (inside a spawned agent)
+  task gate     <workspaceId> <slug> -- <cmd...>        (inside a spawned agent; runs <cmd> here, exits with <cmd>'s exit code)
+  task challenge <workspaceId> <slug> --claim t --evidence t --proposal t --default t [--deadline-min N]
+  task rule     <workspaceId> <slug> <challengeEventId> <text...>  (inside a spawned agent)
+  task close    <workspaceId> <slug>          (inside a spawned agent)
+  task watch    <workspaceId> <slug>          (inside a spawned agent)
+  task unwatch  <workspaceId> <slug>          (inside a spawned agent)
   run <orchestratorId> <prompt...>
   help
 
@@ -175,6 +187,43 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
         // author slot; otherwise inject the sentinel "-" (never a real
         // instance id, which is always a UUID) so the server keeps the chunk
         // `manual` rather than fabricating an author.
+        // ADR 0008: task verbs. `gate` arrives here ALREADY fully expanded by
+        // `run_task_gate` (it needs self too, but resolves it itself before
+        // running the shell command) — pass it through untouched. `create`'s
+        // owner is optional enrichment (mirrors `memory remember`): default it
+        // to self when available and not already given via `--owner`, but
+        // never require a spawned-agent context. Every other verb inherently
+        // mutates task state/history and so REQUIRES self, same as `tell`.
+        Some("task") if argv.get(1).map(String::as_str) == Some("gate") => Ok(argv),
+        Some("task") if argv.get(1).map(String::as_str) == Some("create") => {
+            if argv.iter().any(|w| w == "--owner") {
+                return Ok(argv);
+            }
+            match self_instance.filter(|s| !s.is_empty()) {
+                Some(me) => {
+                    let mut out = argv;
+                    out.push("--owner".to_string());
+                    out.push(me.to_string());
+                    Ok(out)
+                }
+                None => Ok(argv),
+            }
+        }
+        Some("task")
+            if matches!(
+                argv.get(1).map(String::as_str),
+                Some("claim" | "state" | "note" | "challenge" | "rule" | "close" | "watch" | "unwatch")
+            ) =>
+        {
+            let verb = argv[1].clone();
+            let me = require_self(&format!("task {verb}"))?;
+            let mut out = Vec::with_capacity(argv.len() + 1);
+            out.push("task".to_string());
+            out.push(verb);
+            out.push(me.to_string());
+            out.extend_from_slice(&argv[2..]);
+            Ok(out)
+        }
         Some("memory") if argv.get(1).map(String::as_str) == Some("remember") => {
             if argv.len() < 4 {
                 return Err("conclave: memory remember <workspaceId> <text...>".to_string());
@@ -534,6 +583,124 @@ async fn run_lane(argv: &[String], self_instance: Option<&str>) -> ExitCode {
     }
 }
 
+/// Truncate `text` to at most `max_bytes` bytes, keeping the TAIL (the most
+/// recent output matters for a gate — the failure is usually at the end).
+/// Splits on a UTF-8 boundary via `from_utf8_lossy` rather than requiring one,
+/// since a byte-offset cut can land mid-codepoint.
+fn tail_bytes(text: &str, max_bytes: usize) -> String {
+    let bytes = text.as_bytes();
+    if bytes.len() <= max_bytes {
+        return text.to_string();
+    }
+    String::from_utf8_lossy(&bytes[bytes.len() - max_bytes..]).into_owned()
+}
+
+/// Gate tail is capped at 2000 bytes (ADR 0008: "truncate tail to 2000 bytes").
+const GATE_TAIL_MAX_BYTES: usize = 2000;
+
+/// `task gate <workspaceId> <slug> -- <cmd...>` — ADR 0008's risk ledger is
+/// explicit that gates NEVER run engine-side (the command is the CALLING
+/// agent's own privilege, no escalation), so `conclave-cli` runs it HERE, in
+/// the agent's real shell/cwd, and ships the already-computed evidence over
+/// the wire. Requires `CONCLAVE_INSTANCE_ID` (gate results are always
+/// attributed) — same requirement as `tell`/`restart`.
+///
+/// Returns the fully-expanded wire form
+/// `["task","gate",actorId,workspaceId,slug,cmd,exit,sha,cwd,tail]` plus the
+/// command's own exit code, bypassing `expand_self_args`'s generic task
+/// handling entirely (this function already resolved self). `main` propagates
+/// that exit code as its own once the gate is recorded — a red gate must fail
+/// loudly for any agent scripting `task gate ... && next`, not hide behind a
+/// 0 from `conclave-cli` itself.
+fn run_task_gate(
+    argv: &[String],
+    self_instance: Option<&str>,
+) -> Result<(Vec<String>, i32), String> {
+    let me = self_instance.filter(|s| !s.is_empty()).ok_or_else(|| {
+        "conclave: `task gate` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
+            .to_string()
+    })?;
+    let usage = "conclave: task gate <workspaceId> <slug> -- <cmd...>";
+    let workspace_id = argv.get(2).ok_or(usage)?.clone();
+    let slug = argv.get(3).ok_or(usage)?.clone();
+    let dash_pos = argv
+        .iter()
+        .position(|w| w == "--")
+        .filter(|&p| p >= 4)
+        .ok_or(usage)?;
+    let cmd_words = &argv[dash_pos + 1..];
+    if cmd_words.is_empty() {
+        return Err(usage.to_string());
+    }
+    let cmd = cmd_words.join(" ");
+
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("conclave: task gate: cannot resolve cwd: {e}"))?;
+
+    // Combined stdout+stderr, non-streaming, in ONE shell invocation — the
+    // `2>&1` redirect merges streams without needing to interleave two async
+    // pipes ourselves.
+    let output = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg(format!("{cmd} 2>&1"))
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("conclave: task gate: failed to run '{cmd}': {e}"))?;
+    // A killed-by-signal command has no exit code; -1 records "abnormal
+    // termination" rather than fabricating a plausible-looking 0/1.
+    let exit_code = output.status.code().unwrap_or(-1);
+    let combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    let tail = tail_bytes(&combined, GATE_TAIL_MAX_BYTES);
+
+    // Best-effort: a gate run outside a git repo (or a detached/corrupt HEAD)
+    // must still record its evidence — "unknown" beats failing the whole gate.
+    let sha = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok((
+        vec![
+            "task".to_string(),
+            "gate".to_string(),
+            me.to_string(),
+            workspace_id,
+            slug,
+            cmd,
+            exit_code.to_string(),
+            sha,
+            cwd.to_string_lossy().into_owned(),
+            tail,
+        ],
+        exit_code,
+    ))
+}
+
+/// `task create … --plan-file <path>` — reads `<path>` relative to the
+/// CALLING agent's cwd (only `conclave-cli`, not the engine, knows that cwd)
+/// and rewrites the flag to `--plan <contents>` before the request is sent.
+/// A no-op when `--plan-file` is absent.
+fn resolve_task_create_plan_file(argv: Vec<String>) -> Result<Vec<String>, String> {
+    let Some(pos) = argv.iter().position(|w| w == "--plan-file") else {
+        return Ok(argv);
+    };
+    let path = argv
+        .get(pos + 1)
+        .ok_or("conclave: task create: --plan-file requires a path")?
+        .clone();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("conclave: task create: cannot read --plan-file '{path}': {e}"))?;
+    let mut out = argv;
+    out[pos] = "--plan".to_string();
+    out[pos + 1] = content;
+    Ok(out)
+}
+
 /// How `main` renders a successful result row.
 enum OutMode {
     /// One-line confirmation (`tell` / `snapshot save`) — never echo the payload.
@@ -558,22 +725,67 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    let self_instance = std::env::var("CONCLAVE_INSTANCE_ID").ok();
+
     // `lane` is handled locally (git worktree lifecycle + hook install), not as
     // a single `cli.exec` — dispatch it before the socket machinery below.
     if argv[0] == "lane" {
-        return run_lane(&argv, std::env::var("CONCLAVE_INSTANCE_ID").ok().as_deref()).await;
+        return run_lane(&argv, self_instance.as_deref()).await;
     }
 
-    // Expand the self-keyed forms (`tell`, `snapshot save`, `snapshot last`) to
-    // their wire form, filling the instance id from CONCLAVE_INSTANCE_ID (set on
-    // spawned agents).
-    let argv = match expand_self_args(argv, std::env::var("CONCLAVE_INSTANCE_ID").ok().as_deref()) {
+    // `task gate` needs to both run the command HERE (never engine-side) and
+    // later propagate its exit code as `conclave-cli`'s own; `task create
+    // --plan-file` needs the CALLING agent's real cwd to resolve a relative
+    // path. Both run before any other expansion, since they can change
+    // argv's shape/length. `gate_exit_code` is `Some` only for `task gate` —
+    // its value is what `main` exits with once the request completes.
+    let mut gate_exit_code: Option<i32> = None;
+    let argv = if argv.first().map(String::as_str) == Some("task")
+        && argv.get(1).map(String::as_str) == Some("gate")
+    {
+        match run_task_gate(&argv, self_instance.as_deref()) {
+            Ok((a, exit_code)) => {
+                gate_exit_code = Some(exit_code);
+                a
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else if argv.first().map(String::as_str) == Some("task")
+        && argv.get(1).map(String::as_str) == Some("create")
+    {
+        match resolve_task_create_plan_file(argv) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        argv
+    };
+
+    // Expand the self-keyed forms (`tell`, `snapshot save`, `snapshot last`,
+    // `task claim`/…) to their wire form, filling the instance id from
+    // CONCLAVE_INSTANCE_ID (set on spawned agents).
+    let argv = match expand_self_args(argv, self_instance.as_deref()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
+
+    // `task close`'s whole point is prompting the memory-nudge afterward
+    // (ADR 0008: "what did this cost to learn that the repo doesn't
+    // record?"). Captured before the request so it survives into the success
+    // path below regardless of `out_mode`.
+    let task_close_workspace_id = (argv.first().map(String::as_str) == Some("task")
+        && argv.get(1).map(String::as_str) == Some("close"))
+    .then(|| argv.get(3).cloned())
+    .flatten();
 
     // Pick how to render a successful result:
     // - `tell` / `snapshot save` echo a full row; printing it into the agent's
@@ -717,6 +929,18 @@ async fn main() -> ExitCode {
                     serde_json::to_string_pretty(result).expect("serialize result cannot fail");
                 println!("{pretty}");
             }
+        }
+        if let Some(ws) = &task_close_workspace_id {
+            println!(
+                "\nBoundary reached — what did this cost to learn that the repo doesn't record? \
+                 `conclave memory remember {ws} ...`"
+            );
+        }
+        // `task gate` propagates the RECORDED command's own exit code, not a
+        // blanket 0 — a red gate must fail loudly for `task gate ... && next`
+        // scripting, now that the evidence is durably recorded server-side.
+        if let Some(code) = gate_exit_code {
+            return ExitCode::from(code.rem_euclid(256) as u8);
         }
         return ExitCode::SUCCESS;
     }
@@ -878,6 +1102,42 @@ mod tests {
         }
     }
 
+    // ── task (ADR 0008) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn task_claim_injects_actor_from_env() {
+        let out = expand_self_args(v(&["task", "claim", "ws1", "t1"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["task", "claim", "self1", "ws1", "t1"]));
+    }
+
+    #[test]
+    fn task_claim_without_instance_id_errors() {
+        assert!(expand_self_args(v(&["task", "claim", "ws1", "t1"]), None).is_err());
+        assert!(expand_self_args(v(&["task", "claim", "ws1", "t1"]), Some("")).is_err());
+    }
+
+    #[test]
+    fn task_note_injects_actor_and_keeps_text() {
+        let out = expand_self_args(
+            v(&["task", "note", "ws1", "t1", "hello", "world"]),
+            Some("self1"),
+        )
+        .unwrap();
+        assert_eq!(out, v(&["task", "note", "self1", "ws1", "t1", "hello", "world"]));
+    }
+
+    #[test]
+    fn task_state_note_gate_challenge_rule_close_watch_unwatch_all_require_self() {
+        for verb in [
+            "state", "note", "challenge", "rule", "close", "watch", "unwatch",
+        ] {
+            assert!(
+                expand_self_args(v(&["task", verb, "ws1", "t1"]), None).is_err(),
+                "task {verb} must require self"
+            );
+        }
+    }
+
     #[test]
     fn guard_hook_is_wired_and_recognisable() {
         // The embedded hook must be non-empty POSIX sh carrying the marker used
@@ -888,5 +1148,141 @@ mod tests {
         assert!(GUARD_HOOK.contains("--git-dir"));
         assert!(GUARD_HOOK.contains("--git-common-dir"));
         assert!(GUARD_HOOK.contains("CONCLAVE_COMMIT_SCOPE"));
+    }
+
+    #[test]
+    fn task_list_and_get_pass_through_untouched() {
+        let list = v(&["task", "list", "ws1"]);
+        assert_eq!(expand_self_args(list.clone(), None).unwrap(), list);
+        let get = v(&["task", "get", "ws1", "t1"]);
+        assert_eq!(expand_self_args(get.clone(), None).unwrap(), get);
+    }
+
+    #[test]
+    fn task_create_defaults_owner_to_self_when_absent() {
+        let out = expand_self_args(v(&["task", "create", "ws1", "t1", "Title"]), Some("self1"))
+            .unwrap();
+        assert_eq!(out, v(&["task", "create", "ws1", "t1", "Title", "--owner", "self1"]));
+    }
+
+    #[test]
+    fn task_create_leaves_explicit_owner_untouched() {
+        let argv = v(&["task", "create", "ws1", "t1", "Title", "--owner", "other"]);
+        let out = expand_self_args(argv.clone(), Some("self1")).unwrap();
+        assert_eq!(out, argv, "--owner already present must not be overridden");
+    }
+
+    #[test]
+    fn task_create_without_self_and_without_owner_is_left_ownerless() {
+        let argv = v(&["task", "create", "ws1", "t1", "Title"]);
+        let out = expand_self_args(argv.clone(), None).unwrap();
+        assert_eq!(out, argv, "create must not require self");
+    }
+
+    #[test]
+    fn task_gate_passes_through_expand_self_args_untouched() {
+        // run_task_gate (called earlier in main(), before expand_self_args) is
+        // what actually resolves self for `gate` — by the time it reaches
+        // expand_self_args the actorId slot is already filled.
+        let argv = v(&["task", "gate", "self1", "ws1", "t1", "cmd", "0", "sha", "/cwd", "tail"]);
+        assert_eq!(expand_self_args(argv.clone(), None).unwrap(), argv);
+    }
+
+    // ── tail_bytes ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tail_bytes_keeps_whole_string_under_the_cap() {
+        assert_eq!(super::tail_bytes("short", 2000), "short");
+    }
+
+    #[test]
+    fn tail_bytes_truncates_to_the_tail_over_the_cap() {
+        let long = "a".repeat(10) + "END";
+        let truncated = super::tail_bytes(&long, 5);
+        assert_eq!(truncated, "aaEND");
+        assert_eq!(truncated.len(), 5);
+    }
+
+    // ── run_task_gate ─────────────────────────────────────────────────────
+
+    #[test]
+    fn run_task_gate_requires_self() {
+        let argv = v(&["task", "gate", "ws1", "t1", "--", "true"]);
+        assert!(super::run_task_gate(&argv, None).is_err());
+    }
+
+    #[test]
+    fn run_task_gate_requires_dash_dash() {
+        let argv = v(&["task", "gate", "ws1", "t1", "true"]);
+        assert!(super::run_task_gate(&argv, Some("self1")).is_err());
+    }
+
+    #[test]
+    fn run_task_gate_requires_a_command_after_dash_dash() {
+        let argv = v(&["task", "gate", "ws1", "t1", "--"]);
+        assert!(super::run_task_gate(&argv, Some("self1")).is_err());
+    }
+
+    #[test]
+    fn run_task_gate_runs_the_command_and_records_zero_exit() {
+        let argv = v(&["task", "gate", "ws1", "t1", "--", "echo", "hi"]);
+        let (out, exit_code) = super::run_task_gate(&argv, Some("self1")).expect("gate run failed");
+        assert_eq!(out[0], "task");
+        assert_eq!(out[1], "gate");
+        assert_eq!(out[2], "self1");
+        assert_eq!(out[3], "ws1");
+        assert_eq!(out[4], "t1");
+        assert_eq!(out[5], "echo hi");
+        assert_eq!(out[6], "0", "echo hi exits 0");
+        assert!(out[7] == "unknown" || !out[7].is_empty(), "sha field present");
+        assert!(!out[8].is_empty(), "cwd field present");
+        assert!(out[9].contains("hi"), "tail must contain the command's output");
+        assert_eq!(exit_code, 0, "returned exit code must match the recorded one");
+    }
+
+    #[test]
+    fn run_task_gate_records_non_zero_exit_as_evidence_not_error() {
+        let argv = v(&["task", "gate", "ws1", "t1", "--", "false"]);
+        let (out, exit_code) =
+            super::run_task_gate(&argv, Some("self1")).expect("gate run must not error");
+        assert_eq!(out[6], "1", "false exits 1");
+        assert_eq!(exit_code, 1, "returned exit code must propagate the red gate");
+    }
+
+    // ── resolve_task_create_plan_file ─────────────────────────────────────
+
+    #[test]
+    fn resolve_task_create_plan_file_is_a_noop_without_the_flag() {
+        let argv = v(&["task", "create", "ws1", "t1", "Title"]);
+        assert_eq!(
+            super::resolve_task_create_plan_file(argv.clone()).unwrap(),
+            argv
+        );
+    }
+
+    #[test]
+    fn resolve_task_create_plan_file_reads_the_file_and_rewrites_the_flag() {
+        let path = std::env::temp_dir().join("conclave-cli-test-plan-file.txt");
+        std::fs::write(&path, "the plan body").expect("write fixture failed");
+
+        let argv = v(&[
+            "task", "create", "ws1", "t1", "Title", "--plan-file",
+        ]);
+        let mut argv = argv;
+        argv.push(path.to_string_lossy().into_owned());
+
+        let out = super::resolve_task_create_plan_file(argv).expect("resolve failed");
+        assert_eq!(out[5], "--plan");
+        assert_eq!(out[6], "the plan body");
+
+        std::fs::remove_file(&path).expect("cleanup failed");
+    }
+
+    #[test]
+    fn resolve_task_create_plan_file_missing_file_errors() {
+        let argv = v(&[
+            "task", "create", "ws1", "t1", "Title", "--plan-file", "/no/such/file/xyz",
+        ]);
+        assert!(super::resolve_task_create_plan_file(argv).is_err());
     }
 }

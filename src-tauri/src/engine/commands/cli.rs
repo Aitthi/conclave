@@ -377,6 +377,15 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── task (ADR 0008) ──────────────────────────────────────────────
+        // Every self-keyed verb (all but `list`/`get`/`create`) arrives here
+        // ALREADY expanded by `conclave-cli`'s `expand_self_args` — the
+        // actorId slot right after the subcommand name is filled from
+        // `CONCLAVE_INSTANCE_ID`, same idiom as `tell`/`restart`. `gate` also
+        // arrives pre-computed (cmd already RAN client-side — see the risk
+        // ledger note: gates never run engine-side).
+        "task" => map_task_argv(argv),
+
         // ── run ───────────────────────────────────────────────────────────
         "run" => {
             let orchestrator_id = argv
@@ -414,9 +423,297 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
 
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, memory, run, restart)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, memory, task, run, restart)"
         ))),
     }
+}
+
+/// Pull a single `--flag value` pair out of `words`, wherever it appears
+/// (order-independent — every `task` flag-bearing verb accepts its flags in
+/// any order). Returns `(value, remaining words with the pair removed)`, or
+/// `(None, words unchanged)` if the flag is absent.
+fn take_flag(words: &[String], flag: &str) -> (Option<String>, Vec<String>) {
+    if let Some(pos) = words.iter().position(|w| w == flag) {
+        if let Some(value) = words.get(pos + 1) {
+            let mut rest = words.to_vec();
+            rest.drain(pos..=pos + 1);
+            return (Some(value.clone()), rest);
+        }
+    }
+    (None, words.to_vec())
+}
+
+/// `task <verb> …` — the ADR 0008 allowlist. Self-keyed verbs (everything but
+/// `list`/`get`/`create`) arrive pre-expanded by `conclave-cli` with the
+/// actorId slot filled right after the verb name.
+fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
+    let verb = argv.get(1).map(String::as_str);
+    match verb {
+        Some("list") => {
+            let workspace_id = argv
+                .get(2)
+                .ok_or_else(|| AppError::Invalid("cli: task list <workspaceId> [--state s]".into()))?;
+            let (state, rest) = take_flag(&argv[3..], "--state");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(
+                    "cli: task list <workspaceId> [--state s]".into(),
+                ));
+            }
+            let mut params = json!({ "workspaceId": workspace_id });
+            if let Some(state) = state {
+                params["state"] = json!(state);
+            }
+            Ok(("task.list", params))
+        }
+
+        Some("get") => {
+            let workspace_id = argv
+                .get(2)
+                .ok_or_else(|| AppError::Invalid("cli: task get <workspaceId> <slug>".into()))?;
+            let slug = argv
+                .get(3)
+                .ok_or_else(|| AppError::Invalid("cli: task get <workspaceId> <slug>".into()))?;
+            if argv.len() != 4 {
+                return Err(AppError::Invalid("cli: task get <workspaceId> <slug>".into()));
+            }
+            Ok((
+                "task.get",
+                json!({ "workspaceId": workspace_id, "slug": slug }),
+            ))
+        }
+
+        // `task create <ws> <slug> <title...> [--boundary p1,p2] [--canon txt]
+        //  [--owner id] [--plan text]` — `conclave-cli` resolves `--plan-file`
+        // to `--plan <contents>` and defaults `--owner` to the caller's own
+        // instance id before this ever runs (owner is optional enrichment,
+        // same "-" sentinel philosophy as `memory remember`, except here a
+        // missing owner is simply absent rather than stamped).
+        Some("create") => {
+            let workspace_id = argv.get(2).ok_or_else(|| {
+                AppError::Invalid(
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text]".into(),
+                )
+            })?;
+            let slug = argv.get(3).ok_or_else(|| {
+                AppError::Invalid(
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text]".into(),
+                )
+            })?;
+            let rest = argv.get(4..).unwrap_or(&[]).to_vec();
+            let (boundary, rest) = take_flag(&rest, "--boundary");
+            let (canon, rest) = take_flag(&rest, "--canon");
+            let (owner, rest) = take_flag(&rest, "--owner");
+            let (plan, rest) = take_flag(&rest, "--plan");
+            if rest.is_empty() {
+                return Err(AppError::Invalid(
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text]".into(),
+                ));
+            }
+            let title = rest.join(" ");
+            let mut params = json!({ "workspaceId": workspace_id, "slug": slug, "title": title });
+            if let Some(boundary) = boundary {
+                let paths: Vec<&str> = boundary.split(',').filter(|s| !s.is_empty()).collect();
+                params["fileBoundary"] = json!(paths);
+            }
+            if let Some(canon) = canon {
+                params["designCanon"] = json!(canon);
+            }
+            if let Some(owner) = owner {
+                params["ownerAgentId"] = json!(owner);
+            }
+            if let Some(plan) = plan {
+                params["plan"] = json!(plan);
+            }
+            Ok(("task.create", params))
+        }
+
+        Some("claim") => {
+            let (actor_id, workspace_id, slug) = task_actor_ws_slug(argv, "task claim")?;
+            Ok((
+                "task.claim",
+                json!({ "workspaceId": workspace_id, "slug": slug, "actorId": actor_id }),
+            ))
+        }
+
+        Some("state") => {
+            let actor_id = argv
+                .get(2)
+                .ok_or_else(|| AppError::Invalid("cli: task state <workspaceId> <slug> <state>".into()))?;
+            let workspace_id = argv
+                .get(3)
+                .ok_or_else(|| AppError::Invalid("cli: task state <workspaceId> <slug> <state>".into()))?;
+            let slug = argv
+                .get(4)
+                .ok_or_else(|| AppError::Invalid("cli: task state <workspaceId> <slug> <state>".into()))?;
+            let new_state = argv
+                .get(5)
+                .ok_or_else(|| AppError::Invalid("cli: task state <workspaceId> <slug> <state>".into()))?;
+            if argv.len() != 6 {
+                return Err(AppError::Invalid(
+                    "cli: task state <workspaceId> <slug> <state>".into(),
+                ));
+            }
+            Ok((
+                "task.setState",
+                json!({
+                    "workspaceId": workspace_id, "slug": slug,
+                    "state": new_state, "actorId": actor_id
+                }),
+            ))
+        }
+
+        Some("note") => {
+            let actor_id = argv
+                .get(2)
+                .ok_or_else(|| AppError::Invalid("cli: task note <workspaceId> <slug> <text...>".into()))?;
+            let workspace_id = argv
+                .get(3)
+                .ok_or_else(|| AppError::Invalid("cli: task note <workspaceId> <slug> <text...>".into()))?;
+            let slug = argv
+                .get(4)
+                .ok_or_else(|| AppError::Invalid("cli: task note <workspaceId> <slug> <text...>".into()))?;
+            if argv.len() < 6 {
+                return Err(AppError::Invalid(
+                    "cli: task note <workspaceId> <slug> <text...>".into(),
+                ));
+            }
+            let text = argv[5..].join(" ");
+            Ok((
+                "task.note",
+                json!({
+                    "workspaceId": workspace_id, "slug": slug,
+                    "actorId": actor_id, "text": text
+                }),
+            ))
+        }
+
+        // Pre-computed by `conclave-cli` (the shell command already RAN
+        // client-side — never engine-side, ADR 0008 risk ledger):
+        // `task gate <actorId> <ws> <slug> <cmd> <exit> <sha> <cwd> <tail>`.
+        Some("gate") => {
+            let usage = "cli: task gate <workspaceId> <slug> -- <cmd...>";
+            let actor_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let workspace_id = argv.get(3).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let slug = argv.get(4).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let cmd = argv.get(5).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let exit_raw = argv.get(6).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let sha = argv.get(7).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let cwd = argv.get(8).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let tail = argv.get(9).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            if argv.len() != 10 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let exit: i64 = exit_raw
+                .parse()
+                .map_err(|_| AppError::Invalid(format!("cli: task gate: bad exit code '{exit_raw}'")))?;
+            Ok((
+                "task.gate",
+                json!({
+                    "workspaceId": workspace_id, "slug": slug, "actorId": actor_id,
+                    "cmd": cmd, "exit": exit, "sha": sha, "cwd": cwd, "tail": tail
+                }),
+            ))
+        }
+
+        Some("challenge") => {
+            let usage = "cli: task challenge <workspaceId> <slug> --claim t --evidence t --proposal t --default t [--deadline-min N]";
+            let actor_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let workspace_id = argv.get(3).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let slug = argv.get(4).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let rest = argv.get(5..).unwrap_or(&[]).to_vec();
+            let (claim, rest) = take_flag(&rest, "--claim");
+            let (evidence, rest) = take_flag(&rest, "--evidence");
+            let (proposal, rest) = take_flag(&rest, "--proposal");
+            let (default_action, rest) = take_flag(&rest, "--default");
+            let (deadline_min, rest) = take_flag(&rest, "--deadline-min");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let (claim, evidence, proposal, default_action) = (
+                claim.ok_or_else(|| AppError::Invalid(usage.into()))?,
+                evidence.ok_or_else(|| AppError::Invalid(usage.into()))?,
+                proposal.ok_or_else(|| AppError::Invalid(usage.into()))?,
+                default_action.ok_or_else(|| AppError::Invalid(usage.into()))?,
+            );
+            let mut params = json!({
+                "workspaceId": workspace_id, "slug": slug, "actorId": actor_id,
+                "claim": claim, "evidence": evidence, "proposal": proposal,
+                "default": default_action,
+            });
+            if let Some(deadline_min) = deadline_min {
+                let parsed: i64 = deadline_min.parse().map_err(|_| {
+                    AppError::Invalid(format!(
+                        "cli: task challenge: bad --deadline-min '{deadline_min}'"
+                    ))
+                })?;
+                params["deadlineMin"] = json!(parsed);
+            }
+            Ok(("task.challenge", params))
+        }
+
+        Some("rule") => {
+            let usage = "cli: task rule <workspaceId> <slug> <challengeEventId> <text...>";
+            let actor_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let workspace_id = argv.get(3).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let slug = argv.get(4).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let challenge_event_id = argv.get(5).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            if argv.len() < 7 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let text = argv[6..].join(" ");
+            Ok((
+                "task.rule",
+                json!({
+                    "workspaceId": workspace_id, "slug": slug, "actorId": actor_id,
+                    "challengeEventId": challenge_event_id, "text": text
+                }),
+            ))
+        }
+
+        Some("close") => {
+            let (actor_id, workspace_id, slug) = task_actor_ws_slug(argv, "task close")?;
+            Ok((
+                "task.close",
+                json!({ "workspaceId": workspace_id, "slug": slug, "actorId": actor_id }),
+            ))
+        }
+
+        Some("watch") => {
+            let (actor_id, workspace_id, slug) = task_actor_ws_slug(argv, "task watch")?;
+            Ok((
+                "task.watch",
+                json!({ "workspaceId": workspace_id, "slug": slug, "actorId": actor_id }),
+            ))
+        }
+
+        Some("unwatch") => {
+            let (actor_id, workspace_id, slug) = task_actor_ws_slug(argv, "task unwatch")?;
+            Ok((
+                "task.unwatch",
+                json!({ "workspaceId": workspace_id, "slug": slug, "actorId": actor_id }),
+            ))
+        }
+
+        _ => Err(AppError::Invalid(
+            "cli: task <list|get|create|claim|state|note|gate|challenge|rule|close|watch|unwatch> — unknown task subcommand".into(),
+        )),
+    }
+}
+
+/// Shared parse for the `task <verb> <actorId> <workspaceId> <slug>` shape
+/// (`claim`/`close`/`watch`/`unwatch` — no further arguments).
+fn task_actor_ws_slug<'a>(
+    argv: &'a [String],
+    usage_verb: &str,
+) -> Result<(&'a str, &'a str, &'a str), AppError> {
+    let usage = format!("cli: {usage_verb} <workspaceId> <slug>");
+    let actor_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.clone()))?;
+    let workspace_id = argv.get(3).ok_or_else(|| AppError::Invalid(usage.clone()))?;
+    let slug = argv.get(4).ok_or_else(|| AppError::Invalid(usage.clone()))?;
+    if argv.len() != 5 {
+        return Err(AppError::Invalid(usage));
+    }
+    Ok((actor_id, workspace_id, slug))
 }
 
 #[cfg(test)]
@@ -948,6 +1245,250 @@ mod tests {
     #[test]
     fn memory_unknown_sub_is_invalid() {
         assert!(is_invalid(&["memory", "clear", "ws1"]));
+    }
+
+    // ── task (ADR 0008) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn task_list_maps_correctly_with_and_without_state() {
+        assert_eq!(ok_method(&["task", "list", "ws1"]), "task.list");
+        assert_eq!(ok_params(&["task", "list", "ws1"]), json!({ "workspaceId": "ws1" }));
+        assert_eq!(
+            ok_params(&["task", "list", "ws1", "--state", "claimed"]),
+            json!({ "workspaceId": "ws1", "state": "claimed" })
+        );
+    }
+
+    #[test]
+    fn task_list_extra_args_is_invalid() {
+        assert!(is_invalid(&["task", "list", "ws1", "extra"]));
+    }
+
+    #[test]
+    fn task_get_maps_correctly() {
+        assert_eq!(ok_method(&["task", "get", "ws1", "t1"]), "task.get");
+        assert_eq!(
+            ok_params(&["task", "get", "ws1", "t1"]),
+            json!({ "workspaceId": "ws1", "slug": "t1" })
+        );
+    }
+
+    #[test]
+    fn task_get_missing_slug_is_invalid() {
+        assert!(is_invalid(&["task", "get", "ws1"]));
+    }
+
+    #[test]
+    fn task_create_maps_correctly_bare() {
+        assert_eq!(
+            ok_method(&["task", "create", "ws1", "t1", "My", "Title"]),
+            "task.create"
+        );
+        assert_eq!(
+            ok_params(&["task", "create", "ws1", "t1", "My", "Title"]),
+            json!({ "workspaceId": "ws1", "slug": "t1", "title": "My Title" })
+        );
+    }
+
+    #[test]
+    fn task_create_flags_are_order_independent_and_dont_pollute_title() {
+        let params = ok_params(&[
+            "task", "create", "ws1", "t1", "--owner", "agent-1", "Title", "Words",
+            "--boundary", "a.rs,b.rs", "--canon", "canon-x", "--plan", "do it",
+        ]);
+        assert_eq!(params["title"], json!("Title Words"));
+        assert_eq!(params["ownerAgentId"], json!("agent-1"));
+        assert_eq!(params["fileBoundary"], json!(["a.rs", "b.rs"]));
+        assert_eq!(params["designCanon"], json!("canon-x"));
+        assert_eq!(params["plan"], json!("do it"));
+    }
+
+    #[test]
+    fn task_create_missing_title_is_invalid() {
+        assert!(is_invalid(&["task", "create", "ws1", "t1"]));
+        assert!(is_invalid(&["task", "create", "ws1", "t1", "--owner", "a1"]));
+    }
+
+    #[test]
+    fn task_claim_maps_correctly() {
+        assert_eq!(
+            ok_method(&["task", "claim", "actor1", "ws1", "t1"]),
+            "task.claim"
+        );
+        assert_eq!(
+            ok_params(&["task", "claim", "actor1", "ws1", "t1"]),
+            json!({ "workspaceId": "ws1", "slug": "t1", "actorId": "actor1" })
+        );
+    }
+
+    #[test]
+    fn task_claim_missing_args_is_invalid() {
+        assert!(is_invalid(&["task", "claim", "actor1", "ws1"]));
+        assert!(is_invalid(&["task", "claim", "actor1", "ws1", "t1", "extra"]));
+    }
+
+    #[test]
+    fn task_state_maps_correctly() {
+        assert_eq!(
+            ok_method(&["task", "state", "actor1", "ws1", "t1", "in_progress"]),
+            "task.setState"
+        );
+        assert_eq!(
+            ok_params(&["task", "state", "actor1", "ws1", "t1", "in_progress"]),
+            json!({ "workspaceId": "ws1", "slug": "t1", "state": "in_progress", "actorId": "actor1" })
+        );
+    }
+
+    #[test]
+    fn task_note_joins_multiword_text() {
+        assert_eq!(
+            ok_method(&["task", "note", "actor1", "ws1", "t1", "hello", "world"]),
+            "task.note"
+        );
+        let params = ok_params(&["task", "note", "actor1", "ws1", "t1", "hello", "world"]);
+        assert_eq!(params["text"], json!("hello world"));
+        assert_eq!(params["actorId"], json!("actor1"));
+    }
+
+    #[test]
+    fn task_note_missing_text_is_invalid() {
+        assert!(is_invalid(&["task", "note", "actor1", "ws1", "t1"]));
+    }
+
+    #[test]
+    fn task_gate_maps_correctly() {
+        assert_eq!(
+            ok_method(&[
+                "task", "gate", "actor1", "ws1", "t1", "cargo test", "0", "sha123", "/repo", "ok"
+            ]),
+            "task.gate"
+        );
+        let params = ok_params(&[
+            "task", "gate", "actor1", "ws1", "t1", "cargo test", "101", "sha123", "/repo", "FAILED",
+        ]);
+        assert_eq!(params["cmd"], json!("cargo test"));
+        assert_eq!(params["exit"], json!(101));
+        assert_eq!(params["sha"], json!("sha123"));
+        assert_eq!(params["cwd"], json!("/repo"));
+        assert_eq!(params["tail"], json!("FAILED"));
+        assert_eq!(params["actorId"], json!("actor1"));
+    }
+
+    #[test]
+    fn task_gate_bad_exit_code_is_invalid() {
+        assert!(is_invalid(&[
+            "task", "gate", "actor1", "ws1", "t1", "cmd", "notanumber", "sha", "/repo", "tail"
+        ]));
+    }
+
+    #[test]
+    fn task_gate_wrong_arity_is_invalid() {
+        assert!(is_invalid(&["task", "gate", "actor1", "ws1", "t1"]));
+    }
+
+    #[test]
+    fn task_challenge_maps_correctly() {
+        let params = ok_params(&[
+            "task", "challenge", "actor1", "ws1", "t1",
+            "--claim", "X broken", "--evidence", "log", "--proposal", "fix Y",
+            "--default", "escalate", "--deadline-min", "30",
+        ]);
+        assert_eq!(params["claim"], json!("X broken"));
+        assert_eq!(params["evidence"], json!("log"));
+        assert_eq!(params["proposal"], json!("fix Y"));
+        assert_eq!(params["default"], json!("escalate"));
+        assert_eq!(params["deadlineMin"], json!(30));
+        assert_eq!(params["actorId"], json!("actor1"));
+    }
+
+    #[test]
+    fn task_challenge_without_deadline_omits_it() {
+        let params = ok_params(&[
+            "task", "challenge", "actor1", "ws1", "t1",
+            "--claim", "c", "--evidence", "e", "--proposal", "p", "--default", "d",
+        ]);
+        assert!(params.get("deadlineMin").is_none());
+    }
+
+    #[test]
+    fn task_challenge_missing_required_flag_is_invalid() {
+        assert!(is_invalid(&[
+            "task", "challenge", "actor1", "ws1", "t1",
+            "--claim", "c", "--evidence", "e", "--proposal", "p"
+        ]));
+    }
+
+    #[test]
+    fn task_rule_maps_correctly() {
+        assert_eq!(
+            ok_method(&["task", "rule", "actor1", "ws1", "t1", "ev1", "go", "with", "it"]),
+            "task.rule"
+        );
+        let params = ok_params(&["task", "rule", "actor1", "ws1", "t1", "ev1", "go", "with", "it"]);
+        assert_eq!(params["challengeEventId"], json!("ev1"));
+        assert_eq!(params["text"], json!("go with it"));
+        assert_eq!(params["actorId"], json!("actor1"));
+    }
+
+    #[test]
+    fn task_rule_missing_text_is_invalid() {
+        assert!(is_invalid(&["task", "rule", "actor1", "ws1", "t1", "ev1"]));
+    }
+
+    #[test]
+    fn task_close_maps_correctly() {
+        assert_eq!(
+            ok_method(&["task", "close", "actor1", "ws1", "t1"]),
+            "task.close"
+        );
+        assert_eq!(
+            ok_params(&["task", "close", "actor1", "ws1", "t1"]),
+            json!({ "workspaceId": "ws1", "slug": "t1", "actorId": "actor1" })
+        );
+    }
+
+    #[test]
+    fn task_watch_and_unwatch_map_correctly() {
+        assert_eq!(
+            ok_method(&["task", "watch", "actor1", "ws1", "t1"]),
+            "task.watch"
+        );
+        assert_eq!(
+            ok_method(&["task", "unwatch", "actor1", "ws1", "t1"]),
+            "task.unwatch"
+        );
+        assert_eq!(
+            ok_params(&["task", "watch", "actor1", "ws1", "t1"]),
+            json!({ "workspaceId": "ws1", "slug": "t1", "actorId": "actor1" })
+        );
+    }
+
+    #[test]
+    fn task_unknown_sub_is_invalid() {
+        assert!(is_invalid(&["task", "nope", "ws1"]));
+    }
+
+    #[tokio::test]
+    async fn exec_task_create_then_get_round_trips_through_router() {
+        let state = AppState::for_tests().await;
+        let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed")
+            .id;
+
+        let created = exec(
+            &state,
+            json!({ "argv": ["task", "create", ws, "t1", "My", "Title"] }),
+        )
+        .await
+        .expect("exec task create should succeed");
+        assert_eq!(created["slug"], json!("t1"));
+
+        let got = exec(&state, json!({ "argv": ["task", "get", ws, "t1"] }))
+            .await
+            .expect("exec task get should succeed");
+        assert_eq!(got["task"]["slug"], json!("t1"));
+        assert_eq!(got["events"], json!([]));
     }
 
     // ── run ───────────────────────────────────────────────────────────────

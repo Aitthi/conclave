@@ -21,6 +21,7 @@ pub const SESSION_CONTEXT: &str = "session:context";
 pub const FUSION_STAGE: &str = "fusion:stage";
 pub const MESSAGE_INJECTED: &str = "message:injected";
 pub const SNAPSHOT_CREATED: &str = "snapshot:created";
+pub const TASK_CHANGED: &str = "task:changed";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -130,6 +131,22 @@ pub struct MessageInjected {
     pub auto_submitted: bool,
 }
 
+/// Payload for `task:changed` (ADR 0008) — a `task.*` mutating command ran.
+/// Carries only identity + current `state`, not the mutation's details (an
+/// event append leaves `state` unchanged but still fires this so the Lane
+/// Board can refresh badges/counts).
+///
+/// Serialises to `{ "workspaceId", "taskId", "slug", "state" }` (camelCase) to
+/// match `TaskChangedEvent` in `src/ipc/events.ts`.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskChanged {
+    pub workspace_id: String,
+    pub task_id: String,
+    pub slug: String,
+    pub state: String,
+}
+
 // ---------------------------------------------------------------------------
 // Generic emit helper
 // ---------------------------------------------------------------------------
@@ -172,6 +189,11 @@ pub fn fusion_stage(app: &AppHandle, payload: FusionStage) -> tauri::Result<()> 
 /// Emit a `message:injected` event carrying a delivered inter-agent injection.
 pub fn message_injected(app: &AppHandle, payload: MessageInjected) -> tauri::Result<()> {
     emit(app, MESSAGE_INJECTED, payload)
+}
+
+/// Emit a `task:changed` event carrying a task's post-mutation identity+state.
+pub fn task_changed(app: &AppHandle, payload: TaskChanged) -> tauri::Result<()> {
+    emit(app, TASK_CHANGED, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +371,26 @@ mod tests {
             })
         );
         assert!(val.get("toSessionId").is_none(), "key must be absent");
+    }
+
+    #[test]
+    fn task_changed_camel_case() {
+        let val = serde_json::to_value(TaskChanged {
+            workspace_id: "ws1".into(),
+            task_id: "t1".into(),
+            slug: "memory-graph".into(),
+            state: "claimed".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({
+                "workspaceId": "ws1",
+                "taskId": "t1",
+                "slug": "memory-graph",
+                "state": "claimed"
+            })
+        );
     }
 
     #[test]

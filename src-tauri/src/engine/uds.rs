@@ -388,6 +388,138 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// ADR 0008 acceptance: `task` CLI verbs round-trip against a LIVE engine
+    /// — a real `serve()` listener on a real Unix socket, driven with the
+    /// exact `cli.exec` JSON-RPC lines `conclave-cli` sends (not direct Rust
+    /// calls into `commands::task`). Runs on its own temp socket path so it
+    /// never touches the shared production socket other agents are using.
+    #[tokio::test]
+    async fn task_verbs_round_trip_over_a_real_socket() {
+        let state = Arc::new(AppState::for_tests().await);
+        let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed")
+            .id;
+        let agent_def = crate::engine::repo::agent_definition::create(
+            &state.db,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Agent".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let actor = crate::engine::repo::workspace_agent::instantiate(&state.db, &ws, &agent_def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+
+        let path = std::env::temp_dir().join("conclave-uds-test-task-verbs.sock");
+        let _ = std::fs::remove_file(&path);
+        let server = tokio::spawn(serve(Arc::clone(&state), path.clone()));
+
+        let mut stream = None;
+        for _ in 0..5000 {
+            match UnixStream::connect(&path).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        let stream = stream.expect("could not connect to UDS within retry budget");
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+
+        // One request-per-line helper, over the SAME live connection every
+        // `conclave-cli` invocation would open fresh — reused here to keep the
+        // test linear.
+        async fn call(
+            write: &mut tokio::net::unix::OwnedWriteHalf,
+            reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+            id: i64,
+            argv: Value,
+        ) -> Value {
+            let request = json!({ "jsonrpc": "2.0", "id": id, "method": "cli.exec", "params": { "argv": argv } });
+            let mut line = serde_json::to_string(&request).expect("serialize request");
+            line.push('\n');
+            write.write_all(line.as_bytes()).await.expect("write request");
+
+            let mut resp_line = String::new();
+            reader.read_line(&mut resp_line).await.expect("read response");
+            let v: Value = serde_json::from_str(resp_line.trim()).expect("response is JSON");
+            assert!(v.get("error").is_none(), "unexpected error: {v}");
+            v["result"].clone()
+        }
+
+        // `task create <ws> <slug> <title...>`
+        let created = call(
+            &mut write,
+            &mut reader,
+            1,
+            json!(["task", "create", ws, "acceptance-task", "Acceptance", "Task"]),
+        )
+        .await;
+        assert_eq!(created["slug"], json!("acceptance-task"));
+        assert_eq!(created["state"], json!("planned"));
+
+        // `task claim <actorId> <ws> <slug>` (already self-expanded, mirroring
+        // what `conclave-cli` would send).
+        let claimed = call(
+            &mut write,
+            &mut reader,
+            2,
+            json!(["task", "claim", actor, ws, "acceptance-task"]),
+        )
+        .await;
+        assert_eq!(claimed["state"], json!("claimed"));
+        assert_eq!(claimed["implementerAgentId"], json!(actor));
+
+        // `task gate <actorId> <ws> <slug> <cmd> <exit> <sha> <cwd> <tail>`
+        let gated = call(
+            &mut write,
+            &mut reader,
+            3,
+            json!([
+                "task", "gate", actor, ws, "acceptance-task",
+                "cargo test --lib", "0", "abc123", "/repo", "ok"
+            ]),
+        )
+        .await;
+        assert_eq!(gated["kind"], json!("gate"));
+        assert_eq!(gated["payload"]["exit"], json!(0));
+
+        // `task get <ws> <slug>` — sees the claim's state event AND the gate
+        // event, newest-first.
+        let got = call(&mut write, &mut reader, 4, json!(["task", "get", ws, "acceptance-task"])).await;
+        assert_eq!(got["task"]["state"], json!("claimed"));
+        let events = got["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 2, "state event from claim + gate event");
+        assert_eq!(events[0]["kind"], json!("gate"), "newest first");
+        assert_eq!(events[1]["kind"], json!("state"));
+
+        // `task list <ws>` — RULED 2026-07-04 #2 (amended, Arta fidelity F1):
+        // rows carry the board's derived `lastGates`/`challenges` fields over
+        // the SAME real wire path (Arta's canon renders these on every card;
+        // no N+1 `task.get`).
+        let listed = call(&mut write, &mut reader, 5, json!(["task", "list", ws])).await;
+        let row = listed
+            .as_array()
+            .and_then(|a| a.iter().find(|t| t["slug"] == "acceptance-task"))
+            .expect("acceptance-task present in list");
+        let last_gates = row["lastGates"].as_array().expect("lastGates array");
+        assert_eq!(last_gates.len(), 1);
+        assert_eq!(last_gates[0]["cmd"], json!("cargo test --lib"));
+        assert_eq!(last_gates[0]["exit"], json!(0));
+        assert_eq!(row["challenges"], json!([]), "no challenges raised on this task");
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Regression for the 2026-07-03 socket-steal incident: a second process
     /// must NOT hijack a socket a live instance is already serving. The old
     /// unconditional `remove_file` + `bind` unlinked the live entry and bound
