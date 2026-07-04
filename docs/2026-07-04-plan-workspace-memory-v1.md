@@ -82,6 +82,21 @@ CREATE TABLE memory_chunk (
 CREATE INDEX idx_memory_chunk_ws_created ON memory_chunk(workspace_id, created_at);
 ```
 
+**Amendment (ruling on Dabin's T4 performance escalation, 2026-07-04):** keyset
+paging over `(workspace_id, id)` planned a TEMP B-TREE sort on every page
+through `idx_memory_chunk_ws_created` (measured: 50k warm p95 = 4589 ms).
+A composite index fixes the scan shape (50k → 183 ms):
+
+```sql
+-- migration 0010_memory_search_index.sql (owned by T4, incl. its db.rs
+-- `if version < 10` block per global constraint 9)
+CREATE INDEX idx_memory_chunk_ws_id ON memory_chunk(workspace_id, id);
+```
+
+This lands as a NEW migration, not an in-place edit of 0009: 0009 is already
+merged and any dev DB at `user_version = 9` would silently skip an amended
+file. T5's seed migration shifts to `0011`.
+
 ### Embedder trait — `src-tauri/src/engine/runtime/embedder.rs`
 
 ```rust
@@ -163,7 +178,8 @@ GO/NO-GO ruling by lead. Estimate: 1–2 days.
 Files: `migrations/0009_memory_system.sql`, `repo/memory.rs` (+ `repo/mod.rs`
 line), BLOB codec module `engine/runtime/vec_codec.rs`, and the
 `if version < 9` registration block in `engine/db.rs` (see global
-constraint 9; T5's `0010` migration likewise owns its `version < 10` block).
+constraint 9; T4's `0010` and T5's `0011` migrations likewise own their
+version blocks).
 
 - Codec: `encode(&[f32]) -> Vec<u8>` / `decode(&[u8], dim) -> Result<Vec<f32>>`,
   little-endian, with round-trip + wrong-length tests.
@@ -192,15 +208,36 @@ scoring — never score raw bytes.** (Mellow's T2 review: the read-path
 corruption guard of global constraint 3 is carried by this decode call;
 `list_embeddings` returns BLOBs un-decoded by design.) Scan scoped by
 workspace, `spawn_blocking`. Benchmark fixture at 10k and 50k
-rows × 384 dims; record warm p95. Gate: **p95 < 100 ms @ 50k** on this machine
-(Apple Silicon baseline). Estimate: 2 days.
+rows × 384 dims; record warm p95. Estimate: 2 days.
+
+**Search cache (ruling on Dabin's T4 performance escalation, 2026-07-04):**
+measured at 50k×384, raw BLOB materialization from SQLite alone is ~158–183 ms
+(76.8 MB per scan) — the fixed 100 ms gate is unreachable by any per-query
+scan, with metadata/page-size/scorer hypotheses falsified by component timing.
+Therefore T4 adds a `MemorySearchCache` of decoded normalized vectors:
+
+- keyed by `workspace_id`; populated lazily on first search; scoring runs on
+  cached vectors (~33–37 ms measured CPU at 50k);
+- **correctness property (fixed):** the cache must never serve results that
+  contradict a completed `remember`/`delete`/`clear` — invalidate or update
+  on every successful write to that workspace; mechanism (drop-on-write vs
+  incremental) is implementer judgment;
+- **bound (fixed):** small fixed LRU, at most 4 workspaces resident
+  (~77 MB each at 50k); eviction must be safe under concurrent search;
+- cache rebuilds run off the async executor (global constraint 5);
+- T4 owns the cache type + generic handler injection now; the production
+  `AppState` field joins the existing post-T3 wiring delta.
+
+**Gate (amended):** warm/cached p95 **< 100 ms @ 50k** stands. Cold path
+(first search after launch or invalidation, composite index in place) is
+recorded, target **< 300 ms @ 50k**, non-blocking but must be reported.
 
 ### T5 — CLI + agent tool surface (whoever frees first)
 
 CLI subcommands (above) + seed a `memory` core tool for agents following the
-`0002_seed_core_tools.sql` pattern (new migration `0010_seed_memory_tool.sql`)
-so workspace agents can call remember/search via their existing tool channel.
-Estimate: 1.5–2.5 days.
+`0002_seed_core_tools.sql` pattern (new migration `0011_seed_memory_tool.sql`
+— `0010` is taken by T4's search index) so workspace agents can call
+remember/search via their existing tool channel. Estimate: 1.5–2.5 days.
 
 ### T6 — Packaging, notices, validation (lead + Dew)
 
@@ -223,8 +260,11 @@ Estimate: 1.5–2.5 days.
   goes through the existing sign/notarize path, proven with a real
   `cargo tauri build` (notarization Accepted, stapled, spctl pass). Residual:
   that bundle had fastembed dead-code-eliminated (+48 KB only), so **T3 and T6
-  must rerun codesign/spctl once the embedder is wired into product code** and
-  record the real size delta (~14 MB expected).
+  must rerun codesign/spctl once the embedder is wired into product code**.
+  **CLOSED by T3 (Dew):** rerun with the embedder live — codesign/spctl still
+  pass, notarized. Real size delta **+28.6 MB** (binary 17.7→46.3 MB, .app
+  18→45 MB, DMG 7.5→16.4 MB) — about 2× the earlier ~14 MB estimate; T6 uses
+  these real numbers.
 - **fastembed cache-dir override** — verify the env/API override actually
   redirects (default is `.fastembed_cache` in cwd; unacceptable). If not
   overridable, escalate before T3.
