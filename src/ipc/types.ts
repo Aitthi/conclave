@@ -260,3 +260,61 @@ export interface MemoryGraphEdge {
   /** Cosine similarity for `related` edges; absent for `wiki`. */
   score?: number;
 }
+
+// ── Agent Work System (task.*) — ADR 0008 ───────────────────────────────────
+// A claimable unit of work with a lifecycle state machine, a file boundary, an
+// optional design canon, and an append-only event log. Fields are the EXACT
+// frozen wire shape (plan §Frozen interfaces); Lane A's `task.*` handlers emit
+// this camelCase shape, Lane D codes against it.
+export type TaskState =
+  | "planned"
+  | "claimed"
+  | "in_progress"
+  | "review"
+  | "merged"
+  | "abandoned";
+
+export interface Task {
+  /** UUID — the task's stable identity. */
+  id: string;
+  workspaceId: string;
+  /** Short human key, unique within the workspace (the `<slug>` CLI arg). */
+  slug: string;
+  title: string;
+  state: TaskState;
+  /** The lead who owns escalations for this task; null until assigned. */
+  ownerAgentId: string | null;
+  /** The agent who claimed and builds it; null until claimed. */
+  implementerAgentId: string | null;
+  /** Path prefixes this task's lane owns (the frozen `file_boundary` JSON array). */
+  fileBoundary: string[];
+  /** Free-text pointer to the design canon (proto path / SHA); null for non-UI work. */
+  designCanon: string | null;
+  /** The task's written plan text. */
+  plan: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A `task.list` row — the frozen task shape plus the count of its logged events
+ *  (so the board can badge activity without a per-task `task.get`). Field name
+ *  `eventCount` is Lane D's chosen default, flagged to the lead + Lane A for
+ *  camelCase parity (frozen shape says only "event counts included"). */
+export interface TaskListRow extends Task {
+  eventCount: number;
+}
+
+export type TaskEventKind = "note" | "state" | "gate" | "challenge" | "ruling";
+
+/** One append-only entry in a task's event log (the frozen `task_event` row,
+ *  camelCase). `payload` is opaque JSON whose shape varies by `kind` (e.g. a
+ *  `gate` event carries `{cmd,exit,sha,tail,cwd}`); callers narrow per kind. */
+export interface TaskEvent {
+  id: string;
+  taskId: string;
+  kind: TaskEventKind;
+  /** The agent who produced the event; null for system-generated entries. */
+  actorAgentId: string | null;
+  payload: unknown;
+  createdAt: string;
+}

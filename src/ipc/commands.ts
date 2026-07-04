@@ -17,6 +17,9 @@ import type {
   Role,
   MemoryGraphNode,
   MemoryGraphEdge,
+  Task,
+  TaskListRow,
+  TaskEvent,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -230,6 +233,24 @@ export interface Commands {
     req: { workspaceId: string };
     res: { nodes: MemoryGraphNode[]; edges: MemoryGraphEdge[] };
   };
+  // ── Agent Work System (task.*) — ADR 0008 ─────────────────────────────────
+  // Read-only surface consumed by the Lane Board. Mutations (create/claim/
+  // state/note/gate/challenge/rule/close/watch) are agent-facing via the CLI,
+  // not the UI, so only `list`/`get` cross the IPC boundary here.
+  "task.list": {
+    // Every task in the workspace, newest activity first (backend orders).
+    // `--state` maps to the optional `state` filter. Empty workspace → `[]`.
+    req: { workspaceId: string; state?: Task["state"] };
+    res: TaskListRow[];
+  };
+  "task.get": {
+    // One task by slug plus its last 20 events, sorted `createdAt` DESC (newest
+    // first — lead ruling @ 5e3e27e). Each event's `payload` arrives as a parsed
+    // JSON object, never a double-encoded string. NotFound when the slug doesn't
+    // resolve in the workspace.
+    req: { workspaceId: string; slug: string };
+    res: { task: Task; events: TaskEvent[] };
+  };
   "fusion.run": {
     req: { orchestratorId: string; prompt: string };
     res: FusionRun;
@@ -349,6 +370,10 @@ export const ipc = {
   },
   memory: {
     graph: (req: Commands["memory.graph"]["req"]) => call("memory.graph", req),
+  },
+  task: {
+    list: (req: Commands["task.list"]["req"]) => call("task.list", req),
+    get: (req: Commands["task.get"]["req"]) => call("task.get", req),
   },
   fusion: {
     run: (req: Commands["fusion.run"]["req"]) => call("fusion.run", req),
