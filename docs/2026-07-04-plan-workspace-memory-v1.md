@@ -98,6 +98,20 @@ pub trait Embedder: Send + Sync {
 `FakeEmbedder` (deterministic: seeded hash → pseudo-vector, normalized) so no
 lane blocks on the model gate.
 
+**Seam ownership (ruling on Dabin's T4 escalation, 2026-07-04):** the trait +
+`FakeEmbedder` were landed on main by the lead (`5eb4640`) so T3 and T4 build
+against the same seam without cross-lane dependencies. From that commit on:
+
+- T3 owns all further additions to `runtime/embedder.rs`
+  (`FastembedEmbedder`) AND the production wiring surface: an
+  `AppState.memory_embedder: Arc<dyn Embedder>` field in `engine/state.rs`
+  plus its construction.
+- T4 implements command handlers generic over an injected
+  `Arc<dyn Embedder>` (tests/benchmarks use `FakeEmbedder`). The
+  `router.rs` entries + production wrappers reading
+  `state.memory_embedder` are T4's final, small integration delta AFTER
+  T3 merges — never fake/`NotImplemented` production routing.
+
 ### Commands — `src-tauri/src/engine/commands/memory.rs`, routed in `router.rs`
 
 | Command | Payload | Result |
