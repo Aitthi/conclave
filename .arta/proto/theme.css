@@ -89,6 +89,7 @@ body {
 .av-indigo { background: var(--color-a-indigo); }
 .av-amber { background: var(--color-a-amber); }
 .av-sky { background: var(--color-a-sky); }
+.av-violet { background: var(--color-a-violet); }
 .av-human { background: transparent; color: var(--color-heading); border: 1px solid var(--color-border);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 22%, transparent); }
 .av-hash { background: color-mix(in srgb, var(--color-accent) 16%, transparent); color: var(--color-accent);
@@ -143,6 +144,12 @@ body {
   50%       { content: ".."; }
   75%, 100% { content: "..."; }
 }
+
+/* ---------- lane board cards (ADR 0008 · Lane D) ---------- */
+.lane-card { background: var(--color-raised); border: 1px solid var(--color-border);
+  transition: background .12s ease, border-color .12s ease; }
+.lane-card:hover { background: var(--color-hover);
+  border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); }
 
 /* ---------- rows ---------- */
 .row { display: flex; gap: 0.7rem; padding: 0.62rem 0.7rem; border-radius: var(--radius-md); cursor: pointer;

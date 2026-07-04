@@ -3,7 +3,7 @@
 // human self-sends go via ipc.message.send and never enter InterAgentMessage, so the
 // data has no human identity. Agents: Detoro / Mellow / Dew / Arta.
 
-export type AgentColor = "teal" | "red" | "indigo" | "amber" | "sky" | "human" | "hash";
+export type AgentColor = "teal" | "red" | "indigo" | "amber" | "sky" | "violet" | "human" | "hash";
 export type Status = "live" | "queued" | "idle";
 
 export interface Agent {
@@ -20,11 +20,13 @@ export const agents: Record<string, Agent> = {
   mellow: { id: "mellow", name: "Mellow", role: "Staff Engineer", initials: "M", color: "teal", status: "live" },
   dew: { id: "dew", name: "Dew", role: "Engineer", initials: "D", color: "amber", status: "queued" },
   arta: { id: "arta", name: "Arta", role: "Designer", initials: "A", color: "sky", status: "live" },
+  tiesto: { id: "tiesto", name: "Tiësto", role: "Frontend Engineer", initials: "T", color: "red", status: "live" },
+  guetta: { id: "guetta", name: "Guetta", role: "Engineer", initials: "G", color: "violet", status: "live" },
 };
 
 export const avClass: Record<AgentColor, string> = {
   teal: "av-teal", red: "av-red", indigo: "av-indigo", amber: "av-amber", sky: "av-sky",
-  human: "av-human", hash: "av-hash",
+  violet: "av-violet", human: "av-human", hash: "av-hash",
 };
 
 export interface Convo {
