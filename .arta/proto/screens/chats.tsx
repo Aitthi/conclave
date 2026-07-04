@@ -117,11 +117,12 @@ export default function Chats() {
                           the queued label (recipient hasn't picked up yet) shares this
                           row on the left, chip stays right-aligned. Visible without hover. */}
                       {to && (
-                        <div className="self-stretch flex items-center gap-2 px-0.5">
+                        <div className="self-stretch flex items-center gap-1">
+                          {/* queued label styling mirrors the app convention (lowercase,
+                              warning color, no dot) — it predates R10/R11, which only
+                              relocated it into this shared row. */}
                           {queued && (
-                            <span className="inline-flex items-center gap-1 text-[0.62rem]" style={{ color: "var(--color-queued)" }}>
-                              <span className="dot dot-queued w-1.5 h-1.5" /> Queued
-                            </span>
+                            <span className="text-[0.56rem]" style={{ color: "var(--color-queued)" }}>queued</span>
                           )}
                           <span className="ml-auto inline-flex items-center gap-1 text-[0.62rem] faint" title={`→ ${to.name}`}>
                             <span className={`av av-xs ${avClass[to.color]}`}>{to.initials}</span>
