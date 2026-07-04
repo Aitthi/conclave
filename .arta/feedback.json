@@ -10,5 +10,29 @@
     },
     "at": "2026-06-27T06:41:22.742Z",
     "read": true
+  },
+  {
+    "text": "Design ใหม่",
+    "tab": "prototype",
+    "screen": "chats",
+    "element": {
+      "tag": "div",
+      "text": "SkillsAgent LoopCollaborationLeadershipStrategic CompactSession Resume Restart",
+      "selector": "div.px-4"
+    },
+    "at": "2026-07-04T02:00:31.497Z",
+    "read": true
+  },
+  {
+    "text": "Design ใหม่",
+    "tab": "prototype",
+    "screen": "chats",
+    "element": {
+      "tag": "div",
+      "text": "Memory · Snapshots handoff ~1,975 tok · 53m· ~923 tok · 9h Compact now",
+      "selector": "div.px-4"
+    },
+    "at": "2026-07-04T02:00:46.828Z",
+    "read": true
   }
 ]
