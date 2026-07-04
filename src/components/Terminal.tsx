@@ -3,13 +3,31 @@ import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { ipc, useSessionOutput, useSessionStatus } from "../ipc";
 import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
+import { getTermTabMode } from "../lib/termMode";
 
 interface TerminalProps {
   sessionId: string;
 }
+
+// Pre-remount buffer snapshots, keyed by sessionId. In "remount" tab mode
+// (src/lib/termMode.ts) an inactive tab's <Terminal> unmounts; on the next mount
+// the saved buffer is written back above a dim divider so the earlier context is
+// not lost. This store lives OUTSIDE the component so it survives remounts, and
+// it dies on a page reload — the SAME lifetime as the pre-remount hidden-tab
+// approach (a reload always started every tab black), so this is no regression.
+// Bounded by session count (≤ live agents) × `scrollback` rows per entry; no cap
+// needed. In "keep-alive" mode BOTH the save and the restore are gated off (see
+// the isRemount checks in the effect), so no snapshot is ever written and a
+// terminal that unmounts — which DOES happen in keep-alive too: WorkspacePane is
+// keyed `${workspaceId}:${agentsVersion}` (AppShell.tsx:288) and the LaneBoard
+// branch swaps the pane out, so a workspace switch / agent add-remove / LaneBoard
+// visit remounts terminals — simply loses its buffer, exactly as it did before
+// this feature. That loss IS the behavior keep-alive reverts to.
+const snapshots = new Map<string, { data: string; cols: number }>();
 
 /**
  * One live, INTERACTIVE xterm.js terminal bound to a single session.
@@ -39,6 +57,12 @@ export function Terminal({ sessionId }: TerminalProps) {
   // mounted, so no ResizeObserver ever fires; without this the relaunched TUI
   // lays out at the wrong size until a manual window resize.
   const repushSizeRef = useRef<(() => void) | null>(null);
+  // True once at least one live output chunk has been written during THIS mount.
+  // Gates the snapshot save so we never overwrite a good buffer with an empty
+  // one: (a) React 19 StrictMode's dev mount → cleanup → mount would otherwise
+  // clobber the snapshot on the first (immediate, output-free) cleanup; (b) a
+  // fast tab flip before any output arrives. Reset to false on each mount.
+  const receivedOutputRef = useRef(false);
 
   // Drag a file onto the terminal → type its shell-quoted path into the PTY at
   // the cursor (no submit), exactly like dropping a file into a real terminal.
@@ -51,6 +75,12 @@ export function Terminal({ sessionId }: TerminalProps) {
   useEffect(() => {
     const el = divRef.current;
     if (!el) return;
+    receivedOutputRef.current = false;
+    // Snapshot save + restore run ONLY in remount mode. keep-alive must stay
+    // byte-for-byte the pre-remount behavior: terminals still unmount on a
+    // workspace/agents-version/LaneBoard change (see the snapshots comment), but
+    // they must lose their buffer then, with no divider ever injected.
+    const isRemount = getTermTabMode() === "remount";
 
     const term = new XtermTerminal({
       convertEol: true,
@@ -68,6 +98,11 @@ export function Terminal({ sessionId }: TerminalProps) {
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    // Serialize addon: snapshots the buffer on unmount and lets us write it back
+    // on the next mount ("remount" tab mode). Loaded unconditionally and cheaply
+    // — it needs to be present to save even if the mode is flipped later.
+    const serializeAddon = new SerializeAddon();
+    term.loadAddon(serializeAddon);
 
     // Unicode 11 width tables (like VS Code). xterm's built-in tables are
     // Unicode 6, which mis-measures the width of modern wide glyphs/emoji — a
@@ -99,6 +134,30 @@ export function Terminal({ sessionId }: TerminalProps) {
     }
 
     term.focus();
+
+    // Restore the pre-remount buffer (remount tab mode) synchronously, BEFORE
+    // termRef is set below — so a late useSessionOutput event can never land
+    // mid-restore and interleave with the written-back context. The mount jiggle
+    // further down SIGWINCHes the child, which repaints the live frame BELOW the
+    // divider. Gated on remount mode: keep-alive never saves and must never
+    // restore, so no divider is ever injected there.
+    const snap = isRemount ? snapshots.get(sessionId) : undefined;
+    if (snap) {
+      term.write(snap.data);
+      // Explicit SGR reset — serialize output is not guaranteed to end reset, so
+      // clear any lingering attributes before the divider and the live frame.
+      term.write("\x1b[0m\r\n");
+      // Dim, full-width divider at the SAVED cols. The snapshot content is
+      // hard-wrapped at the width it originated from (fit() has not run yet on
+      // this fresh mount — term.cols is still the 80 default), so sizing the
+      // divider to snap.cols keeps it flush with the restored lines.
+      const label = "─── earlier output ───";
+      const pad = Math.max(0, snap.cols - label.length);
+      const left = Math.floor(pad / 2);
+      const line = "─".repeat(left) + label + "─".repeat(pad - left);
+      term.write("\x1b[2m" + line + "\x1b[0m\r\n");
+    }
+
     termRef.current = term;
 
     // Fit the xterm grid to the container, then push the real (cols, rows) to
@@ -238,6 +297,23 @@ export function Terminal({ sessionId }: TerminalProps) {
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
       // touch a disposed terminal.
       termRef.current = null;
+      // Snapshot the buffer for the next mount (remount tab mode), BEFORE
+      // dispose. Only when this mount actually received output — see
+      // receivedOutputRef: skipping the empty case keeps a StrictMode
+      // double-mount or a fast tab flip from clobbering a good snapshot.
+      // excludeAltBuffer: for an alt-screen TUI the transcript worth keeping is
+      // the NORMAL buffer's scrollback; the live alt-screen frame is re-drawn by
+      // the next mount's jiggle SIGWINCH, so serializing it would only duplicate.
+      if (isRemount && receivedOutputRef.current) {
+        snapshots.set(sessionId, {
+          data: serializeAddon.serialize({
+            scrollback: 2000,
+            excludeAltBuffer: true,
+            excludeModes: true,
+          }),
+          cols: term.cols,
+        });
+      }
       term.dispose();
     };
   }, [sessionId]);
@@ -251,6 +327,7 @@ export function Terminal({ sessionId }: TerminalProps) {
   // Stream output chunks for this session into the terminal. The hook already
   // filters by sessionId, so we write every delivered chunk verbatim.
   useSessionOutput(sessionId, (e) => {
+    receivedOutputRef.current = true;
     termRef.current?.write(e.chunk);
   });
 
