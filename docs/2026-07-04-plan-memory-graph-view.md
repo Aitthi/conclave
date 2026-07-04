@@ -106,11 +106,16 @@ call locally if needed; do not commit the mock).
     (id-mismatch trap from workspace memory).
 - **B3** Port the proto's `.gr-range` slider CSS into the app's real
   stylesheet under `src/styles/` — never import from `.arta/`.
-- **B4** `AppShell.tsx` + `Rail.tsx`: Memory destination as a center-pane
-  toggle following the Blackboard pattern exactly (state in AppShell, button
-  in Rail, workspace-scoped, mutually exclusive with Blackboard/ChatHub).
-  Placement per canon @ 73ac6fa: Network glyph, directly below Blackboard
-  (Blackboard → Memory → Chat) — see `.arta/proto/components/AppShell.tsx`.
+- **B4** `AppShell.tsx` + `Roster.tsx`: Memory destination as a center-pane
+  toggle following the Blackboard pattern exactly — state in AppShell, button
+  in the **Roster FOOTER** where the Blackboard/Chat toggles already live
+  (`Roster.tsx:595-620`), workspace-scoped, mutually exclusive with
+  Blackboard/ChatHub. Sequence per canon @ 73ac6fa: Blackboard → Memory →
+  Chat, Network glyph — see `.arta/proto/components/AppShell.tsx`.
+  (Amended 2026-07-04: the plan originally named `Rail.tsx`; the toggles live
+  in the Roster footer — caught by Tiësto before any code was written. Guard:
+  a plan task that adds a nav affordance must cite the file:line of the
+  sibling affordance it sits next to, not a component name from memory.)
 - **B5** States: 0 nodes → honest empty state (store empty / no workspace);
   search filter dims non-matches per proto.
 - **B6** Gate: `npx tsc --noEmit` + `npm run build`. Worktrees have no
