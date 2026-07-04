@@ -183,7 +183,11 @@ smoke — that gap is the lead's; the guard below closes it.
 at zero, no system pills (no system rows in `InterAgentMessage`), no typing indicator (R2).
 
 **Timeline note:** proto `chats.tsx`/`data.ts` last edited 09:38, AFTER Task 3's commit
-(09:36) — Arta to confirm whether the 09:38 iteration changed anything beyond the above.
+(09:36) — Arta CONFIRMED (with evidence, not defaulted) the 09:38 edit introduced no visible
+element beyond F-s1..F-s4: `chats.full.png` (09:35, pre-edit) already renders the final design,
+and the current proto maps 1:1 to the four findings (`chats.tsx:111` .msg / `:104` 82% /
+`:107-108` role + absolute time / `AppShell.tsx` 380px). The proto's system pill is mock-data
+only — stays a confirmed-correct omission.
 
 **New guard — design-acceptance gate:** before ANY future human smoke of a lane that has
 an `.arta/proto` design record, Arta pixel-reviews the actual rendering against the proto
