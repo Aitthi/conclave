@@ -53,6 +53,16 @@ Everything else from the scope report's rulings stands:
    `db.rs`** — a migration file without its `db.rs` block never runs.
    (Guard added 2026-07-04 after Dabin caught this gap in T2's file boundary.)
 
+   **Ordering rule (2026-07-04, flagged by Dew):** a `version < N` block may
+   only merge to main when block `N-1` already exists on main — otherwise a
+   fresh DB migrated in the gap jumps past the missing version and skips it
+   forever (its later block never fires). The lead enforces this at merge.
+   Structural guard (T5 scope): a unit test that lists
+   `src/engine/migrations/` and asserts (a) file numbers are contiguous from
+   0001 with no gaps, and (b) a fresh `migrate()` lands `user_version` at the
+   max file number — so a skipped-version state fails the gate instead of
+   shipping.
+
 ## Interface contract (fixed — escalate to lead before deviating)
 
 ### Schema — migration `src-tauri/src/engine/migrations/0009_memory_system.sql`
