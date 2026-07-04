@@ -90,6 +90,8 @@ Response shapes (RULED 2026-07-04, challenge credit: Tiësto — these are final
 - `task.get` res = `{ "task": Task, "events": TaskEvent[] }` — last 20 events, sorted `createdAt` DESC (newest first).
 - `TaskEvent` = `{ "id", "taskId", "kind", "actorAgentId", "payload", "createdAt" }`, `kind` ∈ note|state|gate|challenge|ruling; `payload` is a JSON OBJECT on the wire (engine parses the stored TEXT column; unparseable → `{}`), never a double-encoded string.
 - `task:changed` event = `{ "workspaceId", "taskId", "slug", "state" }` (as §Bus below).
+- Optional wire fields (`ownerAgentId`, `implementerAgentId`, `designCanon`, `actorAgentId`, `lastGate`, `deadlineAt`) are OMITTED when absent, never `null` (RULED 2026-07-04, ratifying Dew judgment #3; Mellow evidence: faithful mirror of the BlackboardEntry precedent — server omits `blackboard.rs:42`, TS `lastWriterId?:` `types.ts:175`). TS consumers type them `?:` and use loose `== null` checks.
+- `conclave task gate` PROPAGATES the gate command's exit code as its own process exit code, after recording (RULED 2026-07-04, credit: Mellow latent-Low). Recording red and exiting 0 hides failure from scripting agents — `conclave task gate <ws> <slug> -- cmd && <next>` must short-circuit on red.
 
 ### Bus event (Lane D + B)
 
