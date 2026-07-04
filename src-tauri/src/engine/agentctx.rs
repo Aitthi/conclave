@@ -64,7 +64,8 @@ from the human user: answering in your own terminal does NOT reach them. To repl
 `conclave tell <id> <your message>`, using the id shown in that tag. To start a conversation, run \
 `conclave agent list {ws_id}`: every entry whose id is NOT {self_id} is a peer, so `conclave tell \
 <peerId> <text>` messages it. That roster now shows each peer's role and skills — consult it before \
-delegating or asking a peer for something outside their role. Shared notes live on the blackboard: \
+delegating or asking a peer for something outside their role — and each entry reports a working flag, \
+true while that agent is actively emitting output. Shared notes live on the blackboard: \
 `conclave bb set {ws_id} <key> \
 <value>` writes one, `conclave bb get {ws_id} <key>` reads one, and `conclave bb list {ws_id}` \
 shows everything peers already recorded — check it before starting work someone may have claimed \
@@ -589,9 +590,9 @@ text>`. After it confirms, stop and wait for the restart."
 
     /// Restore prompts drive the agent straight into `conclave snapshot last`
     /// + continue-the-task. Without an explicit first step to re-read the
-    /// standing-instructions file, the agent resumes work skill-less — the
-    /// exact "forgets skills after /clear" bug. Both fresh-context prompts
-    /// must name that step BEFORE the snapshot restore.
+    ///   standing-instructions file, the agent resumes work skill-less — the
+    ///   exact "forgets skills after /clear" bug. Both fresh-context prompts
+    ///   must name that step BEFORE the snapshot restore.
     #[test]
     fn fresh_context_restore_prompts_order_skill_file_reread_first() {
         for p in [super::compact_restore_prompt(), super::resume_restore_prompt()] {

@@ -177,3 +177,7 @@ the gap between them is where leads fail.
   it is one commit old, not one phase old.
 - Do not hover. Review on the implementer's cadence (when they update
   progress), not on a timer that interrupts them.
+- `conclave agent list <ws>` now reports `working`/`lastActivityAt` per agent
+  — read it BEFORE interrupting an implementer or declaring a lane stalled. A
+  working agent gets left alone; a quiet one with an open claim is the thing
+  to chase.
