@@ -38,7 +38,8 @@
     ],
     "resources": {
       "skills": "skills",
-      "roles": "roles"
+      "roles": "roles",
+      "THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md"
     }
   }
 }
