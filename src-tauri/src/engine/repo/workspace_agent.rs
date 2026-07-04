@@ -154,6 +154,15 @@ pub struct WorkspaceAgentWithSkills {
         serialize_with = "serialize_launched_ids"
     )]
     pub launched_skill_ids: Option<String>,
+    /// The agent definition's configured model id (e.g. `"claude-sonnet-5"`),
+    /// `None` when unset — lets a lead factor model into delegation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The agent definition's CLI harness kind (`claude-code` / `codex` /
+    /// `custom`), `None` for a chat/orchestrator agent or an unset `cli`
+    /// agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_kind: Option<String>,
     /// Whether the live backend emitted output within `WORKING_WINDOW`
     /// (commands::instance) — `Some` only for currently-live instances.
     /// Always `None` here (this repo layer stays DB-pure); the HANDLER
@@ -197,6 +206,8 @@ struct RosterQueryRow {
     agent_name: String,
     role_id: Option<String>,
     role_text: Option<String>,
+    model: Option<String>,
+    cli_kind: Option<String>,
 }
 
 /// Return the self-describing roster for a workspace (same ordering as
@@ -222,7 +233,8 @@ pub async fn list_by_workspace_with_launched_skills(
     let rows: Vec<RosterQueryRow> = sqlx::query_as(
         "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
          sess.launched_skill_ids, \
-         ad.name AS agent_name, ad.role_id AS role_id, ad.role AS role_text \
+         ad.name AS agent_name, ad.role_id AS role_id, ad.role AS role_text, \
+         ad.model AS model, ad.cli_kind AS cli_kind \
          FROM workspace_agent wa \
          LEFT JOIN session sess ON sess.workspace_agent_id = wa.id \
          JOIN agent_definition ad ON ad.id = wa.agent_def_id \
@@ -281,6 +293,8 @@ pub async fn list_by_workspace_with_launched_skills(
                 role_description,
                 skill_names: skill_names_resolved,
                 launched_skill_ids: r.launched_skill_ids,
+                model: r.model,
+                cli_kind: r.cli_kind,
                 working: None,
                 last_activity_at: None,
                 session_id: None,
@@ -1100,6 +1114,78 @@ mod tests {
         assert!(json.get("roleDescription").is_some());
         assert!(json.get("skillNames").is_some());
         assert!(json.get("role_name").is_none());
+    }
+
+    /// The roster surfaces the agent definition's `model` + `cli_kind`
+    /// (camelCase `cliKind`) so a lead can factor model/harness into
+    /// delegation without reading the database directly.
+    #[tokio::test]
+    async fn roster_exposes_model_and_cli_kind() {
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Sonnet Sam".into(),
+                agent_type: "cli".into(),
+                cli_kind: Some("claude-code".into()),
+                model: Some("claude-sonnet-5".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert_eq!(roster[0].model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(roster[0].cli_kind.as_deref(), Some("claude-code"));
+
+        let json = serde_json::to_value(&roster[0]).expect("serialize failed");
+        assert_eq!(json.get("model").and_then(|v| v.as_str()), Some("claude-sonnet-5"));
+        assert_eq!(json.get("cliKind").and_then(|v| v.as_str()), Some("claude-code"));
+        assert!(json.get("cli_kind").is_none(), "must NOT have cli_kind");
+    }
+
+    /// An agent definition with no `model`/`cli_kind` set (e.g. a chat agent)
+    /// omits both keys entirely from the JSON — null-safe, not `null`.
+    #[tokio::test]
+    async fn roster_model_and_cli_kind_are_null_safe_when_unset() {
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Chatty".into(),
+                agent_type: "chat".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+        assert!(roster[0].model.is_none());
+        assert!(roster[0].cli_kind.is_none());
+
+        let json = serde_json::to_value(&roster[0]).expect("serialize failed");
+        assert!(json.get("model").is_none(), "absent key, not null");
+        assert!(json.get("cliKind").is_none(), "absent key, not null");
     }
 
     /// A builtin role id set on an agent_definition resolves to the bundled

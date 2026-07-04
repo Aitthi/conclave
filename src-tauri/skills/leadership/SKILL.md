@@ -181,3 +181,8 @@ the gap between them is where leads fail.
   — read it BEFORE interrupting an implementer or declaring a lane stalled. A
   working agent gets left alone; a quiet one with an open claim is the thing
   to chase.
+- The same roster also reports each agent's `model`/`cliKind` — consult it
+  before delegating a task that needs a specific model's capability, or
+  before asking a peer for something outside their harness (a `codex` agent
+  is not a `claude-code` agent, and models differ in what they're reliable
+  at).
