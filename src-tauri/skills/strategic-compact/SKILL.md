@@ -69,8 +69,9 @@ were gone:
 
 - `git log` the repo: are the SHAs it names still the head? Did new commits
   land? In a shared workspace, peers kept working.
-- `conclave bb get` the keys it watches: progress, claims, plan — did anyone
-  update them?
+- `conclave task list <ws>` then `task get` the lanes it names: did states
+  move, did notes or gates land while you were gone?
+- `conclave bb get` the ad-hoc keys it watches — did anyone update them?
 - Check for messages that arrived during the gap.
 
 Then continue from the EXACT next step the handoff names. Never restart work

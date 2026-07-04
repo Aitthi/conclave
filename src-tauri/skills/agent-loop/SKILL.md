@@ -14,10 +14,12 @@ and Implementer (building); this one covers the LOOP between them.
 ## The loop is closed only when it's written down
 
 - Delegated authority is a fact on the record, not a vibe. When the human
-  grants it, the lead writes it into the work's blackboard entry:
-  `conclave bb set <ws> plan:<task> "… owner: <leadId> · authority: in-loop"`.
-  An agent that cannot find `authority: in-loop` on the record assumes the
-  human still decides, and escalates per Collaboration.
+  grants it, the lead writes it into the task object's plan body at creation
+  (`conclave task create <ws> <slug> <title> --plan-file <path>`, the plan
+  carrying `owner: <leadId> · authority: in-loop`); anyone can read it back
+  with `conclave task get <ws> <slug>`. An agent that cannot find
+  `authority: in-loop` on the record assumes the human still decides, and
+  escalates per Collaboration.
 - Closed means closed: design conflicts, plan bugs, interface disputes,
   review findings — all of it settles agent-to-agent. The lead's ruling is
   final. If a ruling contradicts a recorded decision, the lead amends the
@@ -36,7 +38,12 @@ and Implementer (building); this one covers the LOOP between them.
 - A challenge has four parts, always: the claim, the evidence (file, line,
   commit, recorded decision it conflicts with), a proposed resolution, and
   the default you'll take if unanswered. A challenge without evidence is an
-  opinion; without a default it's a stall.
+  opinion; without a default it's a stall. File it ON the task so the record
+  outlives the conversation: `conclave task challenge <ws> <slug> --claim <t>
+  --evidence <t> --proposal <t> --default <t> [--deadline-min N]`. The ruler
+  answers with `conclave task rule <ws> <slug> <challengeEventId> <text>`;
+  a deadline that expires unruled fires your stated default automatically
+  and notifies both parties — the loop cannot silently stall.
 - Answer challenges with verification, not rank. The receiver re-reads the
   cited evidence BEFORE replying — "the plan says so" is not a rebuttal when
   the challenge is that the plan is wrong. Pulling rank without verifying is
@@ -58,8 +65,10 @@ and Implementer (building); this one covers the LOOP between them.
 - Supersede your own messages when you find something better before the
   reply arrives ("read this instead of my last") — don't let a peer spend
   effort ruling on your obsolete proposal.
-- Progress lives on the blackboard (`progress:<task>`), pull-based. Messages
-  are for decisions and challenges, not status pings.
+- Progress lives on the task (`conclave task note <ws> <slug> <text>`),
+  pull-based — anyone who needs to react to it subscribes with
+  `conclave task watch <ws> <slug>` and gets changes injected into their
+  session. Messages are for decisions and challenges, not status pings.
 
 ## Closing the loop
 

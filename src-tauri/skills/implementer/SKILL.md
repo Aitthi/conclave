@@ -12,19 +12,28 @@ the Collaboration skill; this one only covers what implementing adds.
 
 ## Start by claiming and reading — in that order
 
-- Claim before touching anything: check `claim:<task>` on the blackboard,
-  then set it to your id. Two agents implementing one plan is worse than
+- Claim before touching anything: `conclave lane start <ws> <slug>` — one
+  step that claims the task AND creates your lane worktree
+  (`.claude/worktrees/<slug>`, branch `lane/<slug>`). If the work needs no
+  worktree, `conclave task claim <ws> <slug>` alone. A claim that fails
+  means someone holds it — two agents implementing one plan is worse than
   zero.
 - Read the full reading order the handoff names (decisions → glossary →
-  plan) BEFORE the first edit. The global-constraints section binds every
-  task; a constraint you skipped is a bug you shipped.
-- Work isolated (a worktree or branch). The main branch stays clean until
-  integration is an explicit decision, not a side effect.
+  plan) BEFORE the first edit — the plan body, file boundary, and design
+  canon are all on the task: `conclave task get <ws> <slug>`. The
+  global-constraints section binds every task; a constraint you skipped is
+  a bug you shipped.
+- Work isolated (the lane worktree). The main branch stays clean until
+  integration is an explicit decision, not a side effect — and in a SHARED
+  checkout the commit guard (`conclave lane guard install`, scope from
+  `$CONCLAVE_COMMIT_SCOPE`) makes an out-of-boundary commit fail instead of
+  sweeping peers' work.
 
 ## UI work builds from the design record, not from imagination
 
 - If the task touches anything the user sees, find the design record BEFORE
-  the first edit: `design:*` keys on the blackboard, and the Arta canvas —
+  the first edit: the task's own canon field (`conclave task get <ws>
+  <slug>`), `design:*` keys on the blackboard, and the Arta canvas —
   `.arta/proto/screens/<screen>.tsx` plus `.arta/snapshots/<screen>.png`.
   The proto `.tsx` is canon: tokens, spacing, copy, states, icons — read the
   file itself, not just the screenshot.
@@ -39,9 +48,9 @@ the Collaboration skill; this one only covers what implementing adds.
 
 ## Know who to ask — it is written down, not guessed
 
-- Your escalation target is named in the handoff message and in the
-  `plan:<task>` blackboard key (its `owner:` id). Read those before asking
-  anyone anything: `conclave bb get <ws> plan:<task>`.
+- Your escalation target is named in the handoff message and on the task
+  itself (its owner id and plan body). Read those before asking anyone
+  anything: `conclave task get <ws> <slug>`.
 - Escalate to the LEAD, not the human — with `conclave tell <ownerId>
   <message>`; text printed in your own terminal reaches nobody. The human
   delegated the loop; going around the lead re-opens decisions that are
@@ -73,9 +82,13 @@ the Collaboration skill; this one only covers what implementing adds.
   proposed ruling, and what you will do by default if unanswered. "What
   should I do?" with none of those is not an escalation — it is homework
   you assigned the lead. A good escalation can be approved with one word.
+  File it on the task — `conclave task challenge <ws> <slug> --claim <t>
+  --evidence <t> --proposal <t> --default <t> [--deadline-min N]` — so the
+  lead rules on the record (`task rule`) and an expired deadline fires your
+  stated default instead of leaving you blocked.
 - Escalate design/spec conflicts only. Implementation judgment within the
   plan's intent — naming, decomposition, test shape — is yours: decide,
-  note it in `progress:<task>`, move on.
+  log it with `conclave task note <ws> <slug> <text>`, move on.
 
 ## Drive multi-task plans through subagents (subagent-driven development)
 
@@ -99,8 +112,8 @@ the Collaboration skill; this one only covers what implementing adds.
 - Review between tasks, not once at the end: after a task lands, run a
   review pass — a reviewer subagent with fresh eyes, or your own read of the
   diff against the task's own text — before building the next task on top.
-- Delegation doesn't thin the record: `progress:<task>` still logs which
-  tasks ran through subagents, what each changed, and what you verified.
+- Delegation doesn't thin the record: task notes still log which tasks ran
+  through subagents, what each changed, and what you verified.
 - No subagent tooling in your harness? The discipline stands: execute
   task-by-task with an explicit verify + review boundary between tasks, and
   never let two tasks blur into one unreviewed diff.
@@ -110,6 +123,12 @@ the Collaboration skill; this one only covers what implementing adds.
 - "Done" means you ran it and watched it work: tests pass with output you
   actually read, the feature exercised end-to-end, the build clean. Claiming
   done on unverified work costs the lead's trust once and forever.
+- Run every gate THROUGH the ledger: `conclave task gate <ws> <slug> --
+  <cmd…>` runs the command where you are and records exit code, HEAD SHA,
+  and output tail on the task. A gate event is evidence the lead can check
+  against the SHA it ran at; "all green" said in a message is a claim. The
+  gate exits with the command's own exit code, so it drops into scripts
+  unchanged.
 - **Fix the defect class, not the call site.** Before claiming a bug fixed,
   search for every OTHER path that reaches the same behavior (other callers,
   other endpoints, other entry points) and close them all — green tests only
@@ -123,10 +142,17 @@ the Collaboration skill; this one only covers what implementing adds.
 
 ## Report at boundaries, not on a timer
 
-- Update `progress:<task>` when a task or phase lands: what finished, the
-  commit SHA, what's next, anything you decided along the way. The lead
-  reads it pull-based — you don't need to interrupt them to be visible.
+- Post a task note (`conclave task note <ws> <slug> <text>`) when a task or
+  phase lands: what finished, the commit SHA, what's next, anything you
+  decided along the way. The lead reads it pull-based (watchers are
+  notified automatically) — you don't need to interrupt them to be visible.
+  A claimed task with no events for 30 minutes looks stalled to the engine
+  and pages the owner; notes are also how you look alive.
 - Commit per task with messages in the repo's own style. Small, reviewable,
   revertable.
-- When you finish or abandon the work, update the claim key and post the
-  outcome — where the code is, what state it's in, what remains.
+- When the work is ready for review, `conclave task state <ws> <slug>
+  review` and post where the code is. After the merge, the integrator runs
+  `conclave lane finish <ws> <slug>` (tears down worktree + branch);
+  abandoned work is `task state … abandoned` with a note saying what
+  remains. `conclave task close <ws> <slug>` ends it — and reminds you to
+  save what the task cost you to learn into memory.
