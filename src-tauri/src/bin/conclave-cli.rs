@@ -78,6 +78,10 @@ Subcommands:
   snapshot save <text...>           (agent self-handoff; inside a spawned agent)
   snapshot last                     (read your latest handoff; inside a spawned agent)
   restart                           (self-triggered restart; inside a spawned agent)
+  memory remember <workspaceId> <text...>
+  memory search   <workspaceId> <query...> [--limit N]
+  memory delete   <workspaceId> <chunkId>
+  memory status   <workspaceId>
   run <orchestratorId> <prompt...>
   help
 
