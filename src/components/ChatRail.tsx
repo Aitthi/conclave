@@ -30,11 +30,6 @@ interface ChatRailProps {
   onOpenChat?: () => void;
 }
 
-// Auto-scroll only snaps to the newest message when the reader is already
-// within this many pixels of the bottom — a background refetch must never
-// scroll-jack someone reading older history (ported from the Chat Hub).
-const NEAR_BOTTOM_PX = 40;
-
 // Matches WorkspacePane's STATUS_COLOR.running / Roster's live dot — a room
 // chip is "live" on the exact same basis as the tab-strip dots (R2).
 const LIVE_DOT_COLOR = "#30d158";
@@ -148,29 +143,29 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
   const activeRoom = rooms.find((r) => r.key === selectedKey) ?? rooms[0];
   const totalUnread = rooms.reduce((n, r) => n + r.unread, 0);
 
-  // ── Auto-scroll (near-bottom guarded) + continuous mark-seen while reading
-  //    at the bottom, exactly the Chat Hub's ported pattern. ──────────────────
+  // ── Auto-scroll (always-snap, R11) + continuous mark-seen while reading. ───
+  // The rail is a read-only live tail: unlike the Chat Hub, a new message
+  // always snaps to bottom, even mid-history-read (human-directed trade-off).
   const streamRef = useRef<HTMLDivElement | null>(null);
   const forceScrollRef = useRef(true);
   const lastMsgIdRef = useRef<string | null>(null);
-  const atBottomRef = useRef(true);
-  const onStreamScroll = () => {
-    const el = streamRef.current;
-    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
-  };
   // Switching rooms is a fresh read — snap to newest and mark it seen.
   useEffect(() => {
     forceScrollRef.current = true;
   }, [selectedKey]);
+  // Reopening the rail is also a fresh read — otherwise the fresh DOM node
+  // lands at the top (forceScrollRef already consumed, isNew false).
+  useEffect(() => {
+    if (open) forceScrollRef.current = true;
+  }, [open]);
   useEffect(() => {
     const el = streamRef.current;
     const newest = oldestFirst[oldestFirst.length - 1];
     const newestId = newest?.id ?? null;
     const isNew = newestId !== lastMsgIdRef.current;
-    const shouldSnap = forceScrollRef.current || (isNew && atBottomRef.current);
+    const shouldSnap = forceScrollRef.current || isNew;
     if (el && shouldSnap) {
       el.scrollTop = el.scrollHeight;
-      atBottomRef.current = true;
     }
     // Accrue "seen" only while genuinely caught up — a background refetch the
     // reader has scrolled away from must not silently clear their unread badge.
@@ -186,7 +181,7 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
     }
     lastMsgIdRef.current = newestId;
     forceScrollRef.current = false;
-  }, [oldestFirst, selectedKey]);
+  }, [oldestFirst, selectedKey, open]);
 
   if (!open) {
     return (
@@ -290,7 +285,6 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
       {/* Message stream. */}
       <div
         ref={streamRef}
-        onScroll={onStreamScroll}
         className="flex-1 overflow-y-auto scroll-thin px-3 py-3 space-y-2.5 min-h-0"
       >
         {loadError ? (
