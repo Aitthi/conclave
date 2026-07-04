@@ -109,17 +109,26 @@ export default function Chats() {
                 </div>
                 {g.items.map((m) => {
                   const to = m.to ? agents[m.to] : null;
+                  const queued = to?.status === "queued";
                   return (
                     <div key={m.id} className="flex flex-col gap-0.5 items-start self-stretch">
-                      {/* recipient chip (ruling R10) — who this message was sent to,
-                          visible without hover, right-aligned above the bubble */}
-                      {to && (
-                        <span className="self-end inline-flex items-center gap-1 text-[0.62rem] faint" title={`→ ${to.name}`}>
-                          <span className={`av av-xs ${avClass[to.color]}`}>{to.initials}</span>
-                          {to.name}
-                        </span>
-                      )}
                       <div className="msg self-start" title={to ? `→ ${to.name}` : undefined}>{m.text}</div>
+                      {/* recipient chip (ruling R10, amended R11) — BELOW the bubble;
+                          the queued label (recipient hasn't picked up yet) shares this
+                          row on the left, chip stays right-aligned. Visible without hover. */}
+                      {to && (
+                        <div className="self-stretch flex items-center gap-2 px-0.5">
+                          {queued && (
+                            <span className="inline-flex items-center gap-1 text-[0.62rem]" style={{ color: "var(--color-queued)" }}>
+                              <span className="dot dot-queued w-1.5 h-1.5" /> Queued
+                            </span>
+                          )}
+                          <span className="ml-auto inline-flex items-center gap-1 text-[0.62rem] faint" title={`→ ${to.name}`}>
+                            <span className={`av av-xs ${avClass[to.color]}`}>{to.initials}</span>
+                            {to.name}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
