@@ -124,6 +124,17 @@ export function Terminal({ sessionId }: TerminalProps) {
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     let jiggleTimer: ReturnType<typeof setTimeout> | undefined;
     const applyResize = () => {
+      // A hidden tab (display:none) has no used layout: getBoundingClientRect
+      // reads the USED width, which is genuinely 0 there — unlike FitAddon's
+      // proposeDimensions, which reads getComputedStyle and sees the COMPUTED
+      // value '100%', parses it with parseInt, and gets 100(px). That misread
+      // 100px never rounds down to 0 cols, so it slips past the cols/rows===0
+      // guard below and pushes a bogus ~11-col resize to the live PTY every
+      // time a tab is switched away from — the child then rewraps its
+      // transcript at 11 cols and pollutes scrollback permanently. Bail here,
+      // before fit() ever runs, so `firstSizing` stays unconsumed and the
+      // unhide path re-runs the normal 0 → real jiggle.
+      if (el.getBoundingClientRect().width === 0) return;
       try {
         fitAddon.fit();
       } catch {
@@ -131,11 +142,8 @@ export function Terminal({ sessionId }: TerminalProps) {
         return;
       }
       const { cols, rows } = term;
-      // A hidden tab (display:none) or an element detached mid-teardown fits to
-      // 0 — never push a zero-dimension resize to the PTY (it would wedge the
-      // child's layout). Leave `firstSizing` unconsumed: when the tab becomes
-      // visible the ResizeObserver fires again with real dims (0 → real is a
-      // genuine change) and the normal first-sizing jiggle repaints the child.
+      // An element detached mid-teardown fits to 0 — never push a
+      // zero-dimension resize to the PTY (it would wedge the child's layout).
       if (cols === 0 || rows === 0) return;
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
