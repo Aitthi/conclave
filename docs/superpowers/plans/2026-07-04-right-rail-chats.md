@@ -217,6 +217,23 @@ lane open for fix round 3:
   gate must treat it as canon, and the proto should be updated to match so the design
   record stays truthful.
 
-Round-3 flow: Dew implements F-s5 → Mellow re-review → Arta updates proto + design
-gate PASS at `bb review:right-rail-chats-design` → lead reruns tsc/vite → rebuild,
-install, human re-smoke.
+- **F-s6 — Always auto-scroll on new message (RULING R11, human-directed).** Human
+  (10:52): "ตอนมี Message ใหม่ ให้ Auto scroll ไปข้างล่างด้วย". Shipped rail ports the
+  Chat Hub's near-bottom guard (`ChatRail.tsx` snap effect, ~:165-189): a new message
+  only snaps when the reader is already within 40px of the bottom. R11: the RAIL is a
+  read-only live tail — a new message ALWAYS snaps to bottom, even mid-history-read
+  (trade-off acknowledged and accepted by the human's directive). The Chat Hub keeps
+  its guard — this ruling is rail-only.
+  Fix: in the snap effect, `shouldSnap = forceScrollRef.current || isNew` (drop the
+  `atBottomRef` condition); `atBottomRef`/`onStreamScroll` become dead — remove both.
+  Mark-seen keeps keying off `shouldSnap` (auto-follow implies caught-up for the
+  active room; other rooms still badge).
+  Companion defect, same fix: collapsing then reopening the rail lands the stream at
+  the TOP (fresh DOM node, `forceScrollRef` already false, `isNew` false). Add a
+  `useEffect` on `open` that sets `forceScrollRef.current = true`, and include `open`
+  in the snap effect's deps so reopening snaps to newest immediately.
+
+Round-3 flow: Dew implements F-s5 (landed `f046b9e`) + F-s6 → Mellow re-reviews both →
+Arta updates proto (F-s5 recipient chip; F-s6 is behavior-only, no proto change) +
+design gate PASS at `bb review:right-rail-chats-design` → lead reruns tsc/vite →
+rebuild, install, human re-smoke.
