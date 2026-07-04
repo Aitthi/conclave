@@ -62,11 +62,18 @@ small probe on both:
    venv in scratchpad), palace data under scratchpad, add the same 24 facts,
    run the same 12 queries, same metrics.
 4. MANDATORY CLEANUP, gated: delete every seeded conclave chunk by id
-   (`conclave memory delete <ws> <chunkId>`), then run
-   `conclave task gate <ws> memory-benchmark -- "/Users/detoro/Library/Application Support/Conclave/bin/conclave" memory status <ws>`
-   and confirm chunk count is back to baseline (33 ± whatever peers saved
+   (`conclave memory delete <ws> <chunkId>`), then gate `memory status` and
+   confirm chunk count is back to baseline (33 ± whatever peers saved
    meanwhile — verify by absence of your seeded texts in a search, not by
    count alone). Uninstall/remove the mempalace env after.
+   AMENDED 2026-07-05 (defect found by Guetta): `task gate` joins its argv
+   and re-runs it via `sh`, so a command path containing spaces (the
+   conclave binary lives under `Application Support`) splits at the space
+   and dies with exit 127. GUARD: wrap any space-containing gate command in
+   a small script and gate the SCRIPT path — e.g.
+   `conclave task gate <ws> memory-benchmark -- <scratchpad>/status_gate.sh`
+   (Guetta's working pattern, gate passed @ 7f9c61a). The quoting defect in
+   `task gate` itself is recorded as a deferred Low, not this lane's scope.
 
 ## Part C — verdict
 
