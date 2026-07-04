@@ -329,6 +329,10 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
                       const to = identityOf(m.toInstanceId);
                       return (
                         <div key={m.id} className="space-y-0.5">
+                          <div className="flex items-center justify-end gap-1 text-[10px] text-text-tertiary">
+                            <Avatar identity={to} size={4} />
+                            <span>{to.name}</span>
+                          </div>
                           <div
                             className="rounded-md border border-overlay/[0.06] bg-surface-raised px-[0.72rem] py-2 text-[0.84rem] leading-[1.5] text-text-primary"
                             title={`→ ${to.name}`}
