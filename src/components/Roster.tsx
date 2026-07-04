@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Waypoints,
   Terminal,
@@ -11,8 +11,18 @@ import {
   Pencil,
 } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
-import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
+import type {
+  AgentDefinition,
+  WorkspaceAgent,
+  SessionStatusEvent,
+  SessionOutputEvent,
+} from "../ipc";
 import { computeSkillsStale } from "../lib/skills";
+
+// A live instance reads as "working" while its backend emitted output within
+// this window (R-act-1) — mirrors commands::instance::WORKING_WINDOW (Rust).
+// Keep both in sync if the window ever changes.
+const WORKING_WINDOW_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // View model for one agent row — derived from ipc.instance.list ⨝ ipc.agentDef.list.
@@ -37,6 +47,15 @@ interface RosterEntry {
    *  Session.launchedSkillIds. Only meaningful for `type === "cli"` (the
    *  only type skills apply to in v1). */
   skillsStale: boolean;
+  /** R-act-1: whether the live backend emitted output within `WORKING_WINDOW_MS`.
+   *  Always `false` for a non-live (idle) instance — `instance.list` only sets
+   *  `working` for live rows, so this seeds `false` and the roster never shows
+   *  the working animation for an idle agent. */
+  working: boolean;
+  /** The live session id — lets the `session:output` subscription below map an
+   *  event (which carries only `sessionId`) back to this row. `undefined` for
+   *  a non-live instance. */
+  sessionId?: string;
 }
 
 // Status dot colors mapped from WorkspaceAgent.status (mirrors WorkspacePane).
@@ -155,12 +174,18 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
         </button>
       ) : (
         <>
-          {/* Status dot — hidden on hover to make room for the remove affordance. */}
+          {/* Status dot — hidden on hover to make room for the remove affordance.
+              Working (R-act-1) adds a halo via `.roster-dot-working`'s ::after,
+              using `color: currentColor` so it matches whatever status color is
+              already showing (running=green, waiting=orange) — no layout shift,
+              no motion for prefers-reduced-motion (persistent ring instead). */}
           <span
-            className="w-2 h-2 rounded-full shrink-0 group-hover:hidden"
-            style={{ backgroundColor: statusColor }}
+            className={`w-2 h-2 rounded-full shrink-0 group-hover:hidden${
+              entry.working ? " roster-dot-working" : ""
+            }`}
+            style={{ backgroundColor: statusColor, color: statusColor }}
             role="img"
-            aria-label={entry.status}
+            aria-label={entry.working ? "working" : entry.status}
           />
           {entry.skillsStale && (
             <span
@@ -286,6 +311,8 @@ export function Roster({
             meta: inst.roleName ?? deriveMeta(def),
             roleDescription: inst.roleDescription,
             skillsStale: computeSkillsStale(def, inst.launchedSkillIds),
+            working: inst.working ?? false,
+            sessionId: inst.sessionId,
           });
         }
         setEntries(rosterEntries);
@@ -317,11 +344,16 @@ export function Roster({
     ipc.instance
       .list({ workspaceId })
       .then((instances) => {
-        const byId = new Map(instances.map((i) => [i.id, i.status]));
+        const byId = new Map(instances.map((i) => [i.id, i]));
         setEntries((prev) =>
           prev.map((e) => {
             const next = byId.get(e.instanceId);
-            return next && next !== e.status ? { ...e, status: next } : e;
+            if (!next) return e;
+            const working = next.working ?? false;
+            if (next.status === e.status && working === e.working && next.sessionId === e.sessionId) {
+              return e;
+            }
+            return { ...e, status: next.status, working, sessionId: next.sessionId };
           }),
         );
       })
@@ -329,6 +361,47 @@ export function Roster({
         // Transient failure — the dot just stays at its last value.
       });
   });
+
+  // Live working state (R-act-1, pull-model — R-act-2): every streamed chunk
+  // marks its instance working and re-arms a per-instance WORKING_WINDOW_MS
+  // timeout that flips it back to quiet. Timeouts live outside React state
+  // (a plain ref) since they're a side effect, not something to render.
+  const workingTimeoutsRef = useRef<Map<string, number>>(new Map());
+  useEvent<SessionOutputEvent>(EVENT_NAMES.sessionOutput, (payload) => {
+    const entry = entries.find((e) => e.sessionId === payload.sessionId);
+    if (!entry) return; // not a live instance we're tracking right now
+
+    const timeouts = workingTimeoutsRef.current;
+    const prevTimeout = timeouts.get(entry.instanceId);
+    if (prevTimeout !== undefined) window.clearTimeout(prevTimeout);
+    timeouts.set(
+      entry.instanceId,
+      window.setTimeout(() => {
+        setEntries((cur) =>
+          cur.map((e) => (e.instanceId === entry.instanceId ? { ...e, working: false } : e)),
+        );
+        timeouts.delete(entry.instanceId);
+      }, WORKING_WINDOW_MS),
+    );
+
+    // Already working — the timer above is re-armed either way; skip the
+    // setState so an actively-streaming instance doesn't churn re-renders.
+    if (entry.working) return;
+    setEntries((cur) =>
+      cur.map((e) => (e.instanceId === entry.instanceId ? { ...e, working: true } : e)),
+    );
+  });
+
+  // Clear every pending working-timeout on workspace switch (stale
+  // instanceIds from the old workspace must not fire into the new one's
+  // entries) and on unmount.
+  useEffect(() => {
+    const timeouts = workingTimeoutsRef.current;
+    return () => {
+      timeouts.forEach((id) => window.clearTimeout(id));
+      timeouts.clear();
+    };
+  }, [workspaceId]);
 
   // Client-side search filter — case-insensitive match on name and meta.
   const q = search.trim().toLowerCase();

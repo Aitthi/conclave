@@ -194,6 +194,52 @@
   border-radius: 9999px;
 }
 
+/* Roster agent working-state dot (R-act-1, plan 2026-07-04-agent-activity-
+   indicator, F2 — direction from Arta's proto b9ab709). A steady core (the
+   existing status dot, colored via inline style) plus a slow expanding halo
+   for an agent that emitted output within the last 5s. `color: currentColor`
+   on the dot's own inline style feeds the halo, so it matches whichever
+   status color is already showing (running=green, waiting=orange) rather
+   than a hardcoded hue. No layout shift — the halo is a scaled ::after over
+   the same slot the plain dot already occupies. */
+.roster-dot-working {
+  position: relative;
+}
+.roster-dot-working::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: roster-dot-halo 1.6s ease-out infinite;
+  will-change: transform, opacity;
+}
+@keyframes roster-dot-halo {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  70% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Working stays distinguishable from quiet-running WITHOUT motion: the halo
+     stops expanding and becomes a persistent ring around the core instead. */
+  .roster-dot-working::after {
+    animation: none;
+    inset: -3px;
+    background: transparent;
+    border: 1.5px solid currentColor;
+    opacity: 0.62;
+  }
+}
+
 /* ─── Base Styles ────────────────────────────────────────────────── */
 
 body,
