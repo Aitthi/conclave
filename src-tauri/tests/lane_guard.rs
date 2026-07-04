@@ -13,7 +13,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,6 +70,15 @@ fn install_hook(repo: &Path) {
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
     std::fs::write(&hook, GUARD_HOOK).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Run the real CLI installer in `repo`.
+fn install_hook_with_cli(repo: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_conclave-cli"))
+        .args(["lane", "guard", "install"])
+        .current_dir(repo)
+        .output()
+        .expect("spawn conclave-cli lane guard install")
 }
 
 /// Attempt `git commit -m <msg>` in `cwd` with an optional commit scope.
@@ -167,6 +176,33 @@ fn guard_self_skips_inside_lane_worktree() {
     assert!(
         ok,
         "guard must self-skip in a lane worktree, else every lane commit breaks; stderr: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[test]
+fn install_warns_when_core_hooks_path_redirects_git() {
+    let repo = init_repo();
+    git_ok(&repo, &["config", "core.hooksPath", ".husky"]);
+
+    let out = install_hook_with_cli(&repo);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "installer must still succeed when core.hooksPath is set; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("core.hooksPath")
+            && stderr.contains(".husky")
+            && stderr.contains(".git/hooks/pre-commit")
+            && stderr.contains("will not fire"),
+        "warning must name the config, configured value, installed hook, and consequence; got: \
+         {stderr}"
+    );
+    assert!(
+        repo.join(".git/hooks/pre-commit").is_file(),
+        "installer must still write the shared pre-commit hook"
     );
 
     std::fs::remove_dir_all(&repo).ok();

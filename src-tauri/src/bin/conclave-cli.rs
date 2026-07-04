@@ -514,11 +514,33 @@ fn lane_guard_install() -> ExitCode {
     };
 
     let hooks_dir = std::path::Path::new(&common).join("hooks");
+    let hook_path = hooks_dir.join("pre-commit");
+    match Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let configured = String::from_utf8_lossy(&output.stdout);
+            let configured = configured.trim_end_matches(['\r', '\n']);
+            let configured = if configured.is_empty() {
+                "(empty)"
+            } else {
+                configured
+            };
+            eprintln!(
+                "conclave: warning: core.hooksPath is set to '{configured}'; the installed hook at \
+                 {} will not fire unless core.hooksPath is unset or points to {}.",
+                hook_path.display(),
+                hooks_dir.display()
+            );
+        }
+        _ => {}
+    }
+
     if let Err(e) = std::fs::create_dir_all(&hooks_dir) {
         eprintln!("conclave: could not create {}: {e}", hooks_dir.display());
         return ExitCode::from(2);
     }
-    let hook_path = hooks_dir.join("pre-commit");
 
     // Never clobber a foreign pre-commit hook; re-installing our own is fine.
     if hook_path.exists() {
