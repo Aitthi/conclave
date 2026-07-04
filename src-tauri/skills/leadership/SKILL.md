@@ -40,11 +40,15 @@ the gap between them is where leads fail.
   implementer hits it prepared instead of surprised.
 - Global constraints go in ONE section every task inherits — a rule stated
   once per task will be violated by the task where you forgot to repeat it.
-- A lane that touches anything the user sees names its DESIGN CANON in the
-  plan key: the proto file under `.arta/proto/screens/`, the pinned commit
-  SHA, and the designer as the design-escalation target. A UI plan without a
-  canon hands the implementer a license to improvise — the drift you find at
-  the design gate was created here.
+- The plan becomes a TASK OBJECT, not a message: `conclave task create <ws>
+  <slug> <title> --plan-file <path> [--boundary p1,p2] [--canon txt]`. The
+  plan body carries `owner: <your id> · authority: <level>`; the boundary is
+  the lane's file partition; implementers read it all back with `task get`.
+- A lane that touches anything the user sees names its DESIGN CANON on the
+  task (`--canon`): the proto file under `.arta/proto/screens/`, the pinned
+  commit SHA, and the designer as the design-escalation target. A UI plan
+  without a canon hands the implementer a license to improvise — the drift
+  you find at the design gate was created here.
 
 ## Know who is who — and make sure they know too
 
@@ -55,25 +59,27 @@ the gap between them is where leads fail.
   delegate-vs-solo decision. A solo lane chosen without reading the roster is
   not a decision, it is a default — "I didn't know peers existed" is the one
   justification the record never accepts.
-- Roles are not discoverable by magic: DECLARE them. When you take a piece of
-  work, write yourself into the record — put your id as owner inside
-  `plan:<task>` on the blackboard (`conclave bb set <ws> plan:<task> "…
-  owner: <your id> …"`), and name the implementer in the handoff. An agent
-  who has to guess who rules on escalations will guess the human.
-- If YOU can't tell who leads a piece of work, read `plan:<task>` /
-  `claim:<task>` first (`conclave bb get`), and only then ask.
+- Roles are not discoverable by magic: DECLARE them. Creating the task makes
+  you its owner on the record (`conclave task create` stamps your id); name
+  the implementer in the handoff. An agent who has to guess who rules on
+  escalations will guess the human.
+- If YOU can't tell who leads a piece of work, read the task first —
+  `conclave task list <ws>`, then `conclave task get <ws> <slug>` (owner,
+  implementer, plan) — and only then ask.
 
 ## Delegate and stay out
 
 - Once the plan exists, you do not implement. Your hands on the keyboard
   compete with your judgment — and judgment is the scarce thing.
 - A handoff message names: the reading order (decisions → glossary → plan),
-  the claim key to set, the progress key to update, and who rules on
-  escalations. Use blackboard conventions: `plan:<task>`, `claim:<task>`,
-  `progress:<task>`.
-- Split authority explicitly: design/spec conflicts escalate to you and your
-  answer is final; implementation judgment within the plan's intent belongs
-  to the implementer, logged in the progress key, never escalated.
+  the task slug to claim (`conclave lane start <ws> <slug>` claims it and
+  creates the lane worktree in one step), and who rules on escalations.
+  Then `conclave task watch <ws> <slug>` yourself — every note, gate, and
+  state change reaches you without polling.
+- Split authority explicitly: design/spec conflicts escalate to you (filed
+  as `task challenge`, ruled with `task rule`) and your answer is final;
+  implementation judgment within the plan's intent belongs to the
+  implementer, logged as task notes, never escalated.
 
 ## When the lead implements directly
 
@@ -85,11 +91,11 @@ the gap between them is where leads fail.
   only be DISCOVERED mid-build, so a plan written up front would be wrong by
   its second task, or (c) the handoff (plan + context transfer + review round
   trips) demonstrably costs more than the work itself.
-- Solo does not mean off the record: claim the work on the blackboard
-  (`claim:<task>` with your own id) and note WHY you are implementing it
-  yourself — "I was sure no one else would touch it" is confidence, not a
-  record. An unclaimed solo lane is invisible to every peer who might plan
-  around it.
+- Solo does not mean off the record: create and claim the task yourself
+  (`conclave task create …` then `task claim` / `lane start`) and note WHY
+  you are implementing it — "I was sure no one else would touch it" is
+  confidence, not a record. An unclaimed solo lane is invisible to every
+  peer who might plan around it, and to the lane board the human reads.
 - Judge your own work by the same gate you would apply to an implementer's:
   run the full verification (tests, build, lint) BEFORE reporting done, and
   report the result as evidence, not assertion. Leading grants no exemption
@@ -99,26 +105,31 @@ the gap between them is where leads fail.
 ## Running multiple implementers
 
 - Fan out only along INDEPENDENT lanes: partition the plan so no two
-  implementers need the same files, and declare each lane's file boundary on
-  the blackboard (`claim:<task>/<lane>` with the paths it owns). If the tasks
-  chain into each other, parallel implementers buy merge conflicts, not
-  speed — keep it one implementer and say so.
+  implementers need the same files — one task object per lane, each with its
+  own `--boundary` declaring the paths it owns. If the tasks chain into each
+  other, parallel implementers buy merge conflicts, not speed — keep it one
+  implementer and say so.
 - Mixed roles (implementer + reviewer + researcher) need no extra machinery —
   the existing topology holds: everyone escalates to you, everyone reads the
   same records.
-- One worktree/branch per implementer; YOU own integration. No implementer
-  merges their own lane into the shared trunk.
+- One worktree/branch per implementer (`conclave lane start` per lane); YOU
+  own integration. No implementer merges their own lane into the shared
+  trunk — after your merge, `conclave lane finish <ws> <slug>` tears down
+  the worktree and branch.
 - FALLBACK when worktrees are not available and implementers must share ONE
-  working tree: partition by FILE, not by branch — each handoff names its
-  out-of-bounds files, and a task blocked on another lane waits for a NAMED
-  clear signal from you (`phase-b-clear`), never for "when X looks done".
-  Release a fence only after the blocking lane is committed, so a reviewer's
-  target never shifts underneath them.
+  working tree: partition by FILE, not by branch — each task's `--boundary`
+  names its paths, `conclave lane guard install` makes an out-of-scope
+  commit fail instead of sweeping a peer's staged work, and a task blocked
+  on another lane waits for a NAMED clear signal from you
+  (`phase-b-clear`), never for "when X looks done". Release a fence only
+  after the blocking lane is committed, so a reviewer's target never shifts
+  underneath them.
 - A shared tree makes gate evidence perishable: a lane's "all green" is true
   only at its timestamp — a neighbor's failing-test-first red can sit in the
-  suite minutes later. At integration YOU rerun the gate and attribute every
-  failure to a lane before ruling; a red test from a neighbor's TDD cycle is
-  noise to exclude, not a defect to bounce.
+  suite minutes later. Gate events (`task gate`) record the SHA they ran at,
+  so staleness is checkable instead of arguable. At integration YOU rerun
+  the gate and attribute every failure to a lane before ruling; a red test
+  from a neighbor's TDD cycle is noise to exclude, not a defect to bounce.
 - Disputes BETWEEN implementers (an interface both sides consume, a boundary
   file) come to you — two peers must never negotiate an interface privately,
   because the record won't know what they agreed.
@@ -136,13 +147,20 @@ the gap between them is where leads fail.
   outranks the ones who read the code and reasoned. Reproduction is evidence;
   reading is opinion with good posture.
 - Accept a deliverable on evidence you reproduced, not evidence you were
-  shown: rerun the gate yourself before integrating.
+  shown: check the task's gate ledger (`conclave task get <ws> <slug>` —
+  exit code and the SHA each gate ran at), then rerun the gate yourself
+  before integrating. A lane whose only "green" is prose in a message has
+  not run its gates.
 
 ## Rule fast, rule in writing
 
 - When an implementer escalates, verify their claim against the recorded
   decisions BEFORE answering — read the code or document they cite. Then rule
-  clearly: what to do, why, and whether the source of truth changes.
+  clearly: what to do, why, and whether the source of truth changes. A
+  challenge filed on the task gets its ruling there too — `conclave task
+  rule <ws> <slug> <challengeEventId> <text>` — and mind the deadline: a
+  challenge you sit on past `--deadline-min` rules ITSELF with the
+  challenger's stated default.
 - Decisions end inside the agent loop. The human gets outcomes and reasons,
   never questions — if something truly contradicts a recorded decision, amend
   the record yourself and report that you did.
@@ -177,11 +195,15 @@ the gap between them is where leads fail.
 
 ## Idle time is oversight time
 
-- While implementers work, you are not done: watch the progress key, review
-  landed commits against the plan, and stay interruptible. Catch drift while
-  it is one commit old, not one phase old.
-- Do not hover. Review on the implementer's cadence (when they update
-  progress), not on a timer that interrupts them.
+- While implementers work, you are not done: `conclave task watch <ws>
+  <slug>` every lane you own — notes, gates, and state changes arrive in
+  your session as they happen — review landed commits against the plan, and
+  stay interruptible. Catch drift while it is one commit old, not one phase
+  old.
+- Do not hover. Review on the implementer's cadence (when their notes and
+  gates land), not on a timer that interrupts them. The stall engine
+  already pages you when a claimed lane goes quiet for 30 minutes — you do
+  not need to poll for silence.
 - `conclave agent list <ws>` now reports `working`/`lastActivityAt` per agent
   — read it BEFORE interrupting an implementer or declaring a lane stalled. A
   working agent gets left alone; a quiet one with an open claim is the thing

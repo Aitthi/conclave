@@ -42,16 +42,20 @@ agent, on any session, gets to know.
   files, ADRs, blackboard state. Memory duplicating the repo goes stale the
   day the repo moves; save the POINTER only if finding it was the hard part.
 - Chat transcripts, status updates, in-flight state — that churn belongs to
-  the blackboard, not memory.
+  the task ledger and blackboard, not memory.
 
-## Memory is not the blackboard
+## Memory is not the coordination layer
 
-- Blackboard = LIVE coordination: claims, plans, progress, reviews — keyed,
-  overwritten, read by peers coordinating NOW.
+- Tasks (`conclave task …`) = LIVE work state: claims, plans, notes, gates,
+  challenges — structured, evented, read by peers coordinating NOW. The
+  blackboard holds the ad-hoc facts beside them (conventions, anomalies,
+  notes).
 - Memory = DURABLE knowledge: unkeyed facts any future session finds by
-  MEANING (semantic search), long after the task's bb keys are gone.
-- A settled ruling can live in both: the bb key coordinates this week's
+  MEANING (semantic search), long after the task is closed and its bb notes
+  are purged.
+- A settled ruling can live in both: the task event coordinates this week's
   work; the memory preserves the reasoning for next month's stranger.
+  `conclave task close` reminds you to make exactly this save.
 
 ## Keep the store trustworthy
 

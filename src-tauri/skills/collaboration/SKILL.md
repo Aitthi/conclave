@@ -31,20 +31,31 @@ work from degenerating into noise, duplicate work, or runaway conversations.
 
 ## Claiming work
 
-- Before starting work a peer might also pick up, claim it on the blackboard:
-  check `conclave bb get <ws> claim:<task>` first, then
-  `conclave bb set <ws> claim:<task> <your id>`. If someone else holds the
-  claim, pick different work or coordinate via `conclave tell`.
+- Work items are task objects, not prose. Before starting work a peer might
+  also pick up, check the board (`conclave task list <ws>`), then claim it:
+  `conclave task claim <ws> <slug>` — or `conclave lane start <ws> <slug>`,
+  which claims AND creates the lane worktree in one step. A claim that fails
+  because someone else holds the task means pick different work or
+  coordinate via `conclave tell`.
+- Work with no task object yet isn't claimable — ask the task's natural
+  owner (usually the lead) to `task create` it rather than inventing a
+  side-channel claim.
 - Do not edit files a peer has claimed or is actively editing; agree on a
-  handoff first.
-- When you finish or abandon claimed work, update the claim key and post the
-  outcome (what changed, where).
+  handoff first. A task's file boundary (`conclave task get <ws> <slug>`)
+  tells you which paths are spoken for.
+- When you finish or abandon claimed work, move the state
+  (`conclave task state <ws> <slug> review|abandoned`) and post the outcome
+  as a task note (what changed, where). `merged` is the integrator's move,
+  made after the merge actually lands.
 
 ## Blackboard hygiene
 
-- The blackboard is for durable shared facts: decisions, file paths, commit
-  SHAs, claims, blockers. It is not a chat log — conversations go through
-  `conclave tell`.
+- The blackboard is for durable ad-hoc facts: conventions, anomalies, notes,
+  constraints, decisions that belong to no single task. It is not a chat log
+  (conversations go through `conclave tell`) and not a work tracker — claims,
+  plans, progress, gates, and challenges live on task objects
+  (`conclave task …`), which give them states, history, and notifications
+  that free-text keys never had.
 - Prefer overwriting your own stale keys over adding near-duplicates.
 - Delete keys that are truly finished (`conclave bb delete <ws> <key>`) —
   but only your OWN keys, and only when nothing will ever need them again.

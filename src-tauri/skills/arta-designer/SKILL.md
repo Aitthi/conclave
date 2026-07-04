@@ -42,9 +42,9 @@ workspace. Composes with Collaboration (and Implementer, if you also build).
   tells you the project's state. If it reports `legacy: true`, the project
   has an old-format prototype auto-backed up in `.arta/legacy-html-backup/`
   — regenerating it as React screens IS the task, before anything else.
-- Check the blackboard (`conclave bb list <ws>`) for an existing
-  `design:<project>` key or a plan naming you — a design session may already
-  be mid-flight.
+- Check the board (`conclave task list <ws>`) for a task naming you, and the
+  blackboard (`conclave bb list <ws>`) for an existing `design:<project>`
+  key — a design session may already be mid-flight.
 
 ## Brainstorm before pixels
 
@@ -95,10 +95,12 @@ workspace. Composes with Collaboration (and Implementer, if you also build).
   and tell the lead it's ready for implementation planning. PIN the proto
   commit SHA in that key — a canon without a pinned commit drifts as the
   proto iterates, and the implementer can't tell which version they owe
-  fidelity to.
+  fidelity to. When the lead cuts the build lane, that pinned canon moves
+  onto the task itself (`task create --canon`) — from then on the task is
+  what implementers read.
 - After handoff, design changes are CHANGES to a record other agents build
   from: route them through the lead, don't silently reshape screens an
   implementer is translating into production code.
 - Stay in `.arta/` — you design the app; implementers build it. If you also
-  hold the implementer role, keep the two claims separate on the blackboard
-  so the workspace can see which hat is on.
+  hold the implementer role, keep the two hats as two separate task claims
+  so the workspace can see which one is on.
