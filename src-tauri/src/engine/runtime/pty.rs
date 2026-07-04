@@ -353,6 +353,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// REPRO for `bb plan:working-false-positive` (2026-07-04 human smoke
+    /// report: roster shows "working…" for idle agents): does a resize jiggle
+    /// AFTER the initial paint has settled provoke repaint chunks from an
+    /// otherwise-idle `claude`? `Runtime::mark_activity` stamps unconditionally
+    /// on every chunk, so a repaint the APP ITSELF provoked (Terminal.tsx's
+    /// mount-jiggle at lines 159-168, mirrored here) would read the agent as
+    /// "working" though it did nothing — this is the failing evidence the
+    /// echo-suppression-horizon fix below closes.
+    ///
+    /// ISOLATED, same scratch-dir pattern as `idle_claude_output_cadence_over_60s`.
+    /// Settle 2s after the initial paint, push a resize jiggle (rows-1 then
+    /// rows, a beat apart — Terminal.tsx's own jiggle shape), then record every
+    /// chunk over a 10s window with NO stdin sent. Observational only (no
+    /// assertion — the fix decision is the lead's recorded ruling, not this
+    /// harness); counts are logged to `bb progress:working-false-positive`.
+    ///
+    /// `#[ignore]`: spawns a real, billed Claude session — manual-only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "spawns a real `claude` process — manual-only repaint-on-resize check"]
+    async fn idle_claude_repaints_on_resize_jiggle() {
+        let scratch =
+            std::env::temp_dir().join(format!("conclave-resize-check-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+
+        let mut backend = spawn_cli("resize-check", "claude", &[], scratch.to_str().unwrap(), &[])
+            .expect("spawn_cli failed — is `claude` on PATH?");
+
+        // Drain until 2s pass with no new chunk — the initial paint has settled.
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), backend.output_rx.recv())
+                .await
+            {
+                Ok(Some(_chunk)) => continue,
+                Ok(None) => panic!("claude exited during initial paint"),
+                Err(_) => break, // 2s quiet
+            }
+        }
+
+        // Mirror Terminal.tsx's mount-jiggle: rows-1 then rows, a beat apart —
+        // a guaranteed SIGWINCH even though the size nets out unchanged.
+        (backend.handle.resize)(80, 23);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        (backend.handle.resize)(80, 24);
+
+        // Observation window: no stdin sent, just record what the jiggle provokes.
+        let start = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(10);
+        let mut observations: Vec<(u128, usize)> = Vec::new();
+        while start.elapsed() < window {
+            let remaining = window - start.elapsed();
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_millis(500)),
+                backend.output_rx.recv(),
+            )
+            .await
+            {
+                Ok(Some(chunk)) => observations.push((start.elapsed().as_millis(), chunk.len())),
+                Ok(None) => break, // child exited on its own
+                Err(_) => {}       // tick, nothing arrived — keep polling
+            }
+        }
+
+        eprintln!(
+            "RESIZE-JIGGLE-CHECK: {} chunk(s) over {}s after jiggle: {:?}",
+            observations.len(),
+            window.as_secs(),
+            observations
+        );
+
+        // Explicit teardown — kill + reap the child, abort the writer task.
+        let CliBackend { handle, .. } = backend;
+        let LiveHandle { shutdown, .. } = handle;
+        shutdown();
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// A 3-byte glyph split across two reads must reassemble intact — the bug
     /// behind the post-resize fragments. "─" (U+2500) is `E2 94 80`; feeding the
     /// first two bytes then the last must yield exactly "─", never U+FFFD.

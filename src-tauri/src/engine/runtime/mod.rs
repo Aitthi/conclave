@@ -54,6 +54,17 @@ impl std::fmt::Display for StdinError {
 
 impl std::error::Error for StdinError {}
 
+/// Rolling echo-suppression horizon (`bb plan:working-false-positive`, human
+/// smoke report 2026-07-04: roster shows "working…" for idle agents). A
+/// PTY/CLI chunk arriving within this window after a `send_stdin` / `resize`
+/// call on the SAME instance is presumed to be the terminal's own echo of that
+/// input — a mount-jiggle repaint, a wheel-scroll arrow-key echo, or plain
+/// keystroke echo — not genuine agent activity, so it must not extend the
+/// working indicator. Proven empirically: an idle `claude` provoked 2 repaint
+/// chunks from a resize jiggle alone, no stdin
+/// (`runtime::pty::tests::idle_claude_repaints_on_resize_jiggle`).
+const ECHO_SUPPRESS_MS: u64 = 500;
+
 /// Per-instance bookkeeping for one live session.
 ///
 /// Backend-agnostic: a session may be driven by the placeholder drain task
@@ -137,6 +148,12 @@ pub struct Runtime {
     /// (no session ⇒ no activity, but a live, quiet session has no entry
     /// either), so it gets its own mutex rather than living on `LiveHandle`.
     activity: Mutex<HashMap<String, std::time::SystemTime>>,
+    /// Per-instance echo-suppression deadline, stamped by `send_stdin`/`resize`
+    /// and consulted by [`Self::mark_activity_gated`] — see [`ECHO_SUPPRESS_MS`].
+    /// A monotonic `Instant` (not `SystemTime`): this is a short rolling
+    /// horizon compared purely against elapsed wall-clock time, never
+    /// persisted or displayed, so it doesn't need to survive a clock jump.
+    echo_suppress: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl Runtime {
@@ -146,13 +163,49 @@ impl Runtime {
             sessions: Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(0),
             activity: Mutex::new(HashMap::new()),
+            echo_suppress: Mutex::new(HashMap::new()),
         }
     }
 
     /// Record that `instance_id` just emitted output, timestamped now.
+    /// Ungated — used directly by chat backends (no PTY, so no terminal echo
+    /// to suppress: every streamed delta is genuine assistant output) and by
+    /// the unit tests below. CLI/PTY backends go through
+    /// [`Self::mark_activity_gated`] instead.
     pub fn mark_activity(&self, instance_id: &str) {
         let mut guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(instance_id.to_owned(), std::time::SystemTime::now());
+    }
+
+    /// Gated variant of [`Self::mark_activity`] for PTY/CLI backends: a chunk
+    /// arriving inside the rolling echo-suppression horizon armed by the most
+    /// recent `send_stdin`/`resize` on this instance ([`ECHO_SUPPRESS_MS`]) is
+    /// presumed to be the terminal's own echo of that input rather than
+    /// genuine agent activity, so it is dropped WITHOUT stamping
+    /// `last_activity` — stamping it would extend the working window on our
+    /// own input and read the agent as "working" while it did nothing.
+    /// Returns `true` if the chunk was stamped, `false` if it was suppressed.
+    pub fn mark_activity_gated(&self, instance_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let suppressed = {
+            let guard = self.echo_suppress.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(guard.get(instance_id), Some(until) if now < *until)
+        };
+        if suppressed {
+            return false;
+        }
+        self.mark_activity(instance_id);
+        true
+    }
+
+    /// Arm the echo-suppression horizon for `instance_id`: any chunk arriving
+    /// before `now + ECHO_SUPPRESS_MS` will be dropped by
+    /// [`Self::mark_activity_gated`]. Called from `send_stdin`/`resize` — the
+    /// two ways OUR OWN input reaches the backend and could provoke an echo.
+    fn arm_echo_suppress(&self, instance_id: &str) {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(ECHO_SUPPRESS_MS);
+        let mut guard = self.echo_suppress.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(instance_id.to_owned(), until);
     }
 
     /// The last-activity timestamp recorded for `instance_id`, if any.
@@ -166,6 +219,8 @@ impl Runtime {
     fn clear_activity(&self, instance_id: &str) {
         let mut guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
         guard.remove(instance_id);
+        let mut es_guard = self.echo_suppress.lock().unwrap_or_else(|e| e.into_inner());
+        es_guard.remove(instance_id);
     }
 
     /// Register a pre-built live session [`LiveHandle`] for `instance_id`.
@@ -295,6 +350,9 @@ impl Runtime {
     pub fn send_stdin(&self, instance_id: &str, text: &str) -> Result<(), StdinError> {
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let handle = guard.get(instance_id).ok_or(StdinError::NotLive)?;
+        // Arm the echo-suppression horizon: this write itself can provoke a
+        // PTY echo (keystroke echo, TUI redraw) that must not read as activity.
+        self.arm_echo_suppress(instance_id);
         handle
             .stdin_tx
             .send(text.to_owned())
@@ -308,6 +366,10 @@ impl Runtime {
     pub fn resize(&self, instance_id: &str, cols: u16, rows: u16) -> Result<(), StdinError> {
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let handle = guard.get(instance_id).ok_or(StdinError::NotLive)?;
+        // Arm the echo-suppression horizon: a resize raises SIGWINCH, which is
+        // exactly the mount-jiggle / real-resize repaint that must not read as
+        // activity (the proven root cause — see ECHO_SUPPRESS_MS's doc comment).
+        self.arm_echo_suppress(instance_id);
         (handle.resize)(cols, rows);
         Ok(())
     }
@@ -339,6 +401,10 @@ impl Drop for Runtime {
         };
         {
             let mut guard = self.activity.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clear();
+        }
+        {
+            let mut guard = self.echo_suppress.lock().unwrap_or_else(|e| e.into_inner());
             guard.clear();
         }
         for handle in handles {
@@ -477,6 +543,69 @@ mod tests {
 
         assert!(rt.unregister_epoch("inst-1", epoch));
         assert_eq!(rt.last_activity("inst-1"), None);
+    }
+
+    /// `bb plan:working-false-positive`: a chunk arriving right after our own
+    /// `send_stdin` must be suppressed (it's presumed to be an echo), but the
+    /// SAME instance stamps normally once the horizon elapses.
+    #[tokio::test]
+    async fn mark_activity_gated_suppresses_echo_after_send_stdin() {
+        let rt = Runtime::new();
+        rt.register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("register");
+
+        rt.send_stdin("inst-1", "hi").expect("send_stdin");
+        assert!(
+            !rt.mark_activity_gated("inst-1"),
+            "a chunk immediately after send_stdin must be suppressed as an echo"
+        );
+        assert_eq!(
+            rt.last_activity("inst-1"),
+            None,
+            "a suppressed chunk must NOT stamp last_activity"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(ECHO_SUPPRESS_MS + 50)).await;
+        assert!(
+            rt.mark_activity_gated("inst-1"),
+            "a chunk after the horizon elapses is genuine activity"
+        );
+        assert!(rt.last_activity("inst-1").is_some());
+    }
+
+    /// The same horizon, armed by `resize` instead of `send_stdin` — the
+    /// mount-jiggle / real-window-resize path, proven empirically to provoke
+    /// repaint chunks from an otherwise-idle agent
+    /// (`runtime::pty::tests::idle_claude_repaints_on_resize_jiggle`).
+    #[tokio::test]
+    async fn mark_activity_gated_suppresses_echo_after_resize() {
+        let rt = Runtime::new();
+        rt.register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("register");
+
+        rt.resize("inst-1", 80, 24).expect("resize");
+        assert!(
+            !rt.mark_activity_gated("inst-1"),
+            "a repaint chunk immediately after resize must be suppressed"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(ECHO_SUPPRESS_MS + 50)).await;
+        assert!(rt.mark_activity_gated("inst-1"));
+    }
+
+    /// Chat backends bypass the gate entirely — no PTY, so no terminal echo;
+    /// `mark_activity` (ungated) always stamps regardless of any recent
+    /// `send_stdin` on the same instance (the message that triggered the
+    /// assistant's reply).
+    #[tokio::test]
+    async fn mark_activity_ungated_always_stamps_even_right_after_send_stdin() {
+        let rt = Runtime::new();
+        rt.register("inst-1", LiveHandle::placeholder("sess-1"))
+            .expect("register");
+
+        rt.send_stdin("inst-1", "hi").expect("send_stdin");
+        rt.mark_activity("inst-1");
+        assert!(rt.last_activity("inst-1").is_some());
     }
 
     /// Bulk single-threaded registration — 16 distinct instances coexist.

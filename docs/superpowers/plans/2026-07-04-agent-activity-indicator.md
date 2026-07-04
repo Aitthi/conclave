@@ -136,6 +136,22 @@ existing one). Constraints (lead):
   measures the same phenomenon without either cost.) If noisy: raise the
   window and/or ignore chunks < 16 bytes — escalate to lead with the
   observed cadence before choosing.
+- **MISS, found post-ship (bb plan:working-false-positive, human smoke report
+  2026-07-04): interaction-driven noise, not idle noise.** This ledger only
+  checked whether an idle agent repaints on its OWN — it never checked
+  whether the APP ITSELF provokes repaint chunks from an idle agent.
+  Terminal.tsx's mount-jiggle (forced resize on every tab mount) and
+  wheel-scroll arrow-key injection both write to the live PTY and provoke a
+  redraw; `mark_activity` stamped unconditionally on every chunk, so those
+  self-inflicted repaints read back as "working". Proven empirically: a
+  resize jiggle alone (no stdin) provoked 2 repaint chunks from an idle
+  `claude` (`runtime::pty::tests::idle_claude_repaints_on_resize_jiggle`).
+  Fix: an engine-side rolling echo-suppression horizon (`ECHO_SUPPRESS_MS =
+  500`, `Runtime::mark_activity_gated`) armed by `send_stdin`/`resize` —
+  `bus::SessionOutput` gains `activity: bool`; Roster ignores non-activity
+  chunks. Lesson for future risk ledgers on this class of feature: idle-noise
+  checks must be paired with an interaction-noise check (does the UI's own
+  event handling write to the channel being measured?).
 - The `session:output` payload delivers full chunks to every listener;
   Roster's handler must do a cheap map lookup only — no state churn when
   the entry is already working (skip the setState if unchanged, re-arm the

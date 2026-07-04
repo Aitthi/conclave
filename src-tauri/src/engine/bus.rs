@@ -28,13 +28,20 @@ pub const SNAPSHOT_CREATED: &str = "snapshot:created";
 
 /// Payload for `session:output` — a streamed output chunk from a session.
 ///
-/// Serialises to `{ "sessionId": "...", "chunk": "..." }` (camelCase) to
-/// match the `SessionOutputEvent` interface in `src/ipc/events.ts`.
+/// Serialises to `{ "sessionId": "...", "chunk": "...", "activity": bool }`
+/// (camelCase) to match the `SessionOutputEvent` interface in
+/// `src/ipc/events.ts`. `activity` (`bb plan:working-false-positive`) is
+/// `false` for a chunk the engine judged to be the terminal's own echo of our
+/// own input (a resize-provoked repaint, keystroke echo) rather than genuine
+/// agent output — Roster's working indicator ignores those chunks; Terminal
+/// still renders every chunk regardless, since the pane must show the echo
+/// even though it isn't "activity".
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionOutput {
     pub session_id: String,
     pub chunk: String,
+    pub activity: bool,
 }
 
 /// Payload for `session:status` — lifecycle status change for a session.
@@ -185,9 +192,27 @@ mod tests {
         let val = serde_json::to_value(SessionOutput {
             session_id: "s1".into(),
             chunk: "hi".into(),
+            activity: true,
         })
         .unwrap();
-        assert_eq!(val, json!({ "sessionId": "s1", "chunk": "hi" }));
+        assert_eq!(
+            val,
+            json!({ "sessionId": "s1", "chunk": "hi", "activity": true })
+        );
+    }
+
+    #[test]
+    fn session_output_activity_false_for_suppressed_echo() {
+        let val = serde_json::to_value(SessionOutput {
+            session_id: "s1".into(),
+            chunk: "\x1b[2J".into(),
+            activity: false,
+        })
+        .unwrap();
+        assert_eq!(
+            val,
+            json!({ "sessionId": "s1", "chunk": "\x1b[2J", "activity": false })
+        );
     }
 
     #[test]

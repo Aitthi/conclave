@@ -385,6 +385,12 @@ export function Roster({
   // (a plain ref) since they're a side effect, not something to render.
   const workingTimeoutsRef = useRef<Map<string, number>>(new Map());
   useEvent<SessionOutputEvent>(EVENT_NAMES.sessionOutput, (payload) => {
+    // bb plan:working-false-positive: the engine flags a chunk it judged to be
+    // our own echo (resize-provoked repaint, keystroke echo) rather than
+    // genuine agent activity via `activity: false`. Terminal still renders it
+    // (the pane must show the echo); Roster must not, or an idle agent lights
+    // up "working" from its own terminal noise.
+    if (!payload.activity) return;
     const entry = entries.find((e) => e.sessionId === payload.sessionId);
     if (!entry) return; // not a live instance we're tracking right now
 

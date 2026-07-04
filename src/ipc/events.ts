@@ -20,9 +20,17 @@ export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
 // Event payload types
 // ---------------------------------------------------------------------------
 
+/**
+ * `activity` (bb plan:working-false-positive) is `false` when the engine
+ * judged this chunk to be the terminal's own echo of OUR input (a
+ * resize-provoked repaint, keystroke echo) rather than genuine agent output.
+ * Terminal still renders every chunk regardless — only Roster's working
+ * indicator should ignore non-activity chunks.
+ */
 export interface SessionOutputEvent {
   sessionId: string;
   chunk: string;
+  activity: boolean;
 }
 
 export interface SessionStatusEvent {

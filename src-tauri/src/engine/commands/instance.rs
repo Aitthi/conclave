@@ -698,9 +698,21 @@ async fn forward_session_output(
     let mut last_flush_chars: usize = 0;
 
     while let Some(chunk) = output_rx.recv().await {
-        // Stamp activity first (R-act-1): any chunk at all counts as "working",
-        // independent of context tracking / emission below.
-        runtime.mark_activity(&instance_id);
+        // Stamp activity (R-act-1 + bb plan:working-false-positive). `chat`
+        // backends have no PTY, so there is no terminal echo to suppress —
+        // every streamed delta is genuine assistant output, stamped
+        // unconditionally. CLI/PTY backends go through the gated variant: a
+        // chunk arriving inside the echo-suppression horizon armed by our own
+        // `send_stdin`/`resize` (mount-jiggle repaint, wheel-scroll arrow-key
+        // echo, keystroke echo — proven empirically in
+        // `runtime::pty::tests::idle_claude_repaints_on_resize_jiggle`) is
+        // dropped without extending the working window.
+        let activity = if track_context {
+            runtime.mark_activity(&instance_id);
+            true
+        } else {
+            runtime.mark_activity_gated(&instance_id)
+        };
 
         // Count before moving `chunk` into the emit — avoids cloning every chunk
         // just to measure it. `chars().count()` (not `len()`) so multi-byte UTF-8
@@ -715,6 +727,7 @@ async fn forward_session_output(
                 bus::SessionOutput {
                     session_id: session_id.clone(),
                     chunk,
+                    activity,
                 },
             );
         }
