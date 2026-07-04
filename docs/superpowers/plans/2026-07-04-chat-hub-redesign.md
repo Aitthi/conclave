@@ -116,9 +116,13 @@ Rebuild on the same grouped feed (proto chat-hub.tsx:158-180):
   asymmetric `rounded-bl-md`/`rounded-br-md`, no per-side border color),
   wrapped in `flex flex-col gap-0.5 ${onLeft ? "items-start" : "items-end"}`
   with `max-width: 72%`.
-- Meta row (proto :172-175): time + `queued` + `injected` (R-hub-2),
-  `text-[9px]`/`text-[10px]` as in Task 2, aligned to the message's side
-  (no recipient chip — the pair implies it; proto :156-157).
+- Meta row (proto :172-175): `queued` → `injected` (R-hub-2) → time — the
+  SAME order as Task 2's All-feed meta; proto leads with queued
+  (chat-hub.tsx:173), and the two views must not disagree. (Amended after
+  Arta's challenge — the original text read "time + queued + injected",
+  which contradicted both the proto and Task 2.) `text-[9px]`/`text-[10px]`
+  as in Task 2, aligned to the message's side (no recipient chip — the pair
+  implies it; proto :156-157).
 
 ## Task 4 — Sidebar + header (ChatHub.tsx:104-171)
 
