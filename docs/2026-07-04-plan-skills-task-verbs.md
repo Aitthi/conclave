@@ -75,3 +75,20 @@ rebuild per plan:rebuild-0.2.0), teaching the HUMAN's docs.
   Interim: nothing — human chose the durable layer over the live push.
 - `task claim`/`state`/`note`/`gate` are agent-context verbs; exact flag
   syntax must be copied from `conclave help`, not from memory.
+
+## POST-LAND ledger (2026-07-04)
+
+- MERGED @ 3274567 (lane head 5aab9ab). Mellow LAND PASS 0 blocking @ 8b3c8bf;
+  his one nit (collaboration offered `task state … merged` to implementers,
+  but `merged` via `state` is review-only per repo/task.rs:120 and the
+  integrator's move by protocol) fixed in 5aab9ab — credit: Mellow.
+- Gates on the task ledger (first task object ever on the board): cargo test
+  exit 0 @ 8b3c8bf, @ 5aab9ab, and post-merge @ 3274567 (lead-reproduced).
+- Deferred Low: implementer/SKILL.md says "`task close` ends it" right after
+  describing the integrator's `state merged` — a reader who runs BOTH gets
+  "cannot close a task in state 'merged'" (close is the claimed/in_progress/
+  review → merged shortcut, task.rs:452). Harmless error, prose could pick
+  one verb per path. Fold into the next skill-prose pass.
+- Adoption note: prose reaches agents when sidecars regenerate from the
+  INSTALLED app's bundled skills — i.e. next rebuild + relaunch. Until then
+  agents follow the old bb protocol; the lead bridges by creating tasks.
