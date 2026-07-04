@@ -52,10 +52,12 @@ pub struct AppState {
     /// inside `FastembedEmbedder` itself — constructing this field touches
     /// neither the filesystem nor the network.
     ///
-    /// `#[allow(dead_code)]`: read by `commands::memory` (T4), which lands
-    /// after this field.
-    #[allow(dead_code)]
     pub memory_embedder: std::sync::Arc<dyn crate::engine::runtime::embedder::Embedder>,
+
+    /// Decoded memory vectors for warm exact search. The cache is bounded to
+    /// four workspaces and invalidated by every completed memory write.
+    pub memory_search_cache:
+        std::sync::Arc<crate::engine::commands::memory::MemorySearchCache>,
 
     /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
     /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
@@ -88,6 +90,9 @@ impl AppState {
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
             memory_embedder: std::sync::Arc::new(
                 crate::engine::runtime::embedder::FastembedEmbedder::with_default_cache_dir(),
+            ),
+            memory_search_cache: std::sync::Arc::new(
+                crate::engine::commands::memory::MemorySearchCache::new(),
             ),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
@@ -199,6 +204,9 @@ impl AppState {
             memory_embedder: std::sync::Arc::new(crate::engine::runtime::embedder::FakeEmbedder::new(
                 crate::engine::runtime::embedder::MINILM_L6_V2_Q_DIMENSION,
             )),
+            memory_search_cache: std::sync::Arc::new(
+                crate::engine::commands::memory::MemorySearchCache::new(),
+            ),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }

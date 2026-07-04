@@ -1,5 +1,5 @@
 use crate::engine::commands::{
-    agent, blackboard, cli, fusion, instance, message, provider, role, skill, skill_draft,
+    agent, blackboard, cli, fusion, instance, memory, message, provider, role, skill, skill_draft,
     snapshot, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
@@ -55,6 +55,13 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "blackboard.get" => blackboard::get(state, payload).await,
         "blackboard.set" => blackboard::set(state, payload).await,
         "blackboard.delete" => blackboard::delete(state, payload).await,
+
+        // ── memory ────────────────────────────────────────────────────────
+        "memory.remember" => memory::remember(state, payload).await,
+        "memory.search" => memory::search(state, payload).await,
+        "memory.delete" => memory::delete(state, payload).await,
+        "memory.clear" => memory::clear(state, payload).await,
+        "memory.status" => memory::status(state, payload).await,
 
         // ── snapshot ──────────────────────────────────────────────────────
         "snapshot.create" => snapshot::create(state, payload).await,

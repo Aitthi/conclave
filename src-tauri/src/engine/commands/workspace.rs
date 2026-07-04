@@ -170,6 +170,7 @@ pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError>
     }
 
     repo::workspace::delete(&state.db, &req.workspace_id).await?;
+    state.memory_search_cache.invalidate(&req.workspace_id);
 
     Ok(Value::Null)
 }

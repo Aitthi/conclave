@@ -3,6 +3,7 @@ pub mod blackboard;
 pub mod cli;
 pub mod fusion;
 pub mod instance;
+pub mod memory;
 pub mod message;
 pub mod provider;
 pub mod role;
