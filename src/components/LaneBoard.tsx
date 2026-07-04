@@ -508,9 +508,11 @@ function Card({ t, resolve }: { t: TaskListRow; resolve: (id: string | undefined
         {t.title}
       </div>
 
-      {(t.lastGate || t.challenges.length > 0) && (
+      {(t.lastGates.length > 0 || t.challenges.length > 0) && (
         <div className="flex flex-wrap gap-1 mb-2">
-          {t.lastGate && <GateChip g={t.lastGate} />}
+          {t.lastGates.map((g) => (
+            <GateChip key={g.cmd} g={g} />
+          ))}
           {t.challenges.map((c) => (
             <ChallengeChip key={c.id} c={c} />
           ))}

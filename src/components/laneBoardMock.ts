@@ -37,6 +37,7 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(13, 56),
     updatedAt: T(13, 56),
     eventCount: 1,
+    lastGates: [],
     challenges: [],
   },
   {
@@ -51,6 +52,7 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(13, 40),
     updatedAt: T(13, 40),
     eventCount: 0,
+    lastGates: [],
     challenges: [],
   },
 
@@ -69,6 +71,7 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(13, 54),
     updatedAt: T(13, 57),
     eventCount: 4,
+    lastGates: [],
     challenges: [],
   },
 
@@ -86,7 +89,10 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(13, 53),
     updatedAt: T(14, 0),
     eventCount: 9,
-    lastGate: { cmd: "cargo test --lib", exit: 0, sha: "4f2a1c9", createdAt: T(13, 59) },
+    lastGates: [
+      { cmd: "cargo test --lib", exit: 0, sha: "4f2a1c9", createdAt: T(13, 59) },
+      { cmd: "cargo clippy --all-targets -- -D warnings", exit: 0, sha: "4f2a1c9", createdAt: T(13, 59) },
+    ],
     challenges: [
       {
         id: "ch-aws-a-1",
@@ -109,7 +115,9 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(13, 55),
     updatedAt: T(13, 58),
     eventCount: 3,
-    lastGate: { cmd: "cargo clippy --all-targets -- -D warnings", exit: 101, sha: "9b2e104", createdAt: T(13, 58) },
+    lastGates: [
+      { cmd: "cargo clippy --all-targets -- -D warnings", exit: 101, sha: "9b2e104", createdAt: T(13, 58) },
+    ],
     challenges: [],
   },
 
@@ -128,7 +136,10 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(11, 0),
     updatedAt: T(13, 0),
     eventCount: 11,
-    lastGate: { cmd: "npx tsc --noEmit", exit: 0, sha: "dcc3627", createdAt: T(12, 50) },
+    lastGates: [
+      { cmd: "cargo test --lib", exit: 0, sha: "dcc3627", createdAt: T(12, 48) },
+      { cmd: "npx tsc --noEmit", exit: 0, sha: "dcc3627", createdAt: T(12, 50) },
+    ],
     challenges: [
       { id: "ch-mem-1", status: "ruled", claim: "ControlPanel group keyed by display name" },
     ],
@@ -149,7 +160,7 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(9, 0),
     updatedAt: T(10, 30),
     eventCount: 7,
-    lastGate: { cmd: "npx tsc --noEmit", exit: 0, sha: "6cdb83f", createdAt: T(10, 25) },
+    lastGates: [{ cmd: "npx tsc --noEmit", exit: 0, sha: "6cdb83f", createdAt: T(10, 25) }],
     challenges: [],
   },
   {
@@ -166,7 +177,7 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(6, 0),
     updatedAt: T(8, 0),
     eventCount: 6,
-    lastGate: { cmd: "npx tsc --noEmit", exit: 0, sha: "c848033", createdAt: T(7, 55) },
+    lastGates: [{ cmd: "npx tsc --noEmit", exit: 0, sha: "c848033", createdAt: T(7, 55) }],
     challenges: [],
   },
   {
@@ -182,7 +193,7 @@ const MOCK_TASKS: TaskListRow[] = [
     createdAt: T(2, 0),
     updatedAt: T(4, 0),
     eventCount: 5,
-    lastGate: { cmd: "cargo test --lib", exit: 0, sha: "0313a31", createdAt: T(3, 55) },
+    lastGates: [{ cmd: "cargo test --lib", exit: 0, sha: "0313a31", createdAt: T(3, 55) }],
     challenges: [],
   },
 ];
@@ -217,6 +228,6 @@ export function mockTaskGet(slug: string): { task: Task; events: TaskEvent[] } {
     .map((e) => ({ ...e }))
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
   // Strip the list-only derived fields to yield the bare frozen Task shape.
-  const { eventCount: _c, lastGate: _g, challenges: _ch, ...task } = row;
+  const { eventCount: _c, lastGates: _g, challenges: _ch, ...task } = row;
   return { task, events };
 }

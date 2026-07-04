@@ -298,13 +298,15 @@ export interface Task {
   updatedAt: string;
 }
 
-/** The NEWEST gate result on a task — `task.list` carries only the latest so
- *  rows stay O(tasks) not O(events); full gate history lives in `task.get`
- *  (lead ruling on the badge escalation). Derived from a `task_event(kind=
- *  'gate')` payload `{cmd,exit,sha,tail,cwd}`. EVIDENCE: `sha` pins the commit
+/** The newest gate result PER DISTINCT command on a task — `task.list` carries
+ *  the latest of each `cmd` (cap 6), so a card shows `cargo test` + `clippy`
+ *  side by side like the canon, while rows stay bounded (not O(events)); full
+ *  gate history lives in `task.get` (lead ruling on the badge escalation, amended
+ *  from a single `lastGate` per Arta's F1). Derived from `task_event(kind=
+ *  'gate')` payloads `{cmd,exit,sha,tail,cwd}`. EVIDENCE: `sha` pins the commit
  *  it ran at, so a shared-tree "all green" can be checked against the commit
  *  that produced it. The human-facing label is derived client-side from `cmd`
- *  (no stored `label`). Omitted when the task has run no gate. */
+ *  (no stored `label`). */
 export interface TaskLastGate {
   cmd: string;
   /** process exit code — 0 = green, non-zero = red. */
@@ -329,12 +331,13 @@ export interface TaskChallengeBadge {
 
 /** A `task.list` row — the frozen task shape plus the count of its logged events
  *  and the derived badges the board renders per card. `eventCount` is the
- *  lead-ruled field @ 5e3e27e; `lastGate`/`challenges` are the lead's ruling on
- *  Lane D's badge escalation: the newest gate only (bounded), and the challenge
- *  set (always present, `[]` when none). Lane A derives both during list. */
+ *  lead-ruled field @ 5e3e27e; `lastGates`/`challenges` are the lead's ruling on
+ *  Lane D's badge escalation (amended @ 066e199): the newest gate per distinct
+ *  cmd (cap 6) and the challenge set — both ALWAYS present (`[]` when none).
+ *  Lane A derives both during list. */
 export interface TaskListRow extends Task {
   eventCount: number;
-  lastGate?: TaskLastGate;
+  lastGates: TaskLastGate[];
   challenges: TaskChallengeBadge[];
 }
 
