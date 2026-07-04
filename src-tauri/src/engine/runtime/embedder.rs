@@ -159,6 +159,15 @@ pub fn is_model_downloaded(cache_dir: &Path) -> bool {
 pub struct FastembedEmbedder {
     cache_dir: PathBuf,
     session: OnceLock<Mutex<TextEmbedding>>,
+    /// Serializes the fallible first init. `OnceLock::get_or_init` cannot be
+    /// used here because loading the model can fail and `get_or_try_init` is
+    /// still unstable (`once_cell_try`) — without this lock, two concurrent
+    /// cold `embed` calls would both observe `session.get() == None` and
+    /// both run `TextEmbedding::try_new` (double download + double model
+    /// load into the same cache dir). Holding this lock across the whole
+    /// check-then-init means only one caller actually initializes; the rest
+    /// block, then re-check `session.get()` and find it already populated.
+    init_lock: Mutex<()>,
 }
 
 impl FastembedEmbedder {
@@ -169,6 +178,7 @@ impl FastembedEmbedder {
         Self {
             cache_dir,
             session: OnceLock::new(),
+            init_lock: Mutex::new(()),
         }
     }
 
@@ -179,6 +189,17 @@ impl FastembedEmbedder {
     }
 
     fn session(&self) -> Result<&Mutex<TextEmbedding>, EmbedError> {
+        if let Some(session) = self.session.get() {
+            return Ok(session);
+        }
+
+        let _init_guard = self
+            .init_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Re-check: another thread may have finished initializing while we
+        // were waiting for `init_lock`.
         if let Some(session) = self.session.get() {
             return Ok(session);
         }
@@ -309,8 +330,12 @@ mod tests {
         // Conclave cache dir may already be warm from an earlier run (e.g.
         // the T1 spike), which would trigger the "already on disk" branch of
         // `is_ready` and make the pre-embed assertion below meaningless.
-        let embedder =
-            FastembedEmbedder::new(std::env::temp_dir().join("conclave-embedder-test-real-embed"));
+        let cache_dir = std::env::temp_dir().join("conclave-embedder-test-real-embed");
+        // This dir is fixed (not per-run unique) so a warm cache from a prior
+        // run of THIS test doesn't leave it behind: remove it first so the
+        // pre-embed `!is_ready` assertion below stays meaningful every run.
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let embedder = FastembedEmbedder::new(cache_dir);
         assert!(!embedder.is_ready(), "must not report ready before the first embed call");
 
         let texts = vec!["workspace memory system".to_string()];
@@ -325,5 +350,41 @@ mod tests {
             .sqrt();
         assert!((norm - 1.0).abs() < 1e-5, "expected a unit vector, norm={norm}");
         assert!(embedder.is_ready(), "must report ready once the session is loaded");
+    }
+
+    #[test]
+    #[ignore = "downloads the real MiniLM model on a cold cache; run manually with --ignored"]
+    fn fastembed_embedder_concurrent_cold_embeds_do_not_race() {
+        // F1 regression test: before the init_lock fix, N threads racing into
+        // a cold `embed()` would each observe `session.get() == None` and
+        // each call `TextEmbedding::try_new` concurrently (double
+        // download + double model load against the same cache dir). This
+        // drives a real concurrent cold start and asserts every thread still
+        // gets a correct, consistent result with no panic/deadlock.
+        let cache_dir =
+            std::env::temp_dir().join("conclave-embedder-test-concurrent-cold-start");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let embedder = std::sync::Arc::new(FastembedEmbedder::new(cache_dir));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let embedder = std::sync::Arc::clone(&embedder);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait(); // maximize the chance all 4 hit `embed` at once
+                    embedder
+                        .embed(&[format!("concurrent cold start {i}")])
+                        .expect("embed")
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let embeddings = handle.join().expect("thread panicked");
+            assert_eq!(embeddings.len(), 1);
+            assert_eq!(embeddings[0].len(), MINILM_L6_V2_Q_DIMENSION);
+        }
+        assert!(embedder.is_ready());
     }
 }
