@@ -394,6 +394,23 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 None => preamble,
             };
 
+            // Sandbox socket allowance: poke exactly one hole so the agent's
+            // sandboxed shell can reach the out-of-workspace conclave UDS
+            // socket without a permission modal. Resolved at runtime from the
+            // same `Conclave` data dir the server binds (never hardcoded), and
+            // skipped in full-bypass mode (no sandbox to poke).
+            let socket_path = if runtime::sandbox_config::needs_socket_hole(
+                def.permission_mode.as_deref(),
+            ) {
+                Some(
+                    crate::engine::uds::socket_path()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                None
+            };
+
             let mut launch = String::from(base);
             if base == "claude" {
                 if let Some(mode) = def.permission_mode.as_deref() {
@@ -414,6 +431,22 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     " --append-system-prompt {}",
                     shell_quote(&preamble)
                 ));
+                // Sandbox: allowlist the conclave socket via a generated
+                // per-instance settings file (Route A — keeps conclave inside
+                // the sandbox, opens only the one IPC socket, and auto-approves
+                // the sandboxed call). Fail-soft: on a write error the agent
+                // still works, just with the one-time seatbelt modal.
+                if let Some(sock) = &socket_path {
+                    match runtime::sandbox_config::write_claude_settings(&id, sock) {
+                        Ok(path) => launch.push_str(&format!(
+                            " --settings {}",
+                            shell_quote(&path.to_string_lossy())
+                        )),
+                        Err(e) => eprintln!(
+                            "[spawn] could not write claude sandbox settings for {id}: {e}"
+                        ),
+                    }
+                }
             } else if base == "codex" {
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
@@ -436,6 +469,14 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     " -c {}",
                     shell_quote(&format!("developer_instructions={preamble}"))
                 ));
+                // Sandbox: same socket allowlist as claude, via per-spawn `-c`
+                // overrides ([permissions.conclave] profile proven in Guetta's
+                // research, test J). Never writes the user's ~/.codex/config.toml.
+                if let Some(sock) = &socket_path {
+                    for ov in runtime::sandbox_config::codex_socket_overrides(sock) {
+                        launch.push_str(&format!(" -c {}", shell_quote(&ov)));
+                    }
+                }
             }
             if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {
                 launch.push(' ');
