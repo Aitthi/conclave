@@ -15,8 +15,13 @@ and what (if anything) is worth adopting.
 - **Ours**: `conclave memory` — Rust, sqlite via sqlx, per-workspace store,
   embedding model `all-minilm-l6-v2-q8` (384-dim), semantic search over
   manually curated chunks. Code: `src-tauri/src/engine/repo/memory.rs`,
-  `src-tauri/src/engine/repo/fusion.rs` (read both; also locate the embedding
-  runtime they call into). Current store: 33 chunks, model ready.
+  `commands/memory.rs`, `embedder.rs`. Current store: 33 chunks, model ready.
+  AMENDED 2026-07-05 (finding credited to Guetta): retrieval is pure
+  brute-force exact top-k cosine (dot product on L2-normalized vectors via
+  fastembed/ONNX), flat scan, warm LRU vector cache, SHA256/NFC dedup — NO
+  ANN, NO BM25, NO rank fusion. `fusion.rs`, which this plan originally
+  listed as memory code, is UNRELATED — it is multi-agent panel/judge/
+  synthesize orchestration (fusion_run tables), not retrieval fusion.
 - **MemPalace**: Python, local-first, VERBATIM storage (no summarization),
   ChromaDB default backend (pluggable, `mempalace/backends/base.py`),
   hierarchical index (wings/rooms/drawers → scoped search), MCP server, CLI.
