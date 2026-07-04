@@ -488,8 +488,7 @@ const clamp2: React.CSSProperties = {
 function Card({ t, resolve }: { t: TaskListRow; resolve: (id: string | undefined) => Identity | null }) {
   return (
     <div
-      className="rounded-lg p-2.5 cursor-pointer bg-surface-raised transition-colors hover:bg-fill-soft"
-      style={{ border: `1px solid ${BORDER}` }}
+      className="rounded-lg p-2.5 cursor-pointer bg-surface-raised border border-overlay/[0.08] transition-colors hover:bg-fill-soft hover:border-accent/30"
     >
       <div className="flex items-center gap-2 mb-1">
         <span className="font-mono text-[0.64rem] truncate" style={{ color: FAINT }}>
