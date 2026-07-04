@@ -11,6 +11,14 @@
       "title": "Right rail · Chats"
     },
     {
+      "id": "lane-board",
+      "title": "Lane board · Agent Work System"
+    },
+    {
+      "id": "memory-graph",
+      "title": "Memory · Knowledge graph"
+    },
+    {
       "id": "role-picker",
       "title": "Edit agent · Role picker"
     },
@@ -22,7 +30,7 @@
   "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "03:05:22 PM",
-  "reportedAt": "2026-07-04T08:05:22.822Z",
+  "updatedAt": "10:26:35 PM",
+  "reportedAt": "2026-07-04T15:26:35.608Z",
   "gates": []
 }
