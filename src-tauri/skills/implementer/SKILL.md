@@ -1,6 +1,6 @@
 ---
 name: Implementer
-description: How to execute work a lead planned — claim it, follow the recorded decisions, escalate with evidence and a proposed ruling, decide the rest yourself, and report at boundaries.
+description: How to execute work a lead planned — claim it, follow the recorded decisions, drive multi-task plans through subagents, escalate with evidence and a proposed ruling, decide the rest yourself, and report at boundaries.
 mandatory: false
 ---
 
@@ -60,6 +60,34 @@ the Collaboration skill; this one only covers what implementing adds.
 - Escalate design/spec conflicts only. Implementation judgment within the
   plan's intent — naming, decomposition, test shape — is yours: decide,
   note it in `progress:<task>`, move on.
+
+## Drive multi-task plans through subagents (subagent-driven development)
+
+- A plan with several tasks is an orchestration problem: your own context
+  window is the scarce resource. Default for a plan of 3+ tasks: dispatch one
+  FRESH subagent per task and stay the orchestrator — you hold the plan, the
+  rulings, and the verification; each subagent holds only its task.
+- A dispatch prompt is a mini-handoff written to the plan's own "stranger"
+  standard: the task text pasted verbatim (never "do task 3" — a subagent
+  sees neither the plan file nor your conversation), the global constraints
+  repeated, exact file paths and interfaces, the gates to run with expected
+  output, and what to report back.
+- One task per subagent, sequential by default. Parallel dispatch ONLY along
+  independent lanes with disjoint file sets — the same rule a lead's fan-out
+  follows; tasks that chain through shared files are cheaper run in order
+  than merged after.
+- Verify each subagent's result yourself BEFORE dispatching the next: read
+  the diff, rerun the gates. A subagent's "done" is a claim, not evidence —
+  the verify-before-you-claim bar below covers delegated work too, and a
+  defect caught at task N is one task old instead of seven.
+- Review between tasks, not once at the end: after a task lands, run a
+  review pass — a reviewer subagent with fresh eyes, or your own read of the
+  diff against the task's own text — before building the next task on top.
+- Delegation doesn't thin the record: `progress:<task>` still logs which
+  tasks ran through subagents, what each changed, and what you verified.
+- No subagent tooling in your harness? The discipline stands: execute
+  task-by-task with an explicit verify + review boundary between tasks, and
+  never let two tasks blur into one unreviewed diff.
 
 ## Verify before you claim
 
