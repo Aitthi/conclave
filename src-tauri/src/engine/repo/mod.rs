@@ -28,6 +28,7 @@ pub mod role;
 pub mod session;
 pub mod skill;
 pub mod snapshot;
+pub mod task;
 pub mod tool;
 pub mod workspace;
 pub mod workspace_agent;
