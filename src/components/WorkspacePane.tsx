@@ -9,7 +9,13 @@ import { FusionView } from "./FusionView";
 import { ChatRail } from "./ChatRail";
 import { ContextTopBar, ContextBottomBar } from "./ContextBars";
 import { useSessionSnapshots } from "../lib/useSessionSnapshots";
+import { getTermTabMode } from "../lib/termMode";
 import type { RoutingTarget } from "./RoutingPicker";
+
+// Terminal tab mode, read once — it cannot change within a page lifetime
+// (see src/lib/termMode.ts). "remount" mounts only the active cli tab's xterm;
+// "keep-alive" mounts every cli tab and toggles visibility.
+const termTabMode = getTermTabMode();
 
 // Re-exported here (the pane builds the roster) for consumers that think of the
 // routing roster as a workspace concept; the type itself lives with the picker.
@@ -350,16 +356,21 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
           />
         )}
 
-        {/* CLI terminals — VSCode-style persistence. Every cli tab keeps its xterm
-            MOUNTED; we only toggle visibility (`hidden`) instead of rendering just
-            the active one. Switching tabs therefore never remounts the terminal,
-            so its scrollback and the app's alt-screen / mouse modes survive — which
-            is exactly what keeps wheel-scroll working after a tab switch (a fresh
-            xterm forgets the app is mid-TUI, and the wheel goes dead). This mirrors
-            VSCode's TerminalInstance, which reparents one long-lived xterm wrapper
-            and flips a `.active` class rather than recreating it. */}
+        {/* CLI terminals — rendered per the terminal tab mode (src/lib/termMode.ts):
+            • "keep-alive" (pre-remount behavior): every cli tab keeps its xterm
+              MOUNTED and we only toggle visibility (`hidden`). A tab switch never
+              remounts, so scrollback and the app's alt-screen / mouse modes survive
+              — this is what kept wheel-scroll alive after a switch (a fresh xterm
+              forgets the app is mid-TUI and the wheel goes dead). Mirrors VSCode's
+              TerminalInstance, which reparents one long-lived xterm and flips a
+              `.active` class rather than recreating it.
+            • "remount" (default): only the ACTIVE tab's xterm is mounted; inactive
+              tabs unmount and remount on return, restoring their pre-remount buffer
+              from a serialize snapshot above a divider (see Terminal.tsx). The live
+              TUI frame below is re-drawn by the mount jiggle's SIGWINCH. */}
         {tabs
           .filter((t) => t.type === "cli")
+          .filter((t) => termTabMode === "keep-alive" || t.instanceId === activeInstanceId)
           .map((tab) => {
             const isActive = tab.instanceId === activeInstanceId;
             const sid = sessions[tab.instanceId] ?? null;
