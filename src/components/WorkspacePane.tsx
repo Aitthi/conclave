@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
-import type { AgentDefinition, Session, WorkspaceAgent, SessionStatusEvent } from "../ipc";
+import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
 import { FusionView } from "./FusionView";
-import { ContextDrawer } from "./ContextDrawer";
+import { ChatRail } from "./ChatRail";
 import type { RoutingTarget } from "./RoutingPicker";
 
 // Re-exported here (the pane builds the roster) for consumers that think of the
@@ -75,9 +75,6 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   // instanceId → sessionId for already-spawned sessions.
   const [sessions, setSessions] = useState<Record<string, string>>({});
-  // instanceId → the full Session object (carries context token counts for the
-  // Context drawer's live meter). Parallel to `sessions` (which is only the id).
-  const [sessionObjs, setSessionObjs] = useState<Record<string, Session>>({});
   // instanceId → spawn error message (claude not installed, etc.).
   const [spawnErrors, setSpawnErrors] = useState<Record<string, string>>({});
   // Instances a spawn has already been kicked off for — kept in a ref so it
@@ -103,7 +100,6 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
     setLoadError(false);
     setActiveInstanceId(null);
     setSessions({});
-    setSessionObjs({});
     setSpawnErrors({});
     spawnAttempted.current = new Set();
 
@@ -185,9 +181,6 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
       .spawn({ workspaceAgentId: id })
       .then((session) => {
         setSessions((prev) => ({ ...prev, [id]: session.id }));
-        // Stash the full Session too so the Context drawer can seed its live
-        // meter from the spawned session's token counts.
-        setSessionObjs((prev) => ({ ...prev, [id]: session }));
       })
       .catch((err: unknown) => {
         // Allow a retry on a later re-select by clearing the attempt mark.
@@ -255,6 +248,14 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
     [tabs],
   );
 
+  // instanceId → status, for the rail's room-chip live dots (R2). Memoized
+  // like `roster` so unrelated WorkspacePane state changes don't re-render
+  // the always-mounted rail (plan-review F5).
+  const statuses: Record<string, WorkspaceAgent["status"]> = useMemo(
+    () => Object.fromEntries(tabs.map((t) => [t.instanceId, t.status])),
+    [tabs],
+  );
+
   // Loading state: don't flash "no agents" during the initial fetch.
   if (loading) {
     return (
@@ -283,7 +284,6 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
     ? (tabs.find((t) => t.instanceId === activeInstanceId) ?? null)
     : null;
   const activeSessionId = activeInstanceId ? (sessions[activeInstanceId] ?? null) : null;
-  const activeSession = activeInstanceId ? (sessionObjs[activeInstanceId] ?? null) : null;
   const activeError = activeInstanceId ? (spawnErrors[activeInstanceId] ?? null) : null;
 
   return (
@@ -394,23 +394,10 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
         ) : null}
       </main>
 
-      {/* Right Context drawer — renders only when a tab is active. The active
-          tab carries the full AgentDefinition (its config is the drawer's data).
-          `session` is the spawned Session (M4.1 snapshot manager): it seeds the
-          live context meter and scopes the Memory · snapshots section. It is
-          `null` until the spawn resolves; the drawer renders the meter/snapshots
-          only once a real session exists. */}
-      {activeTab !== null && (
-        <ContextDrawer
-          def={activeTab.def}
-          status={activeTab.status}
-          instanceId={activeTab.instanceId}
-          roster={roster}
-          session={activeSession}
-          launchedSkillIds={activeTab.launchedSkillIds}
-          onOpenChat={onOpenChat}
-        />
-      )}
+      {/* Right Chats rail — workspace-scoped, NOT per-tab: mounted
+          unconditionally so switching tabs (or having none active) never
+          resets its room selection or unread state. */}
+      <ChatRail workspaceId={workspaceId} roster={roster} statuses={statuses} onOpenChat={onOpenChat} />
     </div>
   );
 }
