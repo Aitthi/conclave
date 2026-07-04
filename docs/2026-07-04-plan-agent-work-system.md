@@ -84,7 +84,9 @@ CREATE TABLE task_watch (
 Wire shape of a task (camelCase): `{"id","workspaceId","slug","title","state","ownerAgentId","implementerAgentId","fileBoundary":[],"designCanon","plan","createdAt","updatedAt"}`. Lane D codes against this EXACT shape.
 
 Response shapes (RULED 2026-07-04, challenge credit: Tiësto — these are final):
-- `task.list` res = `Task[]`, each row = frozen task shape PLUS `"eventCount": number`.
+- `task.list` res = `Task[]`, each row = frozen task shape PLUS `"eventCount": number` PLUS the two derived board fields below (RULED 2026-07-04 #2, escalation credit: Tiësto — canon lane-board.tsx renders gate badges + challenge chips on every card; N+1 `task.get` per card rejected as wasteful and racy):
+  - `"lastGate"?: { "cmd", "exit", "sha", "createdAt" }` — the NEWEST `kind='gate'` event only; OMITTED when the task has no gate events. Full gate history stays in `task.get` — list rows stay O(tasks), never O(events). Badge label derives client-side from `cmd`.
+  - `"challenges": { "id", "status": "open"|"ruled", "claim", "deadlineAt"? }[]` — derived from `kind='challenge'` events joined to `kind='ruling'` by `payload.challengeId`; always present, `[]` when none. `deadlineAt` is an ISO timestamp (client computes minutes remaining live), never a server-computed countdown.
 - `task.get` res = `{ "task": Task, "events": TaskEvent[] }` — last 20 events, sorted `createdAt` DESC (newest first).
 - `TaskEvent` = `{ "id", "taskId", "kind", "actorAgentId", "payload", "createdAt" }`, `kind` ∈ note|state|gate|challenge|ruling; `payload` is a JSON OBJECT on the wire (engine parses the stored TEXT column; unparseable → `{}`), never a double-encoded string.
 - `task:changed` event = `{ "workspaceId", "taskId", "slug", "state" }` (as §Bus below).
