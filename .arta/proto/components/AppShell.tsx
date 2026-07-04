@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Search, Plus, SquareTerminal, Users, MessageSquare, Sparkles, History, RotateCcw, Camera, Zap, CornerDownLeft, ChevronDown, ChevronRight } from "lucide-react";
+import { Search, Plus, SquareTerminal, Users, MessageSquare, Network, Sparkles, History, RotateCcw, Camera, Zap, CornerDownLeft, ChevronDown, ChevronRight } from "lucide-react";
 
 const SKILLS = [
   { n: "Agent Loop", tag: "BUILTIN" },
@@ -78,6 +78,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </div>
           <div className="mt-auto p-2.5 flex flex-col gap-1.5 faint text-[0.76rem]">
             <div className="flex items-center gap-2"><Users size={13} /> Blackboard</div>
+            {/* Memory destination — paired with Blackboard (both are record surfaces),
+                Network glyph matches the graph view's own rail icon */}
+            <div className="flex items-center gap-2"><Network size={13} /> Memory</div>
             <div className="flex items-center gap-2"><MessageSquare size={13} /> Chat</div>
           </div>
         </div>

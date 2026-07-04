@@ -43,6 +43,9 @@
   --color-a-indigo: #5e5ce6;   /* maestro */
   --color-a-amber: #ff9f0a;    /* sol */
   --color-a-sky: #32ade6;      /* echo */
+  --color-a-violet: #bf5af0;   /* shared-protocol memories: macOS system purple.
+                                  Kept off the teal/sky/blue/indigo cluster so
+                                  "not an agent, it's shared" reads at a glance. */
 
   --radius-sm: 6px;
   --radius-md: 9px;

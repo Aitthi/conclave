@@ -3,8 +3,7 @@ import {
   Layers, Plus, Search, Network, Maximize2, SlidersHorizontal, ChevronDown,
   X, Sparkles, Link2, CornerDownRight,
 } from "lucide-react";
-import { memoryNodes, memoryLinks, degreeOf, authorName } from "../lib/memoryGraph";
-import type { AgentColor } from "../lib/data";
+import { memoryNodes, memoryLinks, degreeOf, authorName, type GraphColor } from "../lib/memoryGraph";
 
 export const meta = { title: "Memory · Knowledge graph" };
 
@@ -21,11 +20,12 @@ export const meta = { title: "Memory · Knowledge graph" };
    velocity-integrated force sim (repulsion + link springs + centering) drawn
    to SVG. Zero deps, pixel-matched to the app's dark tokens. */
 
-// AgentColor → the theme's per-agent CSS variable.
-const COLOR: Record<AgentColor, string> = {
+// GraphColor → the theme's CSS variable. Agents use their identity colour;
+// shared-protocol memories use the dedicated violet.
+const COLOR: Record<GraphColor, string> = {
   teal: "var(--color-a-teal)", red: "var(--color-a-red)", indigo: "var(--color-a-indigo)",
-  amber: "var(--color-a-amber)", sky: "var(--color-a-sky)", hash: "var(--color-accent)",
-  human: "var(--color-heading)",
+  amber: "var(--color-a-amber)", sky: "var(--color-a-sky)", violet: "var(--color-a-violet)",
+  hash: "var(--color-accent)", human: "var(--color-heading)",
 };
 
 interface Sim { id: string; x: number; y: number; vx: number; vy: number; }
@@ -409,7 +409,7 @@ function ControlPanel({
   query: string; setQuery: (v: string) => void;
   forces: { center: number; repel: number; link: number; dist: number };
   setForces: (f: { center: number; repel: number; link: number; dist: number }) => void;
-  groups: { author: string; count: number; color: AgentColor }[];
+  groups: { author: string; count: number; color: GraphColor }[];
 }) {
   const [open, setOpen] = useState<OpenState>({ filters: true, groups: true, forces: true });
   return (

@@ -10,6 +10,11 @@
 
 import type { AgentColor } from "./data";
 
+// Node colour = authoring agent, plus a dedicated "violet" for cross-cutting
+// shared-protocol memories (no single author). Kept off the agent palette on
+// purpose — see --color-a-violet in theme.css.
+export type GraphColor = AgentColor | "violet";
+
 export type MemoryKind = "reference" | "feedback" | "project" | "user";
 
 export interface MemoryNode {
@@ -17,7 +22,7 @@ export interface MemoryNode {
   label: string;           // short title shown by the node
   body: string;            // the fact itself (detail card)
   author: string;          // agent id (colour key) — "shared" for cross-cutting protocol
-  color: AgentColor;       // resolved avatar colour
+  color: GraphColor;       // resolved node colour
   kind: MemoryKind;
   age: string;             // relative, for the detail card
 }
@@ -60,11 +65,11 @@ export const memoryNodes: MemoryNode[] = [
     body: "New surfaces reuse the app's exact tokens (ring-accent/40, bg-surface) so a redesign never drifts a shade from what already ships." },
 
   // — memory & context protocol (shared · accent/hash) —
-  { id: "memory-not-blackboard", label: "Memory is not the blackboard", author: "shared", color: "hash", kind: "reference", age: "5d",
+  { id: "memory-not-blackboard", label: "Memory is not the blackboard", author: "shared", color: "violet", kind: "reference", age: "5d",
     body: "Blackboard = live coordination (claims, progress), overwritten & keyed. Memory = durable knowledge found by meaning. A ruling can live in both." },
-  { id: "strategic-compact-handoff", label: "Compact: the 7-section handoff", author: "shared", color: "hash", kind: "reference", age: "5d",
+  { id: "strategic-compact-handoff", label: "Compact: the 7-section handoff", author: "shared", color: "violet", kind: "reference", age: "5d",
     body: "On a compact prompt, write NOW → mission → decisions → open threads → hard-won → done → pointers. Reference, don't paste; redact secrets." },
-  { id: "recall-before-research", label: "Recall before you research", author: "shared", color: "hash", kind: "reference", age: "5d",
+  { id: "recall-before-research", label: "Recall before you research", author: "shared", color: "violet", kind: "reference", age: "5d",
     body: "Search memory before deep-diving a question a past session may have solved — re-deriving a paid-for fact is the most expensive way to agree with a dead agent." },
 ];
 
