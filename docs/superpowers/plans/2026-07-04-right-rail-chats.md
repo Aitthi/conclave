@@ -216,6 +216,12 @@ lane open for fix round 3:
   all, so this is a DELIBERATE human-directed delta from the proto — Arta's design
   gate must treat it as canon, and the proto should be updated to match so the design
   record stays truthful.
+  **R10 AMENDMENT (human, 10:58: "เอาไว้ด้านล่าง สวยกว่า"):** the recipient chip sits
+  BELOW its bubble, not above — same content (Avatar size 4 + name), same styling,
+  still right-aligned. Above-bubble placement (shipped `f046b9e`, proto `a70c221`) is
+  superseded; both the component and the proto move the chip below the bubble. When a
+  message has a `queued` label, the chip and the label share the below-bubble row
+  (label left, chip right) rather than stacking two rows.
 
 - **F-s6 — Always auto-scroll on new message (RULING R11, human-directed).** Human
   (10:52): "ตอนมี Message ใหม่ ให้ Auto scroll ไปข้างล่างด้วย". Shipped rail ports the
