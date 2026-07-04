@@ -44,8 +44,9 @@ work from degenerating into noise, duplicate work, or runaway conversations.
   handoff first. A task's file boundary (`conclave task get <ws> <slug>`)
   tells you which paths are spoken for.
 - When you finish or abandon claimed work, move the state
-  (`conclave task state <ws> <slug> review|merged|abandoned`) and post the
-  outcome as a task note (what changed, where).
+  (`conclave task state <ws> <slug> review|abandoned`) and post the outcome
+  as a task note (what changed, where). `merged` is the integrator's move,
+  made after the merge actually lands.
 
 ## Blackboard hygiene
 
