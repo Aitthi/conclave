@@ -105,6 +105,13 @@ struct CacheSlot {
 /// so a concurrent write cannot publish a stale load after invalidation.
 /// Searches recheck that generation after scoring and retry if a completed
 /// write invalidated the snapshot they used.
+///
+/// The generation-retry loops are deliberately UNBOUNDED: capping them and
+/// returning a stale snapshot would violate the cache's correctness property
+/// (never serve results contradicting a completed write). The load-bearing
+/// assumption is that memory writes are human/agent-paced — a sustained
+/// write storm against one workspace would amplify search latency (repeated
+/// reload + rescore), not corrupt results.
 #[derive(Default)]
 pub struct MemorySearchCache {
     state: Mutex<CacheState>,
