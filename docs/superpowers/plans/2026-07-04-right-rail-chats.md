@@ -21,6 +21,7 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - **R5 — Non-CLI agents.** The drawer's chat-agent (Model·API) and orchestrator (Fusion panel/judge/cost) sections fold into a **Config popover** on the same top bar, shown only for those agent types. The rail itself is workspace-scoped and identical for all types.
 - **R6 — Tools placeholder** ("coming in M5") is dropped; it returns when M5 lands.
 - **R7 — The rail has no filter/search in Phase 1** — search lives in the Chat Hub; the rail's header keeps only maximize ("Open in Chat Hub") and collapse.
+- **R8 — Agents only; the human does not appear (HUMAN DIRECTIVE, 2026-07-04).** The rail shows inter-agent traffic exclusively: no "You" bubbles, no human DM rooms, no human in the member counts. This matches data reality — the human's direct messages go via `ipc.message.send` straight into a session and are never rows in `InterAgentMessage`; only agent↔agent injections are. (Honesty note: a human-ROUTED injection sent from agent A's composer is recorded as `fromInstanceId = A` and is indistinguishable from A's own message — it renders as A, which is accepted.) The proto's `you` participant, `you-arta`/`you-mellow` DM rooms, and right-aligned `msg-mine` bubbles do NOT ship.
 
 ## Global Constraints
 
@@ -72,7 +73,7 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 **Interfaces:**
 - Props: `{ workspaceId: string; roster: RoutingTarget[]; statuses: Record<string, WorkspaceAgent["status"]>; onOpenChat?: () => void }`.
 - Consumes: `useWorkspaceChat` (Task 1), `deriveRooms` (Task 2), `ClampText`, `timeHint`.
-- Layout per proto `chats.tsx`, adapted by rulings: header row ("Chats" + total unread + maximize → `onOpenChat` + collapse), horizontal room-chip switcher (avatar, title, unread badge, live dot per R2), thin active-room meta line (members · N live), message stream (Today divider, consecutive same-sender grouping like the proto's `group()`, human-sent messages right-aligned — the human is the `StdinBar` sender, detect via message flags the same way `ChatView` does), near-bottom-guarded auto-scroll, and the read-only footer: *"Read-only live view — agents reply from their own terminal."*
+- Layout per proto `chats.tsx`, adapted by rulings: header row ("Chats" + total unread + maximize → `onOpenChat` + collapse), horizontal room-chip switcher (avatar, title, unread badge, live dot per R2), thin active-room meta line (members · N live), message stream (Today divider, consecutive same-sender grouping like the proto's `group()`; every message left-aligned — agents only per R8, there is no "mine" side), near-bottom-guarded auto-scroll, and the read-only footer: *"Read-only live view — agents reply from their own terminal."*
 - Collapse: same pattern as the drawer's current Show/Hide (a slim vertical strip when collapsed); state is workspace-scoped in-memory.
 - Room selection + `lastSeen` live in component state; selecting a room marks it seen; the active room accrues seen continuously while scrolled to bottom.
 
@@ -143,5 +144,5 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - **Terminal always-mounted invariant** (`WorkspacePane.tsx` terminal-layer comment): scrollback and TUI mouse modes die if a bar mount restructures those layers. Test wheel-scroll after tab switching in Task 6.
 - **Rail must be workspace-scoped**: mounting it per-tab (like the drawer was) resets room selection and lastSeen on every tab switch — that's the bug the unconditional mount in Task 4 exists to prevent.
 - **`Resume` gating crosses bars**: the drawer computed "has snapshots" once and gated Session's Resume with it. Split into two bars, the state must be lifted, not fetched twice.
-- **Human-sent messages**: `ChatView.tsx` already renders the human side correctly — copy its sender-detection, don't invent a new one.
+- **No human sender-detection needed (R8)**: do not port `ChatView`'s user/assistant sides into the rail — the message table has no human identity, and inventing one would violate the honesty rule.
 - **ChatHub refactor (Task 1) must be behavior-preserving** — it shipped reviewed at `c5465d1`; any visible change there is a defect.
