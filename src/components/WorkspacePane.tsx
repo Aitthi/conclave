@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
-import type { AgentDefinition, WorkspaceAgent, SessionStatusEvent } from "../ipc";
+import type { AgentDefinition, Session, WorkspaceAgent, SessionStatusEvent } from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
 import { FusionView } from "./FusionView";
 import { ChatRail } from "./ChatRail";
+import { ContextTopBar } from "./ContextBars";
+import { useSessionSnapshots } from "../lib/useSessionSnapshots";
 import type { RoutingTarget } from "./RoutingPicker";
 
 // Re-exported here (the pane builds the roster) for consumers that think of the
@@ -75,6 +77,9 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   // instanceId → sessionId for already-spawned sessions.
   const [sessions, setSessions] = useState<Record<string, string>>({});
+  // instanceId → the full Session object (carries context token counts for
+  // ContextTopBar/ContextBottomBar). Parallel to `sessions` (id only).
+  const [sessionObjs, setSessionObjs] = useState<Record<string, Session>>({});
   // instanceId → spawn error message (claude not installed, etc.).
   const [spawnErrors, setSpawnErrors] = useState<Record<string, string>>({});
   // Instances a spawn has already been kicked off for — kept in a ref so it
@@ -100,6 +105,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
     setLoadError(false);
     setActiveInstanceId(null);
     setSessions({});
+    setSessionObjs({});
     setSpawnErrors({});
     spawnAttempted.current = new Set();
 
@@ -181,6 +187,7 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
       .spawn({ workspaceAgentId: id })
       .then((session) => {
         setSessions((prev) => ({ ...prev, [id]: session.id }));
+        setSessionObjs((prev) => ({ ...prev, [id]: session }));
       })
       .catch((err: unknown) => {
         // Allow a retry on a later re-select by clearing the attempt mark.
@@ -256,6 +263,19 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
     [tabs],
   );
 
+  // Active-tab derivations, needed by the hooks below — MUST be declared
+  // before any early return (Rules of Hooks).
+  const activeTab = activeInstanceId
+    ? (tabs.find((t) => t.instanceId === activeInstanceId) ?? null)
+    : null;
+  const activeSessionId = activeInstanceId ? (sessions[activeInstanceId] ?? null) : null;
+  const activeSession = activeInstanceId ? (sessionObjs[activeInstanceId] ?? null) : null;
+
+  // Single shared snapshot fetcher for the active session (plan-review F2) —
+  // both ContextTopBar's Resume gate and ContextBottomBar's popover (Task 6)
+  // consume THIS instance, never a second one of their own.
+  const sessionSnapshots = useSessionSnapshots(activeSessionId ?? "");
+
   // Loading state: don't flash "no agents" during the initial fetch.
   if (loading) {
     return (
@@ -280,10 +300,6 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
     );
   }
 
-  const activeTab = activeInstanceId
-    ? (tabs.find((t) => t.instanceId === activeInstanceId) ?? null)
-    : null;
-  const activeSessionId = activeInstanceId ? (sessions[activeInstanceId] ?? null) : null;
   const activeError = activeInstanceId ? (spawnErrors[activeInstanceId] ?? null) : null;
 
   return (
@@ -319,6 +335,20 @@ export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: Work
             );
           })}
         </div>
+
+        {/* Center top context bar — Skills popover + Session (Resume/Restart)
+            + Config popover (R5), for the ACTIVE agent only. */}
+        {activeTab && (
+          <ContextTopBar
+            def={activeTab.def}
+            status={activeTab.status}
+            instanceId={activeTab.instanceId}
+            roster={roster}
+            session={activeSession}
+            hasHandoff={sessionSnapshots.hasHandoff}
+            launchedSkillIds={activeTab.launchedSkillIds}
+          />
+        )}
 
         {/* CLI terminals — VSCode-style persistence. Every cli tab keeps its xterm
             MOUNTED; we only toggle visibility (`hidden`) instead of rendering just
