@@ -3,14 +3,22 @@
   "screen": "chats",
   "screens": [
     {
+      "id": "chat-hub",
+      "title": "Chat Hub · Full page"
+    },
+    {
       "id": "chats",
       "title": "Right rail · Chats"
+    },
+    {
+      "id": "roster-activity",
+      "title": "Roster · Activity states"
     }
   ],
   "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "09:39:22 AM",
-  "reportedAt": "2026-07-04T02:39:22.841Z",
+  "updatedAt": "02:39:47 PM",
+  "reportedAt": "2026-07-04T07:39:47.221Z",
   "gates": []
 }
