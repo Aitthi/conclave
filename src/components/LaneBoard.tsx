@@ -117,14 +117,24 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
     };
   }, []);
 
-  // ── tasks (mock until Lane A merges — see INTEGRATION seam) ────────────────
+  // ── tasks — the real `task.list` over the UDS wire (Lane A) ────────────────
   const [tasks, setTasks] = useState<TaskListRow[]>([]);
   const load = useCallback(() => {
-    // INTEGRATION: swap the next line for
-    //   ipc.task.list({ workspaceId }).then((rows) => { if (mounted.current) setTasks(rows); }).catch(...)
-    // — the frozen wire shape is identical, so nothing downstream changes.
-    void workspaceId;
-    setTasks(mockTaskList());
+    ipc.task
+      .list({ workspaceId })
+      .then((rows) => {
+        if (mounted.current) setTasks(rows);
+      })
+      .catch((err: unknown) => {
+        // Plain `vite` dev (no Tauri backend) lands here — fall back to the mock
+        // so the board still renders for pure-frontend work. A real backend error
+        // in a Tauri build surfaces in the console and leaves the board empty
+        // (honest — no faked tasks in production).
+        if (import.meta.env.DEV) {
+          console.error("LaneBoard: task.list failed — using dev mock", err);
+          if (mounted.current) setTasks(mockTaskList());
+        }
+      });
   }, [workspaceId]);
   useEffect(load, [load]);
   // Live refresh: every mutating `task.*` handler emits `task:changed` (Lane A).
