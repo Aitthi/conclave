@@ -22,6 +22,9 @@
 pub mod chat;
 pub mod provider;
 pub mod pty;
+// T2 lands the codec before the T4 exact-search consumer.
+#[allow(dead_code)]
+pub mod vec_codec;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
