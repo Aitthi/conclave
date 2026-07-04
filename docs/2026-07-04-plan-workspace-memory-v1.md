@@ -88,6 +88,10 @@ CREATE INDEX idx_memory_chunk_ws_created ON memory_chunk(workspace_id, created_a
 pub trait Embedder: Send + Sync {
     fn model_id(&self) -> &'static str;
     fn dimension(&self) -> usize;
+    /// Cheap, side-effect free; true iff embed() would succeed right now
+    /// without network. Backs memory.status.modelReady. (Added 2026-07-04,
+    /// ruling on Dabin's second T4 escalation.)
+    fn is_ready(&self) -> bool;
     /// Blocking; caller wraps in spawn_blocking. Returns one normalized
     /// f32 vector per input text, in order.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;

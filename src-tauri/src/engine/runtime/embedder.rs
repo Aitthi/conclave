@@ -37,6 +37,15 @@ pub trait Embedder: Send + Sync {
     /// Vector width; must match `memory_index.dimension`.
     fn dimension(&self) -> usize;
 
+    /// Whether `embed` would succeed right now without network access:
+    /// the model is initialized in memory, or its files are fully present
+    /// in the local cache. Backs `memory.status.modelReady`.
+    ///
+    /// MUST be cheap and side-effect free — never triggers download or
+    /// model initialization. `false` is a state ("not downloaded yet"),
+    /// not an error.
+    fn is_ready(&self) -> bool;
+
     /// Blocking; caller wraps in `spawn_blocking`. Returns one normalized
     /// f32 vector per input text, in order.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
@@ -65,6 +74,10 @@ impl Embedder for FakeEmbedder {
 
     fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    fn is_ready(&self) -> bool {
+        true
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
