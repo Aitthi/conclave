@@ -20,6 +20,9 @@
 //! `unwrap_or_else(|e| e.into_inner())` so a panicked holder cannot cascade.
 
 pub mod chat;
+// The memory-v1 embedder seam lands before its T3/T4 consumers.
+#[allow(dead_code)]
+pub mod embedder;
 pub mod provider;
 pub mod pty;
 // T2 lands the codec before the T4 exact-search consumer.
