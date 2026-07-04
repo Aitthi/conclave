@@ -127,6 +127,21 @@ available behind an option, so if the new mode turns out bad we can revert clean
   then `localStorage.setItem('conclave.termTabMode', 'keep-alive')` + reload →
   today's behavior verbatim.
 
+## POST-LAND ledger
+
+- **MERGED @ 23ccff0** (lane head 5dba1a4, Tiësto). One CHANGES-REQUESTED round:
+  lead's pre-LAND audit found save/restore ungated by mode — root cause was this
+  plan's own false claim that keep-alive never unmounts (amended above, 60a86d5);
+  Mellow independently confirmed the same defect before receiving the heads-up.
+  Fixed in 5dba1a4 (isRemount gate on both blocks + honest comments); Mellow
+  delta re-LAND PASS 0 blocking. Gates lead-reproduced on merged main: tsc 0,
+  vite build clean (pnpm install run for the new addon).
+- Non-blocking note on record (Mellow): SerializeAddon loads unconditionally but
+  only serializes in remount mode — acceptable since the mode is read once per
+  page, no in-page flip exists to preserve a snapshot for.
+- The running app (r5) predates this merge — the feature goes live at the next
+  rebuild. `npm run dev` exercises it immediately.
+
 ## Out of scope
 
 - Backend (Rust) ring buffer / reload survival — recorded as the natural follow-up
