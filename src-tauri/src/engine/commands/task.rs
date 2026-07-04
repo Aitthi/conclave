@@ -446,6 +446,7 @@ pub async fn claim(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
     let row = repo::task::claim(&state.db, &req.workspace_id, &req.slug, &req.actor_id).await?;
     emit_changed(state, &row);
+    notify_watchers(state, &row, &req.actor_id, "state", "-> claimed").await;
     Ok(task_to_json(&row))
 }
 
@@ -478,6 +479,9 @@ pub async fn set_state(state: &AppState, payload: Value) -> Result<Value, AppErr
     )
     .await?;
     emit_changed(state, &row);
+    if let Some(actor) = &req.actor_id {
+        notify_watchers(state, &row, actor, "state", &format!("-> {}", req.state)).await;
+    }
     Ok(task_to_json(&row))
 }
 
@@ -509,7 +513,15 @@ pub async fn note(state: &AppState, payload: Value) -> Result<Value, AppError> {
         &payload_json,
     )
     .await?;
-    notify_task_changed_for_event(state, &req.workspace_id, &req.slug).await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        req.actor_id.as_deref(),
+        "note",
+        &req.text,
+    )
+    .await?;
     Ok(task_event_to_json(&event))
 }
 
@@ -555,7 +567,15 @@ pub async fn gate(state: &AppState, payload: Value) -> Result<Value, AppError> {
         &payload_json,
     )
     .await?;
-    notify_task_changed_for_event(state, &req.workspace_id, &req.slug).await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        req.actor_id.as_deref(),
+        "gate",
+        &format!("{} exit={}", req.cmd, req.exit),
+    )
+    .await?;
     Ok(task_event_to_json(&event))
 }
 
@@ -607,7 +627,15 @@ pub async fn challenge(state: &AppState, payload: Value) -> Result<Value, AppErr
         &payload_obj.to_string(),
     )
     .await?;
-    notify_task_changed_for_event(state, &req.workspace_id, &req.slug).await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        req.actor_id.as_deref(),
+        "challenge",
+        &req.claim,
+    )
+    .await?;
     Ok(task_event_to_json(&event))
 }
 
@@ -644,7 +672,15 @@ pub async fn rule(state: &AppState, payload: Value) -> Result<Value, AppError> {
         &payload_json,
     )
     .await?;
-    notify_task_changed_for_event(state, &req.workspace_id, &req.slug).await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        Some(&req.actor_id),
+        "ruling",
+        &req.text,
+    )
+    .await?;
     Ok(task_event_to_json(&event))
 }
 
@@ -668,6 +704,9 @@ pub async fn close(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
     let row = repo::task::close(&state.db, &req.workspace_id, &req.slug, req.actor_id.as_deref()).await?;
     emit_changed(state, &row);
+    if let Some(actor) = &req.actor_id {
+        notify_watchers(state, &row, actor, "state", "-> merged").await;
+    }
     Ok(task_to_json(&row))
 }
 
@@ -688,7 +727,15 @@ pub async fn watch(state: &AppState, payload: Value) -> Result<Value, AppError> 
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
     repo::task::watch(&state.db, &req.workspace_id, &req.slug, &req.actor_id).await?;
-    notify_task_changed_for_event(state, &req.workspace_id, &req.slug).await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        Some(&req.actor_id),
+        "watch",
+        "started watching",
+    )
+    .await?;
     Ok(json!({ "watching": true }))
 }
 
@@ -699,22 +746,96 @@ pub async fn unwatch(state: &AppState, payload: Value) -> Result<Value, AppError
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
     repo::task::unwatch(&state.db, &req.workspace_id, &req.slug, &req.actor_id).await?;
-    notify_task_changed_for_event(state, &req.workspace_id, &req.slug).await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        Some(&req.actor_id),
+        "unwatch",
+        "stopped watching",
+    )
+    .await?;
     Ok(json!({ "watching": false }))
 }
 
-/// Re-fetch the task and emit `task:changed` — shared by the event-only verbs
-/// (`note`/`gate`/`challenge`/`rule`/`watch`/`unwatch`) which don't already
-/// hold the row the way `claim`/`setState`/`close` do.
-async fn notify_task_changed_for_event(
+/// Re-fetch the task, emit `task:changed`, and (Lane B) notify its watchers —
+/// shared by the event-only verbs (`note`/`gate`/`challenge`/`rule`/
+/// `watch`/`unwatch`) which don't already hold the row the way
+/// `claim`/`setState`/`close` do. `kind`/`summary` build the notify line (see
+/// [`notify_watchers`]); `actor_id` absent means no watcher notification (no
+/// real agent to attribute it to — `task.create`'s optional owner is the one
+/// caller that can reach here without an actor, though it has no watchers
+/// yet in practice since watching happens after creation).
+async fn on_task_mutated(
     state: &AppState,
     workspace_id: &str,
     slug: &str,
+    actor_id: Option<&str>,
+    kind: &str,
+    summary: &str,
 ) -> Result<(), AppError> {
     if let Some(row) = repo::task::get(&state.db, workspace_id, slug).await? {
         emit_changed(state, &row);
+        if let Some(actor_id) = actor_id {
+            notify_watchers(state, &row, actor_id, kind, summary).await;
+        }
     }
     Ok(())
+}
+
+/// Cap on a notify line's `summary` segment — a watcher notification is a
+/// one-line nudge into another agent's live PTY, not a place to paste a
+/// multi-paragraph note or challenge claim.
+const NOTIFY_SUMMARY_MAX_CHARS: usize = 140;
+
+fn truncate_for_notify(text: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if text.chars().count() <= max_chars {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        let head: String = text.chars().take(max_chars).collect();
+        std::borrow::Cow::Owned(format!("{head}…"))
+    }
+}
+
+/// Best-effort display name for a `workspace_agent` instance — falls back to
+/// the raw id when the agent/definition can't be resolved (a notify-line
+/// cosmetic must never block on a lookup miss).
+async fn agent_display_name(state: &AppState, instance_id: &str) -> String {
+    let Ok(Some(agent)) = repo::workspace_agent::get(&state.db, instance_id).await else {
+        return instance_id.to_string();
+    };
+    match repo::agent_definition::get(&state.db, &agent.agent_def_id).await {
+        Ok(Some(def)) => def.name,
+        _ => instance_id.to_string(),
+    }
+}
+
+/// Notify every OTHER watcher of a task mutation (ADR 0008 Lane B), one line
+/// per watcher: `[task <slug>] <actor-name>: <kind> — <summary>`. Delivered
+/// via `commands::message::inject` — the SAME delivery path `tell` uses (risk
+/// ledger: "reuse whatever queueing `tell` already does... do not invent a
+/// second injection path"). Best-effort: a delivery failure (unknown/offline
+/// watcher) must never fail the mutating command that triggered it.
+async fn notify_watchers(state: &AppState, task: &TaskRow, actor_id: &str, kind: &str, summary: &str) {
+    let Ok(watcher_ids) = repo::task::watchers(&state.db, &task.id).await else {
+        return;
+    };
+    let watcher_ids: Vec<String> = watcher_ids.into_iter().filter(|w| w != actor_id).collect();
+    if watcher_ids.is_empty() {
+        return;
+    }
+
+    let actor_name = agent_display_name(state, actor_id).await;
+    let summary = truncate_for_notify(summary, NOTIFY_SUMMARY_MAX_CHARS);
+    let text = format!("[task {}] {actor_name}: {kind} — {summary}", task.slug);
+
+    for watcher_id in watcher_ids {
+        let _ = super::message::inject(
+            state,
+            json!({ "fromInstanceId": actor_id, "toInstanceId": watcher_id, "text": text }),
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]
@@ -1406,5 +1527,223 @@ mod tests {
             .await
             .expect_err("unknown actor must fail");
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    // ── Lane B: watch-notify hook ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn claim_notifies_a_watching_second_agent() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("claim failed");
+
+        // The watcher is offline in this test (no live PTY registered), so the
+        // notification is recorded as `queued` — still asserts delivery was
+        // ATTEMPTED via the real `commands::message::inject` path (risk
+        // ledger: no second injection mechanism), not just that claim worked.
+        let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        let arr = inbox.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "watcher must receive exactly one notify");
+        let text = arr[0]["text"].as_str().expect("text present");
+        assert!(text.contains("[task t1]"), "line must name the task: {text}");
+        assert!(text.contains("claimed"), "line must summarize the mutation: {text}");
+        assert_eq!(arr[0]["fromInstanceId"], json!(actor), "attributed to the real actor");
+        assert_eq!(arr[0]["toInstanceId"], json!(watcher));
+    }
+
+    /// The plan's literal acceptance line: "watch a task from a second agent,
+    /// mutate from first, line arrives in watcher's PTY." Registers a live
+    /// placeholder backend for the watcher (same fixture pattern as
+    /// `commands::message`'s own `inject_live_target_delivers` test) so the
+    /// notify actually reaches a "live" stdin, not just a queued DB row.
+    #[tokio::test]
+    async fn claim_notify_arrives_in_a_live_watchers_pty() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        let watcher_session_id = crate::engine::repo::session::get_by_instance(&state.db, &watcher)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists")
+            .id;
+        assert!(
+            state
+                .runtime
+                .register(&watcher, crate::engine::runtime::LiveHandle::placeholder(&watcher_session_id))
+                .is_some(),
+            "registering the watcher's live placeholder must succeed"
+        );
+
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("claim failed");
+
+        let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        let arr = inbox.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0]["status"],
+            json!("delivered"),
+            "a LIVE watcher's notify must be delivered, not merely queued"
+        );
+        assert!(arr[0]["text"].as_str().unwrap().contains("[task t1]"));
+    }
+
+    #[tokio::test]
+    async fn actor_does_not_notify_itself() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        // The actor watches their OWN task before claiming it.
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("watch failed");
+
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("claim failed");
+
+        let inbox = super::super::message::list(&state, json!({ "instanceId": actor }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            0,
+            "the actor must never receive a notify about their own mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_watchers_means_no_notification_attempt() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+
+        // No watch() call at all — must not panic or error.
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("claim failed");
+    }
+
+    #[tokio::test]
+    async fn note_notifies_watchers_with_the_note_text() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": "making progress" }),
+        )
+        .await
+        .expect("note failed");
+
+        let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        let arr = inbox.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let text = arr[0]["text"].as_str().unwrap();
+        assert!(text.contains("note"), "kind must be in the line: {text}");
+        assert!(text.contains("making progress"), "summary must be the note text: {text}");
+    }
+
+    #[tokio::test]
+    async fn notify_line_truncates_a_long_summary() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        let long_text = "x".repeat(500);
+        note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": long_text }),
+        )
+        .await
+        .expect("note failed");
+
+        let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        let text = inbox.as_array().unwrap()[0]["text"].as_str().unwrap().to_string();
+        assert!(
+            text.len() < 500,
+            "notify line must truncate a long summary, got {} chars",
+            text.len()
+        );
+        assert!(text.contains('…'), "truncation marker must be present: {text}");
+    }
+
+    #[tokio::test]
+    async fn unwatching_agent_receives_no_further_notifications() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+        unwatch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("unwatch failed");
+
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("claim failed");
+
+        let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            0,
+            "an unwatched agent must not be notified of later mutations"
+        );
     }
 }

@@ -554,13 +554,81 @@ pub async fn unwatch(
 }
 
 /// All agent ids watching a task (Lane B's notify hook fan-out list).
-#[allow(dead_code)]
 pub async fn watchers(pool: &SqlitePool, task_id: &str) -> sqlx::Result<Vec<String>> {
     let rows: Vec<(String,)> = sqlx::query_as("SELECT agent_id FROM task_watch WHERE task_id = ?1")
         .bind(task_id)
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+// ── Lane B: stall + challenge-default timer queries ─────────────────────────
+
+/// A `claimed`/`in_progress` task plus its newest `task_event.created_at` —
+/// the stall timer's candidate list (`repo::task::stall_candidates`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StallCandidate {
+    pub id: String,
+    pub slug: String,
+    pub state: String,
+    pub owner_agent_id: Option<String>,
+    pub implementer_agent_id: Option<String>,
+    pub last_event_at: String,
+}
+
+/// Every task currently `claimed` or `in_progress`, with its newest
+/// `task_event.created_at` (an `INNER JOIN` is safe here: `claim` always
+/// appends a `state` event, so a task in either of these states always has
+/// at least one). Global across workspaces — the timer is a single
+/// app-wide background loop, not scoped to one workspace.
+pub async fn stall_candidates(pool: &SqlitePool) -> sqlx::Result<Vec<StallCandidate>> {
+    sqlx::query_as::<_, StallCandidate>(
+        "SELECT t.id, t.slug, t.state, t.owner_agent_id, t.implementer_agent_id, \
+         MAX(e.created_at) AS last_event_at \
+         FROM task t JOIN task_event e ON e.task_id = t.id \
+         WHERE t.state IN ('claimed', 'in_progress') \
+         GROUP BY t.id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// A `challenge` event plus the task context needed to notify + rule on it
+/// (the raw `task_event` row alone doesn't carry `workspace_id`/`slug`/
+/// `owner_agent_id` — those live on `task`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ChallengeCandidate {
+    pub event_id: String,
+    pub workspace_id: String,
+    pub slug: String,
+    pub owner_agent_id: Option<String>,
+    pub actor_agent_id: Option<String>,
+    pub payload: String,
+}
+
+/// Every `challenge` event across every workspace, with its owning task's
+/// context. The caller filters to overdue-and-unruled (parsing
+/// `payload.deadlineAt` and cross-referencing [`ruling_challenge_ids`]) —
+/// done in Rust rather than SQL/JSON1 to keep this query engine-agnostic.
+pub async fn open_challenge_candidates(pool: &SqlitePool) -> sqlx::Result<Vec<ChallengeCandidate>> {
+    sqlx::query_as::<_, ChallengeCandidate>(
+        "SELECT e.id AS event_id, t.workspace_id, t.slug, t.owner_agent_id, \
+         e.actor_agent_id, e.payload \
+         FROM task_event e JOIN task t ON t.id = e.task_id \
+         WHERE e.kind = 'challenge'",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Every `ruling` event's raw payload text, across every workspace — the
+/// caller parses `payload.challengeId` out of each to build the set of
+/// already-ruled challenge event ids.
+pub async fn ruling_payloads(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT payload FROM task_event WHERE kind = 'ruling'")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
