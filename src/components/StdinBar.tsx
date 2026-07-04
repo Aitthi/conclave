@@ -143,12 +143,32 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   // Auto-grow with content, capped by the `max-h-40` on the element itself —
   // "auto" first so a shrink (e.g. clearing after send) isn't stuck at the
   // tallest height it ever reached (scrollHeight only ever grows otherwise).
-  useEffect(() => {
+  //
+  // Hidden-tab guard: WorkspacePane keeps every CLI tab mounted and hides the
+  // inactive ones with display:none, under which the textarea has NO layout and
+  // scrollHeight is 0 — pinning height to 0px made the input invisible and
+  // untypeable once the tab was revealed (it could never recover: the effect
+  // only re-runs on typing, and you can't type into a 0px box). Never pin to
+  // 0; leave height alone so rows={1} governs until the element has layout.
+  function autogrow() {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, [value]);
+    const contentHeight = el.scrollHeight;
+    if (contentHeight > 0) el.style.height = `${contentHeight}px`;
+  }
+  useEffect(autogrow, [value]);
+  // Re-measure when the tab is revealed (display:none → laid out): the box
+  // gains a size, the observer fires, and a multiline draft typed before a
+  // tab switch re-expands. Re-setting an unchanged height doesn't re-fire,
+  // so this cannot loop.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(autogrow);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const placeholder = routingToOther
     ? "Type to inject into the target session…"

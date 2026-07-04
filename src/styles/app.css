@@ -232,10 +232,12 @@
   flex: none;
 }
 /* Variant A (shipped): cycling ellipsis via animated `content` on ::after.
-   Known WebKit risk (risk ledger, plan:working-indicator-restyle) — content-
-   keyframe animation may render static (no dots) in the app's WKWebView.
-   Fidelity bar for whichever variant ships: bb review:working-indicator-
-   gatebar. If smoke shows this static, swap to Variant B (pre-approved,
+   WebKit risk RETIRED (research 2026-07-04, bb research:wkwebview-content-
+   keyframes): content-keyframe cycling confirmed animating on WebKit 26.5
+   (Playwright build version-matched to this machine's system WebKit; the
+   2023-era "Safari won't animate content" articles are stale). Expected to
+   PASS in the app's WKWebView; one real-app smoke closes the last gap.
+   If that smoke ever shows it static, swap to Variant B (pre-approved,
    Arta): 3 real dot glyphs, staggered OPACITY-FADE only — never the .typing
    translateY bob (that reads as chat-typing, wrong glyph) — same reserved
    1.1ch width so "working" never jitters. */
