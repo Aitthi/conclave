@@ -19,26 +19,25 @@ export interface Room {
 const WORKSPACE_ROOM_KEY = "workspace";
 
 /**
- * Count messages in `roomMessages` (newest-first) newer than the room's
- * last-seen watermark. `seenMarker` may be either the id of the last-seen
- * message (exact — an index cutoff into the newest-first list) or a plain
- * ISO timestamp (fallback for when that message has aged out of the loaded
- * window). Absent entirely falls back to `mountedAt` — a timestamp the
- * caller captures once when the rail mounts — so a room that first appears
- * mid-session still badges its new messages (Mellow's plan-review F4;
+ * Count messages in `roomMessages` newer than the room's last-seen
+ * watermark. `seenMarker` is an ISO `createdAt` timestamp (interface ruling:
+ * a message id is NOT a valid marker here — once the watermarked message
+ * ages out of `useWorkspaceChat`'s MESSAGE_LIMIT window, an id-vs-timestamp
+ * comparison is garbage, not just imprecise; see Mellow's F-a). A message
+ * with the exact same `createdAt` as the marker counts as seen — acceptable,
+ * not a fake backlog. Absent entirely falls back to `mountedAt` — a
+ * timestamp the caller captures once when the rail mounts — so a room that
+ * first appears mid-session still badges its new messages (plan-review F4;
  * without this a fresh pair room reads as fully-read history and never
- * badges). Messages from before mount are honest pre-existing history, not
- * a fake backlog.
+ * badges).
  */
 function countUnread(
   roomMessages: InterAgentMessage[],
   seenMarker: string | undefined,
   mountedAt: string,
 ): number {
-  if (seenMarker === undefined) return roomMessages.filter((m) => m.createdAt > mountedAt).length;
-  const idx = roomMessages.findIndex((m) => m.id === seenMarker);
-  if (idx !== -1) return idx;
-  return roomMessages.filter((m) => m.createdAt > seenMarker).length;
+  const threshold = seenMarker ?? mountedAt;
+  return roomMessages.filter((m) => m.createdAt > threshold).length;
 }
 
 /**

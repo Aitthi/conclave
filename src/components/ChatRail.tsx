@@ -37,6 +37,10 @@ interface ChatRailProps {
 // scroll-jack someone reading older history (ported from the Chat Hub).
 const NEAR_BOTTOM_PX = 40;
 
+// Matches WorkspacePane's STATUS_COLOR.running / Roster's live dot — a room
+// chip is "live" on the exact same basis as the tab-strip dots (R2).
+const LIVE_DOT_COLOR = "#30d158";
+
 function Avatar({ identity, size = 5 }: { identity: AgentIdentity; size?: 4 | 5 }) {
   const cls = size === 5 ? "w-5 h-5 text-[10px] rounded-md" : "w-4 h-4 text-[9px] rounded-[5px]";
   return (
@@ -163,9 +167,14 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
     }
     // Accrue "seen" only while genuinely caught up — a background refetch the
     // reader has scrolled away from must not silently clear their unread badge.
-    if (shouldSnap && newestId) {
+    // Store createdAt (an ISO timestamp), NOT the message id — chatRooms'
+    // countUnread compares lastSeen against createdAt, and an id would go
+    // stale-garbage once this message ages out of the loaded window (Mellow's
+    // F-a; interface ruling: lastSeen values are always ISO timestamps).
+    if (shouldSnap && newest) {
+      const newestCreatedAt = newest.createdAt;
       setLastSeen((prev) =>
-        prev[selectedKey] === newestId ? prev : { ...prev, [selectedKey]: newestId },
+        prev[selectedKey] === newestCreatedAt ? prev : { ...prev, [selectedKey]: newestCreatedAt },
       );
     }
     lastMsgIdRef.current = newestId;
@@ -243,7 +252,7 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
                   {r.unread}
                 </span>
               ) : (
-                live && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: "#30d158" }} />
+                live && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: LIVE_DOT_COLOR }} />
               )}
             </button>
           );
