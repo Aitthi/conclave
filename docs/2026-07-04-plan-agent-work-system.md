@@ -144,6 +144,8 @@ r5 rebuild (Dew) off main including this program + memory-graph; then install (s
 
 ### POST-LAND ledger
 
+- **Lane A MERGED @ 29a1053** (ebddbf8, Dew; Mellow LAND PASS held-lifted 0 blocking; lead-reproduced 547 lib / 40 bin / clippy clean; post-merge tsc 0 + vite clean). Three mid-flight spec amendments (derive-in-list, gate rc propagation, deadlineAt-at-insert + lastGates per-cmd) absorbed with zero drift findings. Latent Low from first LAND round, superseded: gate rc propagation was ruled IN before merge, no open items.
+- **Lane D MERGED @ 657d7b4** (5052a84, Tiësto; Arta fidelity ACCEPT @ canon fa4929b, F1 resolved via lastGates amendment; Mellow LAND PASS 0 blocking; lead-ran tsc 0 + vite clean on merged main). Cross-lane A↔D wire contract verified closed both sides. Caveat: live-pixel confirm defers to r5 relaunch (running app is an old inode — memory-graph precedent). Doc-rot nit (mock header `lastGate?`) fixed at integration.
 - **Lane C MERGED @ ef07b35** (e1ab408, Guetta; Mellow LAND PASS 0 blocking; lead-reproduced 475/21/4 + clippy clean). Two latent Lows on record, deferred follow-ups, non-blocking:
   - L1: `lane guard install` writes `<common>/hooks/pre-commit` directly and does not honor `core.hooksPath` — silent no-op if a checkout ever sets it (e.g. husky). Inert in this repo today. Follow-up: warn-if-set at install time.
   - L2: hook `while read` mishandles git-quoted paths (embedded newline in filename) — theoretical bypass on pathological filenames only, non-adversarial input, negligible.

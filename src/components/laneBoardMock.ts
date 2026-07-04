@@ -5,7 +5,7 @@
 // `ipc.task.list` / `ipc.task.get`. Nothing here touches the backend.
 //
 // Contract parity with the lead's frozen rulings (@ 5e3e27e + the badge ruling):
-//   • task.list → TaskListRow[]: frozen Task + `eventCount` + `lastGate?`
+//   • task.list → TaskListRow[]: frozen Task + `eventCount` + `lastGates[]` + `challenges[]`
 //     (newest gate only, omitted when none) + `challenges` (always [], deadlineAt
 //     ISO) — optional task fields are OMITTED when absent, never null.
 //   • task.get  → { task, events } with events sorted `createdAt` DESC, each
