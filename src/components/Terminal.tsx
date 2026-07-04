@@ -7,6 +7,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { ipc, useSessionOutput, useSessionStatus } from "../ipc";
 import { useFileDrop, shellQuotePath } from "../lib/fileDrop";
+import { getTermTabMode } from "../lib/termMode";
 
 interface TerminalProps {
   sessionId: string;
@@ -19,7 +20,13 @@ interface TerminalProps {
 // it dies on a page reload — the SAME lifetime as the pre-remount hidden-tab
 // approach (a reload always started every tab black), so this is no regression.
 // Bounded by session count (≤ live agents) × `scrollback` rows per entry; no cap
-// needed. Unused in "keep-alive" mode (nothing ever unmounts to save one).
+// needed. In "keep-alive" mode BOTH the save and the restore are gated off (see
+// the isRemount checks in the effect), so no snapshot is ever written and a
+// terminal that unmounts — which DOES happen in keep-alive too: WorkspacePane is
+// keyed `${workspaceId}:${agentsVersion}` (AppShell.tsx:288) and the LaneBoard
+// branch swaps the pane out, so a workspace switch / agent add-remove / LaneBoard
+// visit remounts terminals — simply loses its buffer, exactly as it did before
+// this feature. That loss IS the behavior keep-alive reverts to.
 const snapshots = new Map<string, { data: string; cols: number }>();
 
 /**
@@ -69,6 +76,11 @@ export function Terminal({ sessionId }: TerminalProps) {
     const el = divRef.current;
     if (!el) return;
     receivedOutputRef.current = false;
+    // Snapshot save + restore run ONLY in remount mode. keep-alive must stay
+    // byte-for-byte the pre-remount behavior: terminals still unmount on a
+    // workspace/agents-version/LaneBoard change (see the snapshots comment), but
+    // they must lose their buffer then, with no divider ever injected.
+    const isRemount = getTermTabMode() === "remount";
 
     const term = new XtermTerminal({
       convertEol: true,
@@ -127,8 +139,9 @@ export function Terminal({ sessionId }: TerminalProps) {
     // termRef is set below — so a late useSessionOutput event can never land
     // mid-restore and interleave with the written-back context. The mount jiggle
     // further down SIGWINCHes the child, which repaints the live frame BELOW the
-    // divider. In keep-alive mode no snapshot is ever saved, so this is a no-op.
-    const snap = snapshots.get(sessionId);
+    // divider. Gated on remount mode: keep-alive never saves and must never
+    // restore, so no divider is ever injected there.
+    const snap = isRemount ? snapshots.get(sessionId) : undefined;
     if (snap) {
       term.write(snap.data);
       // Explicit SGR reset — serialize output is not guaranteed to end reset, so
@@ -291,7 +304,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       // excludeAltBuffer: for an alt-screen TUI the transcript worth keeping is
       // the NORMAL buffer's scrollback; the live alt-screen frame is re-drawn by
       // the next mount's jiggle SIGWINCH, so serializing it would only duplicate.
-      if (receivedOutputRef.current) {
+      if (isRemount && receivedOutputRef.current) {
         snapshots.set(sessionId, {
           data: serializeAddon.serialize({
             scrollback: 2000,
