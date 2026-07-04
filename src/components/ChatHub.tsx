@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, MoveRight, Search, X } from "lucide-react";
-import { ipc, useAnyMessageInjected } from "../ipc";
-import type { InterAgentMessage } from "../ipc";
 import { timeHint } from "../lib/timeHint";
 import { ClampText } from "./ClampText";
 import { derivePairs, pairKeyOf } from "../lib/chatPairs";
+import { useWorkspaceChat, type AgentIdentity } from "../lib/useWorkspaceChat";
 
 // ---------------------------------------------------------------------------
 // Chat Hub — the workspace's inter-agent conversation, center-pane sized
@@ -18,22 +17,11 @@ interface ChatHubProps {
   onClose: () => void;
 }
 
-// The hub loads the workspace's full recent window (the server clamps to its
-// max); per-pair narrowing and search are client-side over this window.
-const MESSAGE_LIMIT = 200;
-
 // Auto-scroll only snaps to the newest message when the reader is already
 // within this many pixels of the bottom — a background refetch must never
 // scroll-jack someone reading older history (same guard as the old drawer
 // timeline).
 const NEAR_BOTTOM_PX = 40;
-
-interface AgentIdentity {
-  name: string;
-  color: string;
-}
-
-const FALLBACK_IDENTITY: AgentIdentity = { name: "unknown", color: "#8e8e93" };
 
 /** Small colored avatar square, initial-letter, matching Blackboard's. */
 function Avatar({ identity, size = 5 }: { identity: AgentIdentity; size?: 4 | 5 }) {
@@ -49,68 +37,7 @@ function Avatar({ identity, size = 5 }: { identity: AgentIdentity; size?: 4 | 5 
 }
 
 export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-
-  // ── Identities: instanceId → { name, color } (instance.list ⨝ agentDef.list,
-  //    the same join WorkspacePane/Blackboard do). ─────────────────────────────
-  const [agents, setAgents] = useState<Map<string, AgentIdentity>>(new Map());
-  useEffect(() => {
-    let active = true;
-    Promise.all([ipc.instance.list({ workspaceId }), ipc.agentDef.list()])
-      .then(([instances, defs]) => {
-        if (!active) return;
-        const defsById = new Map(defs.map((d) => [d.id, d]));
-        const m = new Map<string, AgentIdentity>();
-        for (const inst of instances) {
-          const def = defsById.get(inst.agentDefId);
-          if (def) m.set(inst.id, { name: def.name, color: def.color ?? "#6e6e73" });
-        }
-        setAgents(m);
-      })
-      .catch((err: unknown) => {
-        if (import.meta.env.DEV) console.error("ChatHub: identity load failed", err);
-      });
-    return () => {
-      active = false;
-    };
-  }, [workspaceId]);
-  const identityOf = useCallback(
-    (id: string): AgentIdentity => agents.get(id) ?? FALLBACK_IDENTITY,
-    [agents],
-  );
-
-  // ── Messages — REAL data from message.listForWorkspace, newest-first from
-  //    the API; seq-guarded so a stale response can't overwrite a newer one. ──
-  const [messages, setMessages] = useState<InterAgentMessage[]>([]);
-  const [loadError, setLoadError] = useState(false);
-  const seq = useRef(0);
-  const refetch = useCallback(() => {
-    const mine = ++seq.current;
-    ipc.message
-      .listForWorkspace({ workspaceId, limit: MESSAGE_LIMIT })
-      .then((rows) => {
-        if (mounted.current && mine === seq.current) {
-          setMessages(rows);
-          setLoadError(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (import.meta.env.DEV) console.error("ChatHub: listForWorkspace failed", err);
-        if (mounted.current && mine === seq.current) setLoadError(true);
-      });
-  }, [workspaceId]);
-  useEffect(() => {
-    refetch();
-  }, [refetch]);
-  // Any injection anywhere → refetch (workspace-scoped server-side; a
-  // cross-workspace event costs one cheap guarded refetch).
-  useAnyMessageInjected(() => refetch());
+  const { messages, loadError, identityOf } = useWorkspaceChat(workspaceId);
 
   // ── View state: null = All feed, else a pair key; plus client-side search. ─
   const [selectedPair, setSelectedPair] = useState<string | null>(null);
