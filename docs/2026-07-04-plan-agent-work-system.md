@@ -83,6 +83,12 @@ CREATE TABLE task_watch (
 
 Wire shape of a task (camelCase): `{"id","workspaceId","slug","title","state","ownerAgentId","implementerAgentId","fileBoundary":[],"designCanon","plan","createdAt","updatedAt"}`. Lane D codes against this EXACT shape.
 
+Response shapes (RULED 2026-07-04, challenge credit: Tiësto — these are final):
+- `task.list` res = `Task[]`, each row = frozen task shape PLUS `"eventCount": number`.
+- `task.get` res = `{ "task": Task, "events": TaskEvent[] }` — last 20 events, sorted `createdAt` DESC (newest first).
+- `TaskEvent` = `{ "id", "taskId", "kind", "actorAgentId", "payload", "createdAt" }`, `kind` ∈ note|state|gate|challenge|ruling; `payload` is a JSON OBJECT on the wire (engine parses the stored TEXT column; unparseable → `{}`), never a double-encoded string.
+- `task:changed` event = `{ "workspaceId", "taskId", "slug", "state" }` (as §Bus below).
+
 ### Bus event (Lane D + B)
 
 `engine/bus.rs`: `pub const TASK_CHANGED: &str = "task:changed";` payload `TaskChanged { workspace_id, task_id, slug, state }` (camelCase serde) + mirror in `src/ipc/events.ts` EVENT_NAMES/interface. Emitted by `task.*` mutating handlers (Lane A emits; B reuses).
