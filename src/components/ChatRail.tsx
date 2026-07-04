@@ -2,14 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Eye,
   Hash,
-  MoveRight,
   PanelRightClose,
   PanelRightOpen,
   Maximize2,
   Users,
 } from "lucide-react";
 import type { InterAgentMessage, WorkspaceAgent } from "../ipc";
-import { timeHint } from "../lib/timeHint";
 import { ClampText } from "./ClampText";
 import { pairKeyOf } from "../lib/chatPairs";
 import { deriveRooms, type Room } from "../lib/chatRooms";
@@ -78,6 +76,15 @@ function roomTitle(room: Room, identityOf: (id: string) => AgentIdentity): strin
 function roomIsLive(room: Room, statuses: Record<string, WorkspaceAgent["status"]>): boolean {
   if (room.kind === "channel") return Object.values(statuses).some((s) => s === "running");
   return room.memberIds.some((id) => statuses[id] === "running");
+}
+
+// Absolute clock time for a group header (proto chats.tsx:105-109 — the
+// group's own HH:MM, day context comes from the divider, not a per-message
+// relative stamp).
+function clockLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 // Day-boundary divider label — honest (a merged feed can span more than
@@ -199,7 +206,7 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
   }
 
   return (
-    <aside className="w-[300px] vibrancy border-l border-overlay/[0.06] flex flex-col shrink-0">
+    <aside className="w-[380px] vibrancy border-l border-overlay/[0.06] flex flex-col shrink-0">
       {/* Header. */}
       <div className="h-12 flex items-center gap-2 px-3.5 border-b border-overlay/[0.06] shrink-0">
         <span className="text-[13px] font-semibold tracking-tight">Chats</span>
@@ -310,32 +317,27 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
                 )}
                 <div className="flex gap-2">
                   <Avatar identity={from} />
-                  <div className="flex-1 min-w-0 space-y-1">
-                    <div className="flex items-center gap-1.5 text-[10.5px]">
+                  <div className="flex-1 min-w-0 max-w-[82%] space-y-1">
+                    <div className="flex items-baseline gap-1.5 text-[10.5px]">
                       <span className="font-semibold text-text-secondary">{from.name}</span>
+                      {from.role && <span className="text-text-tertiary">{from.role}</span>}
+                      <span className="text-text-tertiary font-mono tabular-nums">
+                        {clockLabel(g.items[0].createdAt)}
+                      </span>
                     </div>
                     {g.items.map((m) => {
                       const to = identityOf(m.toInstanceId);
                       return (
-                        <div key={m.id}>
-                          <div className="flex items-center gap-1.5 text-[9.5px] text-text-tertiary mb-0.5">
-                            {selectedKey === "workspace" && (
-                              <>
-                                <MoveRight className="w-2.5 h-2.5 shrink-0" />
-                                <span>{to.name}</span>
-                              </>
-                            )}
-                            <span className={selectedKey === "workspace" ? "ml-auto" : ""}>
-                              {timeHint(m.createdAt)}
-                            </span>
-                            {m.status === "queued" && <span className="text-warning">queued</span>}
-                          </div>
+                        <div key={m.id} className="space-y-0.5">
                           <div
-                            className="rounded-xl bg-overlay/[0.05] px-3 py-2 text-[12px] text-text-primary"
-                            style={{ borderLeft: `2px solid ${from.color}` }}
+                            className="rounded-md border border-overlay/[0.06] bg-surface-raised px-[0.72rem] py-2 text-[0.84rem] leading-[1.5] text-text-primary"
+                            title={`→ ${to.name}`}
                           >
                             <ClampText text={m.text} outgoing={false} lines={12} />
                           </div>
+                          {m.status === "queued" && (
+                            <span className="text-[9px] text-warning">queued</span>
+                          )}
                         </div>
                       );
                     })}

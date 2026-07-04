@@ -9,6 +9,9 @@ const MESSAGE_LIMIT = 200;
 export interface AgentIdentity {
   name: string;
   color: string;
+  /** From `instance.list`'s resolved `roleName` (first-class role or legacy
+   *  free-text label) — absent for a role-less agent. */
+  role?: string;
 }
 
 export const FALLBACK_IDENTITY: AgentIdentity = { name: "unknown", color: "#8e8e93" };
@@ -39,7 +42,7 @@ export function useWorkspaceChat(workspaceId: string) {
         const m = new Map<string, AgentIdentity>();
         for (const inst of instances) {
           const def = defsById.get(inst.agentDefId);
-          if (def) m.set(inst.id, { name: def.name, color: def.color ?? "#6e6e73" });
+          if (def) m.set(inst.id, { name: def.name, color: def.color ?? "#6e6e73", role: inst.roleName });
         }
         setAgents(m);
       })
