@@ -168,8 +168,12 @@ Estimate: 2–3 days.
 ### T4 — Search + commands + router (Dabin after T2, branch `feat/memory-commands`)
 
 `commands/memory.rs` + `router.rs` entries + top-k search:
-dot-product over decoded BLOBs with a bounded `BinaryHeap` (never full sort),
-scan scoped by workspace, `spawn_blocking`. Benchmark fixture at 10k and 50k
+dot-product over decoded BLOBs with a bounded `BinaryHeap` (never full sort).
+**Every BLOB goes through `vec_codec::decode(bytes, index.dimension)` before
+scoring — never score raw bytes.** (Mellow's T2 review: the read-path
+corruption guard of global constraint 3 is carried by this decode call;
+`list_embeddings` returns BLOBs un-decoded by design.) Scan scoped by
+workspace, `spawn_blocking`. Benchmark fixture at 10k and 50k
 rows × 384 dims; record warm p95. Gate: **p95 < 100 ms @ 50k** on this machine
 (Apple Silicon baseline). Estimate: 2 days.
 
@@ -195,9 +199,14 @@ Estimate: 1.5–2.5 days.
 
 ## Risk ledger
 
-- **ort rc12 native-lib packaging in the Tauri bundle** — the .dylib must end up
-  in the notarized app and pass signing. T1 must build the actual bundle
-  (`cargo tauri build`), not just the cli binary, before GO.
+- ~~ort rc12 native-lib packaging (.dylib)~~ **RESOLVED by T1 (Dew, 2026-07-04):**
+  on macOS aarch64, ort links onnxruntime **statically** (70 MB `.a` at build
+  time from pyke's CDN) — no separate runtime dylib exists; the single Mach-O
+  goes through the existing sign/notarize path, proven with a real
+  `cargo tauri build` (notarization Accepted, stapled, spctl pass). Residual:
+  that bundle had fastembed dead-code-eliminated (+48 KB only), so **T3 and T6
+  must rerun codesign/spctl once the embedder is wired into product code** and
+  record the real size delta (~14 MB expected).
 - **fastembed cache-dir override** — verify the env/API override actually
   redirects (default is `.fastembed_cache` in cwd; unacceptable). If not
   overridable, escalate before T3.
