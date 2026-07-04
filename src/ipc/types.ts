@@ -119,6 +119,12 @@ export interface WorkspaceAgent {
   /** Annotated by `instance.list`: skill ids used at the last launch (see
    *  Session.launchedSkillIds — same value, joined in for the Roster). */
   launchedSkillIds?: string[];
+  /** Annotated by `instance.list`: the agent definition's configured model id
+   *  (e.g. "claude-sonnet-5"), absent when unset. */
+  model?: string;
+  /** Annotated by `instance.list`: the agent definition's CLI harness kind,
+   *  absent for a chat/orchestrator agent or an unset `cli` agent. */
+  cliKind?: "claude-code" | "codex" | "custom";
   /** Annotated by `instance.list`, live instances only (R-act-1): whether the
    *  backend emitted output within the last `WORKING_WINDOW` (5s). */
   working?: boolean;
