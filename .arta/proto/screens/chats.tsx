@@ -107,9 +107,22 @@ export default function Chats() {
                   <span className="text-[0.64rem] faint">{a.role}</span>
                   <span className="text-[0.64rem] faint num">{g.items[0].at}</span>
                 </div>
-                {g.items.map((m) => (
-                  <div key={m.id} className="msg">{m.text}</div>
-                ))}
+                {g.items.map((m) => {
+                  const to = m.to ? agents[m.to] : null;
+                  return (
+                    <div key={m.id} className="flex flex-col gap-0.5 items-start self-stretch">
+                      {/* recipient chip (ruling R10) — who this message was sent to,
+                          visible without hover, right-aligned above the bubble */}
+                      {to && (
+                        <span className="self-end inline-flex items-center gap-1 text-[0.62rem] faint" title={`→ ${to.name}`}>
+                          <span className={`av av-xs ${avClass[to.color]}`}>{to.initials}</span>
+                          {to.name}
+                        </span>
+                      )}
+                      <div className="msg self-start" title={to ? `→ ${to.name}` : undefined}>{m.text}</div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           );

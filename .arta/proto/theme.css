@@ -77,6 +77,7 @@ body {
 .av-lg { width: 34px; height: 34px; font-size: 0.78rem; }
 .av-md { width: 28px; height: 28px; }
 .av-sm { width: 22px; height: 22px; font-size: 0.62rem; border-radius: 5px; }
+.av-xs { width: 16px; height: 16px; font-size: 0.5rem; border-radius: 4px; }  /* recipient chip (R10) — matches app avatar size-4 */
 .av-teal { background: var(--color-a-teal); }
 .av-red { background: var(--color-a-red); }
 .av-indigo { background: var(--color-a-indigo); }

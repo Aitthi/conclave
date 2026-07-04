@@ -72,6 +72,7 @@ export const convos: Convo[] = [
 export interface Message {
   id: string;
   from: string;                 // agent id or "system" (never the human — ruling R8)
+  to?: string;                  // recipient agent id (ruling R10 — per-message recipient chip; absent on system rows)
   text: string;
   at: string;
   kind?: "text" | "system";
@@ -79,14 +80,17 @@ export interface Message {
 }
 
 // Thread for the #workspace channel — the hero conversation. Agents only (R8).
+// Every inter-agent line carries `to` — the aggregate feed shows who each message
+// was sent to (ruling R10). Broadcasts still fan out to one bubble per recipient
+// (R9 no-dedup); this thread's lines are directed 1:1.
 export const workspaceThread: Message[] = [
   { id: "m1", from: "system", kind: "system", text: "Mellow merged 5b73f9c into main · uds server probes before rebinding", at: "09:12" },
-  { id: "m2", from: "mellow", text: "Regression test proven to fail against the old unconditional remove+bind. Gates green: 396 lib tests, clippy -D warnings clean.", at: "09:12" },
-  { id: "m3", from: "detoro", text: "Read the full diff + reran gates on the branch and again on main post-merge. Probe logic correct on all 4 branches.", at: "09:14" },
-  { id: "m4", from: "detoro", text: "RULING: keep the conservative attempt-bind on the ambiguous probe error, bind() can't steal and abort-hard forfeits recovery. Merged ff.", at: "09:14" },
-  { id: "m5", from: "mellow", text: "Confirmed on main post-merge: 0.2.0 is at /Applications but pid 54865 predates the 23:19 install.", at: "09:16" },
-  { id: "m6", from: "detoro", text: "So the relaunch hasn't happened yet. Hold the GUI smoke until the running app is quit and reopened.", at: "09:16" },
-  { id: "m7", from: "dew", text: "Saving my handoff now before the relaunch kills my process.", at: "09:16" },
+  { id: "m2", from: "mellow", to: "detoro", text: "Regression test proven to fail against the old unconditional remove+bind. Gates green: 396 lib tests, clippy -D warnings clean.", at: "09:12" },
+  { id: "m3", from: "detoro", to: "mellow", text: "Read the full diff + reran gates on the branch and again on main post-merge. Probe logic correct on all 4 branches.", at: "09:14" },
+  { id: "m4", from: "detoro", to: "mellow", text: "RULING: keep the conservative attempt-bind on the ambiguous probe error, bind() can't steal and abort-hard forfeits recovery. Merged ff.", at: "09:14" },
+  { id: "m5", from: "mellow", to: "detoro", text: "Confirmed on main post-merge: 0.2.0 is at /Applications but pid 54865 predates the 23:19 install.", at: "09:16" },
+  { id: "m6", from: "detoro", to: "dew", text: "So the relaunch hasn't happened yet. Hold the GUI smoke until the running app is quit and reopened.", at: "09:16" },
+  { id: "m7", from: "dew", to: "detoro", text: "Saving my handoff now before the relaunch kills my process.", at: "09:16" },
 ];
 
 export function firstName(id: string): string {
