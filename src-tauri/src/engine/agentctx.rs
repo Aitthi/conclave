@@ -68,8 +68,11 @@ delegating or asking a peer for something outside their role — and each entry 
 true while that agent is actively emitting output. Shared notes live on the blackboard: \
 `conclave bb set {ws_id} <key> \
 <value>` writes one, `conclave bb get {ws_id} <key>` reads one, and `conclave bb list {ws_id}` \
-shows everything peers already recorded — check it before starting work someone may have claimed \
-or planned."
+shows everything peers already recorded as ad-hoc facts — run `conclave task list {ws_id}` before \
+starting work someone may have claimed or planned. Work items and claims ride `conclave task` \
+(list, get, claim, note, gate, challenge) and `conclave lane start`/`conclave lane finish` for \
+worktrees; durable knowledge that outlives a task goes through `conclave memory search`/`conclave \
+memory remember`; your skills file carries the full tool table."
     )
 }
 
@@ -372,6 +375,24 @@ mod tests {
         assert!(p.contains("ws_123"));
         // The agent's own id must appear so it can pick itself out of the roster.
         assert!(p.contains("inst_a"));
+    }
+
+    #[test]
+    fn preamble_names_the_task_and_lane_and_memory_tool_families() {
+        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
+        // ADR-driven tool map: the preamble points at the verb families even
+        // before the agent reads its skills sidecar's full table.
+        assert!(p.contains("conclave task"), "{p}");
+        assert!(p.contains("conclave lane start"), "{p}");
+        assert!(p.contains("conclave lane finish"), "{p}");
+        assert!(p.contains("conclave memory search"), "{p}");
+        assert!(p.contains("conclave memory remember"), "{p}");
+        assert!(p.contains("skills file carries the full tool table"), "{p}");
+        // The bb check-before-starting pointer now names the task board, not
+        // a bb claim key.
+        assert!(p.contains("conclave task list ws_123"), "{p}");
+        assert!(!p.contains('\n'), "must stay one line: {p}");
+        assert!(!p.contains('='), "must stay '='-free: {p}");
     }
 
     #[test]
