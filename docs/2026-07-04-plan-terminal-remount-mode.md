@@ -47,6 +47,21 @@ available behind an option, so if the new mode turns out bad we can revert clean
 
 ## Terminal.tsx spec
 
+> **AMENDMENT (2026-07-04, post-implementation, lead self-review):** the original
+> spec below implied save/restore could run unconditionally because "nothing ever
+> unmounts in keep-alive". That claim was WRONG (lead's plan defect, found by lead
+> during pre-LAND diff audit): `WorkspacePane` is keyed by
+> `` `${workspaceId}:${agentsVersion}` `` (AppShell.tsx:288) and the LaneBoard
+> branch swaps the pane out entirely — so workspace switches, agent add/remove,
+> and LaneBoard open/close ALL unmount terminals even in keep-alive mode. An
+> ungated restore would therefore inject snapshot+divider into keep-alive,
+> breaking the human's explicit verbatim-revert requirement. RULING: gate BOTH
+> the restore block and the cleanup save on `getTermTabMode() === "remount"`.
+> Keep-alive must remain byte-for-byte today's behavior (buffer lost on those
+> unmounts, repainted by the jiggle) — that loss IS the old behavior being
+> reverted to. Side effect worth noting: in remount mode, context now also
+> survives workspace switches and LaneBoard visits — a strict improvement there.
+
 - Module-level store OUTSIDE the component (survives remounts, dies on reload —
   same lifetime as today's hidden-tab approach, no regression):
   `const snapshots = new Map<string, { data: string; cols: number }>()` keyed by
