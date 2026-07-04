@@ -13,9 +13,9 @@
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
-/// Mirrors the app-support convention in `engine/db.rs::db_path` (`dirs::data_dir()`
-/// + `Conclave`), scoped to a `models` subdir so the DB file and model cache
-/// don't collide.
+/// Mirrors the app-support convention in `engine/db.rs::db_path`
+/// (`dirs::data_dir()` + `Conclave`), scoped to a `models` subdir so the
+/// DB file and model cache don't collide.
 fn conclave_model_cache_dir() -> std::path::PathBuf {
     dirs::data_dir()
         .expect("could not resolve user data directory")
