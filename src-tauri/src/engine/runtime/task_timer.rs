@@ -126,8 +126,12 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
             continue;
         };
 
+        // "AUTO" is load-bearing (RULED 2026-07-04, Detoro): the message is
+        // attributed to a real agent (`implementer`) who did NOT type it —
+        // the marker stops the recipient mistaking a machine-generated ping
+        // for something the implementer actually wrote.
         let text = format!(
-            "[task {}] STALL: no activity for {}+ min (state={})",
+            "[task {}] AUTO stall alert — no activity for {}+ min (state={})",
             c.slug,
             stale_for.num_minutes(),
             c.state
@@ -194,7 +198,27 @@ async fn check_challenge_deadlines(state: &AppState, now: DateTime<Utc>) {
             continue;
         }
 
-        let text = format!("[task {}] challenge defaulted: {default_action}", c.slug);
+        // task:changed (RULED 2026-07-04, Detoro): a default ruling doesn't
+        // go through `commands::task`'s handlers (it bypasses `emit_changed`
+        // by construction — the whole point is that no agent called
+        // `task.rule`), so the LaneBoard would otherwise never see the
+        // open->ruled chip flip until unrelated activity touched the task.
+        if let Ok(Some(task)) = repo::task::get(&state.db, &c.workspace_id, &c.slug).await {
+            state.emit(
+                crate::engine::bus::TASK_CHANGED,
+                crate::engine::bus::TaskChanged {
+                    workspace_id: task.workspace_id,
+                    task_id: task.id,
+                    slug: task.slug,
+                    state: task.state,
+                },
+            );
+        }
+
+        // "AUTO" is load-bearing (RULED 2026-07-04, Detoro) — same rationale
+        // as the stall alert: the swapped-sender attribution below is a REAL
+        // party to the challenge, but neither actually typed this line.
+        let text = format!("[task {}] AUTO default ruling — {default_action}", c.slug);
         match (&c.actor_agent_id, &c.owner_agent_id) {
             (Some(actor), Some(owner)) if actor != owner => {
                 notify(state, owner, actor, &text).await;
@@ -278,7 +302,11 @@ mod tests {
         let arr = inbox.as_array().unwrap();
         assert_eq!(arr.len(), 1, "must fire once past the threshold");
         let text = arr[0]["text"].as_str().unwrap();
-        assert!(text.contains("STALL"), "line must say STALL: {text}");
+        assert!(
+            text.contains("AUTO"),
+            "line must carry the machine-generated marker (RULED 2026-07-04): {text}"
+        );
+        assert!(text.contains("stall"), "line must say it's a stall alert: {text}");
         assert!(text.contains("t1"), "line must name the task: {text}");
         assert_eq!(arr[0]["fromInstanceId"], json!(implementer));
         assert_eq!(arr[0]["toInstanceId"], json!(owner));
@@ -321,6 +349,62 @@ mod tests {
             .await
             .expect("list failed");
         assert_eq!(inbox.as_array().unwrap().len(), 2, "cooldown expired -> second alert fires");
+    }
+
+    /// The cooldown MUST be per-task, not a single global gate — Ticker keys
+    /// `last_stall_alert` by task id, so one stalled task firing must never
+    /// suppress a DIFFERENT stalled task's alert on the very same tick.
+    #[tokio::test]
+    async fn stall_cooldown_is_per_task_not_global() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create t1");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t2", "title": "T2", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create t2");
+        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
+            .await
+            .expect("claim t1 failed");
+        task::claim(&state, json!({ "workspaceId": ws, "slug": "t2", "actorId": implementer }))
+            .await
+            .expect("claim t2 failed");
+
+        let claimed_at = Utc::now();
+        let mut ticker = Ticker::new();
+        // Both tasks stall together on the SAME tick.
+        tick(&state, claimed_at + Duration::minutes(31), &mut ticker).await;
+        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            2,
+            "both t1 and t2 must alert independently on the same tick — one task's cooldown \
+             entry must not gate the other's"
+        );
+
+        // Within the hour on a second tick: BOTH stay cooled down (proves the
+        // cooldown is keyed per-task, not a single last-fired-at timestamp
+        // that a second task would incorrectly race past or get blocked by).
+        tick(&state, claimed_at + Duration::minutes(51), &mut ticker).await;
+        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            2,
+            "both tasks' cooldowns must independently suppress a same-hour repeat"
+        );
     }
 
     /// A real test clock can't tell a claim-time event apart from a note
@@ -448,25 +532,31 @@ mod tests {
         let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
-        let owner_received = owner_inbox
+        let owner_received: Vec<_> = owner_inbox
             .as_array()
             .unwrap()
             .iter()
             .filter(|m| m["toInstanceId"] == json!(owner))
-            .count();
-        assert_eq!(owner_received, 1, "owner must receive exactly one notification");
+            .collect();
+        assert_eq!(owner_received.len(), 1, "owner must receive exactly one notification");
+        assert!(
+            owner_received[0]["text"].as_str().unwrap().contains("AUTO"),
+            "line must carry the machine-generated marker (RULED 2026-07-04): {}",
+            owner_received[0]["text"]
+        );
 
         let challenger_inbox =
             crate::engine::commands::message::list(&state, json!({ "instanceId": challenger }))
                 .await
                 .expect("list failed");
-        let challenger_received = challenger_inbox
+        let challenger_received: Vec<_> = challenger_inbox
             .as_array()
             .unwrap()
             .iter()
             .filter(|m| m["toInstanceId"] == json!(challenger))
-            .count();
-        assert_eq!(challenger_received, 1, "challenger must receive exactly one notification");
+            .collect();
+        assert_eq!(challenger_received.len(), 1, "challenger must receive exactly one notification");
+        assert!(challenger_received[0]["text"].as_str().unwrap().contains("AUTO"));
     }
 
     #[tokio::test]
