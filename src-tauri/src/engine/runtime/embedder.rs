@@ -15,6 +15,10 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
 /// Embedding failure, kept separate from `AppError` so the trait stays free
 /// of command-layer concerns; handlers map it at the boundary.
@@ -108,6 +112,131 @@ impl Embedder for FakeEmbedder {
     }
 }
 
+/// Output dimension of `AllMiniLML6V2Q` (plan R2).
+pub const MINILM_L6_V2_Q_DIMENSION: usize = 384;
+
+/// Model identity recorded in `memory_index.model_id` for the production model.
+pub const MINILM_L6_V2_Q_MODEL_ID: &str = "all-minilm-l6-v2-q8";
+
+/// `~/Library/Application Support/Conclave/models` (macOS) — mirrors the
+/// `dirs::data_dir()`/`Conclave` convention in `engine/db.rs::db_path`,
+/// scoped to a `models` subdir so it never collides with `conclave.db`.
+pub fn model_cache_dir() -> PathBuf {
+    dirs::data_dir()
+        .expect("could not resolve user data directory")
+        .join("Conclave")
+        .join("models")
+}
+
+/// Best-effort check for whether the model has already been downloaded to
+/// `cache_dir`, without loading it into memory. Backs
+/// [`FastembedEmbedder`]'s [`Embedder::is_ready`] disk-cache branch (an
+/// in-process session load is the other) — `pub` so it can also be
+/// unit-tested directly without constructing a full `FastembedEmbedder`.
+/// Works across process restarts, before any embed call has happened in the
+/// current process.
+///
+/// This inspects the `hf-hub` cache layout for the pinned repo
+/// (`models--Xenova--all-MiniLM-L6-v2`) rather than the model's own manifest,
+/// so it stays a directory-existence check, not a hash/integrity check — a
+/// corrupt-but-present cache is still reported ready and surfaces its real
+/// error on the next `embed` call.
+pub fn is_model_downloaded(cache_dir: &Path) -> bool {
+    let repo_dir = cache_dir.join("models--Xenova--all-MiniLM-L6-v2");
+    let Ok(mut entries) = std::fs::read_dir(&repo_dir) else {
+        return false;
+    };
+    entries.next().is_some()
+}
+
+/// Production [`Embedder`] backed by `fastembed`'s quantized MiniLM model.
+///
+/// The ONNX session is loaded lazily on the first [`Embedder::embed`] call
+/// (triggering a one-time download if the cache is cold) and cached in a
+/// `Mutex` for the process lifetime — `fastembed::TextEmbedding::embed` takes
+/// `&mut self`, so the mutex supplies the interior mutability the `&self`
+/// trait signature requires.
+pub struct FastembedEmbedder {
+    cache_dir: PathBuf,
+    session: OnceLock<Mutex<TextEmbedding>>,
+}
+
+impl FastembedEmbedder {
+    /// Construct an embedder that caches the model under `cache_dir`. Does
+    /// not touch the filesystem or network until the first [`Embedder::embed`]
+    /// call.
+    pub fn new(cache_dir: PathBuf) -> Self {
+        Self {
+            cache_dir,
+            session: OnceLock::new(),
+        }
+    }
+
+    /// Construct an embedder using the Conclave-scoped model cache
+    /// directory ([`model_cache_dir`]).
+    pub fn with_default_cache_dir() -> Self {
+        Self::new(model_cache_dir())
+    }
+
+    fn session(&self) -> Result<&Mutex<TextEmbedding>, EmbedError> {
+        if let Some(session) = self.session.get() {
+            return Ok(session);
+        }
+
+        std::fs::create_dir_all(&self.cache_dir).map_err(|error| {
+            EmbedError::ModelUnavailable(format!(
+                "could not create model cache dir {:?}: {error}",
+                self.cache_dir
+            ))
+        })?;
+
+        let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2Q)
+            .with_cache_dir(self.cache_dir.clone())
+            .with_show_download_progress(false);
+
+        let model = TextEmbedding::try_new(options)
+            .map_err(|error| EmbedError::ModelUnavailable(error.to_string()))?;
+
+        Ok(self.session.get_or_init(|| Mutex::new(model)))
+    }
+}
+
+impl Embedder for FastembedEmbedder {
+    fn model_id(&self) -> &'static str {
+        MINILM_L6_V2_Q_MODEL_ID
+    }
+
+    fn dimension(&self) -> usize {
+        MINILM_L6_V2_Q_DIMENSION
+    }
+
+    /// True once the model session has loaded in this process, OR the model
+    /// files are already present on disk from a prior run. Never triggers a
+    /// download or a model load — cheap and side-effect free, per the trait
+    /// contract.
+    fn is_ready(&self) -> bool {
+        self.session.get().is_some() || is_model_downloaded(&self.cache_dir)
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let session = self.session()?;
+        let mut model = session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // `None` batch_size defers to fastembed's own default batching.
+        // `fastembed::Embedding` is a `Vec<f32>` alias, so this is already
+        // the trait's `Vec<Vec<f32>>` return shape.
+        model
+            .embed(texts, None)
+            .map_err(|error| EmbedError::Failed(error.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +260,70 @@ mod tests {
     fn fake_embedder_empty_input_yields_empty_output() {
         let embedder = FakeEmbedder::new(8);
         assert!(embedder.embed(&[]).expect("embed").is_empty());
+    }
+
+    #[test]
+    fn model_cache_dir_is_scoped_under_conclave() {
+        let dir = model_cache_dir();
+        assert!(dir.ends_with("Conclave/models"), "unexpected cache dir: {dir:?}");
+    }
+
+    #[test]
+    fn is_model_downloaded_false_for_missing_dir() {
+        let missing = std::env::temp_dir().join("conclave-embedder-test-missing-dir-xyz");
+        assert!(!is_model_downloaded(&missing));
+    }
+
+    #[test]
+    fn fastembed_embedder_is_ready_reflects_uninitialized_session() {
+        let embedder =
+            FastembedEmbedder::new(std::env::temp_dir().join("conclave-embedder-test-empty"));
+        assert!(
+            !embedder.is_ready(),
+            "fresh embedder over an empty dir must not report ready"
+        );
+    }
+
+    #[test]
+    fn fastembed_embedder_reports_model_identity() {
+        let embedder = FastembedEmbedder::with_default_cache_dir();
+        assert_eq!(embedder.model_id(), MINILM_L6_V2_Q_MODEL_ID);
+        assert_eq!(embedder.dimension(), MINILM_L6_V2_Q_DIMENSION);
+    }
+
+    #[test]
+    fn fastembed_embedder_empty_input_never_touches_the_model() {
+        // Must short-circuit before `session()` — an empty cache dir would
+        // otherwise force a session load (and, on a cold cache, a network
+        // download) just to answer a call with nothing to embed.
+        let embedder =
+            FastembedEmbedder::new(std::env::temp_dir().join("conclave-embedder-test-empty-2"));
+        assert!(embedder.embed(&[]).expect("embed empty").is_empty());
+        assert!(!embedder.is_ready(), "embedding nothing must not load the model");
+    }
+
+    #[test]
+    #[ignore = "downloads the real MiniLM model on a cold cache; run manually with --ignored"]
+    fn fastembed_embedder_embeds_real_text_and_becomes_ready() {
+        // A dedicated cache dir, not `with_default_cache_dir()` — the shared
+        // Conclave cache dir may already be warm from an earlier run (e.g.
+        // the T1 spike), which would trigger the "already on disk" branch of
+        // `is_ready` and make the pre-embed assertion below meaningless.
+        let embedder =
+            FastembedEmbedder::new(std::env::temp_dir().join("conclave-embedder-test-real-embed"));
+        assert!(!embedder.is_ready(), "must not report ready before the first embed call");
+
+        let texts = vec!["workspace memory system".to_string()];
+        let embeddings = embedder.embed(&texts).expect("embed");
+
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].len(), MINILM_L6_V2_Q_DIMENSION);
+        let norm = embeddings[0]
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "expected a unit vector, norm={norm}");
+        assert!(embedder.is_ready(), "must report ready once the session is loaded");
     }
 }

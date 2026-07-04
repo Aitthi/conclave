@@ -43,6 +43,20 @@ pub struct AppState {
     /// (M2.2), independent of the `AppState`'s lifetime.
     pub runtime: std::sync::Arc<crate::engine::runtime::Runtime>,
 
+    /// Text embedder for the workspace memory system (memory-v1 T3).
+    ///
+    /// Object-safe (`Arc<dyn Embedder>`) so command handlers (T4) are
+    /// generic over the backend: production wiring holds a
+    /// `FastembedEmbedder`, `AppState::for_tests` holds a `FakeEmbedder` so
+    /// tests never depend on the model download gate. Model load is lazy
+    /// inside `FastembedEmbedder` itself — constructing this field touches
+    /// neither the filesystem nor the network.
+    ///
+    /// `#[allow(dead_code)]`: read by `commands::memory` (T4), which lands
+    /// after this field.
+    #[allow(dead_code)]
+    pub memory_embedder: std::sync::Arc<dyn crate::engine::runtime::embedder::Embedder>,
+
     /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
     /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
     /// time. This is what makes `/clear` run strictly AFTER the save completes
@@ -72,6 +86,9 @@ impl AppState {
             db: pool,
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
+            memory_embedder: std::sync::Arc::new(
+                crate::engine::runtime::embedder::FastembedEmbedder::with_default_cache_dir(),
+            ),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
@@ -179,6 +196,9 @@ impl AppState {
             db: crate::engine::db::connect_in_memory().await,
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
+            memory_embedder: std::sync::Arc::new(crate::engine::runtime::embedder::FakeEmbedder::new(
+                crate::engine::runtime::embedder::MINILM_L6_V2_Q_DIMENSION,
+            )),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
