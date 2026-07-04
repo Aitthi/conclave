@@ -58,7 +58,7 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 
 **Interfaces:**
 - Consumes: `InterAgentMessage[]` (newest-first, as the API returns), `derivePairs`/`pairKeyOf` from `src/lib/chatPairs.ts`, a `lastSeen: Record<string, string>` map (room key → last-seen message id or ISO time).
-- Produces: `deriveRooms(messages, lastSeen): Room[]` where `Room = { key: string; kind: "channel" | "dm"; title: string; memberIds: string[]; lastAt: string; unread: number }`. Room `key`s: literal `"workspace"` for the channel; the `pairKeyOf` key for DMs. `#workspace` is always first and always present (even with zero messages); pairs follow most-recent-first. `unread` counts messages newer than `lastSeen[key]` (0 when unseen entry is absent → everything unread is wrong for first open; rule: absent entry = fully read at mount, so unread only accrues while the app runs — no fake history badges).
+- Produces: `deriveRooms(messages, lastSeen): Room[]` where `Room = { key: string; kind: "channel" | "dm"; title: string; memberIds: string[]; lastAt: string; unread: number }`. Room `key`s: literal `"workspace"` for the channel; the `pairKeyOf` key for DMs. `#workspace` is always first and always present (even with zero messages); pairs follow most-recent-first. `unread` counts messages newer than `lastSeen[key]`; when a room has no `lastSeen` entry, the baseline is a `mountedAt` timestamp the caller captures once when the rail mounts (Mellow's plan-review F4: without it, a PAIR room that first appears mid-session would count as fully read and never badge). Net effect: no fake history badges at first open, but new rooms badge their new messages.
 - Pure function, no React.
 
 - [ ] Step 1: If the repo has a frontend test runner (check `package.json` for vitest/jest), write unit tests for: workspace-room always present, pair grouping, unread accrual, absent-lastSeen = read. If none exists, note it in the commit body and rely on Step 2.
@@ -90,7 +90,7 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - Replace the `<ContextDrawer …/>` mount (currently inside `activeTab !== null`) with `<ChatRail workspaceId={workspaceId} roster={roster} statuses={…from tabs}} onOpenChat={onOpenChat} />` mounted **unconditionally** (the rail is workspace-scoped, not per-tab — it must not unmount on tab switch or when no tab is active).
 - `ContextDrawer` import stays until Task 7 (the file still compiles); only the mount moves.
 
-- [ ] Step 1: Swap the mount; thread `statuses` from `tabs`.
+- [ ] Step 1: Swap the mount; thread `statuses` from `tabs` — memoized (`useMemo` on `tabs`, like `roster`) so unrelated `WorkspacePane` state changes don't re-render the rail (plan-review F5).
 - [ ] Step 2: Verify `npx tsc --noEmit`; manual smoke: rail shows live messages, tab switching does not reset the rail, maximize opens the Chat Hub, collapse works.
 - [ ] Step 3: Commit.
 
@@ -105,8 +105,8 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - Content per proto `AppShell.tsx` top section: `Skills (N) ▾` trigger → popover listing the effective skill set **with the existing drift hint** ("restart to apply", from `launchedSkillIds` diff) and the Role chip (ADR 0005 section); divider; Resume-last-handoff + Restart icon buttons wired to the drawer's existing Session logic (move the lockout/timeout code as-is). For `chat`/`orchestrator` defs add the `Config ▾` popover (R5) holding the drawer's Model·API / Fusion sections.
 - Mount: in `WorkspacePane`'s `<main>`, directly under the tab strip, rendered from `activeTab` data (one instance, active agent only). Popovers close on outside click and are mutually exclusive with the bottom bar's (proto behavior).
 
-- [ ] Step 1: Extract the Skills/Role/Session/Config code from `ContextDrawer.tsx` into `ContextTopBar` (move guards + comments).
-- [ ] Step 2: Mount under the tab strip.
+- [ ] Step 1: Extract the SNAPSHOT STATE first (plan-review F2, blocking): move the drawer's snapshot block (`snapshots`, `hasHandoff`, `snapshotError`, `refetchSnapshots` with its seq guard, the `useSnapshotCreated` wiring — `ContextDrawer.tsx:281–332`) into a shared hook `useSessionSnapshots(sessionId)` in `src/lib/`. `WorkspacePane` calls it ONCE for the active session and passes the result to both bars — Task 5's Resume button gates on `hasHandoff` NOW, Task 6's popover consumes the same instance's `snapshots` later. Two separate hook calls = two fetchers = the risk-ledger violation this step exists to prevent.
+- [ ] Step 2: Extract the Skills/Role/Session/Config code from `ContextDrawer.tsx` into `ContextTopBar` (move guards + comments); mount under the tab strip.
 - [ ] Step 3: Verify `npx tsc --noEmit`; manual smoke: skills list + drift hint, restart/resume still work, popover open/close.
 - [ ] Step 4: Commit.
 
@@ -120,9 +120,9 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - Content per proto bottom section + R4: `Snapshots (N) ▾` trigger → popover with the drawer's full snapshot list (expand row → saved content, delete, submit-into-terminal, "Snapshot now", "Compact now") — move the logic verbatim; inline summary text `last handoff ~N tok · age`; Compact icon button; compact context-meter chip (R4) fed by the drawer's existing `session:context` estimate code, honest-labelled.
 - Mount: bottom of the active agent's column, visually **above the composer** per proto (top bar / terminal / bottom bar / StdinBar). Exact DOM placement relative to the per-tab always-mounted layers is implementer judgment under two constraints: the terminal invariant (no remounting), and at most ONE live snapshot/meter fetcher at a time (don't duplicate per hidden tab).
 
-- [ ] Step 1: Extract snapshots + meter code into `ContextBottomBar`.
+- [ ] Step 1: Extract the snapshot popover UI + row actions + meter code into `ContextBottomBar`, consuming the `useSessionSnapshots` instance `WorkspacePane` already holds from Task 5 — this task adds NO new fetcher.
 - [ ] Step 2: Mount per the constraint above.
-- [ ] Step 3: Verify `npx tsc --noEmit`; manual smoke: snapshot list/expand/delete/submit, compact fires, meter updates, resume gating (Session's Resume enable follows snapshot presence — that wiring crosses both bars; keep the shared state in `WorkspacePane` or a small context, not duplicated fetches).
+- [ ] Step 3: Verify `npx tsc --noEmit`; manual smoke: snapshot list/expand/delete/submit, compact fires, meter updates, resume gating (Session's Resume enable still follows snapshot presence via the shared `useSessionSnapshots` state from Task 5).
 - [ ] Step 4: Commit.
 
 ### Task 7: Delete `ContextDrawer` + sweep
@@ -143,6 +143,6 @@ Recorded by the lead (Detoro) after design review; these bind every task:
 - **`ContextDrawer.tsx` is 997 lines of guarded code** — the restart lockout timer, StrictMode-safe spawn results, seq-guarded fetches. Rewriting any of it from memory WILL reintroduce fixed bugs. Move code blocks wholesale.
 - **Terminal always-mounted invariant** (`WorkspacePane.tsx` terminal-layer comment): scrollback and TUI mouse modes die if a bar mount restructures those layers. Test wheel-scroll after tab switching in Task 6.
 - **Rail must be workspace-scoped**: mounting it per-tab (like the drawer was) resets room selection and lastSeen on every tab switch — that's the bug the unconditional mount in Task 4 exists to prevent.
-- **`Resume` gating crosses bars**: the drawer computed "has snapshots" once and gated Session's Resume with it. Split into two bars, the state must be lifted, not fetched twice.
+- **`Resume` gating crosses bars**: the drawer computed `hasHandoff` once (`ContextDrawer.tsx:314`) and gated Session's Resume with it. Solved structurally by Task 5 Step 1 (`useSessionSnapshots`, single instance in `WorkspacePane`) — found blocking in plan review by Mellow (F2); do not regress to per-bar fetches.
 - **No human sender-detection needed (R8)**: do not port `ChatView`'s user/assistant sides into the rail — the message table has no human identity, and inventing one would violate the honesty rule.
 - **ChatHub refactor (Task 1) must be behavior-preserving** — it shipped reviewed at `c5465d1`; any visible change there is a defect.
