@@ -140,6 +140,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 9 {
+        sqlx::raw_sql(include_str!("migrations/0009_memory_system.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 9;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -172,7 +181,7 @@ pub(crate) async fn connect_in_memory() -> SqlitePool {
 mod tests {
     use super::*;
 
-    /// All 19 entity tables must exist after migration.
+    /// All entity tables must exist after migration.
     #[tokio::test]
     async fn migrate_creates_all_tables() {
         let pool = connect_in_memory().await;
@@ -183,10 +192,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("table-count query failed");
-        assert_eq!(count, 20, "expected 20 tables, got {count}");
+        assert_eq!(count, 22, "expected 22 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 6.
+    /// Running migrate twice must not error and must leave user_version == 9.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -211,15 +220,15 @@ mod tests {
         .await
         .expect("table-count query failed");
         assert_eq!(
-            count, 20,
-            "expected 20 tables after idempotent run, got {count}"
+            count, 22,
+            "expected 22 tables after idempotent run, got {count}"
         );
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 8, "user_version should be 8");
+        assert_eq!(version, 9, "user_version should be 9");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -344,7 +353,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -435,7 +444,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -474,5 +483,76 @@ mod tests {
                 .await
                 .expect("select failed");
         assert!(role_id.is_none());
+    }
+
+    /// Migration 0009 creates the workspace-scoped memory index and chunk
+    /// tables, including the idempotency uniqueness constraint.
+    #[tokio::test]
+    async fn migrate_adds_memory_system_tables() {
+        let pool = connect_in_memory().await;
+
+        sqlx::query(
+            "INSERT INTO workspace (id, name, folder_path, created_at) \
+             VALUES ('memory-ws', 'Memory', '/tmp/memory', '2026-07-04T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO memory_index \
+             (workspace_id, model_id, dimension, created_at, updated_at) \
+             VALUES ('memory-ws', 'fake', 2, '2026-07-04T00:00:00Z', \
+                     '2026-07-04T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert memory index");
+        sqlx::query(
+            "INSERT INTO memory_chunk \
+             (id, workspace_id, source_kind, text, embedding, dimension, content_hash, \
+              created_at, updated_at) \
+             VALUES ('chunk-1', 'memory-ws', 'manual', 'text', x'0000000000000000', 2, \
+                     'hash', '2026-07-04T00:00:00Z', '2026-07-04T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert memory chunk");
+
+        let duplicate = sqlx::query(
+            "INSERT INTO memory_chunk \
+             (id, workspace_id, source_kind, text, embedding, dimension, content_hash, \
+              created_at, updated_at) \
+             VALUES ('chunk-2', 'memory-ws', 'manual', 'text', x'0000000000000000', 2, \
+                     'hash', '2026-07-04T00:00:00Z', '2026-07-04T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            duplicate.is_err(),
+            "workspace/content hash uniqueness must reject duplicates"
+        );
+
+        sqlx::query("DELETE FROM workspace WHERE id = 'memory-ws'")
+            .execute(&pool)
+            .await
+            .expect("delete workspace");
+        let remaining_index: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'")
+                .fetch_one(&pool)
+                .await
+                .expect("count memory index");
+        let remaining_chunks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'")
+                .fetch_one(&pool)
+                .await
+                .expect("count memory chunks");
+        assert_eq!(remaining_index, 0, "memory index must cascade");
+        assert_eq!(remaining_chunks, 0, "memory chunks must cascade");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .expect("pragma read failed");
+        assert_eq!(version, 9);
     }
 }
