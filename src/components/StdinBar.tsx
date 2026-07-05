@@ -40,6 +40,9 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   const [targetId, setTargetId] = useState(instanceId);
   // Last routed-send confirmation (cleared on the next keystroke).
   const [outbox, setOutbox] = useState<OutboxNote | null>(null);
+  // Composer wrapper width, not shell mode — this fixes any narrow context
+  // (Design pane, Artifacts pane, a resized window) for free.
+  const [narrow, setNarrow] = useState(false);
 
   // Guard setState against a send that resolves after unmount (e.g. the pane
   // closes mid-send) — React 19 no-ops the update but `sending` would otherwise
@@ -140,6 +143,22 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   }
   const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>(insertPaths);
 
+  // Measure the composer wrapper (the same node useFileDrop's `dropRef` is
+  // already attached to — reading `.current` here doesn't touch that ref
+  // assignment or the drop-target logic). Below the threshold the placeholder
+  // shortens so it never wraps and balloons the box's auto-grown height.
+  useEffect(() => {
+    const el = dropRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? el.getBoundingClientRect().width;
+      const next = width < 560;
+      setNarrow((prev) => (prev === next ? prev : next));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [dropRef]);
+
   // Auto-grow with content, capped by the `max-h-40` on the element itself —
   // "auto" first so a shrink (e.g. clearing after send) isn't stuck at the
   // tallest height it ever reached (scrollHeight only ever grows otherwise).
@@ -157,7 +176,11 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     const contentHeight = el.scrollHeight;
     if (contentHeight > 0) el.style.height = `${contentHeight}px`;
   }
-  useEffect(autogrow, [value]);
+  // `narrow` is a dep too: the empty textarea's scrollHeight includes the
+  // rendered placeholder (Blink/WebKit), so a width flip that swaps the
+  // placeholder text must re-measure in the same render or the box flashes
+  // tall until the next keystroke.
+  useEffect(autogrow, [value, narrow]);
   // Re-measure when the tab is revealed (display:none → laid out): the box
   // gains a size, the observer fires, and a multiline draft typed before a
   // tab switch re-expands. Re-setting an unchanged height doesn't re-fire,
@@ -174,7 +197,82 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     ? "Type to inject into the target session…"
     : sessionId === null
       ? "No running session"
-      : "Message the agent…  (Enter to send · Shift+Enter for newline)";
+      : narrow
+        ? "Message the agent…"
+        : "Message the agent…  (Enter to send · Shift+Enter for newline)";
+
+  // Shared pieces, laid out differently below depending on `narrow` — the
+  // routing chip + attach + send buttons already claim ~230px on their own,
+  // which crowds the textarea to a sliver in a ~400px column regardless of
+  // placeholder length. Below the threshold the composer switches to two
+  // rows (controls on top, full-width input below) instead of shrinking the
+  // input to near-zero width in a single row.
+  const routingPicker = (
+    <RoutingPicker
+      selfId={instanceId}
+      roster={roster}
+      value={targetId}
+      onChange={setTargetId}
+      disabled={sending}
+    />
+  );
+  const promptGlyph = (
+    <span className="text-[15px] text-text-tertiary font-mono select-none shrink-0">›</span>
+  );
+  const textareaEl = (
+    <textarea
+      ref={inputRef}
+      rows={1}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => {
+        setValue(e.target.value);
+        if (outbox) setOutbox(null);
+      }}
+      onKeyDown={(e) => {
+        // Enter submits; Shift+Enter falls through to the browser default
+        // (insert a literal newline) — matches ChatView's composer. The
+        // embedded "\n" rides along in the single `text` send below, and
+        // Claude Code / Codex read it as "insert a line" in their own
+        // input box rather than submitting (only the trailing standalone
+        // "\r" does that).
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          void handleSend();
+        }
+      }}
+      placeholder={placeholder}
+      title="Enter to send · Shift+Enter for newline"
+      className="flex-1 min-w-0 bg-transparent outline-none resize-none overflow-y-auto text-[14.5px] font-mono placeholder:text-text-tertiary py-0.5 max-h-40 disabled:opacity-50"
+    />
+  );
+  // Attach — opens the native file picker (Finder); same path-insertion as
+  // dragging a file in, for anyone who'd rather click than drag.
+  const attachButton = (
+    <button
+      type="button"
+      onClick={() => void pickFiles().then((paths) => paths && insertPaths(paths))}
+      disabled={sending}
+      title="Attach files or images"
+      aria-label="Attach files or images"
+      className="w-8 h-8 rounded-lg grid place-items-center shrink-0 text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary disabled:opacity-40"
+    >
+      <Paperclip className="w-4 h-4" />
+    </button>
+  );
+  // Send — Enter also submits; the button mirrors that for discoverability.
+  const sendButton = (
+    <button
+      type="button"
+      onClick={() => void handleSend()}
+      disabled={disabled || value.length === 0}
+      title="Send (Enter)"
+      aria-label="Send"
+      className="w-9 h-9 rounded-xl bg-accent text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
+    >
+      <CornerDownLeft className="w-[18px] h-[18px]" />
+    </button>
+  );
 
   return (
     <div className="shrink-0 border-t border-overlay/[0.06] bg-surface">
@@ -197,67 +295,37 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
             stdin and the chat input read as the same control. */}
         <div
           ref={dropRef}
-          className={`flex items-center gap-2.5 rounded-2xl ring-1 bg-fill-softer px-3 py-2.5 transition-shadow${
+          className={`rounded-2xl ring-1 bg-fill-softer px-3 py-2.5 transition-shadow${
+            narrow ? " flex flex-col gap-2" : " flex items-center gap-2.5"
+          }${
             isOver
               ? " ring-2 ring-accent bg-accent/[0.06]"
               : " ring-overlay/[0.1] focus-within:ring-accent/50"
           }`}
         >
-          <RoutingPicker
-            selfId={instanceId}
-            roster={roster}
-            value={targetId}
-            onChange={setTargetId}
-            disabled={sending}
-          />
-          <span className="text-[15px] text-text-tertiary font-mono select-none shrink-0">›</span>
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={value}
-            disabled={disabled}
-            onChange={(e) => {
-              setValue(e.target.value);
-              if (outbox) setOutbox(null);
-            }}
-            onKeyDown={(e) => {
-              // Enter submits; Shift+Enter falls through to the browser default
-              // (insert a literal newline) — matches ChatView's composer. The
-              // embedded "\n" rides along in the single `text` send below, and
-              // Claude Code / Codex read it as "insert a line" in their own
-              // input box rather than submitting (only the trailing standalone
-              // "\r" does that).
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleSend();
-              }
-            }}
-            placeholder={placeholder}
-            className="flex-1 min-w-0 bg-transparent outline-none resize-none overflow-y-auto text-[14.5px] font-mono placeholder:text-text-tertiary py-0.5 max-h-40 disabled:opacity-50"
-          />
-          {/* Attach — opens the native file picker (Finder); same path-insertion
-              as dragging a file in, for anyone who'd rather click than drag. */}
-          <button
-            type="button"
-            onClick={() => void pickFiles().then((paths) => paths && insertPaths(paths))}
-            disabled={sending}
-            title="Attach files or images"
-            aria-label="Attach files or images"
-            className="w-8 h-8 rounded-lg grid place-items-center shrink-0 text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary disabled:opacity-40"
-          >
-            <Paperclip className="w-4 h-4" />
-          </button>
-          {/* Send — Enter also submits; the button mirrors that for discoverability. */}
-          <button
-            type="button"
-            onClick={() => void handleSend()}
-            disabled={disabled || value.length === 0}
-            title="Send (Enter)"
-            aria-label="Send"
-            className="w-9 h-9 rounded-xl bg-accent text-white grid place-items-center shrink-0 hover:brightness-105 disabled:opacity-30 disabled:hover:brightness-100"
-          >
-            <CornerDownLeft className="w-[18px] h-[18px]" />
-          </button>
+          {narrow ? (
+            <>
+              <div className="flex items-center justify-between gap-2">
+                {routingPicker}
+                <div className="flex items-center gap-1 shrink-0">
+                  {attachButton}
+                  {sendButton}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {promptGlyph}
+                {textareaEl}
+              </div>
+            </>
+          ) : (
+            <>
+              {routingPicker}
+              {promptGlyph}
+              {textareaEl}
+              {attachButton}
+              {sendButton}
+            </>
+          )}
         </div>
       </div>
     </div>
