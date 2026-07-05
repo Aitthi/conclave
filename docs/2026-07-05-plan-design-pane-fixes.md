@@ -70,6 +70,16 @@ date: 2026-07-05 (evening) · requester: human (screenshot of the Design view ri
   `handleSelectWorkspace` keeps clearing both flags. ⌘⇧A becomes the mirror of
   ⌘D: `setShowDesign(false); setShowArtifacts(v => !v);` and no longer touches
   the center-screen flags. Rail's Artifacts button gets the same body.
+  AMENDED at implementation (defect found by Tiësto, ruling: upheld): the
+  original step-4 enumeration missed the four center-screen OPEN handlers
+  (`onOpenBlackboard`/`onOpenChat`/`onOpenMemory`/`onOpenLaneBoard` in the
+  Roster props) — each carried a `setShowArtifacts(false)` from the
+  center-screen era. D4's principle (Design is never cleared by those
+  handlers, artifacts mirrors Design exactly) requires removing all four;
+  an enumeration that contradicts its own stated principle is a plan bug.
+  Guard for later tasks: when a flag changes CATEGORY (center screen →
+  canvas slot), grep every write site of that flag and re-derive each one
+  from the new category's rules — don't trust the plan's site list.
 - **D5 — ChatRail wrapper gets `inert` + `aria-hidden` when collapsed**
   (`WorkspacePane.tsx:515`). Same hidden-tab-stop defect class as Armin F1 on
   Rail/Roster, already in the recorded follow-up bag, and this lane touches
