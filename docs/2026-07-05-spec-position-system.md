@@ -193,12 +193,13 @@ degrades to *today's* behavior byte-for-byte. The chain only ever *adds* a hop w
 ### 3.1 Challenge filed (`task challenge`)
 
 - **Today:** records the event; wakes all watchers (`wakes_watchers` → `challenge` always true).
-- **Change:** additionally ensure the **expected ruler is notified even if not watching**. Expected ruler =
-  the task `owner_agent_id` (the sub-lead/lead who owns the domain). If `owner_agent_id` is NULL, notify the
-  first non-null supervisor up the **challenger's** chain (someone with authority above the challenger); if
-  that is also NULL, the challenge stays advisory to watchers only (today's behavior) — no human ping is
-  fabricated (decision 1: the loop settles itself; the human gets outcomes, not questions).
-- **All-NULL:** identical to today (watchers only).
+- **Change (AMENDED per challenge 75af4e44, Tiësto — the original wording notified a non-watching owner
+  even at all-NULL, contradicting the supreme invariant):** the expected-ruler supplement is the single
+  primitive `lowest_common_supervisor(challenger, owner)` — notify that agent if non-None and not already
+  a watcher. This self-gates on the chain being engaged: challenger under the owner's chain → owner;
+  cross-chain → the LCA (§4); either party chainless / all-NULL → None → watchers-only, byte-for-byte
+  today. No human ping is fabricated (decision 1: the loop settles itself).
+- **All-NULL:** identical to today (watchers only) — including for a non-watching owner.
 
 ### 3.2 Challenge deadline expiry (`task_timer::check_challenge_deadlines`)
 
@@ -228,11 +229,13 @@ fire. So the chain adds **visibility, not a second timer**:
 ### 3.4 Task review-ready (`state -> review`)
 
 - **Today:** wakes watchers (the owner usually watches).
-- **Change:** formalize that review-ready **routes to the integrator = the task `owner_agent_id`** — ensure
-  the owner is notified even if not on the watch list. If owner NULL, watchers-only (today). This is mostly a
-  no-op in practice (owners watch their lanes) but makes "who integrates" explicit rather than watch-list
-  dependent.
-- **All-NULL / no owner:** identical to today.
+- **Change (AMENDED per challenge 75af4e44, Tiësto — same contradiction as §3.1; review-ready has no
+  second party to LCA against, so it gates explicitly):** the owner even-if-not-watching supplement fires
+  ONLY when the owner participates in a chain (`supervisor_agent_id` set on the owner). A chainless owner
+  = watchers-only, exactly today. "Who integrates" becomes explicit precisely when the workspace has
+  opted into the org structure, never before.
+- **All-NULL / no owner:** identical to today — including for a non-watching owner. The all-NULL
+  byte-for-byte invariant is SUPREME over every routing clause in this section.
 
 ### 3.5 Supervisor-link write validation (cycle + scope)
 
