@@ -108,6 +108,7 @@ Subcommands:
   task close    <workspaceId> <slug>          (inside a spawned agent)
   task watch    <workspaceId> <slug>          (inside a spawned agent)
   task unwatch  <workspaceId> <slug>          (inside a spawned agent)
+  uishot        [--task <slug>] <args...>     (runs the workspace's package.json \"uishot\" script here; with --task also records it as a task gate)
   artifact add  <workspaceId> --title <t> --kind <k> (--file <path> | --content <text>)  (kinds: markdown|code|html|svg|mermaid|react|text)
   artifact list <workspaceId>
   artifact get  <id>
@@ -1692,6 +1693,209 @@ fn run_task_gate(
     ))
 }
 
+// ── uishot (ADR 0008: capture runs caller-side) ────────────────────────────
+//
+// `conclave uishot [--task <slug>] <args...>` is a thin CLIENT-side wrapper
+// over the workspace's `package.json` `uishot` capture script — the platform
+// binary never reimplements the capture (no puppeteer/chrome in Rust), it just
+// runs the workspace's own script HERE, same reasoning as `task gate` (cwd,
+// sandbox, env belong to the agent). `--task` additionally records the run on
+// that task's gate ledger by composing a `task gate …` argv and routing it
+// through [`run_task_gate`], so the ledger entry is byte-identical to a manual
+// gate. The workspace for that gate comes from `CONCLAVE_WORKSPACE_ID` (the
+// spawner exports it alongside `CONCLAVE_INSTANCE_ID`, which `--task` already
+// requires) or an explicit `--ws <workspaceId>` override (ruling on challenge
+// 1241c1dc; plan amended @ 43ef7e3).
+
+/// The convention error when a workspace defines no UI capture contract — the
+/// exact wording the spec pins
+/// (`docs/superpowers/specs/2026-07-05-uishot-cli-native.md`).
+const UISHOT_NO_SCRIPT: &str =
+    "conclave: no \"uishot\" script in package.json — this workspace has no UI capture contract";
+
+/// The error when `--task` is used but no workspace can be resolved (neither
+/// `CONCLAVE_WORKSPACE_ID` nor `--ws`).
+const UISHOT_NO_WS: &str =
+    "conclave: uishot --task needs a workspace (CONCLAVE_WORKSPACE_ID unset; pass --ws <workspaceId>)";
+
+const UISHOT_USAGE: &str =
+    "Usage: conclave uishot [--task <slug>] [--ws <workspaceId>] <args...>  (runs the workspace's package.json \"uishot\" script here; with --task also records it as a task gate)";
+
+/// A parsed `conclave uishot …` invocation: conclave's own flags peeled off,
+/// and the remaining words to forward verbatim to the capture script.
+struct UishotInvocation {
+    /// `Some(slug)` when `--task <slug>` was given — the run records that
+    /// task's gate.
+    task: Option<String>,
+    /// `--ws <workspaceId>` override for the gate's workspace (else the
+    /// `CONCLAVE_WORKSPACE_ID` env is used).
+    ws_override: Option<String>,
+    /// Everything not a conclave flag — passed to `pnpm run uishot -- <args…>`.
+    capture_args: Vec<String>,
+}
+
+/// Parse the words AFTER the `uishot` verb. `--task` and `--ws` are conclave's
+/// own flags (each consumes the next word, which must not itself look like a
+/// flag); `--ws` is only meaningful with `--task`. Every other word is a
+/// capture arg forwarded verbatim (the same no-shell-reparse rule as
+/// `task gate`), and at least one is required.
+fn parse_uishot_args(rest: &[String]) -> Result<UishotInvocation, String> {
+    let mut task: Option<String> = None;
+    let mut ws_override: Option<String> = None;
+    let mut capture_args: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--task" => {
+                let slug = rest
+                    .get(i + 1)
+                    .filter(|s| !s.starts_with("--"))
+                    .ok_or(UISHOT_USAGE)?;
+                task = Some(slug.clone());
+                i += 2;
+            }
+            "--ws" => {
+                let ws = rest
+                    .get(i + 1)
+                    .filter(|s| !s.starts_with("--"))
+                    .ok_or(UISHOT_USAGE)?;
+                ws_override = Some(ws.clone());
+                i += 2;
+            }
+            _ => {
+                capture_args.push(rest[i].clone());
+                i += 1;
+            }
+        }
+    }
+    if ws_override.is_some() && task.is_none() {
+        return Err("conclave: uishot --ws requires --task".to_string());
+    }
+    if capture_args.is_empty() {
+        return Err(UISHOT_USAGE.to_string());
+    }
+    Ok(UishotInvocation {
+        task,
+        ws_override,
+        capture_args,
+    })
+}
+
+/// True if `package_json` (raw file contents) defines a string `scripts.uishot`.
+fn has_uishot_script(package_json: &str) -> bool {
+    serde_json::from_str::<Value>(package_json)
+        .ok()
+        .and_then(|v| {
+            v.get("scripts")
+                .and_then(|s| s.get("uishot"))
+                .map(Value::is_string)
+        })
+        .unwrap_or(false)
+}
+
+/// Confirm `<root>/package.json` defines a `uishot` script, or the convention
+/// error ([`UISHOT_NO_SCRIPT`]). Split from the git-root walk so it is
+/// unit-testable without a repo.
+fn read_uishot_contract(root: &std::path::Path) -> Result<(), String> {
+    let contents = std::fs::read_to_string(root.join("package.json"))
+        .map_err(|_| UISHOT_NO_SCRIPT.to_string())?;
+    if has_uishot_script(&contents) {
+        Ok(())
+    } else {
+        Err(UISHOT_NO_SCRIPT.to_string())
+    }
+}
+
+/// The git top-level containing `cwd` (same primitive `run_task_gate` uses for
+/// the gate SHA), or a user-facing error when `cwd` is not inside a repo.
+fn git_toplevel(cwd: &std::path::Path) -> Result<PathBuf, String> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("conclave: uishot: cannot run git: {e}"))?;
+    if !out.status.success() {
+        return Err("conclave: uishot: not inside a git repository".to_string());
+    }
+    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// Compose the `task gate` argv that records a `uishot` run: byte-identical in
+/// shape to a manual `conclave task gate <ws> <slug> -- pnpm run uishot -- …`,
+/// so the ledger entry (cmd, exit, sha, cwd, tail) is indistinguishable.
+fn compose_uishot_gate(ws: &str, slug: &str, capture_args: &[String]) -> Vec<String> {
+    let mut gate = vec![
+        "task".to_string(),
+        "gate".to_string(),
+        ws.to_string(),
+        slug.to_string(),
+        "--".to_string(),
+        "pnpm".to_string(),
+        "run".to_string(),
+        "uishot".to_string(),
+        "--".to_string(),
+    ];
+    gate.extend_from_slice(capture_args);
+    gate
+}
+
+/// What `main` should do with a `uishot` invocation.
+enum UishotPlan {
+    /// Bare form: exec `pnpm run uishot -- <args…>` locally, propagate its exit.
+    Exec(Vec<String>),
+    /// `--task` form: this fully-composed `task gate …` argv flows through the
+    /// existing gate machinery (records the ledger entry + propagates exit).
+    Gate(Vec<String>),
+}
+
+/// Plan a `uishot` invocation (`rest` = argv after the verb). Parses the flags
+/// (usage error → exit 2), confirms the workspace defines a capture contract
+/// (missing → exit 1), and for `--task` resolves the workspace from `--ws` or
+/// `workspace_env` (`CONCLAVE_WORKSPACE_ID`; unset → exit 1). The `u8` in the
+/// error is the exit code `main` should use.
+fn prepare_uishot(
+    rest: &[String],
+    cwd: &std::path::Path,
+    workspace_env: Option<&str>,
+) -> Result<UishotPlan, (String, u8)> {
+    let inv = parse_uishot_args(rest).map_err(|e| (e, 2u8))?;
+    let root = git_toplevel(cwd).map_err(|e| (e, 1u8))?;
+    read_uishot_contract(&root).map_err(|e| (e, 1u8))?;
+    match inv.task {
+        None => Ok(UishotPlan::Exec(inv.capture_args)),
+        Some(slug) => {
+            let ws = inv
+                .ws_override
+                .or_else(|| workspace_env.filter(|s| !s.is_empty()).map(str::to_string))
+                .ok_or((UISHOT_NO_WS.to_string(), 1u8))?;
+            Ok(UishotPlan::Gate(compose_uishot_gate(
+                &ws,
+                &slug,
+                &inv.capture_args,
+            )))
+        }
+    }
+}
+
+/// Exec `pnpm run uishot -- <args…>` in the current cwd, inheriting stdio so
+/// the agent sees the capture live, and return the child's own exit code. No
+/// shell — args are forwarded verbatim (same rule as `task gate`). A missing
+/// `pnpm` surfaces the OS error and the attempted command (never a silent
+/// npm/npx fallback).
+fn exec_uishot(capture_args: &[String]) -> ExitCode {
+    let mut cmd = Command::new("pnpm");
+    cmd.arg("run").arg("uishot").arg("--").args(capture_args);
+    match cmd.status() {
+        Ok(status) => ExitCode::from(status.code().unwrap_or(-1).rem_euclid(256) as u8),
+        Err(e) => {
+            eprintln!(
+                "conclave: uishot: failed to run 'pnpm run uishot -- …': {e} (is pnpm on PATH?)"
+            );
+            ExitCode::from(127)
+        }
+    }
+}
+
 /// `task create … --plan-file <path>` — reads `<path>` relative to the
 /// CALLING agent's cwd (only `conclave-cli`, not the engine, knows that cwd)
 /// and rewrites the flag to `--plan <contents>` before the request is sent.
@@ -1854,6 +2058,27 @@ async fn main() -> ExitCode {
     if argv[0] == "stage" {
         return run_stage(&argv, self_instance.as_deref()).await;
     }
+
+    // `uishot` — client-side wrapper over the workspace's `package.json`
+    // "uishot" capture script (ADR 0008: capture runs caller-side, never
+    // engine-side, same as `task gate`). The bare form execs it and returns
+    // the child's exit; `--task <slug>` rewrites argv into the composed
+    // `task gate …` form below so the run is recorded byte-identically to a
+    // manual gate (workspace from `CONCLAVE_WORKSPACE_ID` or `--ws`).
+    let argv = if argv.first().map(String::as_str) == Some("uishot") {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace_env = std::env::var("CONCLAVE_WORKSPACE_ID").ok();
+        match prepare_uishot(&argv[1..], &cwd, workspace_env.as_deref()) {
+            Ok(UishotPlan::Exec(capture_args)) => return exec_uishot(&capture_args),
+            Ok(UishotPlan::Gate(gate_argv)) => gate_argv,
+            Err((e, code)) => {
+                eprintln!("{e}");
+                return ExitCode::from(code);
+            }
+        }
+    } else {
+        argv
+    };
 
     // `task gate` needs to both run the command HERE (never engine-side) and
     // later propagate its exit code as `conclave-cli`'s own; `task create
@@ -2150,6 +2375,157 @@ mod tests {
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── uishot (ADR 0008: caller-side capture wrapper) ─────────────────────
+
+    #[test]
+    fn uishot_parse_bare_forwards_all_args() {
+        let inv = super::parse_uishot_args(&v(&["home", "--scenario", "empty"])).unwrap();
+        assert!(inv.task.is_none());
+        assert!(inv.ws_override.is_none());
+        assert_eq!(inv.capture_args, v(&["home", "--scenario", "empty"]));
+    }
+
+    #[test]
+    fn uishot_parse_task_peels_slug_keeps_capture() {
+        let inv = super::parse_uishot_args(&v(&["--task", "t1", "home", "--full"])).unwrap();
+        assert_eq!(inv.task.as_deref(), Some("t1"));
+        assert!(inv.ws_override.is_none());
+        assert_eq!(inv.capture_args, v(&["home", "--full"]));
+    }
+
+    #[test]
+    fn uishot_parse_ws_override_and_task() {
+        let inv = super::parse_uishot_args(&v(&["--task", "t1", "--ws", "ws9", "home"])).unwrap();
+        assert_eq!(inv.task.as_deref(), Some("t1"));
+        assert_eq!(inv.ws_override.as_deref(), Some("ws9"));
+        assert_eq!(inv.capture_args, v(&["home"]));
+    }
+
+    #[test]
+    fn uishot_parse_usage_errors() {
+        // no args at all → usage error (exit 2 upstream)
+        assert!(super::parse_uishot_args(&v(&[])).is_err());
+        // --task consumed the only word, no capture arg left
+        assert!(super::parse_uishot_args(&v(&["--task", "t1"])).is_err());
+        // --task with no following word
+        assert!(super::parse_uishot_args(&v(&["--task"])).is_err());
+        // --task's value must not itself look like a flag (would swallow it)
+        assert!(super::parse_uishot_args(&v(&["--task", "--ws", "home"])).is_err());
+        // --ws without --task is meaningless
+        assert!(super::parse_uishot_args(&v(&["--ws", "ws9", "home"])).is_err());
+    }
+
+    #[test]
+    fn uishot_has_script_detects_string_entry_only() {
+        assert!(super::has_uishot_script(r#"{"scripts":{"uishot":"node x.mjs"}}"#));
+        assert!(!super::has_uishot_script(r#"{"scripts":{"build":"x"}}"#));
+        assert!(!super::has_uishot_script(r#"{"scripts":{}}"#));
+        assert!(!super::has_uishot_script(r#"{}"#));
+        assert!(!super::has_uishot_script("not json at all"));
+        // present but not a string → not a runnable script
+        assert!(!super::has_uishot_script(r#"{"scripts":{"uishot":123}}"#));
+    }
+
+    #[test]
+    fn uishot_read_contract_found_and_missing() {
+        let base = std::env::temp_dir().join(format!("conclave-uishot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        // no package.json at all → convention error
+        assert!(super::read_uishot_contract(&base).is_err());
+        // present but no uishot script → convention error
+        std::fs::write(base.join("package.json"), r#"{"scripts":{"build":"x"}}"#).unwrap();
+        assert!(super::read_uishot_contract(&base).is_err());
+        // present with the script → ok
+        std::fs::write(
+            base.join("package.json"),
+            r#"{"scripts":{"uishot":"node scripts/uishot.mjs"}}"#,
+        )
+        .unwrap();
+        assert!(super::read_uishot_contract(&base).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn uishot_compose_gate_is_manual_gate_shape() {
+        assert_eq!(
+            super::compose_uishot_gate("ws1", "t1", &v(&["home", "--full"])),
+            v(&[
+                "task", "gate", "ws1", "t1", "--", "pnpm", "run", "uishot", "--", "home", "--full",
+            ]),
+        );
+    }
+
+    #[test]
+    fn uishot_prepare_task_resolves_workspace_from_env() {
+        // cargo test runs with cwd = the crate dir (src-tauri), which IS inside
+        // this repo and whose root package.json defines a `uishot` script.
+        let cwd = std::env::current_dir().unwrap();
+        match super::prepare_uishot(&v(&["--task", "t1", "home"]), &cwd, Some("ws-env")) {
+            Ok(super::UishotPlan::Gate(argv)) => {
+                assert_eq!(argv, super::compose_uishot_gate("ws-env", "t1", &v(&["home"])));
+            }
+            _ => panic!("expected a Gate plan"),
+        }
+    }
+
+    #[test]
+    fn uishot_prepare_ws_override_beats_env() {
+        let cwd = std::env::current_dir().unwrap();
+        match super::prepare_uishot(
+            &v(&["--task", "t1", "--ws", "ws-flag", "home"]),
+            &cwd,
+            Some("ws-env"),
+        ) {
+            Ok(super::UishotPlan::Gate(argv)) => {
+                assert_eq!(argv[2], "ws-flag");
+            }
+            _ => panic!("expected a Gate plan using the --ws override"),
+        }
+    }
+
+    #[test]
+    fn uishot_prepare_task_without_workspace_errors_exit1() {
+        let cwd = std::env::current_dir().unwrap();
+        match super::prepare_uishot(&v(&["--task", "t1", "home"]), &cwd, None) {
+            Err((msg, code)) => {
+                assert_eq!(code, 1);
+                assert!(msg.contains("needs a workspace"), "unexpected: {msg}");
+            }
+            Ok(_) => panic!("expected a workspace-precondition error"),
+        }
+    }
+
+    #[test]
+    fn uishot_prepare_bare_execs_forwarding_args() {
+        let cwd = std::env::current_dir().unwrap();
+        match super::prepare_uishot(&v(&["home"]), &cwd, None) {
+            Ok(super::UishotPlan::Exec(args)) => assert_eq!(args, v(&["home"])),
+            _ => panic!("expected an Exec plan"),
+        }
+    }
+
+    #[test]
+    fn uishot_prepare_missing_contract_errors_exit1() {
+        // a throwaway dir that is not inside any git repo → resolution fails
+        let base = std::env::temp_dir().join(format!("conclave-uishot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        match super::prepare_uishot(&v(&["home"]), &base, None) {
+            Err((_, code)) => assert_eq!(code, 1),
+            Ok(_) => panic!("expected an exit-1 resolution error"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn uishot_gate_requires_instance_id() {
+        // The --task path routes the composed argv through run_task_gate, which
+        // (like `task gate`) refuses to run without CONCLAVE_INSTANCE_ID — the
+        // precondition error fires BEFORE any command runs.
+        let gate = super::compose_uishot_gate("ws1", "t1", &v(&["home"]));
+        assert!(super::run_task_gate(&gate, None).is_err());
+        assert!(super::run_task_gate(&gate, Some("")).is_err());
     }
 
     #[test]
