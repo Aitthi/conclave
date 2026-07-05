@@ -47,6 +47,21 @@ Per `roster-positions.tsx`: level ladder + track on the 266px card (aside at Ros
 ### T4 — Builder position pickers (`src/components/Builder.tsx`)
 Per `builder-position.tsx`: extend the role area (~line 192+): Track row read-only (= role), Level 4-segment control + "Clear → Unranked", Supervisor list with self AND descendants disabled (use T1 `chainUp`/`reportsOf` for the disable set), live escalation-chain preview. Submit via `setPosition` with tri-state semantics — only send keys the user changed.
 
+AMENDED (lead ruling on challenge a79b45e1, found by Dabin): the original plan
+anchored T4 in Builder without checking that Builder has NO workspace context —
+it takes only `onClose`/`onSaved`/`initialDef` and its single mount
+(`AppShell.tsx:470`) forwards no `workspaceId`/`workspaceAgentId`, while
+`instance.setPosition` requires both. Ruling: T4 stays in Builder per canon;
+Builder gains OPTIONAL props `workspaceId?` + `workspaceAgentId?` and renders
+the Position section ONLY when both are present (definition-only flows — new
+agent, Library — stay position-free: no membership yet). The AppShell wiring
+(forwarding the active workspace + edited member's ids into the Builder mount)
+is IN SCOPE but OUT OF BOUNDARY — it lands as a separate raw scoped commit
+(`git commit -- src/components/AppShell.tsx` with native authorship), flagged
+on the ledger, per the standing boundary-widening convention (precedents
+f895f0a, 3c7220d ratified today). Keep that commit one-arm additive: pass the
+two props, change nothing else in AppShell.
+
 ### T5 — Org chart in Lane board (`src/components/LaneBoard.tsx`)
 Per `org-chart.tsx`: `Board|Org` segment control in the existing floating header; Org mode renders the vertical indented supervisor tree (client-side from roster), Human crown at top, working/last-activity dot per row (roster already carries activity). Refetch on `roster:changed`.
 
