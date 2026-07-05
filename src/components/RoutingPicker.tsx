@@ -93,11 +93,11 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
               className="w-2 h-2 rounded-full shrink-0"
               style={{ backgroundColor: selected.color }}
             />
-            <span className="truncate font-medium text-text-primary">{selected.name}</span>
+            <span className="truncate min-w-0 max-w-[110px] font-medium text-text-primary">{selected.name}</span>
             {isSelf ? (
-              <span className="text-text-tertiary">· self</span>
+              <span className="shrink-0 whitespace-nowrap text-text-tertiary">· self</span>
             ) : hint ? (
-              <span className="text-text-tertiary">· {hint.label}</span>
+              <span className="shrink-0 whitespace-nowrap text-text-tertiary">· {hint.label}</span>
             ) : null}
           </>
         ) : (
