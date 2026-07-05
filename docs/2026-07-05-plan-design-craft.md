@@ -17,6 +17,19 @@ Key fit: arta's grader reads `screens/*.tsx` + `components/*.tsx` + `theme.css` 
 - **R2 — One new `design-craft` skill, self-contained.** Distill the craft core (anti-slop vocabulary, token discipline, critique-rubric essentials, layout/type/color rules) into ONE SKILL.md ≤ ~10KB. Do NOT inject 70KB into agent context; do NOT copy the 14 reference docs in v1 — a workspace `design/craft/` reference library is DEFERRED (recorded here, cut only if asked).
 - **R3 — Review runs as a CLI gate, not an overlay.** `conclave design review <workspaceId> [--json]` → engine `design.review` → spawns node (same login-shell resolution as the host) running the ported grader against `<workspace>/design/`. Exit 0 = no serious findings; agents use it as a `task gate`. A live viewer overlay (arta_design_review-style) is DEFERRED.
 - **R4 — Grader semantics adapt to `design/`:** A1a/A1b (tokens defined/used) run against `design/theme.css` — scaffold gains a minimal `theme.css` so a fresh workspace passes; A2 (shared layout) unchanged over `design/components/`; A3 (nav reachability) runs ONLY when `design/config.json` with `{"start": "<screen>"}` exists — absent = skipped, and the scaffold does NOT create it; A4 (valid TSX + default export) unchanged (esbuild comes with the host's node_modules); A5 = `detectSlopJsx` 0 serious findings. Finding shape `{ antipattern, severity, file, line, snippet, message }` is pinned.
+- **R6 — Host reaches Arta authoring parity** (ruled on Arta's cross-lane flag
+  at Lane S review): the skills teach the Arta-parity authoring contract —
+  curated imports `{react, react-dom, react-router-dom, motion, lucide-react,
+  recharts, clsx, tailwind-merge}` + styling via Tailwind v4 utilities with
+  tokens in `design/theme.css` (`@theme` block, `@source` for workspace dirs) —
+  so `design-host` must provide exactly that set: alias/dedupe the full curated
+  list in vite.config.ts and wire `@tailwindcss/vite` compiling the workspace's
+  `design/theme.css`. The R4 scaffold theme.css carries a real `@theme` token
+  set the welcome screen uses. Rationale: the human asked for ALL of arta's
+  capability; grader A1a already expects `@theme` tokens; skills that promise
+  imports the host can't resolve produce broken-by-construction designs.
+  REJECTED: reduced react-only contract. Lands in Lane R (item 6). Credit:
+  Arta for catching the gap before it shipped.
 - **R5 — Evals = Layer A only (deterministic regression gate), local.** Port `gate.mjs`/`thresholds.json` + two fixtures (one good `design/`, one bad) into `design-host/evals/`; runnable locally and as a task gate. The repo has no CI workflows — do not add one. Layer B (LLM builder loop) is DEFERRED.
 
 ## Lanes (independent; lead integrates)
@@ -34,6 +47,7 @@ Gate: `cd src-tauri && cargo test --lib` (skill loader tests scan the folder).
 3. Engine: `design.review { workspaceId }` in `commands/design.rs` → resolves the workspace `design/` dir, spawns node review.mjs, returns `{ pass, findings, assertions }`. CLI verb `conclave design review <workspaceId> [--json]` in `commands/cli.rs`. Router registration one-arm additive (choke files — semantic-diff guard).
 4. Scaffold: add minimal `design/theme.css` to `scaffold_if_missing` (R4) — tokens the welcome screen actually uses.
 5. Evals per R5: `design-host/evals/{gate.mjs,thresholds.json,fixtures/good,fixtures/bad}` — gate greps the grader over both fixtures vs thresholds; wire nothing into CI.
+6. Host authoring parity per R6: extend `CURATED` + aliases in `design-host/vite.config.ts` to the full set, add the deps + `@tailwindcss/vite` to design-host/package.json, compile the workspace `design/theme.css` (Tailwind v4 `@theme`/`@source`); scaffold theme.css (item 4) gains a real token set. The old `.arta` viewer solved the same wiring — its pre-swap `THEME_CSS` template (git history of `commands/design.rs`) is the reference.
 Boundary: `design-host, src-tauri/src/engine/commands/design.rs, src-tauri/src/engine/commands/cli.rs, src-tauri/src/engine/router.rs, src-tauri/src/engine/runtime/design_host.rs`
 Gates: `cargo test --lib` + `cargo clippy --all-targets -- -D warnings` + `node design-host/review/slop-detect.test.mjs` + `node design-host/evals/gate.mjs`.
 
