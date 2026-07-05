@@ -169,6 +169,8 @@ export function AppShell() {
     setShowChat(false);
     setShowMemory(false);
     setShowLaneBoard(false);
+    setShowArtifacts(false);
+    setShowDesign(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
       // Ignore — the workspace just can't be found in the DB (stale id).
     });
