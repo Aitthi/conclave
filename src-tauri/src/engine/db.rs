@@ -265,10 +265,7 @@ mod tests {
             include_str!("migrations/0012_task_system.sql"),
             include_str!("migrations/0013_memory_proposal.sql"),
         ] {
-            sqlx::raw_sql(sql)
-                .execute(&mut *tx)
-                .await
-                .expect("apply pre-0014 migration");
+            sqlx::raw_sql(sql).execute(&mut *tx).await.expect("apply pre-0014 migration");
         }
         sqlx::raw_sql("PRAGMA user_version = 13;")
             .execute(&mut *tx)
@@ -340,8 +337,8 @@ mod tests {
         .await
         .expect("seed pre-0014 artifact");
 
-        // Apply the real upgrade path from v13 forward. The 0014 rebuild is
-        // the behavior under test; later additive migrations may also fire.
+        // Apply migrate() from v13; the 0014 rebuild remains the behavior
+        // under test even though later additive migrations may also fire.
         migrate(&pool).await.expect("0014 migration failed");
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
@@ -355,31 +352,12 @@ mod tests {
             .await
             .expect("get failed")
             .expect("legacy artifact must survive the rebuild");
-        assert_eq!(
-            row.message_id.as_deref(),
-            Some("msg-1"),
-            "message_id preserved"
-        );
-        assert_eq!(
-            row.filename.as_deref(),
-            Some("page.html"),
-            "filename preserved"
-        );
-        assert_eq!(
-            row.content.as_deref(),
-            Some("<h1>hi</h1>"),
-            "html folded into content"
-        );
-        assert_eq!(
-            row.kind.as_deref(),
-            Some("html"),
-            "legacy rows tagged kind='html'"
-        );
+        assert_eq!(row.message_id.as_deref(), Some("msg-1"), "message_id preserved");
+        assert_eq!(row.filename.as_deref(), Some("page.html"), "filename preserved");
+        assert_eq!(row.content.as_deref(), Some("<h1>hi</h1>"), "html folded into content");
+        assert_eq!(row.kind.as_deref(), Some("html"), "legacy rows tagged kind='html'");
         assert_eq!(row.sandboxed, Some(true), "sandboxed 1 preserved (as bool)");
-        assert!(
-            row.workspace_id.is_none(),
-            "legacy rows were never workspace-scoped"
-        );
+        assert!(row.workspace_id.is_none(), "legacy rows were never workspace-scoped");
 
         // Wire shape of the migrated legacy row (Armin, challenge d66edb10):
         // sandboxed is a JSON bool, messageId is present, the null
@@ -390,15 +368,9 @@ mod tests {
             Some(&serde_json::Value::Bool(true)),
             "sandboxed must serialise as a JSON bool, not the integer 1"
         );
-        assert_eq!(
-            json.get("messageId").and_then(|v| v.as_str()),
-            Some("msg-1")
-        );
+        assert_eq!(json.get("messageId").and_then(|v| v.as_str()), Some("msg-1"));
         assert_eq!(json.get("kind").and_then(|v| v.as_str()), Some("html"));
-        assert!(
-            json.get("workspaceId").is_none(),
-            "null workspaceId omitted"
-        );
+        assert!(json.get("workspaceId").is_none(), "null workspaceId omitted");
         assert!(json.get("agentId").is_none(), "null agentId omitted");
 
         // No foreign key left dangling by the rebuild.
@@ -407,10 +379,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("foreign_key_check query failed");
-        assert!(
-            fk_violations.is_empty(),
-            "0014 left dangling FKs: {fk_violations:?}"
-        );
+        assert!(fk_violations.is_empty(), "0014 left dangling FKs: {fk_violations:?}");
     }
 
     /// All entity tables must exist after migration.
@@ -486,13 +455,7 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/migrations");
         let mut numbers: Vec<u32> = std::fs::read_dir(&dir)
             .expect("read migrations dir")
-            .map(|entry| {
-                entry
-                    .expect("dir entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
             .filter_map(|name| name.get(0..4).and_then(|prefix| prefix.parse::<u32>().ok()))
             .collect();
         numbers.sort_unstable();
@@ -518,8 +481,7 @@ mod tests {
             .await
             .expect("user_version query failed");
         assert_eq!(
-            version,
-            i64::from(max_number),
+            version, i64::from(max_number),
             "a fresh migrate() must land user_version at the highest migration file number"
         );
     }
@@ -772,10 +734,11 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert role should succeed");
-        let skill_ids: String = sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
-            .fetch_one(&pool)
-            .await
-            .expect("select failed");
+        let skill_ids: String =
+            sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
+                .fetch_one(&pool)
+                .await
+                .expect("select failed");
         assert_eq!(skill_ids, "[]");
 
         // agent_definition.role_id exists and defaults to NULL.
@@ -845,18 +808,16 @@ mod tests {
             .execute(&pool)
             .await
             .expect("delete workspace");
-        let remaining_index: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count memory index");
-        let remaining_chunks: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count memory chunks");
+        let remaining_index: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'")
+                .fetch_one(&pool)
+                .await
+                .expect("count memory index");
+        let remaining_chunks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'")
+                .fetch_one(&pool)
+                .await
+                .expect("count memory chunks");
         assert_eq!(remaining_index, 0, "memory index must cascade");
         assert_eq!(remaining_chunks, 0, "memory chunks must cascade");
 
@@ -900,7 +861,9 @@ mod tests {
             "query must use the composite index: {details:?}"
         );
         assert!(
-            details.iter().all(|detail| !detail.contains("TEMP B-TREE")),
+            details
+                .iter()
+                .all(|detail| !detail.contains("TEMP B-TREE")),
             "query must not sort each page into a temp B-tree: {details:?}"
         );
     }
