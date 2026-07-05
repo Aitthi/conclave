@@ -113,6 +113,7 @@ Subcommands:
   artifact get  <id>
   position set  <workspaceId> <agentId> [--level <junior|mid|senior|principal>|none] [--supervisor <agentId>|none]  (at least one flag; \"none\" clears)
   org           <workspaceId>          (indented supervisor tree)
+  design review <workspaceId> [--json]  (deterministic design QA; gate with the plain form — --json is for data retrieval, it always exits 0)
   run <orchestratorId> <prompt...>
   help
 
