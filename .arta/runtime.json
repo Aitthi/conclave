@@ -3,12 +3,24 @@
   "screen": "chats",
   "screens": [
     {
+      "id": "builder-position",
+      "title": "Edit agent · Position"
+    },
+    {
       "id": "chat-hub",
       "title": "Chat Hub · Full page"
     },
     {
       "id": "chats",
       "title": "Right rail · Chats"
+    },
+    {
+      "id": "escalation-trace",
+      "title": "Task detail · Escalation trace"
+    },
+    {
+      "id": "home",
+      "title": "Home"
     },
     {
       "id": "lane-board",
@@ -19,18 +31,26 @@
       "title": "Memory · Knowledge graph"
     },
     {
+      "id": "org-chart",
+      "title": "Org chart · Supervisor tree"
+    },
+    {
       "id": "role-picker",
       "title": "Edit agent · Role picker"
     },
     {
       "id": "roster-activity",
       "title": "Roster · Activity states"
+    },
+    {
+      "id": "roster-positions",
+      "title": "Roster · Position display"
     }
   ],
   "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "10:26:35 PM",
-  "reportedAt": "2026-07-04T15:26:35.608Z",
+  "updatedAt": "16:07:28",
+  "reportedAt": "2026-07-05T09:07:28.723Z",
   "gates": []
 }
