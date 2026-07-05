@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 /// the Keychain; receiving it back on save means "keep the existing secret"
 /// (must match `SECRET_PLACEHOLDER` in `src/components/Builder.tsx`).
 const SECRET_PLACEHOLDER: &str = "••••••••";
+const ALLOWED_DEFAULT_LEVELS: [&str; 4] = ["junior", "mid", "senior", "principal"];
 
 /// Heuristic: does this env var NAME look like it holds a secret? Such values
 /// are routed to the Keychain instead of the DB (constraint: secrets never land
@@ -25,6 +26,21 @@ fn is_secret_env_key(key: &str) -> bool {
 /// Keychain account for one agent's secret env var.
 fn secret_account(agent_id: &str, env_key: &str) -> String {
     format!("agent_env:{agent_id}:{env_key}")
+}
+
+fn parse_optional_string_field(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    command: &str,
+) -> Result<Option<Option<String>>, AppError> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) => Ok(Some(Some(s.clone()))),
+        Some(_) => Err(AppError::Invalid(format!(
+            "{command}: {key} must be a string or null"
+        ))),
+    }
 }
 
 // ── Request types ────────────────────────────────────────────────────────────
@@ -143,6 +159,10 @@ pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> 
 /// - `id` absent → INSERT (new UUID assigned).
 /// - `id` present → UPDATE; `NotFound` error if the id doesn't exist.
 pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let obj = payload
+        .as_object()
+        .ok_or_else(|| AppError::Invalid("agentDef.save: expected an object payload".into()))?;
+    let default_level_field = parse_optional_string_field(obj, "defaultLevel", "agentDef.save")?;
     let req: SaveAgentReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
@@ -253,6 +273,21 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
             .expect("serializing Vec<String> is infallible")
     });
 
+    let old_row = match req.id.as_deref() {
+        Some(id) => repo::agent_definition::get(&state.db, id).await?,
+        None => None,
+    };
+    let default_level = match (old_row.as_ref(), default_level_field) {
+        (_, Some(Some(level))) => {
+            if !ALLOWED_DEFAULT_LEVELS.contains(&level.as_str()) {
+                return Err(AppError::Invalid(format!("invalid default level: {level}")));
+            }
+            Some(level)
+        }
+        (_, Some(None)) | (None, None) => None,
+        (Some(existing), None) => existing.default_level.clone(),
+    };
+
     let input = AgentDefinitionInput {
         name: req.name,
         role: role_display,
@@ -260,6 +295,7 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         agent_type: req.agent_type,
         cli_kind: req.cli_kind,
         color: req.color,
+        default_level,
         provider_id: req.provider_id,
         model: req.model,
         harness_mode: req.harness_mode.unwrap_or_else(|| "own".to_owned()),
@@ -277,8 +313,7 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     // Capture the previously-stored secret key NAMES (UPDATE only) so we can
     // prune the Keychain entries the user removed on this edit.
     let old_secret_names: Vec<String> = match req.id.as_deref() {
-        Some(id) => repo::agent_definition::get(&state.db, id)
-            .await?
+        Some(_) => old_row
             .and_then(|r| r.secret_env_keys)
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
             .unwrap_or_default(),
@@ -317,7 +352,10 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     // (no AppHandle set) — covered directly by `reload_skills_for_def`'s own
     // unit tests instead.
     if let Some(app) = state.app().cloned() {
-        tauri::async_runtime::spawn(super::instance::run_reload_skills(app, vec![row.id.clone()]));
+        tauri::async_runtime::spawn(super::instance::run_reload_skills(
+            app,
+            vec![row.id.clone()],
+        ));
     }
 
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
@@ -554,6 +592,80 @@ mod tests {
             attached.is_empty(),
             "builtin/unknown ids must never become agent_skill rows"
         );
+    }
+
+    #[tokio::test]
+    async fn save_default_level_roundtrips_and_list_exposes_camel_case_key() {
+        let state = AppState::for_tests().await;
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas",
+                "type": "cli",
+                "harnessMode": "own",
+                "defaultLevel": "senior",
+            }),
+        )
+        .await
+        .expect("create failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["defaultLevel"], "senior");
+
+        let listed = list(&state, Value::Null).await.expect("list failed");
+        let item = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .expect("item present");
+        assert_eq!(item["defaultLevel"], "senior");
+        assert!(item.get("default_level").is_none());
+    }
+
+    #[tokio::test]
+    async fn save_update_default_level_absent_keeps_and_null_clears() {
+        let state = AppState::for_tests().await;
+
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "Atlas",
+                "type": "cli",
+                "harnessMode": "own",
+                "defaultLevel": "senior",
+            }),
+        )
+        .await
+        .expect("create failed");
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let kept = save(
+            &state,
+            serde_json::json!({
+                "id": id,
+                "name": "Atlas v2",
+                "type": "cli",
+                "harnessMode": "own",
+            }),
+        )
+        .await
+        .expect("update without defaultLevel failed");
+        assert_eq!(kept["defaultLevel"], "senior");
+
+        let cleared = save(
+            &state,
+            serde_json::json!({
+                "id": id,
+                "name": "Atlas v3",
+                "type": "cli",
+                "harnessMode": "own",
+                "defaultLevel": null,
+            }),
+        )
+        .await
+        .expect("update with null defaultLevel failed");
+        assert!(cleared.get("defaultLevel").is_none());
     }
 
     #[tokio::test]
