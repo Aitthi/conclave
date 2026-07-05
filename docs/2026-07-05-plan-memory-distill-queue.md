@@ -179,3 +179,12 @@ them in the boundary by default.)*
   transcript store — out of scope; JSONL is the source of truth.
 - Phase 2 (auto-trigger via task_timer.rs tick or task-close hook at
   task.rs:705) is DEFERRED and needs its own plan + human go-ahead.
+- KNOWN LIMITATION (F1, found by Mellow at LAND review, lead-ruled
+  land-as-is): approve/reject TOCTOU — `approve_with_embedder` orders
+  embed → upsert_chunk → set_reviewed(WHERE pending), so a reject that wins
+  the race inside the ~ms embed window leaves a live `'distilled'` chunk
+  while the proposal ends rejected. Near-zero reachability in v1 (requires
+  two distinct concurrent reviewers on the same proposal; v1 has one
+  reviewer). Leak is greppable/bulk-purgeable by source_kind. Phase 2 owns
+  the fix: claim state atomically BEFORE embed (UPDATE state='approved'
+  WHERE state='pending'), then embed+upsert, then stamp chunk_id.
