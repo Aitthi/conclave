@@ -847,6 +847,48 @@ mod tests {
         assert!(json.get("supervisorName").is_none());
     }
 
+    #[tokio::test]
+    async fn deleting_supervisor_row_nulls_reports_via_fk_action() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let supervisor = instance_named(&pool, &ws.id, "Supervisor").await;
+        let report = instance_named(&pool, &ws.id, "Report").await;
+
+        set_position(&pool, &report.id, Some("mid"), Some(&supervisor.id))
+            .await
+            .expect("set position");
+
+        sqlx::query("DELETE FROM workspace_agent WHERE id = ?")
+            .bind(&supervisor.id)
+            .execute(&pool)
+            .await
+            .expect("delete supervisor");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("list roster after supervisor delete");
+        let row = roster.iter().find(|row| row.id == report.id).unwrap();
+        assert_eq!(row.level.as_deref(), Some("mid"));
+        assert!(
+            row.supervisor_agent_id.is_none(),
+            "FK ON DELETE SET NULL should clear supervisor_agent_id"
+        );
+        assert!(
+            row.supervisor_name.is_none(),
+            "resolved supervisor name should disappear with the FK"
+        );
+
+        let stored_supervisor: Option<String> =
+            sqlx::query_scalar("SELECT supervisor_agent_id FROM workspace_agent WHERE id = ?")
+                .bind(&report.id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch surviving report");
+        assert!(stored_supervisor.is_none(), "stored FK should be NULL");
+    }
+
     /// create → get round-trip: every field is preserved.
     #[tokio::test]
     async fn create_then_get_roundtrip() {
