@@ -145,8 +145,17 @@ runs, stop and rethink before Phase 2.
 `src-tauri/src/engine/db.rs`, `src-tauri/src/engine/repo/memory_proposal.rs`
 (new), `src-tauri/src/engine/repo/mod.rs`,
 `src-tauri/src/engine/commands/memory.rs`,
+`src-tauri/src/engine/router.rs` (route registration),
+`src-tauri/src/engine/commands/cli.rs` (server-side CLI allowlist mapping
+`memory propose|queue|approve|reject` argv to the routes),
 `src-tauri/src/bin/conclave-cli.rs`, `src-tauri/skills/tool-map/SKILL.md`,
 `src-tauri/skills/memory-distiller/SKILL.md` (new). Nothing else.
+
+*(Amended 2026-07-05 by lead: original boundary omitted `router.rs` +
+`commands/cli.rs`, both unavoidable to wire the routes the plan itself names —
+gap found by Tiësto during implementation. Guard for future plans: any plan
+adding a router route ALWAYS touches `router.rs` + `commands/cli.rs`; include
+them in the boundary by default.)*
 
 ## Gates (commit first, then gate; from src-tauri)
 
