@@ -287,14 +287,22 @@ export function SupervisorPicker({
         {error && <div className="px-4 pt-2 text-[11px] text-danger shrink-0">{error}</div>}
 
         <div className="flex items-center gap-2 px-4 h-14 shrink-0 border-t border-overlay/[0.06]">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={submitting}
-            className="text-[12.5px] font-medium text-text-secondary px-3 py-1.5 rounded-lg hover:bg-overlay/[0.05] disabled:opacity-50"
-          >
-            Cancel
-          </button>
+          {/* Add-flow footer is Skip + Add agent ONLY (canon @3fd0f6e, Arta
+              design pass) — a Cancel ghost button next to Skip would be a
+              misclick trap (same style, opposite effects: Cancel drops the
+              whole add, Skip completes it with no supervisor). The X and
+              back arrow already cover "abort" for that variant. Edit keeps
+              Cancel + Confirm — there's no Skip to collide with there. */}
+          {variant === "edit" && (
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={submitting}
+              className="text-[12.5px] font-medium text-text-secondary px-3 py-1.5 rounded-lg hover:bg-overlay/[0.05] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          )}
           {variant === "add" && (
             // Human-ruled (2d03b21a, proto @3fd0f6e): Skip adds with no
             // supervisor REGARDLESS of the current row selection — a bypass
