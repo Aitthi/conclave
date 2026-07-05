@@ -202,8 +202,20 @@ export interface Snapshot {
 
 export interface Artifact {
   id: string;
-  messageId: string;
+  /**
+   * Chat-parsed rows still carry a `messageId`; workspace-scoped artifacts
+   * created via `conclave artifact add` (migration 0014) leave it null, so it
+   * is optional now. `html` is likewise retained for the old rows — new
+   * artifacts store their body in `content` under a typed `kind`.
+   */
+  messageId?: string;
+  workspaceId?: string;
+  agentId?: string;
+  title?: string;
+  /** markdown | code | html | svg | mermaid | react | text */
+  kind?: string;
   filename?: string;
+  content?: string;
   html?: string;
   sandboxed?: boolean;
   createdAt: string;

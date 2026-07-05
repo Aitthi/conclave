@@ -20,6 +20,7 @@ import type {
   Task,
   TaskListRow,
   TaskEvent,
+  Artifact,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -251,6 +252,30 @@ export interface Commands {
     req: { workspaceId: string; slug: string };
     res: { task: Task; events: TaskEvent[] };
   };
+  // ── Artifacts (artifact.*) — plan design-artifact-store ───────────────────
+  // Read surface consumed by the Artifacts view; `add` is agent-facing via the
+  // CLI (`conclave artifact add`) but is a valid IPC method too.
+  "artifact.add": {
+    req: {
+      workspaceId: string;
+      agentId?: string;
+      title: string;
+      kind: string;
+      filename?: string;
+      content: string;
+    };
+    res: Artifact;
+  };
+  "artifact.list": {
+    // Every artifact in the workspace, newest first. Empty workspace → `[]`.
+    req: { workspaceId: string };
+    res: Artifact[];
+  };
+  "artifact.get": {
+    // One artifact by id; NotFound when the id doesn't resolve.
+    req: { id: string };
+    res: Artifact;
+  };
   "fusion.run": {
     req: { orchestratorId: string; prompt: string };
     res: FusionRun;
@@ -374,6 +399,11 @@ export const ipc = {
   task: {
     list: (req: Commands["task.list"]["req"]) => call("task.list", req),
     get: (req: Commands["task.get"]["req"]) => call("task.get", req),
+  },
+  artifact: {
+    add: (req: Commands["artifact.add"]["req"]) => call("artifact.add", req),
+    list: (req: Commands["artifact.list"]["req"]) => call("artifact.list", req),
+    get: (req: Commands["artifact.get"]["req"]) => call("artifact.get", req),
   },
   fusion: {
     run: (req: Commands["fusion.run"]["req"]) => call("fusion.run", req),

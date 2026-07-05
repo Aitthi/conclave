@@ -17,6 +17,7 @@
 //! Milestones that add new entities should copy `workspace.rs` as a template.
 
 pub mod agent_definition;
+pub mod artifact;
 pub mod blackboard;
 pub mod fusion;
 pub mod inter_agent_message;

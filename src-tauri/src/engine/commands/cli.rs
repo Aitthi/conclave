@@ -461,6 +461,108 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── artifact (plan design-artifact-store) ────────────────────────
+        // `add` arrives ALREADY expanded by `conclave-cli`: the creator-agent
+        // slot right after `add` is filled from `CONCLAVE_INSTANCE_ID` (or the
+        // sentinel "-" outside a spawned agent, same idiom as `memory
+        // remember`), and any `--file <path>` was resolved to `--content
+        // <text>` client-side (map_argv does no file I/O). `list`/`get` are
+        // read-only and pass through unexpanded.
+        "artifact" => match argv.get(1).map(String::as_str) {
+            Some("add") => {
+                let usage = || {
+                    AppError::Invalid(
+                        "cli: artifact add <workspaceId> --title <t> --kind <k> (--file <path> | --content <text>)".into(),
+                    )
+                };
+                let agent = argv.get(2).ok_or_else(usage)?;
+                let workspace_id = argv.get(3).ok_or_else(usage)?;
+
+                // Parse the flags sequentially — this is the security choke
+                // point (M5.1: no passthrough), so it validates strictly rather
+                // than picking the first match and ignoring the rest. Each of
+                // --title/--kind/--content/--filename may appear at most once;
+                // --file is rejected (the client resolves it to --content —
+                // the server never reads files); unknown flags, duplicates, and
+                // dangling values are all errors.
+                let mut title: Option<&str> = None;
+                let mut kind: Option<&str> = None;
+                let mut content: Option<&str> = None;
+                let mut filename: Option<&str> = None;
+                let flags = argv.get(4..).unwrap_or(&[]);
+                let mut i = 0;
+                while i < flags.len() {
+                    let name = flags[i].as_str();
+                    let slot: &mut Option<&str> = match name {
+                        "--title" => &mut title,
+                        "--kind" => &mut kind,
+                        "--content" => &mut content,
+                        "--filename" => &mut filename,
+                        "--file" => {
+                            return Err(AppError::Invalid(
+                                "cli: artifact add: --file must be resolved to --content by the client; the server does not read files".into(),
+                            ))
+                        }
+                        other => {
+                            return Err(AppError::Invalid(format!(
+                                "cli: artifact add: unknown flag '{other}'"
+                            )))
+                        }
+                    };
+                    if slot.is_some() {
+                        return Err(AppError::Invalid(format!(
+                            "cli: artifact add: duplicate flag '{name}'"
+                        )));
+                    }
+                    let value = flags.get(i + 1).ok_or_else(|| {
+                        AppError::Invalid(format!("cli: artifact add: flag '{name}' expects a value"))
+                    })?;
+                    *slot = Some(value.as_str());
+                    i += 2;
+                }
+
+                let title = title
+                    .ok_or_else(|| AppError::Invalid("cli: artifact add requires --title <t>".into()))?;
+                let kind = kind
+                    .ok_or_else(|| AppError::Invalid("cli: artifact add requires --kind <k>".into()))?;
+                let content = content.ok_or_else(|| {
+                    AppError::Invalid(
+                        "cli: artifact add requires --content <text> or --file <path>".into(),
+                    )
+                })?;
+                let mut params =
+                    json!({ "workspaceId": workspace_id, "title": title, "kind": kind, "content": content });
+                if agent != "-" {
+                    params["agentId"] = json!(agent);
+                }
+                if let Some(f) = filename {
+                    params["filename"] = json!(f);
+                }
+                Ok(("artifact.add", params))
+            }
+            Some("list") => {
+                let workspace_id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid("cli: artifact list <workspaceId>".into()))?;
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: artifact list <workspaceId>".into()));
+                }
+                Ok(("artifact.list", json!({ "workspaceId": workspace_id })))
+            }
+            Some("get") => {
+                let id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid("cli: artifact get <id>".into()))?;
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: artifact get <id>".into()));
+                }
+                Ok(("artifact.get", json!({ "id": id })))
+            }
+            _ => Err(AppError::Invalid(
+                "cli: artifact <add|list|get> — unknown artifact subcommand".into(),
+            )),
+        },
+
         // ── task (ADR 0008) ──────────────────────────────────────────────
         // Every self-keyed verb (all but `list`/`get`/`create`) arrives here
         // ALREADY expanded by `conclave-cli`'s `expand_self_args` — the
@@ -1729,6 +1831,107 @@ mod tests {
         assert!(is_invalid(&["nope"]));
     }
 
+    // ── artifact (plan design-artifact-store) ─────────────────────────────
+    // `add` argv arrives already expanded by conclave-cli: the creator-agent
+    // slot sits at argv[2] ("-" outside a spawned agent), --file already
+    // resolved to --content client-side.
+
+    #[test]
+    fn artifact_add_maps_with_agent_and_flags() {
+        let words = &[
+            "artifact", "add", "self1", "ws1", "--title", "My Doc", "--kind", "markdown",
+            "--content", "# Hi",
+        ];
+        assert_eq!(ok_method(words), "artifact.add");
+        assert_eq!(
+            ok_params(words),
+            json!({
+                "workspaceId": "ws1",
+                "title": "My Doc",
+                "kind": "markdown",
+                "content": "# Hi",
+                "agentId": "self1"
+            })
+        );
+    }
+
+    #[test]
+    fn artifact_add_sentinel_agent_omits_agent_id() {
+        let params = ok_params(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
+        ]);
+        assert!(params.get("agentId").is_none(), "'-' must not set agentId");
+    }
+
+    #[test]
+    fn artifact_add_carries_optional_filename() {
+        let params = ok_params(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "code", "--content", "x",
+            "--filename", "main.rs",
+        ]);
+        assert_eq!(params.get("filename"), Some(&json!("main.rs")));
+    }
+
+    #[test]
+    fn artifact_add_missing_title_or_content_is_invalid() {
+        assert!(is_invalid(&["artifact", "add", "-", "ws1", "--kind", "text", "--content", "x"]));
+        assert!(is_invalid(&["artifact", "add", "-", "ws1", "--title", "T", "--kind", "text"]));
+    }
+
+    #[test]
+    fn artifact_list_and_get_map_correctly() {
+        assert_eq!(ok_method(&["artifact", "list", "ws1"]), "artifact.list");
+        assert_eq!(ok_params(&["artifact", "list", "ws1"]), json!({ "workspaceId": "ws1" }));
+        assert_eq!(ok_method(&["artifact", "get", "id1"]), "artifact.get");
+        assert_eq!(ok_params(&["artifact", "get", "id1"]), json!({ "id": "id1" }));
+    }
+
+    #[test]
+    fn artifact_unknown_sub_is_invalid() {
+        assert!(is_invalid(&["artifact", "bogus", "ws1"]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_both_content_and_file_server_side() {
+        // --file must be resolved client-side; the choke point rejects it even
+        // when --content is also present (a raw cli.exec caller bypasses the
+        // official client's preprocessing).
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
+            "--file", "/etc/passwd",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_bare_file_flag() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--file", "/x",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_duplicate_flag() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "a",
+            "--content", "b",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_unknown_flag() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
+            "--bogus", "y",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_dangling_flag_value() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content",
+        ]));
+    }
+
     // ── security tests ────────────────────────────────────────────────────
 
     /// Callers must NOT be able to reach `provider.upsert` via cli.exec.
@@ -1770,5 +1973,45 @@ mod tests {
         let value = result.expect("exec memory status should succeed");
         assert!(value.is_object(), "memory.status returns an object: {value}");
         assert_eq!(value["chunks"], json!(0));
+    }
+
+    /// End-to-end functional proof for the artifact CLI surface: the full
+    /// `exec → map_argv → router → commands::artifact → DB` pipeline (only the
+    /// socket JSON framing sits outside this). `add` then `list` then `get`
+    /// must round-trip the same artifact.
+    #[tokio::test]
+    async fn exec_artifact_add_list_get_roundtrip() {
+        let state = AppState::for_tests().await;
+        let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+
+        // add (agent slot "self1", inline --content)
+        let added = exec(
+            &state,
+            json!({ "argv": [
+                "artifact", "add", "self1", &ws.id,
+                "--title", "Design Notes", "--kind", "markdown", "--content", "# Notes"
+            ] }),
+        )
+        .await
+        .expect("artifact add should succeed");
+        assert_eq!(added["kind"], json!("markdown"));
+        assert_eq!(added["agentId"], json!("self1"));
+        let id = added["id"].as_str().expect("id present").to_string();
+
+        // list
+        let listed = exec(&state, json!({ "argv": ["artifact", "list", &ws.id] }))
+            .await
+            .expect("artifact list should succeed");
+        assert_eq!(listed.as_array().expect("array").len(), 1);
+        assert_eq!(listed[0]["id"], json!(id));
+
+        // get
+        let got = exec(&state, json!({ "argv": ["artifact", "get", &id] }))
+            .await
+            .expect("artifact get should succeed");
+        assert_eq!(got["title"], json!("Design Notes"));
+        assert_eq!(got["content"], json!("# Notes"));
     }
 }

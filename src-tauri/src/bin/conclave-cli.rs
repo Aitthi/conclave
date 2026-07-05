@@ -108,6 +108,9 @@ Subcommands:
   task close    <workspaceId> <slug>          (inside a spawned agent)
   task watch    <workspaceId> <slug>          (inside a spawned agent)
   task unwatch  <workspaceId> <slug>          (inside a spawned agent)
+  artifact add  <workspaceId> --title <t> --kind <k> (--file <path> | --content <text>)  (kinds: markdown|code|html|svg|mermaid|react|text)
+  artifact list <workspaceId>
+  artifact get  <id>
   run <orchestratorId> <prompt...>
   help
 
@@ -271,8 +274,71 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             out.extend_from_slice(&argv[2..]); // workspaceId + rest...
             Ok(out)
         }
+        // plan design-artifact-store: `artifact add` stamps the caller's own
+        // agent id as the optional creator (free text — an instance OR def id).
+        // Like `memory remember`, valid both inside a spawned agent AND from a
+        // plain terminal: inject the sentinel "-" when CONCLAVE_INSTANCE_ID is
+        // unset so the server keeps `agentId` NULL rather than fabricating one.
+        // `artifact list`/`get` are read-only and pass through untouched.
+        Some("artifact") if argv.get(1).map(String::as_str) == Some("add") => {
+            if argv.len() < 3 {
+                return Err(
+                    "conclave: artifact add <workspaceId> --title <t> --kind <k> (--file <path> | --content <text>)"
+                        .to_string(),
+                );
+            }
+            let agent = self_instance.filter(|s| !s.is_empty()).unwrap_or("-");
+            let mut out = Vec::with_capacity(argv.len() + 1);
+            out.push("artifact".to_string());
+            out.push("add".to_string());
+            out.push(agent.to_string()); // creator agent (injected from env, or "-")
+            out.extend_from_slice(&argv[2..]); // workspaceId + flags...
+            Ok(out)
+        }
         _ => Ok(argv),
     }
+}
+
+/// `artifact add ... --file <path>`: read the file at the CLIENT's cwd and
+/// rewrite the flag into `--content <text>` (plus a derived `--filename
+/// <basename>` when none was given), so the server's pure `map_argv` never does
+/// file I/O — the same client-side resolution `task create --plan-file` uses
+/// (see [`resolve_task_create_plan_file`]). Rejects supplying both `--file` and
+/// `--content`. A no-op for anything but `artifact add` and for the inline
+/// `--content` form.
+fn resolve_artifact_add_file(argv: Vec<String>) -> Result<Vec<String>, String> {
+    if argv.first().map(String::as_str) != Some("artifact")
+        || argv.get(1).map(String::as_str) != Some("add")
+    {
+        return Ok(argv);
+    }
+    let Some(pos) = argv.iter().position(|w| w == "--file") else {
+        return Ok(argv);
+    };
+    if argv.iter().any(|w| w == "--content") {
+        return Err(
+            "conclave: artifact add: give exactly one of --file or --content, not both".to_string(),
+        );
+    }
+    let path = argv
+        .get(pos + 1)
+        .ok_or("conclave: artifact add: --file requires a path")?
+        .clone();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("conclave: artifact add: cannot read --file '{path}': {e}"))?;
+    let basename = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned());
+    let mut out = argv;
+    out[pos] = "--content".to_string();
+    out[pos + 1] = content;
+    if let Some(name) = basename {
+        if !out.iter().any(|w| w == "--filename") {
+            out.push("--filename".to_string());
+            out.push(name);
+        }
+    }
+    Ok(out)
 }
 
 // ── Lane manager + commit guard (ADR 0008, Lane C) ─────────────────────────
@@ -1653,6 +1719,12 @@ enum OutMode {
     /// step (write + save the handoff), printed verbatim so it reads as plain
     /// command output rather than an injected chat turn.
     Instruction,
+    /// Just the new artifact's id (`artifact add`) — the caller scripts on it.
+    ArtifactId,
+    /// A newest-first table of artifacts (`artifact list`), content omitted.
+    ArtifactList,
+    /// One artifact's metadata header + full content (`artifact get`).
+    ArtifactGet,
     /// Pretty-printed JSON (everything else).
     Json,
 }
@@ -1734,6 +1806,18 @@ async fn main() -> ExitCode {
         argv
     };
 
+    // `artifact add --file <path>` reads the file at the CLIENT's cwd (the
+    // engine may be sandboxed and could not see it) and rewrites it to
+    // `--content <text>` before any further expansion — same client-side
+    // resolution as `task create --plan-file`.
+    let argv = match resolve_artifact_add_file(argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+
     // Capture the public CLI form before self-keyed task verbs gain their
     // actor-id wire slot. The reminder still prints only after a successful
     // response below.
@@ -1765,6 +1849,15 @@ async fn main() -> ExitCode {
         OutMode::Handoff
     } else if argv.first().map(String::as_str) == Some("restart") {
         OutMode::Instruction
+    } else if argv.first().map(String::as_str) == Some("artifact") {
+        // `add` prints just the id; `list` a content-free table; `get` a
+        // metadata header + the full body. (See the render match below.)
+        match sub {
+            Some("add") => OutMode::ArtifactId,
+            Some("list") => OutMode::ArtifactList,
+            Some("get") => OutMode::ArtifactGet,
+            _ => OutMode::Json,
+        }
     } else {
         OutMode::Json
     };
@@ -1887,6 +1980,46 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            // `artifact add` → the new id, so a caller can `id=$(conclave
+            // artifact add …)` and reference it.
+            OutMode::ArtifactId => {
+                let id = result.get("id").and_then(Value::as_str).unwrap_or("");
+                println!("{id}");
+            }
+            // `artifact list` → one line per artifact, newest first, WITHOUT the
+            // body (the plan's "no content dump"). Empty workspace → a marker.
+            OutMode::ArtifactList => {
+                let empty: Vec<Value> = Vec::new();
+                let rows = result.as_array().unwrap_or(&empty);
+                if rows.is_empty() {
+                    println!("(no artifacts)");
+                } else {
+                    for row in rows {
+                        let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+                        let short = id.get(..8).unwrap_or(id);
+                        let kind = row.get("kind").and_then(Value::as_str).unwrap_or("-");
+                        let title = row.get("title").and_then(Value::as_str).unwrap_or("-");
+                        let agent = row.get("agentId").and_then(Value::as_str).unwrap_or("-");
+                        let created = row.get("createdAt").and_then(Value::as_str).unwrap_or("-");
+                        println!("{short}  {kind:<8}  {title}  ({agent}, {created})");
+                    }
+                }
+            }
+            // `artifact get` → a short metadata header, a blank line, then the
+            // full body verbatim to stdout.
+            OutMode::ArtifactGet => {
+                let field = |k: &str| result.get(k).and_then(Value::as_str).unwrap_or("-");
+                println!("id:       {}", field("id"));
+                println!("title:    {}", field("title"));
+                println!("kind:     {}", field("kind"));
+                println!("agent:    {}", field("agentId"));
+                if let Some(f) = result.get("filename").and_then(Value::as_str) {
+                    println!("filename: {f}");
+                }
+                println!("created:  {}", field("createdAt"));
+                println!();
+                println!("{}", result.get("content").and_then(Value::as_str).unwrap_or(""));
+            }
             OutMode::Json => {
                 let pretty =
                     serde_json::to_string_pretty(result).expect("serialize result cannot fail");
@@ -2404,6 +2537,84 @@ mod tests {
             "task", "create", "ws1", "t1", "Title", "--plan-file", "/no/such/file/xyz",
         ]);
         assert!(super::resolve_task_create_plan_file(argv).is_err());
+    }
+
+    // ── artifact add: agent-slot injection + client-side --file read ──────
+
+    #[test]
+    fn artifact_add_injects_instance_from_env() {
+        let out = expand_self_args(
+            v(&["artifact", "add", "ws1", "--title", "T", "--kind", "text", "--content", "x"]),
+            Some("self1"),
+        )
+        .unwrap();
+        // artifact add <self1> ws1 --title T --kind text --content x
+        assert_eq!(out[0], "artifact");
+        assert_eq!(out[1], "add");
+        assert_eq!(out[2], "self1");
+        assert_eq!(out[3], "ws1");
+    }
+
+    #[test]
+    fn artifact_add_injects_sentinel_without_instance_id() {
+        let out = expand_self_args(
+            v(&["artifact", "add", "ws1", "--title", "T", "--kind", "text", "--content", "x"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out[2], "-", "no CONCLAVE_INSTANCE_ID → sentinel author");
+    }
+
+    #[test]
+    fn artifact_list_and_get_pass_through_unexpanded() {
+        let list = expand_self_args(v(&["artifact", "list", "ws1"]), Some("self1")).unwrap();
+        assert_eq!(list, v(&["artifact", "list", "ws1"]));
+        let get = expand_self_args(v(&["artifact", "get", "id1"]), Some("self1")).unwrap();
+        assert_eq!(get, v(&["artifact", "get", "id1"]));
+    }
+
+    #[test]
+    fn resolve_artifact_add_file_is_a_noop_without_the_flag() {
+        let argv = v(&["artifact", "add", "ws1", "--content", "inline"]);
+        assert_eq!(
+            super::resolve_artifact_add_file(argv.clone()).unwrap(),
+            argv
+        );
+    }
+
+    #[test]
+    fn resolve_artifact_add_file_reads_the_file_and_derives_filename() {
+        // Unique per run — a fixed temp path races a concurrent `cargo test`.
+        let path = std::env::temp_dir()
+            .join(format!("conclave artifact test {}.md", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "# the body").expect("write fixture failed");
+
+        let mut argv = v(&["artifact", "add", "ws1", "--title", "T", "--kind", "markdown", "--file"]);
+        argv.push(path.to_string_lossy().into_owned());
+
+        let out = super::resolve_artifact_add_file(argv).expect("resolve failed");
+        // --file <path> became --content <body>; --filename <basename> appended.
+        let cpos = out.iter().position(|w| w == "--content").expect("has --content");
+        assert_eq!(out[cpos + 1], "# the body");
+        assert!(!out.iter().any(|w| w == "--file"), "--file rewritten away");
+        let fpos = out.iter().position(|w| w == "--filename").expect("has --filename");
+        assert_eq!(out[fpos + 1], path.file_name().unwrap().to_string_lossy());
+
+        std::fs::remove_file(&path).expect("cleanup failed");
+    }
+
+    #[test]
+    fn resolve_artifact_add_file_rejects_both_file_and_content() {
+        let argv = v(&[
+            "artifact", "add", "ws1", "--content", "x", "--file", "/tmp/whatever",
+        ]);
+        assert!(super::resolve_artifact_add_file(argv).is_err());
+    }
+
+    #[test]
+    fn resolve_artifact_add_file_missing_file_errors() {
+        let argv = v(&["artifact", "add", "ws1", "--file", "/no/such/file/xyz.md"]);
+        assert!(super::resolve_artifact_add_file(argv).is_err());
     }
 
     // ── stage: private-index commit + attribution + snapshot op log ───────
