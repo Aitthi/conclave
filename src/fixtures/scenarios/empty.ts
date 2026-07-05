@@ -28,6 +28,7 @@ export const handlers: FixtureHandlers = {
   "artifact.list": () => [],
   "blackboard.list": () => ({ entries: [], activity: [] }),
   "message.listForWorkspace": () => [],
+  "snapshot.list": () => [],
   "role.list": () => [],
   "skill.list": () => [],
   "provider.list": () => [],
