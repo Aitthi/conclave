@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CornerUpRight, CornerDownLeft, Paperclip } from "lucide-react";
 import { ipc } from "../ipc";
 import { RoutingPicker, type RoutingTarget } from "./RoutingPicker";
@@ -145,16 +145,23 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
 
   // Measure the composer wrapper (the same node useFileDrop's `dropRef` is
   // already attached to — reading `.current` here doesn't touch that ref
-  // assignment or the drop-target logic). Below the threshold the placeholder
-  // shortens so it never wraps and balloons the box's auto-grown height.
-  useEffect(() => {
+  // assignment or the drop-target logic). Below the threshold the composer
+  // switches to the 2-row narrow layout instead of squeezing the input.
+  //
+  // useLayoutEffect + a synchronous initial measurement (not just the
+  // ResizeObserver's first, inherently async, callback) so a pane that
+  // MOUNTS narrow never paints one frame of the wide single-row layout
+  // first — that transient frame IS the ballooned-box symptom the human
+  // reported, just for one frame instead of persisting.
+  useLayoutEffect(() => {
     const el = dropRef.current;
     if (!el) return;
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? el.getBoundingClientRect().width;
-      const next = width < 560;
+    const measure = () => {
+      const next = el.getBoundingClientRect().width < 560;
       setNarrow((prev) => (prev === next ? prev : next));
-    });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
   }, [dropRef]);
