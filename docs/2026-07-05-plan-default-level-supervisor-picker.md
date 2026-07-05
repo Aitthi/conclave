@@ -158,7 +158,15 @@ original boundary).
    swap the modal body to the supervisor step (same modal frame, back arrow
    returns to the list); Confirm → `addToWorkspace` → take the returned
    instance for THIS workspace → `setPosition` (D6 failure UX) → `onAdded`.
-   Skip button = add with no supervisor.
+   ~~Skip button = add with no supervisor.~~ AMENDED (challenge 1ddff9aa,
+   Arta — upheld): NO Skip button. The "Reports to the human" row IS the
+   no-supervisor choice, PRE-SELECTED as the default; footer = Cancel +
+   "Add agent" (primary). One selection model, same as the edit variant.
+   Design canon extended: proto @18149cc
+   (`.arta/proto/screens/supervisor-picker.tsx`) pins the 3 states
+   composition underspecified — add-flow step-2 chrome, empty-members case,
+   edit-variant cycle-disable. When picking a member row, `setPosition` runs
+   only for a non-Human selection (Human row = add with level seed only).
 5. `Roster.tsx` — chip entry: the reports-to chip on AgentRow becomes a
    button (stopPropagation — row click still selects the agent; keyboard
    focusable, aria-label "Change supervisor") → SupervisorPicker
