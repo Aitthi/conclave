@@ -17,7 +17,7 @@ use crate::engine::{error::AppError, runtime::vec_codec};
 use chain_builder::{Order, QueryBuilder, Sqlite};
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 /// Number of embedding rows returned by one keyset-paginated scan.
@@ -137,14 +137,21 @@ pub struct UpsertChunkResult {
 }
 
 /// Fetch the memory-index identity for a workspace.
-pub async fn get_index(
-    pool: &SqlitePool,
+///
+/// Generic over the sqlx executor so it reads through either the pool or an
+/// open transaction/connection — the transactional approve path composes it
+/// inside [`ensure_index_on`].
+pub async fn get_index<'e, E>(
+    executor: E,
     workspace_id: &str,
-) -> Result<Option<MemoryIndexRow>, AppError> {
+) -> Result<Option<MemoryIndexRow>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     QueryBuilder::<Sqlite>::table("memory_index")
         .select(INDEX_COLS)
         .where_eq("workspace_id", workspace_id)
-        .fetch_optional::<MemoryIndexRow, _>(pool)
+        .fetch_optional::<MemoryIndexRow, _>(executor)
         .await
         .map_err(cb_err)
         .map_err(AppError::from)
@@ -157,6 +164,20 @@ pub async fn get_index(
 /// so model or dimension drift becomes [`AppError::Invalid`].
 pub async fn ensure_index(
     pool: &SqlitePool,
+    workspace_id: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<MemoryIndexRow, AppError> {
+    let mut conn = pool.acquire().await.map_err(AppError::from)?;
+    ensure_index_on(&mut conn, workspace_id, model_id, dimension).await
+}
+
+/// [`ensure_index`] run on an existing connection so it can share the caller's
+/// transaction (the transactional approve path). The two statements run on the
+/// same `conn`, keeping index creation atomic with the chunk write that
+/// follows in [`upsert_chunk_on`].
+pub async fn ensure_index_on(
+    conn: &mut SqliteConnection,
     workspace_id: &str,
     model_id: &str,
     dimension: usize,
@@ -175,11 +196,11 @@ pub async fn ensure_index(
     .bind(model_id)
     .bind(dimension)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .map_err(AppError::from)?;
 
-    let index = get_index(pool, workspace_id)
+    let index = get_index(&mut *conn, workspace_id)
         .await?
         .ok_or_else(|| AppError::Internal("memory index disappeared after ensure".into()))?;
     validate_index(&index, model_id, dimension)?;
@@ -196,6 +217,22 @@ pub async fn upsert_chunk(
     pool: &SqlitePool,
     input: UpsertChunkInput<'_>,
 ) -> Result<UpsertChunkResult, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::from)?;
+    let result = upsert_chunk_on(&mut tx, input).await?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(result)
+}
+
+/// [`upsert_chunk`] run on an existing connection, without owning the
+/// transaction. The transactional approve path (`commands::memory::
+/// approve_with_embedder`) calls this and `memory_proposal::set_reviewed` on
+/// one `conn` so the chunk write and the `pending -> approved` stamp commit or
+/// roll back together — a reject that wins the race leaves NO orphan chunk.
+/// [`upsert_chunk`] is the pool wrapper that owns the surrounding tx.
+pub async fn upsert_chunk_on(
+    conn: &mut SqliteConnection,
+    input: UpsertChunkInput<'_>,
+) -> Result<UpsertChunkResult, AppError> {
     if input.content_hash.trim().is_empty() {
         return Err(AppError::Invalid(
             "memory content hash must not be empty".into(),
@@ -204,12 +241,11 @@ pub async fn upsert_chunk(
 
     let normalized = normalize(input.embedding)?;
     let dimension = valid_dimension(normalized.len())?;
-    ensure_index(pool, input.workspace_id, input.model_id, normalized.len()).await?;
+    ensure_index_on(&mut *conn, input.workspace_id, input.model_id, normalized.len()).await?;
 
     let new_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let encoded = vec_codec::encode(&normalized);
-    let mut tx = pool.begin().await.map_err(AppError::from)?;
 
     let row = sqlx::query_as::<_, MemoryChunkRow>(
         "INSERT INTO memory_chunk \
@@ -235,18 +271,16 @@ pub async fn upsert_chunk(
     .bind(dimension)
     .bind(input.content_hash)
     .bind(&now)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .map_err(AppError::from)?;
 
     sqlx::query("UPDATE memory_index SET updated_at = ?1 WHERE workspace_id = ?2")
         .bind(&now)
         .bind(input.workspace_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(AppError::from)?;
-
-    tx.commit().await.map_err(AppError::from)?;
 
     Ok(UpsertChunkResult {
         deduped: row.id != new_id,

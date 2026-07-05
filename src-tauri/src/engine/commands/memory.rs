@@ -1249,9 +1249,15 @@ pub async fn approve_with_embedder(
         validate_embedder_identity(embedder.model_id(), embedder.dimension(), &index)?;
     }
 
+    // Embed FIRST (pure, no DB side effects), then commit the chunk write and
+    // the pending -> approved stamp in ONE transaction. A reject that wins the
+    // race during the embed window makes set_reviewed match 0 rows; the chunk
+    // upsert rolls back with it, so no orphan `distilled` chunk survives (F1).
     let (model_id, embedding) = embed_one(Arc::clone(&embedder), proposal.text.clone()).await?;
-    let upsert = repo::memory::upsert_chunk(
-        &state.db,
+
+    let mut tx = state.db.begin().await.map_err(AppError::from)?;
+    let upsert = repo::memory::upsert_chunk_on(
+        &mut tx,
         UpsertChunkInput {
             workspace_id: &req.workspace_id,
             model_id,
@@ -1264,7 +1270,7 @@ pub async fn approve_with_embedder(
     )
     .await?;
     let reviewed = repo::memory_proposal::set_reviewed(
-        &state.db,
+        &mut *tx,
         &req.workspace_id,
         &proposal.id,
         "approved",
@@ -1272,13 +1278,18 @@ pub async fn approve_with_embedder(
         req.reason.as_deref(),
         Some(&upsert.row.id),
     )
-    .await?
-    .ok_or_else(|| {
-        AppError::Invalid(format!(
+    .await?;
+    let Some(reviewed) = reviewed else {
+        tx.rollback().await.map_err(AppError::from)?;
+        return Err(AppError::Invalid(format!(
             "proposal id={} is no longer pending",
             proposal.id
-        ))
-    })?;
+        )));
+    };
+    tx.commit().await.map_err(AppError::from)?;
+
+    // Only after a successful commit: never invalidate the cache or emit for a
+    // write that rolled back.
     cache.invalidate(&req.workspace_id);
     if !upsert.deduped {
         emit_changed(state, &req.workspace_id);
@@ -2090,6 +2101,116 @@ mod tests {
         .await
         .expect_err("approve of rejected must error");
         assert!(matches!(approve_rejected, AppError::Invalid(message) if message.contains("not pending")));
+    }
+
+    /// Embedder that lands a reject on the target proposal DURING `embed`, so
+    /// the proposal is pending at the approve precondition check but no longer
+    /// pending when the approve transaction runs `set_reviewed` — a
+    /// deterministic simulation of the F1 approve/reject race.
+    struct RejectDuringEmbed {
+        inner: FakeEmbedder,
+        pool: SqlitePool,
+        workspace_id: String,
+        proposal_id: String,
+    }
+
+    impl Embedder for RejectDuringEmbed {
+        fn model_id(&self) -> &'static str {
+            self.inner.model_id()
+        }
+
+        fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            // Runs on a spawn_blocking thread (see embed_one), so blocking on
+            // the runtime handle here is safe and does not stall the executor.
+            let pool = self.pool.clone();
+            let ws = self.workspace_id.clone();
+            let id = self.proposal_id.clone();
+            tokio::runtime::Handle::current().block_on(async move {
+                repo::memory_proposal::set_reviewed(
+                    &pool,
+                    &ws,
+                    &id,
+                    "rejected",
+                    "racing-reviewer",
+                    None,
+                    None,
+                )
+                .await
+                .expect("racing reject lands");
+            });
+            self.inner.embed(texts)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approve_rolls_back_and_does_not_emit_when_a_reject_wins_the_race() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "distill-race").await;
+        let proposer = fixture_agent(&state, &ws, "P").await;
+        let reviewer = fixture_agent(&state, &ws, "R").await;
+        let proposed = propose(
+            &state,
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "raced distilled fact" }),
+        )
+        .await
+        .expect("propose");
+        let proposal_id = proposed["id"].as_str().unwrap().to_owned();
+
+        let baseline = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+
+        let embedder = Arc::new(RejectDuringEmbed {
+            inner: FakeEmbedder::new(DIMENSION),
+            pool: state.db.clone(),
+            workspace_id: ws.clone(),
+            proposal_id: proposal_id.clone(),
+        });
+        let error = approve_with_embedder(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposal_id }),
+            embedder,
+            Arc::clone(&cache),
+        )
+        .await
+        .expect_err("a racing reject must make approve fail");
+        assert!(
+            matches!(error, AppError::Invalid(message) if message.contains("no longer pending"))
+        );
+
+        // The chunk upsert rolled back with the failed stamp: no chunk exists.
+        let status = status_with_embedder(
+            &state,
+            json!({ "workspaceId": ws }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["chunks"], 0, "a rolled-back approve leaves no chunk (F1)");
+
+        // The racer's reject stands; nothing landed in `approved`.
+        let rejected = queue(&state, json!({ "workspaceId": ws, "state": "rejected" }))
+            .await
+            .expect("queue rejected");
+        assert_eq!(rejected["proposals"].as_array().unwrap().len(), 1);
+        let approved = queue(&state, json!({ "workspaceId": ws, "state": "approved" }))
+            .await
+            .expect("queue approved");
+        assert!(approved["proposals"].as_array().unwrap().is_empty());
+
+        // No memory:changed emitted for the write that rolled back.
+        let after = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(
+            after, baseline,
+            "a rolled-back approve must not emit memory:changed"
+        );
     }
 
     #[tokio::test]
