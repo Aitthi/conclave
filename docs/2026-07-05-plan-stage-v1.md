@@ -148,3 +148,14 @@ per memory df65b613.)
   worktree guard; complexity without payoff.
 - conclave-cli.rs is already large; keep stage code in one contiguous
   region with a section comment, mirroring the lane manager region style.
+- KNOWN LIMITATION (F1, raised by Dew, confirmed by Mellow at LAND,
+  lead-ruled land-as-is): `stage commit` moves the branch ref without
+  touching the shared index (decision 2's safety property), so plain
+  `git status` — and `stage status`, which wraps porcelain — shows the
+  just-committed boundary files as modified until the local index
+  refreshes. `stage diff` is immune (diffs against HEAD). Follow-up lane
+  `stage-status-head` re-derives `stage status` from HEAD
+  (`git diff --name-status HEAD` + `ls-files --others`) and drops the
+  porcelain/index path; also adds M1's ancestor-of-snap-ref guard on
+  `stage restore`. M2 (n_files unwrap_or(0) cosmetic) and M3 (cwd
+  threading inconsistency) accepted as-is.
