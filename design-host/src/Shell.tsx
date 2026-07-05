@@ -1,4 +1,5 @@
 import { Component, useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { parseHashScreen, pickInitialScreen } from "./screenSelection";
 
 type ScreenLoader = () => Promise<{ default: ComponentType }>;
 
@@ -7,16 +8,38 @@ interface ShellProps {
   screenIds: string[];
 }
 
+const PROJECT = new URLSearchParams(window.location.search).get("project") ?? "";
+const LS_KEY = `conclave-design-active:${PROJECT}`;
+
 // Conclave-native design canvas shell — the Design view's iframe target. No spec panel,
 // no tabs, no Arta concepts: just the selected screen full-bleed plus a small switcher
 // when there's more than one. The switcher's placement/look is Lane C's canon to design;
 // this is the functional baseline it pins.
 export function Shell({ screens, screenIds }: ShellProps) {
-  const [active, setActive] = useState<string | null>(() => defaultScreen(screenIds));
+  const [active, setActiveState] = useState<string | null>(() =>
+    pickInitialScreen(parseHashScreen(window.location.hash), localStorage.getItem(LS_KEY), screenIds),
+  );
+
+  const setActive = (id: string | null) => {
+    setActiveState(id);
+    if (id) {
+      history.replaceState(null, "", `#/${encodeURIComponent(id)}`);
+      localStorage.setItem(LS_KEY, id);
+    }
+  };
 
   useEffect(() => {
-    if (active && !screenIds.includes(active)) setActive(defaultScreen(screenIds));
-    else if (!active && screenIds.length) setActive(defaultScreen(screenIds));
+    const hashScreen = parseHashScreen(window.location.hash);
+    const stored = localStorage.getItem(LS_KEY);
+
+    if (active && !screenIds.includes(active)) {
+      setActive(pickInitialScreen(hashScreen, stored, screenIds));
+    } else if (!active && screenIds.length) {
+      setActive(pickInitialScreen(hashScreen, stored, screenIds));
+    } else if (active && (hashScreen !== active || stored !== active)) {
+      setActive(active);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenIds, active]);
 
   if (!active) return <EmptyState />;
@@ -27,10 +50,6 @@ export function Shell({ screens, screenIds }: ShellProps) {
       <ScreenHost key={active} loader={screens[active]} />
     </div>
   );
-}
-
-function defaultScreen(ids: string[]): string | null {
-  return ids.find((id) => id === "welcome") ?? ids[0] ?? null;
 }
 
 function Switcher({ ids, active, onSelect }: { ids: string[]; active: string; onSelect: (id: string) => void }) {
