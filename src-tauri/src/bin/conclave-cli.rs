@@ -692,6 +692,28 @@ fn require_boundary(slug: &str, boundary: Vec<String>) -> Result<Vec<String>, St
     Ok(boundary)
 }
 
+/// Extract `fileBoundary` from a `task get` response and enforce
+/// `require_boundary` on it. Split out from `stage_boundary` so the envelope
+/// shape can be pinned in a unit test without a live UDS socket.
+///
+/// `task get` returns the envelope `{"task": {...}, "events": [...]}`, not a
+/// flat task object, so `fileBoundary` lives under `.task` — read it there
+/// only (envelope-only, no flat fallback: the engine has one response shape,
+/// and a fallback would mask future envelope drift rather than surface it).
+fn parse_task_boundary(result: &Value, slug: &str) -> Result<Vec<String>, String> {
+    let boundary: Vec<String> = result
+        .get("task")
+        .and_then(|task| task.get("fileBoundary"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    require_boundary(slug, boundary)
+}
+
 /// Read a task's `fileBoundary` over the existing `task get` client path (no
 /// new engine route — the plan's boundary is the CLI-only feature's only
 /// server dependency).
@@ -703,16 +725,7 @@ async fn stage_boundary(ws: &str, slug: &str, self_instance: Option<&str>) -> Re
         slug.to_string(),
     ];
     let result = uds_task_call(argv, self_instance).await?;
-    let boundary: Vec<String> = result
-        .get("fileBoundary")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    require_boundary(slug, boundary)
+    parse_task_boundary(&result, slug)
 }
 
 /// Resolve the calling agent's display name from the workspace roster (over
@@ -2426,6 +2439,35 @@ mod tests {
     fn require_boundary_refuses_an_empty_boundary() {
         assert!(super::require_boundary("t1", vec![]).is_err());
         assert!(super::require_boundary("t1", vec!["a.rs".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn parse_task_boundary_reads_field_from_the_real_task_get_envelope() {
+        let envelope = serde_json::json!({
+            "task": { "fileBoundary": ["a.ts"] },
+            "events": []
+        });
+        assert_eq!(
+            super::parse_task_boundary(&envelope, "t1").expect("boundary should parse"),
+            vec!["a.ts".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_task_boundary_refuses_an_empty_boundary_inside_the_envelope() {
+        let envelope = serde_json::json!({
+            "task": { "fileBoundary": [] },
+            "events": []
+        });
+        assert!(super::parse_task_boundary(&envelope, "t1").is_err());
+    }
+
+    #[test]
+    fn parse_task_boundary_refuses_a_legacy_flat_shape() {
+        // No `task` wrapper at all — must not fall back to a top-level
+        // `fileBoundary`; the envelope is the only shape the engine sends.
+        let flat = serde_json::json!({ "fileBoundary": ["a.ts"] });
+        assert!(super::parse_task_boundary(&flat, "t1").is_err());
     }
 
     #[test]
