@@ -372,8 +372,92 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 }
                 Ok(("memory.status", json!({ "workspaceId": workspace_id })))
             }
+            // `memory propose <proposer> <workspaceId> <text...> [--source-note NOTE]`
+            // — the `<proposer>` slot is filled by `conclave-cli`'s
+            // `expand_self_args` from `CONCLAVE_INSTANCE_ID`. A trailing
+            // `--source-note NOTE` pair is stripped before the text is joined.
+            Some("propose") => {
+                let usage = || {
+                    AppError::Invalid(
+                        "cli: memory propose <workspaceId> <text...> [--source-note NOTE]".into(),
+                    )
+                };
+                let proposer = argv.get(2).ok_or_else(usage)?;
+                let workspace_id = argv.get(3).ok_or_else(usage)?;
+                let mut rest = argv.get(4..).unwrap_or(&[]);
+                let mut source_note: Option<&str> = None;
+                if rest.len() >= 2 && rest[rest.len() - 2] == "--source-note" {
+                    source_note = Some(&rest[rest.len() - 1]);
+                    rest = &rest[..rest.len() - 2];
+                }
+                if rest.is_empty() {
+                    return Err(usage());
+                }
+                let text = rest.join(" ");
+                let mut params =
+                    json!({ "workspaceId": workspace_id, "proposerId": proposer, "text": text });
+                if let Some(note) = source_note {
+                    params["sourceNote"] = json!(note);
+                }
+                Ok(("memory.propose", params))
+            }
+            Some("queue") => {
+                let workspace_id = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid(
+                        "cli: memory queue <workspaceId> [--state pending|approved|rejected]".into(),
+                    )
+                })?;
+                let mut params = json!({ "workspaceId": workspace_id });
+                match argv.get(3..).unwrap_or(&[]) {
+                    [] => {}
+                    [flag, state] if flag == "--state" => {
+                        params["state"] = json!(state);
+                    }
+                    _ => {
+                        return Err(AppError::Invalid(
+                            "cli: memory queue <workspaceId> [--state pending|approved|rejected]"
+                                .into(),
+                        ))
+                    }
+                }
+                Ok(("memory.queue", params))
+            }
+            // `memory approve|reject <reviewer> <workspaceId> <proposalId> [--reason TEXT...]`
+            // — `<reviewer>` is filled by `expand_self_args` from
+            // `CONCLAVE_INSTANCE_ID`. An optional leading `--reason` consumes the
+            // rest as free-text prose.
+            Some(verb @ ("approve" | "reject")) => {
+                let method = if verb == "approve" {
+                    "memory.approve"
+                } else {
+                    "memory.reject"
+                };
+                let usage = || {
+                    AppError::Invalid(format!(
+                        "cli: memory {verb} <workspaceId> <proposalId> [--reason TEXT...]"
+                    ))
+                };
+                let reviewer = argv.get(2).ok_or_else(usage)?;
+                let workspace_id = argv.get(3).ok_or_else(usage)?;
+                let proposal_id = argv.get(4).ok_or_else(usage)?;
+                let mut params = json!({
+                    "workspaceId": workspace_id,
+                    "reviewerId": reviewer,
+                    "proposalId": proposal_id,
+                });
+                match argv.get(5..).unwrap_or(&[]) {
+                    [] => {}
+                    [flag, reason @ ..] if flag == "--reason" && !reason.is_empty() => {
+                        params["reason"] = json!(reason.join(" "));
+                    }
+                    _ => return Err(usage()),
+                }
+                Ok((method, params))
+            }
             _ => Err(AppError::Invalid(
-                "cli: memory <remember|search|delete|status> — unknown memory subcommand".into(),
+                "cli: memory <remember|search|delete|status|propose|queue|approve|reject> — \
+                 unknown memory subcommand"
+                    .into(),
             )),
         },
 
@@ -1245,6 +1329,97 @@ mod tests {
     #[test]
     fn memory_unknown_sub_is_invalid() {
         assert!(is_invalid(&["memory", "clear", "ws1"]));
+    }
+
+    // ── memory review queue (plan memory-distill-queue) ─────────────────────
+    // These arrive already expanded by `conclave-cli`'s `expand_self_args`: the
+    // proposer/reviewer slot right after the verb is the caller's own agent id.
+
+    #[test]
+    fn memory_propose_maps_with_and_without_source_note() {
+        assert_eq!(
+            ok_method(&["memory", "propose", "agent1", "ws1", "a", "fact"]),
+            "memory.propose"
+        );
+        assert_eq!(
+            ok_params(&["memory", "propose", "agent1", "ws1", "a", "fact"]),
+            json!({ "workspaceId": "ws1", "proposerId": "agent1", "text": "a fact" })
+        );
+        assert_eq!(
+            ok_params(&[
+                "memory", "propose", "agent1", "ws1", "a", "fact", "--source-note", "t.jsonl",
+            ]),
+            json!({
+                "workspaceId": "ws1",
+                "proposerId": "agent1",
+                "text": "a fact",
+                "sourceNote": "t.jsonl",
+            })
+        );
+    }
+
+    #[test]
+    fn memory_propose_missing_text_is_invalid() {
+        assert!(is_invalid(&["memory", "propose", "agent1", "ws1"]));
+        assert!(is_invalid(&["memory", "propose", "agent1"]));
+        // a `--source-note` with no remaining text is not a valid proposal
+        assert!(is_invalid(&[
+            "memory", "propose", "agent1", "ws1", "--source-note", "t.jsonl",
+        ]));
+    }
+
+    #[test]
+    fn memory_queue_maps_with_and_without_state() {
+        assert_eq!(ok_method(&["memory", "queue", "ws1"]), "memory.queue");
+        assert_eq!(
+            ok_params(&["memory", "queue", "ws1"]),
+            json!({ "workspaceId": "ws1" })
+        );
+        assert_eq!(
+            ok_params(&["memory", "queue", "ws1", "--state", "approved"]),
+            json!({ "workspaceId": "ws1", "state": "approved" })
+        );
+    }
+
+    #[test]
+    fn memory_queue_bad_flag_is_invalid() {
+        assert!(is_invalid(&["memory", "queue"]));
+        assert!(is_invalid(&["memory", "queue", "ws1", "--bogus", "x"]));
+        assert!(is_invalid(&["memory", "queue", "ws1", "extra"]));
+    }
+
+    #[test]
+    fn memory_approve_and_reject_map_with_optional_reason() {
+        assert_eq!(
+            ok_method(&["memory", "approve", "rev1", "ws1", "p1"]),
+            "memory.approve"
+        );
+        assert_eq!(
+            ok_params(&["memory", "approve", "rev1", "ws1", "p1"]),
+            json!({ "workspaceId": "ws1", "reviewerId": "rev1", "proposalId": "p1" })
+        );
+        assert_eq!(
+            ok_method(&["memory", "reject", "rev1", "ws1", "p1", "--reason", "in", "the", "docs"]),
+            "memory.reject"
+        );
+        assert_eq!(
+            ok_params(&["memory", "reject", "rev1", "ws1", "p1", "--reason", "in", "the", "docs"]),
+            json!({
+                "workspaceId": "ws1",
+                "reviewerId": "rev1",
+                "proposalId": "p1",
+                "reason": "in the docs",
+            })
+        );
+    }
+
+    #[test]
+    fn memory_approve_missing_args_or_bad_reason_is_invalid() {
+        assert!(is_invalid(&["memory", "approve", "rev1", "ws1"]));
+        assert!(is_invalid(&["memory", "approve", "rev1"]));
+        // a lone `--reason` with no text, or a stray non-flag trailing token
+        assert!(is_invalid(&["memory", "approve", "rev1", "ws1", "p1", "--reason"]));
+        assert!(is_invalid(&["memory", "reject", "rev1", "ws1", "p1", "stray"]));
     }
 
     // ── task (ADR 0008) ─────────────────────────────────────────────────────

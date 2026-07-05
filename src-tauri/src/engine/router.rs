@@ -63,6 +63,10 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "memory.clear" => memory::clear(state, payload).await,
         "memory.status" => memory::status(state, payload).await,
         "memory.graph" => memory::graph(state, payload).await,
+        "memory.propose" => memory::propose(state, payload).await,
+        "memory.queue" => memory::queue(state, payload).await,
+        "memory.approve" => memory::approve(state, payload).await,
+        "memory.reject" => memory::reject(state, payload).await,
 
         // ── snapshot ──────────────────────────────────────────────────────
         "snapshot.create" => snapshot::create(state, payload).await,

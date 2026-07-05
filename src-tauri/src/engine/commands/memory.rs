@@ -88,6 +88,31 @@ struct WorkspaceReq {
     workspace_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposeReq {
+    workspace_id: String,
+    proposer_id: String,
+    text: String,
+    source_note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueueReq {
+    workspace_id: String,
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewReq {
+    workspace_id: String,
+    reviewer_id: String,
+    proposal_id: String,
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchHit {
@@ -1068,6 +1093,211 @@ pub async fn graph(state: &AppState, payload: Value) -> Result<Value, AppError> 
     Ok(json!({ "nodes": nodes, "edges": edges }))
 }
 
+// ── memory review queue (plan memory-distill-queue) ──────────────────────────
+//
+// The distiller mines transcripts into candidate memories; a candidate becomes
+// a `memory_chunk` only when a reviewer other than the proposer approves it.
+// This keeps unproven auto-writes out of the semantic-search commons. Embedding
+// is paid at approve time only — rejected junk never costs an embed.
+
+/// Confirm `agent_id` is a `workspace_agent` of this workspace. Mirrors the
+/// `agent` arm of [`validate_source`]: the proposer and reviewer must both be
+/// real agents in the workspace, so a garbage id can never author a chunk or
+/// stand in as the not-self reviewer that the gate depends on.
+async fn require_workspace_agent(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
+    role: &str,
+) -> Result<(), AppError> {
+    let agent = repo::workspace_agent::get(&state.db, agent_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("{role} agent id={agent_id} not found")))?;
+    if agent.workspace_id != workspace_id {
+        return Err(AppError::Invalid(format!(
+            "{role} agent does not belong to this workspace"
+        )));
+    }
+    Ok(())
+}
+
+/// `memory.propose` — enqueue a distilled candidate for review.
+///
+/// No embedding is computed here (decision 1: rejected junk must not cost an
+/// embed). The candidate is deduped against BOTH the review queue and the live
+/// store: an already-remembered fact, or one already pending/rejected, returns
+/// `{ "deduped": true }` and creates nothing.
+pub async fn propose(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: ProposeReq =
+        serde_json::from_value(payload).map_err(|error| AppError::Invalid(error.to_string()))?;
+    if req.text.trim().is_empty() {
+        return Err(AppError::Invalid(
+            "memory proposal text must not be empty".into(),
+        ));
+    }
+    require_workspace(state, &req.workspace_id).await?;
+    require_workspace_agent(state, &req.workspace_id, &req.proposer_id, "proposer").await?;
+
+    let hash = content_hash(&req.text);
+    if repo::memory_proposal::chunk_hash_exists(&state.db, &req.workspace_id, &hash).await? {
+        return Ok(json!({ "deduped": true }));
+    }
+    let result = repo::memory_proposal::create(
+        &state.db,
+        repo::memory_proposal::CreateProposalInput {
+            workspace_id: &req.workspace_id,
+            proposer_id: &req.proposer_id,
+            text: &req.text,
+            source_note: req.source_note.as_deref(),
+            content_hash: &hash,
+        },
+    )
+    .await?;
+    match result.row {
+        Some(row) => Ok(json!({ "id": row.id, "deduped": false })),
+        None => Ok(json!({ "deduped": true })),
+    }
+}
+
+/// `memory.queue` — list proposals in one state (default `pending`), newest first.
+pub async fn queue(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: QueueReq =
+        serde_json::from_value(payload).map_err(|error| AppError::Invalid(error.to_string()))?;
+    require_workspace(state, &req.workspace_id).await?;
+    let filter = req.state.as_deref().unwrap_or("pending");
+    if !matches!(filter, "pending" | "approved" | "rejected") {
+        return Err(AppError::Invalid(format!(
+            "unknown proposal state: {filter}; expected pending, approved, or rejected"
+        )));
+    }
+    let proposals =
+        repo::memory_proposal::list_by_state(&state.db, &req.workspace_id, filter).await?;
+    Ok(json!({ "proposals": proposals }))
+}
+
+/// `memory.approve` core with an injected runtime embedder.
+///
+/// A pending proposal, approved by an agent OTHER than its proposer, is
+/// embedded and upserted into `memory_chunk` with `source_kind='distilled'`
+/// and `source_id` = the proposer (so distilled chunks stay greppable and
+/// bulk-purgeable). The proposal is stamped `approved` with the new chunk id.
+pub async fn approve_with_embedder(
+    state: &AppState,
+    payload: Value,
+    embedder: Arc<dyn Embedder>,
+    cache: Arc<MemorySearchCache>,
+) -> Result<Value, AppError> {
+    let req: ReviewReq =
+        serde_json::from_value(payload).map_err(|error| AppError::Invalid(error.to_string()))?;
+    require_workspace(state, &req.workspace_id).await?;
+    require_workspace_agent(state, &req.workspace_id, &req.reviewer_id, "reviewer").await?;
+
+    let proposal = repo::memory_proposal::get(&state.db, &req.workspace_id, &req.proposal_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("proposal id={} not found", req.proposal_id)))?;
+    if proposal.state != "pending" {
+        return Err(AppError::Invalid(format!(
+            "proposal id={} is {}, not pending",
+            proposal.id, proposal.state
+        )));
+    }
+    if proposal.proposer_id == req.reviewer_id {
+        return Err(AppError::Invalid(
+            "a proposer cannot approve their own proposal".into(),
+        ));
+    }
+    if let Some(index) = repo::memory::get_index(&state.db, &req.workspace_id).await? {
+        validate_embedder_identity(embedder.model_id(), embedder.dimension(), &index)?;
+    }
+
+    let (model_id, embedding) = embed_one(Arc::clone(&embedder), proposal.text.clone()).await?;
+    let upsert = repo::memory::upsert_chunk(
+        &state.db,
+        UpsertChunkInput {
+            workspace_id: &req.workspace_id,
+            model_id,
+            source_kind: "distilled",
+            source_id: Some(&proposal.proposer_id),
+            text: &proposal.text,
+            embedding: &embedding,
+            content_hash: &proposal.content_hash,
+        },
+    )
+    .await?;
+    let reviewed = repo::memory_proposal::set_reviewed(
+        &state.db,
+        &req.workspace_id,
+        &proposal.id,
+        "approved",
+        &req.reviewer_id,
+        req.reason.as_deref(),
+        Some(&upsert.row.id),
+    )
+    .await?
+    .ok_or_else(|| {
+        AppError::Invalid(format!(
+            "proposal id={} is no longer pending",
+            proposal.id
+        ))
+    })?;
+    cache.invalidate(&req.workspace_id);
+    Ok(json!({
+        "id": reviewed.id,
+        "chunkId": upsert.row.id,
+        "deduped": upsert.deduped,
+    }))
+}
+
+/// `memory.approve` production wrapper.
+pub async fn approve(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    approve_with_embedder(
+        state,
+        payload,
+        Arc::clone(&state.memory_embedder),
+        Arc::clone(&state.memory_search_cache),
+    )
+    .await
+}
+
+/// `memory.reject` — mark a pending proposal `rejected` with a reason.
+///
+/// Rejected rows are kept: their `content_hash` blocks the same fact from being
+/// re-proposed on the distiller's next run. Self-rejection is allowed (a
+/// proposer may retract); only self-APPROVAL is barred.
+pub async fn reject(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: ReviewReq =
+        serde_json::from_value(payload).map_err(|error| AppError::Invalid(error.to_string()))?;
+    require_workspace(state, &req.workspace_id).await?;
+    require_workspace_agent(state, &req.workspace_id, &req.reviewer_id, "reviewer").await?;
+
+    let proposal = repo::memory_proposal::get(&state.db, &req.workspace_id, &req.proposal_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("proposal id={} not found", req.proposal_id)))?;
+    if proposal.state != "pending" {
+        return Err(AppError::Invalid(format!(
+            "proposal id={} is {}, not pending",
+            proposal.id, proposal.state
+        )));
+    }
+    let reviewed = repo::memory_proposal::set_reviewed(
+        &state.db,
+        &req.workspace_id,
+        &proposal.id,
+        "rejected",
+        &req.reviewer_id,
+        req.reason.as_deref(),
+        None,
+    )
+    .await?
+    .ok_or_else(|| {
+        AppError::Invalid(format!(
+            "proposal id={} is no longer pending",
+            proposal.id
+        ))
+    })?;
+    Ok(json!({ "id": reviewed.id, "state": reviewed.state }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1500,6 +1730,285 @@ mod tests {
         .await
         .expect("clear route");
         assert_eq!(cleared, json!({ "deleted": 0 }));
+    }
+
+    // ── memory review queue (plan memory-distill-queue) ──────────────────
+
+    async fn fixture_agent(state: &AppState, workspace_id: &str, name: &str) -> String {
+        let definition = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: name.into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create definition");
+        workspace_agent::instantiate(&state.db, workspace_id, &definition.id)
+            .await
+            .expect("instantiate agent")
+            .id
+    }
+
+    #[tokio::test]
+    async fn propose_then_approve_stores_distilled_chunk_and_is_searchable() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "distill-happy").await;
+        let proposer = fixture_agent(&state, &ws, "Proposer").await;
+        let reviewer = fixture_agent(&state, &ws, "Reviewer").await;
+
+        let proposed = propose(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "proposerId": proposer,
+                "text": "failed approach: rusqlite was rejected for sqlx",
+                "sourceNote": "transcript.jsonl 2026-07-05",
+            }),
+        )
+        .await
+        .expect("propose");
+        assert_eq!(proposed["deduped"], false);
+        let proposal_id = proposed["id"].as_str().unwrap().to_owned();
+
+        let approved = approve_with_embedder(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposal_id }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("approve");
+        assert_eq!(approved["deduped"], false);
+        let chunk_id = approved["chunkId"].as_str().unwrap().to_owned();
+
+        // Pending queue is now empty; the proposal moved to approved carrying
+        // the chunk id and the reviewer.
+        let pending = queue(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("queue pending");
+        assert!(pending["proposals"].as_array().unwrap().is_empty());
+        let approved_list = queue(&state, json!({ "workspaceId": ws, "state": "approved" }))
+            .await
+            .expect("queue approved");
+        let rows = approved_list["proposals"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["chunkId"], chunk_id);
+        assert_eq!(rows[0]["state"], "approved");
+        assert_eq!(rows[0]["reviewerId"], reviewer);
+
+        // The chunk is searchable and stored as a `distilled` chunk sourced to
+        // the proposer (greppable + bulk-purgeable, decision 4).
+        let result = search_with_embedder(
+            &state,
+            json!({ "workspaceId": ws, "query": "rusqlite sqlx" }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("search");
+        let hits = result["hits"].as_array().unwrap();
+        assert!(hits.iter().any(|hit| {
+            hit["id"] == json!(chunk_id)
+                && hit["sourceKind"] == "distilled"
+                && hit["sourceId"] == json!(proposer)
+        }));
+    }
+
+    #[tokio::test]
+    async fn self_approve_is_rejected_before_any_chunk_is_written() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "distill-self").await;
+        let proposer = fixture_agent(&state, &ws, "Solo").await;
+        let proposed = propose(
+            &state,
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "self review attempt" }),
+        )
+        .await
+        .expect("propose");
+        let proposal_id = proposed["id"].as_str().unwrap().to_owned();
+
+        let error = approve_with_embedder(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": proposer, "proposalId": proposal_id }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect_err("self-approve must fail");
+        assert!(
+            matches!(error, AppError::Invalid(message) if message.contains("cannot approve their own"))
+        );
+
+        // The gate fired before embedding: no chunk exists, proposal stays pending.
+        let status = status_with_embedder(
+            &state,
+            json!({ "workspaceId": ws }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+        )
+        .await
+        .expect("status");
+        assert_eq!(status["chunks"], 0);
+        let pending = queue(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("queue");
+        assert_eq!(pending["proposals"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reject_stamps_reason_and_a_second_review_errors() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state, "distill-reject").await;
+        let proposer = fixture_agent(&state, &ws, "P").await;
+        let reviewer = fixture_agent(&state, &ws, "R").await;
+        let proposed = propose(
+            &state,
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "candidate to reject" }),
+        )
+        .await
+        .expect("propose");
+        let proposal_id = proposed["id"].as_str().unwrap().to_owned();
+
+        let rejected = reject(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "reviewerId": reviewer,
+                "proposalId": proposal_id,
+                "reason": "already in the docs",
+            }),
+        )
+        .await
+        .expect("reject");
+        assert_eq!(rejected["state"], "rejected");
+
+        let rejected_list = queue(&state, json!({ "workspaceId": ws, "state": "rejected" }))
+            .await
+            .expect("queue rejected");
+        let rows = rejected_list["proposals"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["reviewReason"], "already in the docs");
+
+        // A rejected proposal is no longer pending: re-review errors on both verbs.
+        let reject_again = reject(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposal_id }),
+        )
+        .await
+        .expect_err("re-reject must error");
+        assert!(matches!(reject_again, AppError::Invalid(message) if message.contains("not pending")));
+        let approve_rejected = approve_with_embedder(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposal_id }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+            Arc::new(MemorySearchCache::new()),
+        )
+        .await
+        .expect_err("approve of rejected must error");
+        assert!(matches!(approve_rejected, AppError::Invalid(message) if message.contains("not pending")));
+    }
+
+    #[tokio::test]
+    async fn propose_dedups_against_queue_and_live_store() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "distill-dedup").await;
+        let proposer = fixture_agent(&state, &ws, "P").await;
+
+        // vs an existing proposal: identical text creates nothing the second time.
+        let first = propose(
+            &state,
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "duplicate fact" }),
+        )
+        .await
+        .expect("first propose");
+        assert_eq!(first["deduped"], false);
+        let dup = propose(
+            &state,
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "duplicate fact" }),
+        )
+        .await
+        .expect("dup propose");
+        assert_eq!(dup["deduped"], true);
+        assert!(dup.get("id").is_none());
+        assert_eq!(
+            queue(&state, json!({ "workspaceId": ws })).await.unwrap()["proposals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // vs the live store: a remembered fact blocks proposing the same text.
+        remember_text(&state, Arc::clone(&cache), &ws, "already remembered fact")
+            .await
+            .expect("remember");
+        let vs_chunk = propose(
+            &state,
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "already remembered fact" }),
+        )
+        .await
+        .expect("propose vs live chunk");
+        assert_eq!(vs_chunk["deduped"], true);
+        assert!(vs_chunk.get("id").is_none());
+        assert_eq!(
+            queue(&state, json!({ "workspaceId": ws })).await.unwrap()["proposals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_review_queue_commands() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state, "distill-router").await;
+        let proposer = fixture_agent(&state, &ws, "P").await;
+        let reviewer = fixture_agent(&state, &ws, "R").await;
+
+        let proposed = router::dispatch(
+            &state,
+            "memory.propose",
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "router distill" }),
+        )
+        .await
+        .expect("propose route");
+        let proposal_id = proposed["id"].as_str().unwrap().to_owned();
+
+        let queued = router::dispatch(&state, "memory.queue", json!({ "workspaceId": ws }))
+            .await
+            .expect("queue route");
+        assert_eq!(queued["proposals"].as_array().unwrap().len(), 1);
+
+        let approved = router::dispatch(
+            &state,
+            "memory.approve",
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposal_id }),
+        )
+        .await
+        .expect("approve route");
+        assert!(approved["chunkId"].is_string());
+
+        let second = router::dispatch(
+            &state,
+            "memory.propose",
+            json!({ "workspaceId": ws, "proposerId": proposer, "text": "router distill two" }),
+        )
+        .await
+        .expect("second propose route");
+        let rejected = router::dispatch(
+            &state,
+            "memory.reject",
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": second["id"] }),
+        )
+        .await
+        .expect("reject route");
+        assert_eq!(rejected["state"], "rejected");
     }
 
     // ── memory.graph (ADR 0007) ──────────────────────────────────────────

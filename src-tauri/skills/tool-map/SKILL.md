@@ -39,6 +39,10 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Memory | `conclave memory remember <workspaceId> <text...>` | save hard-won knowledge |
 | Memory | `conclave memory delete <workspaceId> <chunkId>` | remove a wrong or stale memory |
 | Memory | `conclave memory status <workspaceId>` | store health |
+| Memory | `conclave memory propose <workspaceId> <text...> [--source-note NOTE]` | distiller enqueues a candidate memory for review (no embed until approved) |
+| Memory | `conclave memory queue <workspaceId> [--state pending\|approved\|rejected]` | list review-queue proposals (default pending, newest first) |
+| Memory | `conclave memory approve <workspaceId> <proposalId> [--reason TEXT]` | reviewer (≠ proposer) approves → embeds + stores as a `distilled` chunk |
+| Memory | `conclave memory reject <workspaceId> <proposalId> [--reason TEXT]` | reviewer rejects; the row is kept so the fact is not re-proposed |
 | Context | `conclave snapshot save <text...>` | persist YOUR handoff before a clear/restart |
 | Context | `conclave snapshot last` | re-read it after |
 | Context | `conclave snapshot list <sessionId>` / `snapshot read <snapshotId>` | browse saved handoffs |
