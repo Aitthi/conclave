@@ -14,6 +14,7 @@ export const EVENT_NAMES = {
   snapshotCreated: "snapshot:created",
   taskChanged: "task:changed",
   memoryChanged: "memory:changed",
+  artifactChanged: "artifact:changed",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -104,6 +105,16 @@ export interface TaskChangedEvent {
  * `engine/bus.rs` `MemoryChanged` (serialisation tests enforce).
  */
 export interface MemoryChangedEvent {
+  workspaceId: string;
+}
+
+/**
+ * A workspace's `artifact` table gained a row — emitted after `artifact.add`
+ * (plan design-artifact-store). Carries only `workspaceId`; the Artifacts view
+ * re-lists rather than patching state from the payload. camelCase serde, kept
+ * in sync with `engine/bus.rs` `ArtifactChanged` (serialisation tests enforce).
+ */
+export interface ArtifactChangedEvent {
   workspaceId: string;
 }
 
@@ -297,6 +308,21 @@ export function useMemoryChanged(
   cb: (event: MemoryChangedEvent) => void,
 ): void {
   useEvent<MemoryChangedEvent>(EVENT_NAMES.memoryChanged, (payload) => {
+    if (payload.workspaceId === workspaceId) cb(payload);
+  });
+}
+
+/**
+ * Subscribe to artifact-changed events for a specific workspace — the Artifacts
+ * view's live-refresh trigger (mirrors `useMemoryChanged`). Fires for each
+ * `ArtifactChangedEvent` whose `workspaceId` matches, so a `conclave artifact
+ * add` from any agent refreshes an open Artifacts view without reopening it.
+ */
+export function useArtifactChanged(
+  workspaceId: string,
+  cb: (event: ArtifactChangedEvent) => void,
+): void {
+  useEvent<ArtifactChangedEvent>(EVENT_NAMES.artifactChanged, (payload) => {
     if (payload.workspaceId === workspaceId) cb(payload);
   });
 }

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod artifact;
 pub mod blackboard;
 pub mod cli;
 pub mod fusion;

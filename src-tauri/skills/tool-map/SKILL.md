@@ -22,6 +22,9 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Work items | `conclave task rule <workspaceId> <slug> <challengeEventId> <text...>` | settle a challenge (lead) |
 | Work items | `conclave task close <workspaceId> <slug>` | live state → merged shortcut + memory-save reminder |
 | Work items | `conclave task watch <workspaceId> <slug>` / `task unwatch <workspaceId> <slug>` | follow / stop following a lane; notes prefixed `READY`/`BLOCKED`/`ESCALATION` wake watchers, while unmarked notes and passing gates are ledger-only |
+| Artifacts | `conclave artifact add <workspaceId> --title <t> --kind <k> (--file <path> \| --content <text>)` | persist a significant, self-contained output; kinds `markdown\|code\|html\|svg\|mermaid\|react\|text`; prints the id; your agent id is stamped automatically |
+| Artifacts | `conclave artifact list <workspaceId>` | list this workspace's artifacts, newest first (id, kind, title, agent, createdAt — no content dump) |
+| Artifacts | `conclave artifact get <id>` | print one artifact's metadata header + full content to stdout |
 | Lanes | `conclave lane start <workspaceId> <slug>` | claim + worktree in one step |
 | Lanes | `conclave lane finish <workspaceId> <slug>` | integrator teardown after merge (remove worktree + delete branch) |
 | Lanes | `conclave lane guard install` | install the shared-checkout commit-scope guard |
@@ -58,3 +61,16 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Context | `conclave snapshot create <sessionId> <type> [label]` | snapshot another session (orchestration plumbing) |
 | Context | `conclave restart` | self-triggered restart — follow its printed save-then-die contract |
 | Help | `conclave help` | this list, live — trust it over any cached copy |
+
+## Artifacts — when to save one
+
+Save an artifact when an output is **significant and self-contained**: typically
+more than ~15 lines, likely to be edited/iterated/reused outside this
+conversation, standing on its own without the surrounding chat, and something
+you or the human will refer back to later. Typical kinds: documents
+(`markdown`), `code`, single-page `html`, `svg`, diagrams (`mermaid`), and
+React components (`react`); use `text` for anything else. Do NOT wrap a throwaway
+snippet, a one-line answer, or a value that only makes sense mid-conversation —
+those belong in the chat, a task note, or the blackboard. One artifact = one
+coherent deliverable; iterate by adding a new version rather than cramming
+several outputs into one.
