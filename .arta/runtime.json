@@ -59,7 +59,7 @@
       "file": "screens/supervisor-picker.tsx",
       "line": 36,
       "snippet": "esolution — a visible Skip button is required in the add-flow (\"supervisor isn't required; give m",
-      "message": "Em-dash overuse — em-dash overuse (10) — vary with commas, colons, periods, parentheses"
+      "message": "Em-dash overuse — em-dash overuse (16) — vary with commas, colons, periods, parentheses"
     }
   ]
 }
