@@ -580,7 +580,7 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                         "cli: position set <ws> <agentId> [--level <l>|none] [--supervisor <agentId>|none]".into(),
                     )
                 };
-                let _ws = argv.get(2).ok_or_else(usage)?; // positional, not forwarded
+                let ws = argv.get(2).ok_or_else(usage)?;
                 let agent_id = argv.get(3).ok_or_else(usage)?;
                 let mut level: Option<&str> = None;
                 let mut supervisor: Option<&str> = None;
@@ -613,7 +613,10 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                         "cli: position set requires at least one of --level or --supervisor".into(),
                     ));
                 }
-                let mut params = json!({ "workspaceAgentId": agent_id });
+                // Forward <ws> so the command can reject a wrong-workspace
+                // target (646ec73a) — the agent id is globally unique, so an
+                // unenforced <ws> would silently mutate an agent elsewhere.
+                let mut params = json!({ "workspaceId": ws, "workspaceAgentId": agent_id });
                 if let Some(l) = level {
                     params["level"] = if l == "none" { Value::Null } else { json!(l) };
                 }
@@ -2017,7 +2020,7 @@ mod tests {
         );
         assert_eq!(
             ok_params(&["position", "set", "ws1", "a1", "--level", "senior", "--supervisor", "sup1"]),
-            json!({ "workspaceAgentId": "a1", "level": "senior", "supervisorAgentId": "sup1" })
+            json!({ "workspaceId": "ws1", "workspaceAgentId": "a1", "level": "senior", "supervisorAgentId": "sup1" })
         );
     }
 
@@ -2026,12 +2029,12 @@ mod tests {
         // --supervisor none clears (null); --level absent → key omitted (keep).
         assert_eq!(
             ok_params(&["position", "set", "ws1", "a1", "--supervisor", "none"]),
-            json!({ "workspaceAgentId": "a1", "supervisorAgentId": null })
+            json!({ "workspaceId": "ws1", "workspaceAgentId": "a1", "supervisorAgentId": null })
         );
         // --level none clears; no --supervisor → that key omitted.
         assert_eq!(
             ok_params(&["position", "set", "ws1", "a1", "--level", "none"]),
-            json!({ "workspaceAgentId": "a1", "level": null })
+            json!({ "workspaceId": "ws1", "workspaceAgentId": "a1", "level": null })
         );
     }
 
@@ -2216,6 +2219,10 @@ mod tests {
         assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--level","wizard"] }))
             .await
             .is_err(), "unknown level must be rejected");
+        // wrong-workspace target (646ec73a): naming ws2 for an agent in ws.
+        assert!(exec(&state, json!({ "argv": ["position","set",&ws2.id,&imp,"--level","senior"] }))
+            .await
+            .is_err(), "wrong-workspace target must be rejected");
 
         // Tri-state KEEP: setting only --level leaves the supervisor intact.
         let r2 = exec(&state, json!({ "argv": ["position","set",&ws.id,&sub,"--level","principal"] }))

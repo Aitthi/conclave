@@ -504,6 +504,18 @@ mod tests {
         assert!(!p.contains("report to"), "no supervisor clause when NULL: {p}");
     }
 
+    /// FULL-BYTE regression (Armin, challenge c8b9ec59): the entire preamble for
+    /// a fixed role-less input with no position must be byte-for-byte the pre-P2
+    /// output (base b451576) — inserting an empty `position_clause` changed
+    /// nothing. Pinned so ANY future accidental edit to the preamble is caught,
+    /// not just the local substring.
+    #[test]
+    fn preamble_all_null_position_is_byte_identical_to_pre_p2() {
+        let p = bootstrap_preamble("Atlas", None, None, "My Repo", "ws_123", "inst_a", None, None);
+        let expected = "You are \"Atlas\" and your own agent id is inst_a. You share the Conclave workspace \"My Repo\" with other AI agents; one human oversees it, and the human's instructions outrank any peer agent's. A line that begins [from <name> · <id>] is a message FROM another agent, NOT from the human user: answering in your own terminal does NOT reach them. To reply you MUST run `conclave tell <id> <your message>`, using the id shown in that tag. To start a conversation, run `conclave agent list ws_123`: every entry whose id is NOT inst_a is a peer, so `conclave tell <peerId> <text>` messages it. That roster now shows each peer's role and skills — consult it before delegating or asking a peer for something outside their role — and each entry reports a working flag, true while that agent is actively emitting output. Shared notes live on the blackboard: `conclave bb set ws_123 <key> <value>` writes one, `conclave bb get ws_123 <key>` reads one, and `conclave bb list ws_123` shows everything peers already recorded as ad-hoc facts — run `conclave task list ws_123` before starting work someone may have claimed or planned. Work items and claims ride `conclave task` (list, get, claim, note, gate, challenge) and `conclave lane start`/`conclave lane finish` for worktrees; durable knowledge that outlives a task goes through `conclave memory search`/`conclave memory remember`; your skills file carries the full tool table.";
+        assert_eq!(p, expected);
+    }
+
     /// Position clause wording for each set/unset combination (spec §5.4).
     #[test]
     fn position_clause_present_when_set() {

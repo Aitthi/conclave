@@ -151,10 +151,13 @@ export interface Commands {
     req: { workspaceAgentId: string };
     res: void;
   };
-  // Position System (spec §5.1). `level`/`supervisorAgentId` are tri-state:
-  // omit the key to keep the current value, `null` to clear, a string to set.
+  // Position System (spec §5.1, amended by ruling 71a00512: workspaceId is
+  // REQUIRED — the command rejects a mismatch against the agent's real
+  // workspace). `level`/`supervisorAgentId` are tri-state: omit the key to keep
+  // the current value, `null` to clear, a string to set.
   "instance.setPosition": {
     req: {
+      workspaceId: string;
       workspaceAgentId: string;
       level?: string | null;
       supervisorAgentId?: string | null;
