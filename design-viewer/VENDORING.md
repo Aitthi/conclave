@@ -96,23 +96,35 @@ so the smoke check hit Vite's DEFAULT allow-list (this package's own root
 only): every `/@fs/` screen import from a real registered project 403'd.
 
 Implemented instead (`vite.config.ts`): `server.fs.strict: false`, which
-disables the check entirely rather than scoping it. **This is broader than
-the plan intended and carries a real Phase-1 risk**, flagged in review
-(Mellow, challenge `4d81be26`): with `fs.strict: false`, this loopback Vite
-server will serve ANY absolute path via `GET /@fs/<abspath>` to ANY same-machine
-requester — not just this engine's own registry.json contents. Binding to
-`127.0.0.1` blocks LAN access but not another local process, nor a webpage
-the user's browser has open (the classic Vite dev-server localhost-file-read
-/ DNS-rebind vector — e.g. a malicious page could attempt to fetch
-`http://127.0.0.1:7343/@fs/Users/<you>/.ssh/id_rsa` while the sidecar runs).
+disables the check entirely rather than scoping it — flagged in review
+(Mellow, challenge `4d81be26`), lead ruling 2026-07-05 (`4d81be26`, UPHELD).
+The ruling verified the actual threat model before deciding what to require:
+the vendored Vite resolves to 6.4.3 (>=6.0.9), so Vite's default
+`allowedHosts` (localhost-only Host-header check, blocks DNS rebinding) and
+default localhost-only CORS were ALREADY active — an external webpage cannot
+read `/@fs/` responses cross-origin even with `fs.strict: false`. The
+residual, ACCEPTED exposure is narrower than the original comment here
+implied: another SAME-USER local process (no privilege gained — it could
+read the file directly anyway), and another localhost-port origin via
+Vite's permissive "any localhost" CORS regex.
 
-Accepted for Phase 1 as an explicit dev-mode threat-model call (loopback-only
-sidecar, developer's own machine) rather than implemented as a real
-`fs.allow` scope — a correctly scoped allow-list would need to grow dynamically
-as workspaces register (unlike upstream's single fixed project dir), which is
-a small enough follow-up to track rather than block this lane on. A
-Host/Origin-header guard (and/or `server.fs.deny` for secret-like globs) is
-the candidate hardening; tracked as a follow-up, not implemented here.
+**Required before merge and IMPLEMENTED** (all in `vite.config.ts`'s
+`server` block):
+- `cors: false` — closes the same-machine, different-localhost-port cross-origin
+  read (the one gap the active defaults above did NOT already cover).
+- `allowedHosts: ["127.0.0.1", "localhost"]` — pins the Host-header check
+  explicitly so a future Vite version bump can't silently change the
+  default this posture relies on.
+- `server.fs.deny: ["**/.ssh/**", "**/.env", "**/.env.*", "**/id_rsa*",
+  "**/*.pem"]` — defense-in-depth against the common secret-file globs, on
+  top of (not instead of) the above.
+
+**Still follow-up, NOT implemented here** (tracked, bundled with the
+prod-packaging task): (a) a full Host/Origin-header guard middleware closing
+the same-user-local-process exposure; (b) a registry-driven dynamic
+`server.fs.allow` (would need to grow as workspaces register, unlike
+upstream's single fixed project dir) as a stronger alternative to
+`fs.strict: false` entirely.
 
 ## Smoke check
 

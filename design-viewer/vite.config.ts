@@ -44,26 +44,36 @@ export default defineConfig({
     // sidecar locally and embeds it via iframe; it is never meant to be
     // reachable over LAN or a tunnel like upstream's standalone `arta` CLI.
     host: "127.0.0.1",
+    // SECURITY POSTURE (lead ruling on review challenge 4d81be26, 2026-07-05):
+    // `fs.strict: false` below makes Vite serve ANY absolute path via
+    // `GET /@fs/<abspath>`, completely independent of registry.json — the
+    // registry only gates the project SWITCHER list, never this route. That
+    // is ACCEPTED for Phase 1 (function needs `/@fs/` across arbitrary
+    // workspace dirs; a registry-driven dynamic `fs.allow` is the recorded
+    // follow-up). What closes the actual attack surface is this trio, all
+    // required by the ruling:
+    // - `cors: false` — an open page on a DIFFERENT localhost port cannot
+    //   read a response via cross-origin fetch (Vite's default CORS is a
+    //   permissive "any localhost origin" regex).
+    // - explicit `allowedHosts` — pins the Host-header check that already
+    //   defaults to localhost-only on this vendored Vite version (>=6.0.9),
+    //   so it survives a future Vite bump changing that default under us.
+    // - `fs.deny` — defense-in-depth: even a request that gets past the
+    //   above can't read the common secret-file globs.
+    // Residual, accepted risk: another SAME-USER local process can still
+    // read `/@fs/<abspath>` directly (no privilege gained over just reading
+    // the file itself) — a full Host/Origin guard middleware is the
+    // follow-up that would close that too (see VENDORING.md).
+    cors: false,
+    allowedHosts: ["127.0.0.1", "localhost"],
     fs: {
       // Registered projects live in arbitrary Conclave workspace folders
       // anywhere on disk, never under this package's own root — Vite's
       // default allow-list (this root only) 403s every /@fs/ screen import
       // for a real project (proven empirically: a scratch project's
       // proto/screens/home.tsx 403'd until this was added).
-      //
-      // SECURITY POSTURE (corrected per review — the prior comment here was
-      // wrong): `fs.strict: false` makes Vite serve ANY absolute path via
-      // `GET /@fs/<abspath>`, completely independent of registry.json —
-      // the registry only gates the project SWITCHER list, not this route.
-      // Safety rests SOLELY on the `host: "127.0.0.1"` binding above, which
-      // blocks LAN access but NOT a same-machine attacker (any other local
-      // process, or a webpage the user's browser opens — the classic
-      // dev-server localhost-file-read / DNS-rebind vector: while this
-      // sidecar runs, an untrusted page could fetch
-      // `http://127.0.0.1:<port>/@fs/Users/<you>/.ssh/id_rsa`). Accepted for
-      // Phase 1 as a dev-mode posture (see VENDORING.md); a Host/Origin guard
-      // is tracked as a follow-up, not implemented here.
       strict: false,
+      deny: ["**/.ssh/**", "**/.env", "**/.env.*", "**/id_rsa*", "**/*.pem"],
     },
   },
 });
