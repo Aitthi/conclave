@@ -131,6 +131,18 @@ Boundary: `src/ipc/commands.ts`, `src/components/Builder.tsx`,
 `src/components/Roster.tsx`, `src/components/SupervisorPicker.tsx` (new),
 `src/lib/positions.ts`
 
+AMENDED (challenge 639af566, Armin — upheld): `src/ipc/types.ts` is a
+RATIFIED boundary extension, limited to adding `defaultLevel` on
+`AgentDefinition` (types.ts:37) — the plan pinned the TS contract but pointed
+at commands.ts while the interface lives in types.ts. Same defect class as
+Lane B's db.rs omission, same session: TWO boundary misses in one plan, both
+"the contract names a concept, the boundary misses the file that OWNS it".
+Standing guard for future plans: for every type/constant a contract pins,
+grep for its DEFINING file and put THAT in the boundary — the file you
+remember using is often just the importer. Mechanism: types.ts lands as a
+separate scoped commit with Dew's authorship (stage commit honors only the
+original boundary).
+
 1. `src/ipc/commands.ts`: pinned contract types (AgentDefinition.defaultLevel
    + create/update req fields).
 2. `Builder.tsx`: "Level" 4-segment picker + Clear-to-Unranked on the
