@@ -1,2 +1,55 @@
 import type { FixtureHandlers } from "../backend";
-export const handlers: FixtureHandlers = {};
+import {
+  workspaces,
+  agents,
+  agentDefs,
+  tasks,
+  blackboardEntries,
+  blackboardActivity,
+  artifacts,
+  memoryGraph,
+  messages,
+  roles,
+  skills,
+  providers,
+} from "./data";
+
+// Handler coverage for every command the v1 views invoke on their render path.
+// `workspace.use` / `session.resize` are no-op void handlers so an incidental
+// call (workspace activation, terminal fit) doesn't throw the loud
+// missing-handler error. Mutations that only fire on user interaction are
+// intentionally absent — reaching one in a screenshot is a real bug worth the
+// loud failure.
+export const handlers: FixtureHandlers = {
+  "workspace.list": () => workspaces,
+  "workspace.use": () => undefined,
+  "instance.list": ({ workspaceId }) =>
+    agents.filter((a) => a.workspaceId === workspaceId),
+  // The WorkspacePane auto-opens a session for the focused agent on mount.
+  // Synthesize a deterministic one; the Terminal then renders an empty frame
+  // (no session:output on the fixture bus) — the accepted PTY-in-fixture v1
+  // limitation, not an error.
+  "instance.spawn": ({ workspaceAgentId }) => ({
+    id: `fx-sess-${workspaceAgentId}`,
+    workspaceAgentId,
+    contextTokens: 42000,
+    contextLimit: 200000,
+    startedAt: "2026-07-05T11:00:00.000Z",
+    lastActiveAt: "2026-07-05T11:58:00.000Z",
+  }),
+  "agentDef.list": () => agentDefs,
+  "task.list": ({ workspaceId, state }) =>
+    tasks.filter((t) => t.workspaceId === workspaceId && (!state || t.state === state)),
+  "memory.graph": () => memoryGraph,
+  "artifact.list": ({ workspaceId }) =>
+    artifacts.filter((a) => a.workspaceId === workspaceId),
+  "blackboard.list": ({ workspaceId }) => ({
+    entries: blackboardEntries.filter((e) => e.workspaceId === workspaceId),
+    activity: blackboardActivity,
+  }),
+  "message.listForWorkspace": () => messages,
+  "role.list": () => roles,
+  "skill.list": () => skills,
+  "provider.list": () => providers,
+  "session.resize": () => undefined,
+};

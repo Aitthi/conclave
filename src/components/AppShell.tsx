@@ -17,6 +17,17 @@ import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
 import { LaneBoard } from "./LaneBoard";
 
+/** Synchronous fixture-mode check (mirrors src/fixtures/mode.ts) — kept inline
+ *  so prod builds never statically import the fixture module. The
+ *  `import.meta.env.DEV` short-circuit makes the whole expression dead-code-
+ *  eliminate in a production build. */
+function fixtureActive(): boolean {
+  return (
+    import.meta.env.DEV &&
+    !!new URLSearchParams(window.location.search).get("fixture")
+  );
+}
+
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
   // the active agent tab when the user clicks an agent in the Roster sidebar.
@@ -78,12 +89,26 @@ export function AppShell() {
   // ── EditWorkspace state ────────────────────────────────────────────────
   const [showEditWorkspace, setShowEditWorkspace] = useState(false);
 
+  // ── Fixture-mode boot flag (DEV-only) — true once the initial workspace
+  //    fetch has settled, gating the readiness sentinel below. ────────────────
+  const [booted, setBooted] = useState(false);
+
   // Load workspaces from the DB on mount.
   // Falls back to an empty list if Tauri is not present (plain Vite dev).
   useEffect(() => {
     ipc.workspace
       .list()
-      .then(setWorkspaces)
+      .then((ws) => {
+        setWorkspaces(ws);
+        // Fixture mode (DEV-only): auto-select the first workspace so the routed
+        // view renders with data — a headless shot has no human to click a
+        // workspace. Set directly (not via handleSelectWorkspace) so the
+        // hash-routed center-screen flags are NOT cleared.
+        if (fixtureActive() && ws.length > 0) {
+          setActiveWorkspaceId(ws[0].id);
+        }
+        setBooted(true);
+      })
       .catch((err: unknown) => {
         // Plain `vite` dev (no Tauri shell) lands here; so does a real backend
         // failure. Surface it in dev rather than silently showing an empty Rail.
@@ -91,8 +116,48 @@ export function AppShell() {
           console.error("AppShell: workspace.list failed", err);
         }
         setWorkspaces([]);
+        setBooted(true);
       });
   }, []);
+
+  // Fixture mode (DEV-only): route the initial view from the URL hash so a
+  // headless capture (scripts/uishot.mjs) can open any screen directly via
+  // `#view=<id>`. Set directly (not via handleSelectWorkspace) so the boot
+  // effect's workspace auto-select doesn't clobber it. No-op outside ?fixture=.
+  useEffect(() => {
+    if (!fixtureActive()) return;
+    const view = /view=([a-z-]+)/.exec(window.location.hash)?.[1] ?? "home";
+    const open: Record<string, () => void> = {
+      home: () => {},
+      laneboard: () => setShowLaneBoard(true),
+      memory: () => setShowMemory(true),
+      artifacts: () => setShowArtifacts(true),
+      blackboard: () => setShowBlackboard(true),
+      chat: () => setShowChat(true),
+      library: () => setShowLibrary(true),
+      builder: () => setShowBuilder(true),
+      settings: () => setShowSettings(true),
+    };
+    (open[view] ?? open.home)();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fixture mode (DEV-only): set the readiness sentinel once boot data has
+  // landed and the routed view has had its first real paint, so uishot knows
+  // when to shoot. Double-rAF defers past the paint. No-op outside ?fixture=.
+  useEffect(() => {
+    if (!booted || !fixtureActive()) return;
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        document.body.dataset.conclaveReady = "1";
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [booted]);
 
   // Native menu / accelerator events from the Rust menu bar (⌘N, ⌘L, ⌘B, the
   // Appearance submenu). Each carries the clicked item's id.
