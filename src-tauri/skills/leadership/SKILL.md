@@ -196,13 +196,17 @@ the gap between them is where leads fail.
 ## Idle time is oversight time
 
 - While implementers work, you are not done: `conclave task watch <ws>
-  <slug>` every lane you own — notes, gates, and state changes arrive in
-  your session as they happen — review landed commits against the plan, and
-  stay interruptible. Catch drift while it is one commit old, not one phase
-  old.
+  <slug>` every lane you own. Watchers wake only on decision-demanding
+  events — a `review`/`abandoned`/`merged` transition, a failing gate, a
+  challenge or its ruling, or a note prefixed `READY`/`BLOCKED`/`ESCALATION`;
+  routine
+  progress (plain notes, passing gates, `claimed`/`in_progress`) records
+  silently, so pull it with `conclave task get <ws> <slug>` on your own
+  cadence. Review landed commits against the plan and stay interruptible —
+  catch drift while it is one commit old, not one phase old.
 - Do not hover. Review on the implementer's cadence (when their notes and
   gates land), not on a timer that interrupts them. The stall engine
-  already pages you when a claimed lane goes quiet for 30 minutes — you do
+  already pages you when a claimed lane goes quiet for 10 minutes — you do
   not need to poll for silence.
 - `conclave agent list <ws>` now reports `working`/`lastActivityAt` per agent
   — read it BEFORE interrupting an implementer or declaring a lane stalled. A

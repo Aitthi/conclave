@@ -41,11 +41,16 @@ use std::collections::{HashMap, HashSet};
 const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// A task counts as stalled once its newest `task_event` is this many
-/// minutes old.
-const STALL_MINUTES: i64 = 30;
+/// minutes old. Chosen at 10 (plan `watch-filter`, decision 3): the human
+/// asked for 5-10, and 10 clears the 5-8 quiet minutes a full `cargo
+/// test`/`clippy` gate legitimately runs, so a normal build never false-pages.
+/// Since the watch fan-out now injects only decision-demanding events, this
+/// stall page is the safety net that pulls the lead in to CHECK a quiet claim
+/// carrying an important-but-unmarked note.
+const STALL_MINUTES: i64 = 10;
 
 /// A stalled task's owner is alerted at most once per this many minutes.
-const STALL_ALERT_COOLDOWN_MINUTES: i64 = 60;
+const STALL_ALERT_COOLDOWN_MINUTES: i64 = 30;
 
 /// Per-task last-stall-alert timestamps, held across ticks by [`run`]'s loop.
 /// Deliberately in-process only (ADR 0008 plan: "track last-alert in memory,
@@ -287,15 +292,15 @@ mod tests {
         let claimed_at = Utc::now();
         let mut ticker = Ticker::new();
 
-        // Just under the threshold — no alert yet.
-        tick(&state, claimed_at + Duration::minutes(29), &mut ticker).await;
+        // Just under the 10-minute threshold — no alert yet.
+        tick(&state, claimed_at + Duration::minutes(9), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
         assert_eq!(inbox.as_array().unwrap().len(), 0, "must not fire before the threshold");
 
         // Past the threshold — alert fires.
-        tick(&state, claimed_at + Duration::minutes(31), &mut ticker).await;
+        tick(&state, claimed_at + Duration::minutes(11), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
@@ -313,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stall_alert_respects_the_hourly_cooldown() {
+    async fn stall_alert_respects_the_cooldown() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
@@ -330,9 +335,10 @@ mod tests {
 
         let claimed_at = Utc::now();
         let mut ticker = Ticker::new();
+        tick(&state, claimed_at + Duration::minutes(11), &mut ticker).await;
+        // 20 minutes after the first alert — still within the 30-minute
+        // cooldown, no second alert.
         tick(&state, claimed_at + Duration::minutes(31), &mut ticker).await;
-        // 20 minutes later — still within the 60-minute cooldown, no second alert.
-        tick(&state, claimed_at + Duration::minutes(51), &mut ticker).await;
 
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
@@ -340,11 +346,11 @@ mod tests {
         assert_eq!(
             inbox.as_array().unwrap().len(),
             1,
-            "cooldown must suppress a second alert within the hour"
+            "cooldown must suppress a second alert within the cooldown window"
         );
 
-        // Past the cooldown — a second alert fires.
-        tick(&state, claimed_at + Duration::minutes(31 + 61), &mut ticker).await;
+        // Past the cooldown (31 min after the first alert) — a second fires.
+        tick(&state, claimed_at + Duration::minutes(11 + 31), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
@@ -382,7 +388,7 @@ mod tests {
         let claimed_at = Utc::now();
         let mut ticker = Ticker::new();
         // Both tasks stall together on the SAME tick.
-        tick(&state, claimed_at + Duration::minutes(31), &mut ticker).await;
+        tick(&state, claimed_at + Duration::minutes(11), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
@@ -393,17 +399,17 @@ mod tests {
              entry must not gate the other's"
         );
 
-        // Within the hour on a second tick: BOTH stay cooled down (proves the
-        // cooldown is keyed per-task, not a single last-fired-at timestamp
+        // Within the cooldown on a second tick: BOTH stay cooled down (proves
+        // the cooldown is keyed per-task, not a single last-fired-at timestamp
         // that a second task would incorrectly race past or get blocked by).
-        tick(&state, claimed_at + Duration::minutes(51), &mut ticker).await;
+        tick(&state, claimed_at + Duration::minutes(26), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
         assert_eq!(
             inbox.as_array().unwrap().len(),
             2,
-            "both tasks' cooldowns must independently suppress a same-hour repeat"
+            "both tasks' cooldowns must independently suppress a same-cooldown-window repeat"
         );
     }
 
