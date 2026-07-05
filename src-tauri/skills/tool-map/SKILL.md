@@ -43,6 +43,7 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Blackboard | `conclave bb get <workspaceId> <key>` | read one |
 | Blackboard | `conclave bb set <workspaceId> <key> <value>` | write one |
 | Blackboard | `conclave bb delete <workspaceId> <key>` (alias `bb rm`) | remove a finished key of your own |
+| Blackboard | `config:distill-auto` key | opts a workspace into the timer-driven distiller nudge (`{"distiller","reviewer","cooldownHours"}`); absent = OFF, `bb delete` is the kill switch |
 | Memory | `conclave memory search <workspaceId> <query...> [--limit N]` | recall before you research |
 | Memory | `conclave memory remember <workspaceId> <text...>` | save hard-won knowledge |
 | Memory | `conclave memory delete <workspaceId> <chunkId>` | remove a wrong or stale memory |

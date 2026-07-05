@@ -34,6 +34,7 @@
 
 use crate::engine::{commands, repo, AppState};
 use chrono::{DateTime, Duration, Utc};
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -52,18 +53,57 @@ const STALL_MINUTES: i64 = 10;
 /// A stalled task's owner is alerted at most once per this many minutes.
 const STALL_ALERT_COOLDOWN_MINUTES: i64 = 30;
 
+/// bb key holding the per-workspace opt-in config for the distill-auto-nudge
+/// (distill phase 2 plan, decision 3): `{"distiller": "<id>", "reviewer":
+/// "<id>", "cooldownHours": 6}`. Absent key = OFF — the kill switch is
+/// `conclave bb delete <ws> config:distill-auto`.
+const DISTILL_CONFIG_KEY: &str = "config:distill-auto";
+
+/// bb key holding the memory-distiller skill's own cadence high-water-mark
+/// (an ISO instant the skill advances on every run — SKILL.md step 5).
+const DISTILL_HWM_KEY: &str = "note:distill-hwm";
+
+/// Default `cooldownHours` when the config JSON omits it (decision 4).
+const DISTILL_DEFAULT_COOLDOWN_HOURS: i64 = 6;
+
+/// In-memory per-workspace re-nudge cooldown (decision 4), distinct from the
+/// skill-owned hwm cooldown above: this one guards against re-paging a
+/// distiller that is already mid-run (hwm hasn't advanced yet) on every
+/// 5-minute tick. A restart resets it — one early re-nudge worst case,
+/// the same accepted tradeoff as [`STALL_ALERT_COOLDOWN_MINUTES`].
+const DISTILL_RENUDGE_COOLDOWN_MINUTES: i64 = 60;
+
+/// Per-workspace distill-auto config, parsed from the `config:distill-auto`
+/// bb value. Malformed JSON or a missing field fails to deserialize, which
+/// the caller treats as "skip this workspace" (decision 3).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DistillAutoConfig {
+    distiller: String,
+    reviewer: String,
+    #[serde(default = "default_distill_cooldown_hours")]
+    cooldown_hours: i64,
+}
+
+fn default_distill_cooldown_hours() -> i64 {
+    DISTILL_DEFAULT_COOLDOWN_HOURS
+}
+
 /// Per-task last-stall-alert timestamps, held across ticks by [`run`]'s loop.
 /// Deliberately in-process only (ADR 0008 plan: "track last-alert in memory,
 /// not DB") — restarting the app resets the cooldown, which is an acceptable
-/// trade for not persisting a purely advisory rate-limit.
+/// trade for not persisting a purely advisory rate-limit. `last_distill_nudge`
+/// is keyed by workspace_id and follows the same in-process-only rationale.
 pub struct Ticker {
     last_stall_alert: HashMap<String, DateTime<Utc>>,
+    last_distill_nudge: HashMap<String, DateTime<Utc>>,
 }
 
 impl Ticker {
     pub fn new() -> Self {
         Self {
             last_stall_alert: HashMap::new(),
+            last_distill_nudge: HashMap::new(),
         }
     }
 }
@@ -85,11 +125,13 @@ pub async fn run(state: std::sync::Arc<AppState>) {
     }
 }
 
-/// One timer pass: stall check then challenge-default check. `now` is
-/// injected so tests can drive exact boundary behavior.
+/// One timer pass: stall check, challenge-default check, then the
+/// distill-auto-nudge check. `now` is injected so tests can drive exact
+/// boundary behavior.
 pub async fn tick(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker) {
     check_stalls(state, now, ticker).await;
     check_challenge_deadlines(state, now).await;
+    check_distill_nudge(state, now, ticker).await;
 }
 
 /// Deliver one notify line via the shared `tell` mechanism. Best-effort: the
@@ -234,6 +276,110 @@ async fn check_challenge_deadlines(state: &AppState, now: DateTime<Utc>) {
             (None, None) => {}
         }
     }
+}
+
+/// Per workspace: nudge the configured distiller agent to run the
+/// memory-distiller skill once its cadence is due (distill phase 2 plan,
+/// decisions 3-5). Every workspace is checked independently — one
+/// workspace's bad config must not skip another's nudge.
+async fn check_distill_nudge(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker) {
+    let Ok(workspaces) = repo::workspace::list(&state.db).await else {
+        return;
+    };
+    for ws in workspaces {
+        check_distill_nudge_for_workspace(state, &ws.id, now, ticker).await;
+    }
+}
+
+/// The single-workspace nudge check. Every failure mode here — a missing or
+/// malformed `config:distill-auto`, an unknown or foreign agent id, a bb
+/// read error — degrades to an early return ("skip this workspace"), never
+/// a panic or propagated error: this check shares the tick with the stall
+/// and challenge-default checks, which must run regardless (risk ledger,
+/// distill phase 2 plan).
+async fn check_distill_nudge_for_workspace(
+    state: &AppState,
+    workspace_id: &str,
+    now: DateTime<Utc>,
+    ticker: &mut Ticker,
+) {
+    // (a) config present, valid JSON, both agents live and in this workspace.
+    let Ok(Some(config_row)) =
+        repo::blackboard::get(&state.db, workspace_id, DISTILL_CONFIG_KEY, None).await
+    else {
+        return;
+    };
+    let Some(config_text) = config_row.value.as_deref() else {
+        return;
+    };
+    let Ok(config) = serde_json::from_str::<DistillAutoConfig>(config_text) else {
+        return;
+    };
+    let Ok(Some(distiller)) = repo::workspace_agent::get(&state.db, &config.distiller).await else {
+        return;
+    };
+    if distiller.workspace_id != workspace_id {
+        return;
+    }
+    let Ok(Some(reviewer)) = repo::workspace_agent::get(&state.db, &config.reviewer).await else {
+        return;
+    };
+    if reviewer.workspace_id != workspace_id {
+        return;
+    }
+
+    // (b) hwm cooldown — absent hwm satisfies the condition (first run).
+    let hwm = match repo::blackboard::get(&state.db, workspace_id, DISTILL_HWM_KEY, None).await {
+        Ok(Some(row)) => {
+            let Some(dt) = row
+                .value
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<String>(text).ok())
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+            else {
+                return;
+            };
+            Some(dt)
+        }
+        Ok(None) => None,
+        Err(_) => return,
+    };
+    if let Some(hwm) = hwm {
+        if now.signed_duration_since(hwm) < Duration::hours(config.cooldown_hours) {
+            return;
+        }
+    }
+
+    // (c) activity signal — an idle workspace never gets nudged.
+    let hwm_rfc3339 = hwm.map(|h| h.to_rfc3339());
+    let Ok(has_activity) =
+        repo::task::has_task_event_since(&state.db, workspace_id, hwm_rfc3339.as_deref()).await
+    else {
+        return;
+    };
+    if !has_activity {
+        return;
+    }
+
+    // In-memory re-nudge cooldown (decision 4) — separate from the hwm
+    // cooldown above: this suppresses re-paging a distiller that is already
+    // mid-run (hwm hasn't advanced yet) on the very next tick.
+    if let Some(last) = ticker.last_distill_nudge.get(workspace_id) {
+        if now.signed_duration_since(*last) < Duration::minutes(DISTILL_RENUDGE_COOLDOWN_MINUTES) {
+            return;
+        }
+    }
+
+    // Attribution follows the recorded ruling (ADR 0008 Lane B / f51a980f):
+    // FROM the configured reviewer TO the distiller — no synthetic sender.
+    let window_start = hwm_rfc3339.unwrap_or_else(|| "the beginning".to_string());
+    let text = format!(
+        "[distill-auto] Run the memory-distiller skill for workspace {workspace_id} now \
+         (window since {window_start}); report the run summary back to me when done."
+    );
+    notify(state, &reviewer.id, &distiller.id, &text).await;
+    ticker.last_distill_nudge.insert(workspace_id.to_string(), now);
 }
 
 #[cfg(test)]
@@ -682,5 +828,284 @@ mod tests {
             got["events"].as_array().unwrap().iter().all(|e| e["kind"] != "ruling"),
             "an advisory (no deadline) challenge must never auto-default"
         );
+    }
+
+    // ── distill-auto-nudge ───────────────────────────────────────────────
+
+    fn distill_config_json(distiller: &str, reviewer: &str) -> String {
+        json!({ "distiller": distiller, "reviewer": reviewer, "cooldownHours": 6 }).to_string()
+    }
+
+    async fn set_distill_config(state: &AppState, ws: &str, distiller: &str, reviewer: &str) {
+        repo::blackboard::set(
+            &state.db,
+            ws,
+            DISTILL_CONFIG_KEY,
+            &distill_config_json(distiller, reviewer),
+            None,
+        )
+        .await
+        .expect("set config failed");
+    }
+
+    async fn set_distill_hwm(state: &AppState, ws: &str, at: DateTime<Utc>) {
+        let value = serde_json::to_string(&at.to_rfc3339()).unwrap();
+        repo::blackboard::set(&state.db, ws, DISTILL_HWM_KEY, &value, None)
+            .await
+            .expect("set hwm failed");
+    }
+
+    async fn distiller_inbox(state: &AppState, distiller: &str) -> Vec<serde_json::Value> {
+        crate::engine::commands::message::list(state, json!({ "instanceId": distiller }))
+            .await
+            .expect("list failed")
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["toInstanceId"] == json!(distiller))
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_no_config_key_means_no_nudge() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let distiller = fixture_instance(&state, &ws, "Distiller").await;
+        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::hours(24), &mut ticker).await;
+
+        assert_eq!(
+            distiller_inbox(&state, &distiller).await.len(),
+            0,
+            "absent config:distill-auto must never nudge"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_fresh_hwm_within_cooldown_no_nudge() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let distiller = fixture_instance(&state, &ws, "Distiller").await;
+        let reviewer = fixture_instance(&state, &ws, "Reviewer").await;
+        set_distill_config(&state, &ws, &distiller, &reviewer).await;
+        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+
+        let hwm = Utc::now();
+        set_distill_hwm(&state, &ws, hwm).await;
+
+        let mut ticker = Ticker::new();
+        // Only 1h since hwm — inside the default 6h cooldown.
+        tick(&state, hwm + Duration::hours(1), &mut ticker).await;
+
+        assert_eq!(
+            distiller_inbox(&state, &distiller).await.len(),
+            0,
+            "fresh hwm inside the cooldown window must not nudge"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_stale_hwm_but_no_activity_since_no_nudge() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let distiller = fixture_instance(&state, &ws, "Distiller").await;
+        let reviewer = fixture_instance(&state, &ws, "Reviewer").await;
+        set_distill_config(&state, &ws, &distiller, &reviewer).await;
+        // A real task_event happens BEFORE the hwm is recorded (`task::create`
+        // alone inserts no task_event — only `claim`/`note`/etc. do) — nothing
+        // newer than the hwm.
+        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        task::note(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "before hwm" }))
+            .await
+            .expect("note failed");
+        let hwm = Utc::now();
+        set_distill_hwm(&state, &ws, hwm).await;
+
+        let mut ticker = Ticker::new();
+        // Well past the 6h default cooldown.
+        tick(&state, hwm + Duration::hours(7), &mut ticker).await;
+
+        assert_eq!(
+            distiller_inbox(&state, &distiller).await.len(),
+            0,
+            "stale hwm with no activity since must not nudge (idle workspace)"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_stale_hwm_with_activity_fires_once_from_reviewer_to_distiller() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let distiller = fixture_instance(&state, &ws, "Distiller").await;
+        let reviewer = fixture_instance(&state, &ws, "Reviewer").await;
+        set_distill_config(&state, &ws, &distiller, &reviewer).await;
+        let hwm = Utc::now();
+        set_distill_hwm(&state, &ws, hwm).await;
+        // A real task_event AFTER the hwm.
+        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        task::note(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "after hwm" }))
+            .await
+            .expect("note failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, hwm + Duration::hours(7), &mut ticker).await;
+
+        let inbox = distiller_inbox(&state, &distiller).await;
+        assert_eq!(inbox.len(), 1, "stale hwm + activity since must nudge exactly once");
+        assert_eq!(inbox[0]["fromInstanceId"], json!(reviewer));
+        assert_eq!(inbox[0]["toInstanceId"], json!(distiller));
+        let text = inbox[0]["text"].as_str().unwrap();
+        assert!(text.contains("memory-distiller"), "nudge must name the skill: {text}");
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_inmemory_cooldown_suppresses_then_resumes_after_60_minutes() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let distiller = fixture_instance(&state, &ws, "Distiller").await;
+        let reviewer = fixture_instance(&state, &ws, "Reviewer").await;
+        set_distill_config(&state, &ws, &distiller, &reviewer).await;
+        let hwm = Utc::now();
+        set_distill_hwm(&state, &ws, hwm).await;
+        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        task::note(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "after hwm" }))
+            .await
+            .expect("note failed");
+
+        let mut ticker = Ticker::new();
+        let base = hwm + Duration::hours(7);
+        tick(&state, base, &mut ticker).await;
+        assert_eq!(distiller_inbox(&state, &distiller).await.len(), 1, "first tick nudges once");
+
+        // 5 minutes later — well within the 60-minute in-memory cooldown.
+        tick(&state, base + Duration::minutes(5), &mut ticker).await;
+        assert_eq!(
+            distiller_inbox(&state, &distiller).await.len(),
+            1,
+            "in-memory cooldown must suppress a re-nudge within 60 minutes"
+        );
+
+        // 61 minutes after the first nudge — cooldown has expired.
+        tick(&state, base + Duration::minutes(61), &mut ticker).await;
+        assert_eq!(
+            distiller_inbox(&state, &distiller).await.len(),
+            2,
+            "cooldown expired -> a second nudge fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_malformed_config_json_is_skipped_and_stall_check_still_runs() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        repo::blackboard::set(&state.db, &ws, DISTILL_CONFIG_KEY, "not valid json", None)
+            .await
+            .expect("set config failed");
+
+        // A stalled task on the SAME tick — proves malformed distill config
+        // doesn't take down the other timer checks sharing this tick.
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
+            .await
+            .expect("claim failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
+
+        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            owner_inbox.as_array().unwrap().len(),
+            1,
+            "malformed distill config must not stop the stall check from firing on the same tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_unknown_agent_id_in_config_is_skipped_and_stall_check_still_runs() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        set_distill_config(&state, &ws, "not-a-real-agent-id", "also-not-real").await;
+
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
+            .await
+            .expect("claim failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
+
+        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            owner_inbox.as_array().unwrap().len(),
+            1,
+            "unknown agent id in distill config must not stop the stall check from firing"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_nudge_workspaces_are_independent() {
+        let state = AppState::for_tests().await;
+        let ws1 = fixture_workspace(&state).await;
+        let ws2 = fixture_workspace(&state).await;
+        let distiller1 = fixture_instance(&state, &ws1, "Distiller1").await;
+        let reviewer1 = fixture_instance(&state, &ws1, "Reviewer1").await;
+        let distiller2 = fixture_instance(&state, &ws2, "Distiller2").await;
+        let reviewer2 = fixture_instance(&state, &ws2, "Reviewer2").await;
+
+        set_distill_config(&state, &ws1, &distiller1, &reviewer1).await;
+        let hwm1 = Utc::now();
+        set_distill_hwm(&state, &ws1, hwm1).await;
+        task::create(&state, json!({ "workspaceId": ws1, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        task::note(&state, json!({ "workspaceId": ws1, "slug": "t1", "actorId": reviewer1, "text": "after hwm" }))
+            .await
+            .expect("note failed");
+
+        set_distill_config(&state, &ws2, &distiller2, &reviewer2).await;
+        // Fresh relative to the SAME injected `now` the tick below uses (one
+        // tick checks every workspace against one `now`) — 1h old, inside the
+        // 6h default cooldown — must not nudge regardless of ws1's schedule.
+        set_distill_hwm(&state, &ws2, hwm1 + Duration::hours(6)).await;
+        task::create(&state, json!({ "workspaceId": ws2, "slug": "t2", "title": "T2" }))
+            .await
+            .expect("create failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, hwm1 + Duration::hours(7), &mut ticker).await;
+
+        assert_eq!(distiller_inbox(&state, &distiller1).await.len(), 1, "ws1 must nudge");
+        assert_eq!(distiller_inbox(&state, &distiller2).await.len(), 0, "ws2 must not nudge");
     }
 }

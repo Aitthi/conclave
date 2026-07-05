@@ -12,9 +12,12 @@ PROPOSALS, never direct writes: everything you produce lands in a review queue
 and reaches the store only when a reviewer other than you approves it. Junk that
 reaches the store poisons every future search, so the gate is the whole point.
 
-Run this only when the lead or human asks. It is on-demand (trigger v1); there
-is no background writer. You are the proposer; the lead (or whoever they name)
-is the reviewer.
+Run this only when the lead or human asks. It is on-demand: a designated
+reviewer decides when a run happens, either by asking you directly or via the
+engine's `config:distill-auto` timer nudge (Phase 2) — that nudge arrives from
+the configured reviewer's own instance id, so it IS the reviewer asking, not a
+background writer acting on its own. Either way, you are the proposer; the
+named reviewer is the reviewer.
 
 ## What you are NOT doing
 
@@ -101,3 +104,7 @@ This is a precision pilot. If fewer than half the proposals are approve-worthy
 across the first two runs, STOP and rethink the distillation criteria before
 anyone widens the trigger — a low-precision writer costs more review time than
 the memories are worth.
+
+Kill switch: `conclave bb delete <ws> config:distill-auto` stops all future
+engine nudges instantly (Phase 2). If precision collapses, turn it off first,
+rethink second — do not keep running while you diagnose.
