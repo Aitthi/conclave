@@ -16,6 +16,7 @@ import { Blackboard } from "./Blackboard";
 import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
 import { LaneBoard } from "./LaneBoard";
+import { ArtifactsView } from "./ArtifactsView";
 
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
@@ -40,6 +41,14 @@ export function AppShell() {
   // ── Lane Board state — a fourth center-pane destination (agent work system,
   //    ADR 0008), mutually exclusive with Blackboard / Chat Hub / Memory. ──────
   const [showLaneBoard, setShowLaneBoard] = useState(false);
+
+  // ── Artifacts state — a fifth center-pane destination, mutually exclusive
+  //    with the other full-page workspace views. ──────────────────────────────
+  const [showArtifacts, setShowArtifacts] = useState(false);
+
+  // ── Design state — shell-plumbed now so Lane D can render inside the
+  //    mounted workspace pane without touching the Rail. ──────────────────────
+  const [showDesign, setShowDesign] = useState(false);
 
   // Bumped whenever the set of agents in the active workspace changes (add via
   // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
@@ -113,6 +122,42 @@ export function AppShell() {
     }
   });
 
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.defaultPrevented || activeWorkspaceId == null || e.metaKey === false) return;
+
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT")
+      ) {
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (key === "d" && !e.shiftKey && !e.altKey && !e.ctrlKey) {
+        e.preventDefault();
+        setShowArtifacts(false);
+        setShowDesign((v) => !v);
+        return;
+      }
+      if (key === "a" && e.shiftKey && !e.altKey && !e.ctrlKey) {
+        e.preventDefault();
+        setShowBlackboard(false);
+        setShowChat(false);
+        setShowMemory(false);
+        setShowLaneBoard(false);
+        setShowArtifacts((v) => !v);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeWorkspaceId]);
+
   function handleSelectWorkspace(id: string) {
     // Optimistically update selection; handler only validates on the Rust side.
     setActiveWorkspaceId(id);
@@ -121,6 +166,7 @@ export function AppShell() {
     setSelectedId(null);
     // Switching workspace returns to that workspace's agent pane.
     setShowBlackboard(false);
+    setShowChat(false);
     setShowMemory(false);
     setShowLaneBoard(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
@@ -165,7 +211,22 @@ export function AppShell() {
         <Rail
           workspaces={workspaces}
           activeWorkspaceId={activeWorkspaceId}
+          artifactsOpen={showArtifacts}
+          designOpen={showDesign}
           onSelectWorkspace={handleSelectWorkspace}
+          onOpenDesign={() => {
+            if (!activeWorkspaceId) return;
+            setShowArtifacts(false);
+            setShowDesign((v) => !v);
+          }}
+          onOpenArtifacts={() => {
+            if (!activeWorkspaceId) return;
+            setShowBlackboard(false);
+            setShowChat(false);
+            setShowMemory(false);
+            setShowLaneBoard(false);
+            setShowArtifacts((v) => !v);
+          }}
           onOpenLibrary={() => {
             setShowBlackboard(false);
             setShowLibrary(true);
@@ -189,6 +250,7 @@ export function AppShell() {
                 setShowChat(false);
                 setShowMemory(false);
                 setShowLaneBoard(false);
+                setShowArtifacts(false);
                 setSelectedId(id);
               }}
               // "Create new agent…" (from inside the picker) still opens the Builder.
@@ -207,6 +269,7 @@ export function AppShell() {
               onOpenBlackboard={
                 activeWorkspaceId
                   ? () => {
+                      setShowArtifacts(false);
                       setShowChat(false);
                       setShowMemory(false);
                       setShowLaneBoard(false);
@@ -218,6 +281,7 @@ export function AppShell() {
               onOpenMemory={
                 activeWorkspaceId
                   ? () => {
+                      setShowArtifacts(false);
                       setShowBlackboard(false);
                       setShowChat(false);
                       setShowLaneBoard(false);
@@ -229,6 +293,7 @@ export function AppShell() {
               onOpenChat={
                 activeWorkspaceId
                   ? () => {
+                      setShowArtifacts(false);
                       setShowBlackboard(false);
                       setShowMemory(false);
                       setShowLaneBoard(false);
@@ -240,6 +305,7 @@ export function AppShell() {
               onOpenLaneBoard={
                 activeWorkspaceId
                   ? () => {
+                      setShowArtifacts(false);
                       setShowBlackboard(false);
                       setShowChat(false);
                       setShowMemory(false);
@@ -281,6 +347,13 @@ export function AppShell() {
                 workspaceName={activeWorkspace?.name}
                 onClose={() => setShowLaneBoard(false)}
               />
+            ) : showArtifacts && activeWorkspaceId ? (
+              <ArtifactsView
+                key={activeWorkspaceId}
+                workspaceId={activeWorkspaceId}
+                workspaceName={activeWorkspace?.name}
+                onClose={() => setShowArtifacts(false)}
+              />
             ) : activeWorkspaceId ? (
               // Remount per workspace AND per agents change so the pane refetches
               // its tabs when an agent is added/removed.
@@ -288,10 +361,12 @@ export function AppShell() {
                 key={`${activeWorkspaceId}:${agentsVersion}`}
                 workspaceId={activeWorkspaceId}
                 focusInstanceId={selectedId}
+                showDesign={showDesign}
                 onOpenChat={() => {
                   setShowBlackboard(false);
                   setShowMemory(false);
                   setShowLaneBoard(false);
+                  setShowArtifacts(false);
                   setShowChat(true);
                 }}
               />
@@ -374,6 +449,11 @@ export function AppShell() {
             setActiveWorkspaceId(null);
             setSelectedId(null);
             setShowBlackboard(false);
+            setShowChat(false);
+            setShowMemory(false);
+            setShowLaneBoard(false);
+            setShowArtifacts(false);
+            setShowDesign(false);
           }}
         />
       )}
