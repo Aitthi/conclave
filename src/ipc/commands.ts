@@ -356,6 +356,13 @@ export async function call<K extends keyof Commands>(
   // `null` (not `{}`) is the Rust-compatible sentinel for void-req commands:
   // serde deserializes a unit / Value::Null from JSON `null`, never from `{}`.
   const safePayload: unknown = payload ?? null;
+  if (import.meta.env.DEV) {
+    // Dynamic import inside the DEV guard: prod builds drop this branch and
+    // never bundle src/fixtures/*.
+    const { maybeFixtureCall } = await import("../fixtures/backend");
+    const routed = await maybeFixtureCall(cmd, safePayload);
+    if (routed.hit) return routed.value as Commands[K]["res"];
+  }
   return invoke<Commands[K]["res"]>("ipc", { cmd, payload: safePayload });
 }
 
