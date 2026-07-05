@@ -131,6 +131,13 @@ the Collaboration skill; this one only covers what implementing adds.
   unchanged. Commit BEFORE gating: `task gate` pins `git rev-parse HEAD` at
   run time, so gating uncommitted work records the parent commit as evidence
   — a SHA the reviewer cannot check your work out at.
+- When the workspace defines a UI capture contract (`package.json` script
+  `uishot`; details usually live on bb key `protocol:ui-pixel-gate` and the
+  repo's `CLAUDE.md`/`AGENTS.md`), a lane touching UI must, BEFORE claiming
+  READY, run the capture for each affected view, OPEN each PNG with your
+  image-capable file reader and look at it, attach the shot paths in the
+  READY note, and record the run as a task gate. A green exit code without
+  looking at the pixels is not verification.
 - **Fix the defect class, not the call site.** Before claiming a bug fixed,
   search for every OTHER path that reaches the same behavior (other callers,
   other endpoints, other entry points) and close them all — green tests only
