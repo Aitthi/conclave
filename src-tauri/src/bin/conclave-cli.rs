@@ -1011,8 +1011,69 @@ fn snapshot(
     Ok(Some(new_commit))
 }
 
-/// `stage status <ws> <slug>`: `git status --porcelain`, partitioned into
-/// IN-BOUNDARY vs OUT-OF-BOUNDARY sections by [`path_in_boundary`].
+fn stage_status_entries(
+    repo: &std::path::Path,
+    boundary: &[String],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    fn tracked(
+        repo: &std::path::Path,
+        index_path: &std::path::Path,
+        pathspec: &[String],
+    ) -> Result<Vec<String>, String> {
+        let mut args = vec!["diff", "--name-status", "HEAD", "--"];
+        args.extend(pathspec.iter().map(String::as_str));
+        Ok(git_with_index(repo, index_path, &args)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn untracked(
+        repo: &std::path::Path,
+        index_path: &std::path::Path,
+        pathspec: &[String],
+    ) -> Result<Vec<String>, String> {
+        let mut args = vec!["ls-files", "--others", "--exclude-standard", "--"];
+        args.extend(pathspec.iter().map(String::as_str));
+        Ok(git_with_index(repo, index_path, &args)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|path| format!("??\t{path}"))
+            .collect())
+    }
+
+    fn entries(
+        repo: &std::path::Path,
+        index_path: &std::path::Path,
+        pathspec: &[String],
+    ) -> Result<Vec<String>, String> {
+        let mut result = tracked(repo, index_path, pathspec)?;
+        result.extend(untracked(repo, index_path, pathspec)?);
+        Ok(result)
+    }
+
+    let index_path = tmp_index_path();
+    let result = (|| {
+        git_with_index(repo, &index_path, &["read-tree", "HEAD"])?;
+        let in_boundary = entries(repo, &index_path, boundary)?;
+        let out_of_boundary = entries(repo, &index_path, &[])?
+            .into_iter()
+            .filter(|line| {
+                line.rsplit('\t')
+                    .next()
+                    .is_none_or(|path| !path_in_boundary(path, boundary))
+            })
+            .collect();
+        Ok((in_boundary, out_of_boundary))
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    result
+}
+
+/// `stage status <ws> <slug>`: HEAD-vs-worktree changes, partitioned into
+/// IN-BOUNDARY vs OUT-OF-BOUNDARY sections through a private HEAD-seeded
+/// index, never the shared index.
 async fn stage_status(ws: &str, slug: &str, self_instance: Option<&str>) -> ExitCode {
     let boundary = match stage_boundary(ws, slug, self_instance).await {
         Ok(b) => b,
@@ -1021,36 +1082,14 @@ async fn stage_status(ws: &str, slug: &str, self_instance: Option<&str>) -> Exit
             return ExitCode::FAILURE;
         }
     };
-    let output = match Command::new("git").args(["status", "--porcelain"]).output() {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Ok(o) => {
-            eprintln!(
-                "conclave: git status failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            return ExitCode::FAILURE;
-        }
-        Err(e) => {
-            eprintln!("conclave: could not run git: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let mut in_boundary = Vec::new();
-    let mut out_of_boundary = Vec::new();
-    for line in output.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let raw_path = &line[3..];
-        // A rename shows as "orig -> new"; the CURRENT path is what matters
-        // for boundary membership.
-        let path = raw_path.split(" -> ").last().unwrap_or(raw_path);
-        if path_in_boundary(path, &boundary) {
-            in_boundary.push(line);
-        } else {
-            out_of_boundary.push(line);
-        }
-    }
+    let (in_boundary, out_of_boundary) =
+        match stage_status_entries(std::path::Path::new("."), &boundary) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!("conclave: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     println!("IN-BOUNDARY ({}):", in_boundary.len());
     for l in &in_boundary {
         println!("  {l}");
@@ -1224,6 +1263,38 @@ fn stage_log(slug: &str) -> ExitCode {
     }
 }
 
+fn validate_stage_restore_source(
+    repo: &std::path::Path,
+    ws: &str,
+    slug: &str,
+    snap_sha: &str,
+) -> Result<(), String> {
+    let snap_ref = stage_snapshot_ref(slug);
+    let ref_exists = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--verify", "--quiet", &snap_ref])
+        .output()
+        .map_err(|e| format!("could not run git rev-parse: {e}"))?;
+    if !ref_exists.status.success() {
+        return Err(format!(
+            "snapshot ref '{snap_ref}' does not exist; run `conclave stage log {ws} {slug}`"
+        ));
+    }
+
+    let reachable = Command::new("git")
+        .current_dir(repo)
+        .args(["merge-base", "--is-ancestor", snap_sha, &snap_ref])
+        .output()
+        .map_err(|e| format!("could not run git merge-base: {e}"))?;
+    if !reachable.status.success() {
+        return Err(format!(
+            "snapshot '{snap_sha}' is not reachable from '{snap_ref}'; \
+             run `conclave stage log {ws} {slug}`"
+        ));
+    }
+    Ok(())
+}
+
 /// `stage restore <ws> <slug> <snapSha>`: auto-snaps the current state first
 /// (decision 6 — so the restore itself is undoable), then `git restore
 /// --worktree` from `snapSha`. Never touches the index (no `--staged`).
@@ -1256,6 +1327,10 @@ async fn stage_restore(ws: &str, slug: &str, snap_sha: &str, self_instance: Opti
             return ExitCode::from(2);
         }
     };
+    if let Err(e) = validate_stage_restore_source(&repo, ws, slug, snap_sha) {
+        eprintln!("conclave: stage restore: {e}");
+        return ExitCode::FAILURE;
+    }
     let author_email = format!("{author_id}@agents.conclave.local");
     match snapshot(&repo, slug, &boundary, "auto-pre-restore", &author_name, &author_email) {
         Ok(Some(sha)) => println!(
@@ -2311,6 +2386,129 @@ mod tests {
     }
 
     #[test]
+    fn stage_status_is_clean_after_private_index_commit() {
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let boundary = vec!["in-scope.txt".to_string()];
+
+        super::stage_commit_core(
+            &dir,
+            "main",
+            "t1",
+            &boundary,
+            "commit boundary",
+            "Dabin",
+            "dabin-agent-id",
+        )
+        .expect("stage commit must succeed");
+
+        let head_diff =
+            super::git_output(&dir, &["diff", "--name-status", "HEAD", "--", "in-scope.txt"])
+                .unwrap();
+        assert!(
+            head_diff.is_empty(),
+            "worktree must already match the new HEAD: {head_diff}"
+        );
+        let porcelain = super::git_output(&dir, &["status", "--porcelain"]).unwrap();
+        assert!(
+            porcelain.lines().any(|line| line == "MM in-scope.txt"),
+            "the shared index must remain stale to reproduce F1: {porcelain}"
+        );
+
+        let (in_boundary, out_of_boundary) =
+            super::stage_status_entries(&dir, &boundary).expect("stage status must succeed");
+        assert!(
+            in_boundary.is_empty(),
+            "committed boundary file must report CLEAN, got {in_boundary:?}"
+        );
+        assert!(out_of_boundary.is_empty(), "{out_of_boundary:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_status_is_clean_after_committing_a_new_boundary_file() {
+        let dir = init_repo();
+        std::fs::write(dir.join("new-in-scope.txt"), "new\n").unwrap();
+        let boundary = vec!["new-in-scope.txt".to_string()];
+
+        super::stage_commit_core(
+            &dir,
+            "main",
+            "t1",
+            &boundary,
+            "commit new boundary file",
+            "Dabin",
+            "dabin-agent-id",
+        )
+        .expect("stage commit must succeed");
+
+        let (in_boundary, out_of_boundary) =
+            super::stage_status_entries(&dir, &boundary).expect("stage status must succeed");
+        assert!(
+            in_boundary.is_empty(),
+            "newly committed boundary file must report CLEAN, got {in_boundary:?}"
+        );
+        assert!(out_of_boundary.is_empty(), "{out_of_boundary:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_status_reports_tracked_and_untracked_boundary_changes() {
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        std::fs::write(dir.join("new-in-scope.txt"), "new\n").unwrap();
+        let boundary = vec![
+            "in-scope.txt".to_string(),
+            "new-in-scope.txt".to_string(),
+        ];
+
+        let (in_boundary, out_of_boundary) =
+            super::stage_status_entries(&dir, &boundary).expect("stage status must succeed");
+        assert!(
+            in_boundary.iter().any(|line| line == "M\tin-scope.txt"),
+            "tracked modification must keep its letter status: {in_boundary:?}"
+        );
+        assert!(
+            in_boundary
+                .iter()
+                .any(|line| line == "??\tnew-in-scope.txt"),
+            "untracked boundary file must appear in status: {in_boundary:?}"
+        );
+        assert!(out_of_boundary.is_empty(), "{out_of_boundary:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_status_ignores_a_staged_stranger_entry_in_the_shared_index() {
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+
+        let before =
+            super::stage_status_entries(&dir, &boundary).expect("baseline status must succeed");
+        assert_eq!(before.0, vec!["M\tin-scope.txt"]);
+        assert!(before.1.is_empty(), "{before:?}");
+
+        std::fs::write(dir.join("out-of-scope.txt"), "staged stranger\n").unwrap();
+        run_git(&dir, &["add", "--", "out-of-scope.txt"]);
+        std::fs::write(dir.join("out-of-scope.txt"), "v1\n").unwrap();
+
+        let porcelain = super::git_output(&dir, &["status", "--porcelain"]).unwrap();
+        assert!(
+            porcelain.lines().any(|line| line == "MM out-of-scope.txt"),
+            "fixture must leave a staged stranger entry in the shared index: {porcelain}"
+        );
+        let after = super::stage_status_entries(&dir, &boundary)
+            .expect("HEAD-based status must ignore shared-index staging");
+        assert_eq!(after, before, "shared index state must not affect stage status");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn stage_commit_only_touches_boundary_paths_and_shared_index_untouched() {
         let dir = init_repo();
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
@@ -2447,6 +2645,47 @@ mod tests {
             "deleted file must not be in the commit tree: {ls}"
         );
         assert!(ls.contains("out-of-scope.txt"), "untouched file must survive: {ls}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_restore_source_must_be_reachable_from_the_task_snapshot_ref() {
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+        let outside_sha = super::head_sha(&dir).unwrap();
+        let snapshot_sha =
+            super::snapshot(&dir, "t1", &boundary, "manual", "Dabin", "dabin@agents.conclave.local")
+                .unwrap()
+                .expect("snapshot must be created");
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let snapshot_tip =
+            super::snapshot(&dir, "t1", &boundary, "second", "Dabin", "dabin@agents.conclave.local")
+                .unwrap()
+                .expect("second snapshot must be created");
+
+        let err = super::validate_stage_restore_source(&dir, "ws-1", "t1", &outside_sha)
+            .expect_err("normal branch commit must not be accepted as a task snapshot");
+        assert!(err.contains("refs/conclave/stage/t1"), "{err}");
+        assert!(err.contains("stage log"), "{err}");
+        super::validate_stage_restore_source(&dir, "ws-1", "t1", &snapshot_sha)
+            .expect("older snapshot from stage log must be accepted");
+        super::validate_stage_restore_source(&dir, "ws-1", "t1", &snapshot_tip)
+            .expect("snapshot ref tip must be accepted");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_restore_source_reports_a_missing_snapshot_ref_clearly() {
+        let dir = init_repo();
+        let sha = super::head_sha(&dir).unwrap();
+
+        let err = super::validate_stage_restore_source(&dir, "ws-1", "missing", &sha)
+            .expect_err("restore must reject when the task has no snapshot ref");
+        assert!(err.contains("refs/conclave/stage/missing"), "{err}");
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(err.contains("conclave stage log ws-1 missing"), "{err}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
