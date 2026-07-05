@@ -488,15 +488,24 @@ pub async fn set_state(state: &AppState, payload: Value) -> Result<Value, AppErr
     .await?;
     emit_changed(state, &row);
     if let Some(actor) = &req.actor_id {
-        notify_watchers(
-            state,
-            &row,
-            actor,
-            "state",
-            &format!("-> {}", req.state),
-            &json!({ "state": req.state }),
-        )
-        .await;
+        let summary = format!("-> {}", req.state);
+        notify_watchers(state, &row, actor, "state", &summary, &json!({ "state": req.state })).await;
+
+        // Position routing (spec §3.4): review-ready routes to the integrator =
+        // the task owner — notify the owner even if not on the watch list
+        // (supplements + dedupes against the watcher fan-out above). GATED on the
+        // position system being ENGAGED for the owner (owner has a supervisor
+        // link) so the all-NULL case stays byte-for-byte today even for a
+        // non-watching owner — the non-negotiable invariant outranks the literal
+        // "even if not watching" (spec amended @ 8a28641 per the escalation
+        // ruling). All-NULL / no owner → watchers only, exactly as today.
+        if req.state == "review" {
+            if let Some(owner) = &row.owner_agent_id {
+                if let Ok(Some(_)) = repo::workspace_agent::supervisor_of(&state.db, owner).await {
+                    notify_expected_ruler(state, &row, actor, "state", &summary, owner).await;
+                }
+            }
+        }
     }
     Ok(task_to_json(&row))
 }
@@ -656,6 +665,18 @@ pub async fn challenge(state: &AppState, payload: Value) -> Result<Value, AppErr
         &Value::Null,
     )
     .await?;
+
+    // Position routing (spec §3.1 + §4): ALSO notify the expected ruler even if
+    // not watching — the owner (or the LCA across chains), or the first
+    // supervisor up the challenger's chain when there's no owner. Supplements
+    // the watcher fan-out above; deduped so a watching ruler gets one line.
+    if let Some(challenger) = req.actor_id.as_deref() {
+        if let Ok(Some(task)) = repo::task::get(&state.db, &req.workspace_id, &req.slug).await {
+            if let Some(ruler) = challenge_expected_ruler(state, &task, challenger).await {
+                notify_expected_ruler(state, &task, challenger, "challenge", &req.claim, &ruler).await;
+            }
+        }
+    }
     Ok(task_event_to_json(&event))
 }
 
@@ -934,6 +955,68 @@ async fn notify_watchers(
             json!({ "fromInstanceId": actor_id, "toInstanceId": watcher_id, "text": text }),
         )
         .await;
+    }
+}
+
+/// Notify the expected ruler of an event even if they don't watch the task
+/// (spec position-system §3.1 challenge / §3.4 review-ready) — SUPPLEMENTS
+/// [`notify_watchers`], never replaces it. Deduped against the watch list so a
+/// watching ruler gets exactly ONE line. Attributed to the real `actor_id` who
+/// acted (same line format as a watcher notification), so — unlike the timer
+/// paths — it carries NO `AUTO` marker: the actor genuinely filed the challenge
+/// / moved the state. No-op when `ruler_id` is absent, is the actor, or already
+/// watches (they were covered by `notify_watchers`).
+async fn notify_expected_ruler(
+    state: &AppState,
+    task: &TaskRow,
+    actor_id: &str,
+    kind: &str,
+    summary: &str,
+    ruler_id: &str,
+) {
+    if ruler_id == actor_id {
+        return;
+    }
+    let Ok(watcher_ids) = repo::task::watchers(&state.db, &task.id).await else {
+        return;
+    };
+    if watcher_ids.iter().any(|w| w == ruler_id) {
+        return; // already notified as a watcher — dedupe to one line
+    }
+
+    let actor_name = agent_display_name(state, actor_id).await;
+    let summary = truncate_for_notify(summary, NOTIFY_SUMMARY_MAX_CHARS);
+    let text = format!("[task {}] {actor_name}: {kind} — {summary}", task.slug);
+    let _ = super::message::inject(
+        state,
+        json!({ "fromInstanceId": actor_id, "toInstanceId": ruler_id, "text": text }),
+    )
+    .await;
+}
+
+/// Resolve the expected ruler of a challenge (spec §3.1 + §4). With an owner set
+/// this is `lowest_common_supervisor(challenger, owner)`: it returns the OWNER
+/// when the owner sits in the challenger's chain (§3.1 same-chain) and the
+/// nearest common ancestor when the two sit in different chains (§4 cross-chain);
+/// `None` (chains meet only at the human) stays advisory to watchers only — no
+/// human ping is fabricated. With no owner, the first supervisor up the
+/// challenger's own chain. All chain reads go through the P1 primitives.
+async fn challenge_expected_ruler(
+    state: &AppState,
+    task: &TaskRow,
+    challenger_id: &str,
+) -> Option<String> {
+    match &task.owner_agent_id {
+        Some(owner) => {
+            repo::workspace_agent::lowest_common_supervisor(&state.db, challenger_id, owner)
+                .await
+                .ok()
+                .flatten()
+        }
+        None => repo::workspace_agent::supervisor_of(&state.db, challenger_id)
+            .await
+            .ok()
+            .flatten(),
     }
 }
 
@@ -1593,6 +1676,168 @@ mod tests {
     }
 
     // ── task.watch / task.unwatch ─────────────────────────────────────────
+
+    /// Count messages actually RECEIVED by `instance` (message.list returns
+    /// inbox+outbox; filter by `toInstanceId`).
+    async fn received(state: &AppState, instance: &str) -> Vec<Value> {
+        super::super::message::list(state, json!({ "instanceId": instance }))
+            .await
+            .expect("list failed")
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["toInstanceId"] == json!(instance))
+            .cloned()
+            .collect()
+    }
+
+    /// §3.1 same-chain: a challenger reporting to the owner routes the challenge
+    /// to the owner even when the owner does NOT watch — attributed to the
+    /// challenger (a live actor), so NO `AUTO` marker.
+    #[tokio::test]
+    async fn challenge_routes_to_owner_up_the_chain() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        workspace_agent::set_position(&state.db, &challenger, None, Some(&owner))
+            .await
+            .expect("challenger reports to owner");
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+            .await
+            .expect("create");
+        challenge(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
+                    "claim": "X broken", "evidence": "e", "proposal": "p", "default": "d" }),
+        )
+        .await
+        .expect("challenge");
+
+        let owner_msgs = received(&state, &owner).await;
+        assert_eq!(owner_msgs.len(), 1, "owner is the expected ruler, notified even unwatching");
+        assert!(!owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"), "live actor send, no AUTO");
+    }
+
+    /// §3.1 all-NULL invariant: owner set but NO supervisor links and NOT
+    /// watching → watchers-only, byte-for-byte today (the LCA is None).
+    #[tokio::test]
+    async fn challenge_all_null_owner_not_notified() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+            .await
+            .expect("create");
+        challenge(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
+                    "claim": "X", "evidence": "e", "proposal": "p", "default": "d" }),
+        )
+        .await
+        .expect("challenge");
+        assert_eq!(received(&state, &owner).await.len(), 0, "all-NULL: watchers only, no owner ping");
+    }
+
+    /// §4 cross-chain: challenger and owner under different sub-leads → the
+    /// challenge routes to their lowest common supervisor (the shared lead).
+    #[tokio::test]
+    async fn challenge_routes_cross_chain_to_the_lca() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let lead = fixture_instance(&state, &ws, "Lead").await;
+        let sub1 = fixture_instance(&state, &ws, "Sub1").await;
+        let sub2 = fixture_instance(&state, &ws, "Sub2").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        for (a, s) in [(&sub1, &lead), (&sub2, &lead), (&challenger, &sub1), (&owner, &sub2)] {
+            workspace_agent::set_position(&state.db, a, None, Some(s)).await.expect("link");
+        }
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+            .await
+            .expect("create");
+        challenge(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
+                    "claim": "shared iface", "evidence": "e", "proposal": "p", "default": "d" }),
+        )
+        .await
+        .expect("challenge");
+
+        assert_eq!(received(&state, &lead).await.len(), 1, "the LCA (lead) is the ruler");
+        assert_eq!(received(&state, &owner).await.len(), 0, "owner is cross-chain, not the ruler");
+    }
+
+    /// Q2 dedupe: a watching owner who is also the expected ruler gets exactly
+    /// ONE line, not one as watcher + one as ruler.
+    #[tokio::test]
+    async fn challenge_dedupes_a_watching_owner_to_one_line() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        workspace_agent::set_position(&state.db, &challenger, None, Some(&owner)).await.expect("link");
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+            .await
+            .expect("create");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": owner })).await.expect("watch");
+        challenge(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
+                    "claim": "X", "evidence": "e", "proposal": "p", "default": "d" }),
+        )
+        .await
+        .expect("challenge");
+        assert_eq!(received(&state, &owner).await.len(), 1, "watching ruler gets exactly one line");
+    }
+
+    /// §3.4: review-ready routes to the owner (integrator) even when unwatching,
+    /// once the position system is engaged (owner has a supervisor); no AUTO.
+    #[tokio::test]
+    async fn review_ready_routes_to_owner_when_position_engaged() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let lead = fixture_instance(&state, &ws, "Lead").await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        workspace_agent::set_position(&state.db, &owner, None, Some(&lead)).await.expect("owner reports to lead");
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+            .await
+            .expect("create");
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer })).await.expect("claim");
+        set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": implementer }))
+            .await
+            .expect("in_progress");
+        set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }))
+            .await
+            .expect("review");
+
+        let owner_msgs = received(&state, &owner).await;
+        assert_eq!(owner_msgs.len(), 1, "owner notified as integrator");
+        assert!(!owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"), "live actor send, no AUTO");
+    }
+
+    /// §3.4 all-NULL invariant: owner set, NO supervisor links, NOT watching →
+    /// review-ready is watchers-only, byte-for-byte today.
+    #[tokio::test]
+    async fn review_ready_all_null_owner_not_notified() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+            .await
+            .expect("create");
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer })).await.expect("claim");
+        set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": implementer }))
+            .await
+            .expect("in_progress");
+        set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }))
+            .await
+            .expect("review");
+        assert_eq!(received(&state, &owner).await.len(), 0, "all-NULL: watchers only");
+    }
 
     #[tokio::test]
     async fn watch_then_unwatch_round_trip() {

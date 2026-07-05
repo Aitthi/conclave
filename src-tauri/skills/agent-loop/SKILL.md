@@ -44,6 +44,12 @@ and Implementer (building); this one covers the LOOP between them.
   answers with `conclave task rule <ws> <slug> <challengeEventId> <text>`;
   a deadline that expires unruled fires your stated default automatically
   and notifies both parties — the loop cannot silently stall.
+- A challenge routes to the task **owner** (the sub-lead who owns that domain);
+  if it crosses two chains (both sides report through different supervisors), it
+  routes to the **lowest common supervisor** of the two — the nearest agent with
+  authority over both, the human if none. A `--deadline-min` that lapses still
+  fires your stated default (the loop cannot stall); the owner's supervisor is
+  notified that it lapsed.
 - Answer challenges with verification, not rank. The receiver re-reads the
   cited evidence BEFORE replying — "the plan says so" is not a rebuttal when
   the challenge is that the plan is wrong. Pulling rank without verifying is
