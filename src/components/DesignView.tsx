@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, LoaderCircle, PenTool, X } from "lucide-react";
+import { ExternalLink, LoaderCircle, PenTool, RotateCcw, X } from "lucide-react";
 import { ipc } from "../ipc";
 
 interface DesignViewProps {
@@ -117,9 +117,9 @@ export function DesignView({ workspaceId, workspaceName, onClose }: DesignViewPr
               </span>
               <button
                 onClick={() => setAttempt((a) => a + 1)}
-                className="px-3 h-7 rounded-md text-[12px] font-medium bg-overlay/[0.06] hover:bg-overlay/[0.1] text-text-primary"
+                className="inline-flex items-center gap-1.5 px-3 h-7 rounded-md text-[12px] font-medium bg-overlay/[0.06] hover:bg-overlay/[0.1] text-text-primary"
               >
-                Retry
+                <RotateCcw size={12} /> Retry
               </button>
             </div>
           </div>

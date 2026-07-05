@@ -180,22 +180,29 @@ export function AppShell() {
     ? (workspaces.find((w) => w.id === activeWorkspaceId) ?? null)
     : null;
 
+  // Center-pane destinations that REPLACE the live WorkspacePane (each renders
+  // full-page instead of it). This is the ONE canonical list — adding a new
+  // center screen means adding its flag HERE, and both `workspacePaneVisible`
+  // (which drives the WorkspacePane render branch below) and `designFullWindow`
+  // update together, so the two can't silently diverge (Armin rot-guard).
+  const centerScreenOpen =
+    showChat || showBlackboard || showMemory || showLaneBoard || showArtifacts;
+
+  // The live WorkspacePane (agent pane + the always-mounted Design slot) is the
+  // visible center content exactly when a workspace is active and no center
+  // screen is up. Used BOTH as the WorkspacePane render condition and as the
+  // gate for full-window Design mode.
+  const workspacePaneVisible = !!activeWorkspaceId && !centerScreenOpen;
+
   // Full-window Design mode (human ruling D3): while the Design view is OPEN and
   // actually on screen, hide the Rail + Roster columns so the window becomes
   // canvas-left + agent-terminal-right. `showDesign` alone is not enough — it is
-  // a latent flag that stays true behind a center-pane screen (Chat/Blackboard/
-  // Memory/LaneBoard/Artifacts), where DesignView is NOT rendered (it lives
-  // inside the WorkspacePane branch). Hiding the sidebars then would strand the
-  // user in a full-screen center view with no navigation, so gate on the exact
-  // condition under which the WorkspacePane branch (and thus DesignView) renders.
-  const designFullWindow =
-    showDesign &&
-    !!activeWorkspaceId &&
-    !showChat &&
-    !showBlackboard &&
-    !showMemory &&
-    !showLaneBoard &&
-    !showArtifacts;
+  // a latent flag that stays true behind a center-pane screen, where DesignView
+  // is NOT rendered (it lives inside the WorkspacePane branch); hiding the
+  // sidebars then would strand the user in a full-screen center view with no
+  // navigation. So gate on `workspacePaneVisible` — the exact condition under
+  // which the WorkspacePane branch (and thus DesignView) renders.
+  const designFullWindow = showDesign && workspacePaneVisible;
 
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
@@ -239,8 +246,15 @@ export function AppShell() {
             Rail's own w-[56px] applies normally; collapsing swaps to a 0-width
             clip. Keeping it mounted preserves its state and — with Roster below
             — keeps WorkspacePane's position in the tree unchanged, so the
-            terminal never remounts. */}
-        <div className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}>
+            terminal never remounts. `inert` + `aria-hidden` when collapsed pull
+            the clipped-but-mounted nav out of the tab order and the a11y tree —
+            CSS clipping hides pixels only, leaving focusables tabbable (Armin
+            F1). */}
+        <div
+          inert={designFullWindow}
+          aria-hidden={designFullWindow || undefined}
+          className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
+        >
           <Rail
             workspaces={workspaces}
             activeWorkspaceId={activeWorkspaceId}
@@ -277,8 +291,14 @@ export function AppShell() {
                 never unmounted (same `contents`/clip pattern as the Rail above).
                 It must NOT be conditionally removed: keeping it in the tree holds
                 the center-content branch (WorkspacePane) at a stable position, so
-                toggling Design never remounts the terminal. */}
-            <div className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}>
+                toggling Design never remounts the terminal. `inert` +
+                `aria-hidden` when collapsed remove its clipped-but-mounted
+                focusables from the tab order + a11y tree (Armin F1). */}
+            <div
+              inert={designFullWindow}
+              aria-hidden={designFullWindow || undefined}
+              className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
+            >
             <Roster
               workspaceId={activeWorkspaceId}
               workspaceName={activeWorkspace?.name}
@@ -395,9 +415,12 @@ export function AppShell() {
                 workspaceName={activeWorkspace?.name}
                 onClose={() => setShowArtifacts(false)}
               />
-            ) : activeWorkspaceId ? (
+            ) : workspacePaneVisible ? (
               // Remount per workspace AND per agents change so the pane refetches
-              // its tabs when an agent is added/removed.
+              // its tabs when an agent is added/removed. `workspacePaneVisible` is
+              // the shared predicate (also gating designFullWindow); reaching this
+              // arm with a workspace active already implies no center screen is up,
+              // so it is equivalent to the former `activeWorkspaceId` guard.
               <WorkspacePane
                 key={`${activeWorkspaceId}:${agentsVersion}`}
                 workspaceId={activeWorkspaceId}
