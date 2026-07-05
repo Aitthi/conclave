@@ -82,6 +82,10 @@ export interface Commands {
       contextWindow?: "1m" | "200k";
       toolIds?: string[];
       skillIds?: string[];
+      // Position System seed (D1/D2, pinned interface contract): omit to leave
+      // unchanged on an edit, `null` to clear, a level id to set. Only takes
+      // effect for instances created AFTER the save — never retro-applied.
+      defaultLevel?: "junior" | "mid" | "senior" | "principal" | null;
     };
     res: AgentDefinition;
   };

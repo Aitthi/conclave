@@ -172,6 +172,12 @@ export function Builder({
 
   // ── Form state (lazy-initialised from initialDef when editing) ─────────────
   const [name, setName] = useState(initialDef?.name ?? "");
+  // Position System seed (D1/D3) — the level a NEW instance is created with.
+  // Definition-level, all agent types, distinct from the per-workspace
+  // Position section's `levelDraft` below (which edits an existing instance).
+  const [defaultLevelDraft, setDefaultLevelDraft] = useState<AgentDefinition["defaultLevel"]>(
+    initialDef?.defaultLevel ?? null,
+  );
   const [agentType, setAgentType] = useState<AgentType>(initialDef?.type ?? "cli");
   const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
   const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
@@ -443,6 +449,8 @@ export function Builder({
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
         // save never sends a stale list.
         skillIds: agentType === "cli" ? skillIds : undefined,
+        // Position System seed (D1/D3) — all agent types, create and edit.
+        defaultLevel: defaultLevelDraft,
       });
       if (positionEnabled && (levelChanged || supervisorChanged)) {
         const req: {
@@ -572,6 +580,52 @@ export function Builder({
               </div>
             </div>
 
+          </section>
+
+          {/* Level — the Position System SEED (D1/D3): remembered on the
+              definition so it's restored whenever a new instance is created
+              from it (removing + re-adding an agent to a workspace). Distinct
+              from the per-workspace Position section below, which edits an
+              EXISTING instance's live level and never touches this value. */}
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+                Level
+              </span>
+              <button
+                type="button"
+                onClick={() => setDefaultLevelDraft(null)}
+                className={`text-[11px] font-medium ${
+                  defaultLevelDraft == null
+                    ? "text-accent"
+                    : "text-text-tertiary hover:text-text-secondary"
+                }`}
+              >
+                Clear to Unranked
+              </button>
+            </div>
+            <div className="grid grid-cols-4 gap-2">
+              {LEVELS.map((level) => {
+                const active = defaultLevelDraft === level.id;
+                return (
+                  <button
+                    key={level.id}
+                    type="button"
+                    onClick={() =>
+                      setDefaultLevelDraft(level.id as AgentDefinition["defaultLevel"])
+                    }
+                    className={`rounded-xl px-2.5 py-2 text-left transition-all ring-1 ${
+                      active
+                        ? "ring-accent/40 bg-accent/[0.06]"
+                        : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
+                    }`}
+                  >
+                    <div className="text-[11.5px] font-semibold leading-tight">{level.name}</div>
+                    <div className="mt-1 text-[11px] text-text-tertiary">rung {level.rung}</div>
+                  </button>
+                );
+              })}
+            </div>
           </section>
 
           {/* Role (ADR 0005) — card grid (matches the Type cards below), with a

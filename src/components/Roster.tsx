@@ -22,7 +22,9 @@ import type {
 } from "../ipc";
 import type { RosterChangedEvent } from "../ipc/events";
 import { computeSkillsStale } from "../lib/skills";
-import { type PositionPerson, PositionLine } from "./Position";
+import { type PositionPerson, PositionLine, ReportsTo } from "./Position";
+import { SupervisorPicker, type SupervisorCandidate } from "./SupervisorPicker";
+import { descendantsOf } from "../lib/positions";
 
 // A live instance reads as "working" while its backend emitted output within
 // this window (R-act-1) — mirrors commands::instance::WORKING_WINDOW (Rust).
@@ -62,7 +64,12 @@ interface RosterEntry {
    *  a non-live instance. */
   sessionId?: string;
   level?: string;
+  roleName?: string;
   supervisor?: PositionPerson | null;
+  /** Raw id (as opposed to `supervisor`'s resolved display identity) — needed
+   *  to seed SupervisorPicker's `current` and to walk the chain client-side
+   *  (descendantsOf) when the chip opens the edit-variant picker. */
+  supervisorAgentId?: string;
 }
 
 // Status dot colors mapped from WorkspaceAgent.status (mirrors WorkspacePane).
@@ -142,9 +149,17 @@ interface AgentRowProps {
   onSelect: () => void;
   onRemove: () => void;
   removing: boolean;
+  onEditSupervisor: () => void;
 }
 
-function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowProps) {
+function AgentRow({
+  entry,
+  isSelected,
+  onSelect,
+  onRemove,
+  removing,
+  onEditSupervisor,
+}: AgentRowProps) {
   const isCli = entry.type === "cli";
   const statusColor = STATUS_COLOR[entry.status];
   // Two-step removal so a stray click can't delete an agent: the first click
@@ -175,15 +190,36 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
           {entry.name}
           {isCli && <Terminal className="w-3 h-3 text-text-muted shrink-0" />}
         </div>
-        <PositionLine
-          levelId={entry.level}
-          track={entry.meta}
-          compact
-          supervisor={entry.supervisor}
-          showReportsTo
-          trackTitle={entry.roleDescription}
-          className="mt-0.5"
-        />
+        <div className="flex items-center min-w-0 mt-0.5">
+          <PositionLine
+            levelId={entry.level}
+            track={entry.meta}
+            compact
+            trackTitle={entry.roleDescription}
+            className="flex-1 min-w-0"
+          />
+          {/* Reports-to chip as a button (plan supervisor-picker-ui, Lane C
+              step 5) — stopPropagation so it doesn't also select/deselect the
+              row; ReportsTo itself is Position.tsx's unmodified export, just
+              wrapped here for interactivity. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onEditSupervisor();
+            }}
+            // The row's onKeyDown listens for Enter/Space directly (not via
+            // onClick), so it fires from the raw keydown bubbling BEFORE the
+            // button's own Enter/Space→click synthesis — stopping only
+            // onClick's propagation isn't enough (Armin, review).
+            onKeyDown={(e) => e.stopPropagation()}
+            onKeyUp={(e) => e.stopPropagation()}
+            className="ml-auto shrink-0 pl-1 rounded-md hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+            aria-label={`Change supervisor for ${entry.name}`}
+          >
+            <ReportsTo supervisor={entry.supervisor} />
+          </button>
+        </div>
         <WorkLine working={entry.working} />
       </div>
 
@@ -299,9 +335,32 @@ export function Roster({
   const [search, setSearch] = useState("");
   // Add-agent picker (choose an existing Library agent to add to this workspace).
   const [showPicker, setShowPicker] = useState(false);
+  // Roster chip entry (plan supervisor-picker-ui, Lane C step 5): the
+  // instance whose reports-to chip was clicked, or null when the picker is
+  // closed.
+  const [editingSupervisorFor, setEditingSupervisorFor] = useState<string | null>(null);
+  const [supervisorSubmitting, setSupervisorSubmitting] = useState(false);
+  const [supervisorError, setSupervisorError] = useState<string | null>(null);
   // Instance id currently being removed (disables its confirm button).
   const [removingId, setRemovingId] = useState<string | null>(null);
   const loadSeq = useRef(0);
+
+  // Roster-chip edit (D6-adjacent: clearing an EXISTING supervisor link is
+  // the action, so unlike the add-flow this always calls setPosition, even
+  // for a null pick — see Detoro's ruling on the add-flow/edit-flow split).
+  async function handleSetSupervisor(workspaceAgentId: string, supervisorAgentId: string | null) {
+    if (workspaceId === null) return;
+    setSupervisorSubmitting(true);
+    setSupervisorError(null);
+    try {
+      await ipc.instance.setPosition({ workspaceId, workspaceAgentId, supervisorAgentId });
+      setEditingSupervisorFor(null);
+    } catch (err) {
+      setSupervisorError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSupervisorSubmitting(false);
+    }
+  }
 
   async function handleRemove(instanceId: string) {
     setRemovingId(instanceId);
@@ -365,12 +424,14 @@ export function Roster({
             working: inst.working ?? false,
             sessionId: inst.sessionId,
             level: inst.level,
+            roleName: inst.roleName,
             supervisor:
               inst.supervisorAgentId != null
                 ? (identityByInstanceId.get(inst.supervisorAgentId) ?? {
                     name: inst.supervisorName ?? inst.supervisorAgentId,
                   })
                 : null,
+            supervisorAgentId: inst.supervisorAgentId,
           });
         }
         setEntries(rosterEntries);
@@ -580,6 +641,7 @@ export function Roster({
                       onSelect={() => onSelect(entry.instanceId)}
                       onRemove={() => handleRemove(entry.instanceId)}
                       removing={removingId === entry.instanceId}
+                      onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
                     />
                   ))}
                 </div>
@@ -599,6 +661,7 @@ export function Roster({
                         onSelect={() => onSelect(entry.instanceId)}
                         onRemove={() => handleRemove(entry.instanceId)}
                         removing={removingId === entry.instanceId}
+                        onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
                       />
                     ))}
                   </div>
@@ -619,6 +682,7 @@ export function Roster({
                         onSelect={() => onSelect(entry.instanceId)}
                         onRemove={() => handleRemove(entry.instanceId)}
                         removing={removingId === entry.instanceId}
+                        onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
                       />
                     ))}
                   </div>
@@ -722,6 +786,51 @@ export function Roster({
           }
         />
       )}
+
+      {/* Roster-chip supervisor edit (plan supervisor-picker-ui, Lane C step 5). */}
+      {editingSupervisorFor !== null &&
+        workspaceId !== null &&
+        (() => {
+          const editingEntry = entries.find((e) => e.instanceId === editingSupervisorFor);
+          if (!editingEntry) return null;
+          const members: SupervisorCandidate[] = entries.map((e) => ({
+            id: e.instanceId,
+            name: e.name,
+            color: e.color,
+            level: e.level,
+            roleName: e.roleName,
+          }));
+          const excludeIds = [
+            editingSupervisorFor,
+            ...descendantsOf(editingSupervisorFor, entries.map((e) => ({
+              id: e.instanceId,
+              supervisorAgentId: e.supervisorAgentId,
+            }))),
+          ];
+          return (
+            <SupervisorPicker
+              variant="edit"
+              subject={{
+                name: editingEntry.name,
+                color: editingEntry.color,
+                sub: editingEntry.supervisor
+                  ? `Currently reports to ${editingEntry.supervisor.name}`
+                  : "Currently reports to the human",
+              }}
+              members={members}
+              excludeIds={excludeIds}
+              selfId={editingSupervisorFor}
+              current={editingEntry.supervisorAgentId ?? null}
+              submitting={supervisorSubmitting}
+              error={supervisorError}
+              onPick={(supervisorId) => void handleSetSupervisor(editingSupervisorFor, supervisorId)}
+              onClose={() => {
+                setEditingSupervisorFor(null);
+                setSupervisorError(null);
+              }}
+            />
+          );
+        })()}
     </aside>
   );
 }
@@ -739,10 +848,22 @@ interface AddAgentPickerProps {
 
 function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAgentPickerProps) {
   const [available, setAvailable] = useState<AgentDefinition[] | null>(null);
+  const [members, setMembers] = useState<WorkspaceAgent[]>([]);
   const [error, setError] = useState(false);
-  const [addingId, setAddingId] = useState<string | null>(null);
+  // Step 2 (plan supervisor-picker-ui, Lane C step 4): picking an agent
+  // doesn't call the API immediately — it swaps to the supervisor step in
+  // the SAME modal position/size, `pendingDef` carrying the choice through.
+  const [pendingDef, setPendingDef] = useState<AgentDefinition | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  // D6: addToWorkspace succeeding but setPosition failing must surface
+  // inline and NOT be silently swallowed — but also must not close the modal
+  // out from under the message, so `onAdded` fires only once the user
+  // dismisses this banner via Done, not the instant the write fails.
+  const [partialFailure, setPartialFailure] = useState<string | null>(null);
 
   // Load all defs ⨝ this workspace's instances → defs NOT already present.
+  // The instances double as SupervisorPicker's member list for step 2 — no
+  // second round-trip when the user picks an agent.
   useEffect(() => {
     let active = true;
     Promise.all([ipc.agentDef.list(), ipc.instance.list({ workspaceId })])
@@ -750,6 +871,7 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
         if (!active) return;
         const present = new Set(instances.map((i) => i.agentDefId));
         setAvailable(defs.filter((d) => !present.has(d.id)));
+        setMembers(instances);
       })
       .catch(() => {
         if (active) setError(true);
@@ -759,15 +881,102 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
     };
   }, [workspaceId]);
 
-  async function handleAdd(def: AgentDefinition) {
-    setAddingId(def.id);
+  // D6: add is NEVER rolled back once addToWorkspace succeeds — a setPosition
+  // failure only changes how the flow ENDS, never whether the agent stays in
+  // the workspace.
+  async function handleConfirmAdd(supervisorId: string | null) {
+    if (!pendingDef) return;
+    setSubmitting(true);
     try {
-      await ipc.agentDef.addToWorkspace({ agentDefId: def.id, workspaceIds: [workspaceId] });
+      const created = await ipc.agentDef.addToWorkspace({
+        agentDefId: pendingDef.id,
+        workspaceIds: [workspaceId],
+      });
+      // addToWorkspace can return instances for MULTIPLE workspaces — take
+      // the row for THIS one, never assume [0].
+      const mine = created.find((wa) => wa.workspaceId === workspaceId);
+      if (!mine) {
+        throw new Error("Agent was added, but no instance came back for this workspace");
+      }
+      // Ruled: a null pick needs no write — a fresh instance already has no
+      // supervisor, so calling setPosition would be a no-op with an extra
+      // failure surface for nothing.
+      if (supervisorId !== null) {
+        try {
+          await ipc.instance.setPosition({
+            workspaceId,
+            workspaceAgentId: mine.id,
+            supervisorAgentId: supervisorId,
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          setPartialFailure(
+            `Added, but setting the supervisor failed — set it from the roster chip or Builder. (${detail})`,
+          );
+          setSubmitting(false);
+          return;
+        }
+      }
       onAdded();
     } catch (err) {
-      if (import.meta.env.DEV) console.error("AddAgentPicker: addToWorkspace failed", err);
-      setAddingId(null);
+      if (import.meta.env.DEV) console.error("AddAgentPicker: add flow failed", err);
+      setSubmitting(false);
+      // Failed before or during addToWorkspace itself — nothing was added,
+      // so back out to the agent list rather than stranding the user on a
+      // supervisor step for an agent that was never added.
+      setPendingDef(null);
     }
+  }
+
+  const step2Members: SupervisorCandidate[] = members.map((m) => ({
+    id: m.id,
+    name: m.name,
+    color: undefined,
+    level: m.level,
+    roleName: m.roleName,
+  }));
+
+  if (pendingDef) {
+    if (partialFailure) {
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="w-[420px] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]">
+            <div className="h-12 flex items-center px-5 border-b border-overlay/[0.06] shrink-0">
+              <span className="text-[13px] font-semibold tracking-tight">
+                {pendingDef.name} added
+              </span>
+            </div>
+            <div className="p-4 text-[12px] text-danger">{partialFailure}</div>
+            <div className="border-t border-overlay/[0.06] p-2 flex justify-end shrink-0">
+              <button
+                onClick={onAdded}
+                className="text-[12.5px] font-semibold text-white bg-accent px-3.5 py-1.5 rounded-lg hover:brightness-105"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <SupervisorPicker
+        variant="add"
+        step="Step 2 of 2"
+        subject={{
+          name: pendingDef.name,
+          color: pendingDef.color,
+          sub: "You're adding this agent to the workspace",
+        }}
+        members={step2Members}
+        excludeIds={[]}
+        current={null}
+        submitting={submitting}
+        onBack={() => setPendingDef(null)}
+        onClose={onClose}
+        onPick={(supervisorId) => void handleConfirmAdd(supervisorId)}
+      />
+    );
   }
 
   return (
@@ -805,8 +1014,7 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
             available?.map((def) => (
               <button
                 key={def.id}
-                onClick={() => handleAdd(def)}
-                disabled={addingId !== null}
+                onClick={() => setPendingDef(def)}
                 className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-overlay/[0.04] disabled:opacity-50 text-left"
               >
                 <div
@@ -823,9 +1031,7 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
                   <div className="text-[12.5px] font-semibold truncate">{def.name}</div>
                   <div className="text-[10.5px] text-text-muted truncate">{deriveMeta(def)}</div>
                 </div>
-                <span className="text-[11px] font-semibold text-accent shrink-0">
-                  {addingId === def.id ? "Adding…" : "Add"}
-                </span>
+                <span className="text-[11px] font-semibold text-accent shrink-0">Add</span>
               </button>
             ))
           )}
