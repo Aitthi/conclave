@@ -13,6 +13,7 @@ export const EVENT_NAMES = {
   messageInjected: "message:injected",
   snapshotCreated: "snapshot:created",
   taskChanged: "task:changed",
+  memoryChanged: "memory:changed",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -92,6 +93,18 @@ export interface TaskChangedEvent {
     | "review"
     | "merged"
     | "abandoned";
+}
+
+/**
+ * A workspace's `memory_chunk` table actually changed — emitted after
+ * `remember`/`delete`/`clear`/`approve` write or remove a chunk (NOT for a
+ * no-op: a deduped remember/approve, a delete that found nothing, an empty
+ * clear). Carries only `workspaceId` — the Memory Graph refetches rather than
+ * patching state from the payload. camelCase serde, kept in sync with
+ * `engine/bus.rs` `MemoryChanged` (serialisation tests enforce).
+ */
+export interface MemoryChangedEvent {
+  workspaceId: string;
 }
 
 /**
@@ -268,6 +281,22 @@ export function useTaskChanged(
   cb: (event: TaskChangedEvent) => void,
 ): void {
   useEvent<TaskChangedEvent>(EVENT_NAMES.taskChanged, (payload) => {
+    if (payload.workspaceId === workspaceId) cb(payload);
+  });
+}
+
+/**
+ * Subscribe to memory-changed events for a specific workspace — the Memory
+ * Graph's live-refresh trigger (mirrors `useTaskChanged`'s Lane Board
+ * rationale). Fires for each `MemoryChangedEvent` whose `workspaceId`
+ * matches, so a `conclave memory remember` from any agent/terminal refreshes
+ * an open graph view without reopening it.
+ */
+export function useMemoryChanged(
+  workspaceId: string,
+  cb: (event: MemoryChangedEvent) => void,
+): void {
+  useEvent<MemoryChangedEvent>(EVENT_NAMES.memoryChanged, (payload) => {
     if (payload.workspaceId === workspaceId) cb(payload);
   });
 }

@@ -22,6 +22,7 @@ pub const FUSION_STAGE: &str = "fusion:stage";
 pub const MESSAGE_INJECTED: &str = "message:injected";
 pub const SNAPSHOT_CREATED: &str = "snapshot:created";
 pub const TASK_CHANGED: &str = "task:changed";
+pub const MEMORY_CHANGED: &str = "memory:changed";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -147,6 +148,20 @@ pub struct TaskChanged {
     pub state: String,
 }
 
+/// Payload for `memory:changed` — a workspace's `memory_chunk` table actually
+/// changed (a chunk was written or removed by `remember`/`delete`/`clear`/
+/// `approve`), so an open Memory Graph view should refetch. NEVER emitted for
+/// a no-op — a deduped `remember`, a `delete` that found nothing, an empty
+/// `clear`, or a deduped `approve` (see `commands::memory::emit_changed`).
+///
+/// Serialises to `{ "workspaceId" }` (camelCase) to match
+/// `MemoryChangedEvent` in `src/ipc/events.ts`.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryChanged {
+    pub workspace_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Generic emit helper
 // ---------------------------------------------------------------------------
@@ -194,6 +209,12 @@ pub fn message_injected(app: &AppHandle, payload: MessageInjected) -> tauri::Res
 /// Emit a `task:changed` event carrying a task's post-mutation identity+state.
 pub fn task_changed(app: &AppHandle, payload: TaskChanged) -> tauri::Result<()> {
     emit(app, TASK_CHANGED, payload)
+}
+
+/// Emit a `memory:changed` event carrying the workspace whose memory store
+/// just changed.
+pub fn memory_changed(app: &AppHandle, payload: MemoryChanged) -> tauri::Result<()> {
+    emit(app, MEMORY_CHANGED, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +412,15 @@ mod tests {
                 "state": "claimed"
             })
         );
+    }
+
+    #[test]
+    fn memory_changed_camel_case() {
+        let val = serde_json::to_value(MemoryChanged {
+            workspace_id: "ws1".into(),
+        })
+        .unwrap();
+        assert_eq!(val, json!({ "workspaceId": "ws1" }));
     }
 
     #[test]
