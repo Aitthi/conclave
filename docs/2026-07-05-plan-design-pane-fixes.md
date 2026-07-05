@@ -242,4 +242,12 @@ Gate (commit first, then):
   design opinion).
 - Any ArtifactsView internal redesign for the narrower column (filters row may
   wrap; acceptable this pass — report, don't fix).
-- ChatHub "Open chat" flow from inside artifacts mode (unchanged semantics).
+- ~~ChatHub "Open chat" flow from inside artifacts mode (unchanged
+  semantics).~~ SUPERSEDED by review finding F1 (Mellow, ruled 2026-07-05):
+  the `onOpenChat` prop passed to WorkspacePane (AppShell:429-435) carried a
+  center-era `setShowArtifacts(false)` — exactly the class of stale write
+  site the D4 category-change guard names. RULED: remove it; artifacts stays
+  latent behind ChatHub the same as design. (The workspace-deleted handler's
+  clear of BOTH flags is symmetric and correct — stands.) This Deferred
+  bullet meant "no new UX for chat-from-artifacts", never "preserve stale
+  clears"; the ambiguity was the plan's fault.
