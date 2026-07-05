@@ -23,6 +23,7 @@ pub const MESSAGE_INJECTED: &str = "message:injected";
 pub const SNAPSHOT_CREATED: &str = "snapshot:created";
 pub const TASK_CHANGED: &str = "task:changed";
 pub const MEMORY_CHANGED: &str = "memory:changed";
+pub const ARTIFACT_CHANGED: &str = "artifact:changed";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -162,6 +163,19 @@ pub struct MemoryChanged {
     pub workspace_id: String,
 }
 
+/// Payload for `artifact:changed` (plan design-artifact-store, Lane A) — a
+/// workspace's `artifact` table gained a row via `artifact.add`, so an open
+/// Artifacts view should refetch. Carries only the workspace id (the view
+/// re-lists by workspace); mirrors [`MemoryChanged`].
+///
+/// Serialises to `{ "workspaceId" }` (camelCase) to match
+/// `ArtifactChangedEvent` in `src/ipc/events.ts`.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactChanged {
+    pub workspace_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Generic emit helper
 // ---------------------------------------------------------------------------
@@ -215,6 +229,12 @@ pub fn task_changed(app: &AppHandle, payload: TaskChanged) -> tauri::Result<()> 
 /// just changed.
 pub fn memory_changed(app: &AppHandle, payload: MemoryChanged) -> tauri::Result<()> {
     emit(app, MEMORY_CHANGED, payload)
+}
+
+/// Emit an `artifact:changed` event carrying the workspace whose artifact
+/// store just gained a row.
+pub fn artifact_changed(app: &AppHandle, payload: ArtifactChanged) -> tauri::Result<()> {
+    emit(app, ARTIFACT_CHANGED, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +437,15 @@ mod tests {
     #[test]
     fn memory_changed_camel_case() {
         let val = serde_json::to_value(MemoryChanged {
+            workspace_id: "ws1".into(),
+        })
+        .unwrap();
+        assert_eq!(val, json!({ "workspaceId": "ws1" }));
+    }
+
+    #[test]
+    fn artifact_changed_camel_case() {
+        let val = serde_json::to_value(ArtifactChanged {
             workspace_id: "ws1".into(),
         })
         .unwrap();
