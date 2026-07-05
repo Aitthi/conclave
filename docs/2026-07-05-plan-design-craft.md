@@ -9,7 +9,7 @@ requested by the human 2026-07-05 ~17:2x: "ต้องการความส�
 - `/Users/detoro/code/arta/mcp/slop-detect.mjs` (+ its `.test.mjs`) — dependency-free deterministic anti-slop detector, JSX-aware (`detectSlopJsx`); ported from Hallmark's MIT gate set — KEEP the attribution comment
 - `/Users/detoro/code/arta/evals/` — `grade.mjs` (6 deterministic assertions A1a..A5), `gate.mjs`, `thresholds.json`, `briefs.json`, fixtures
 
-Key fit: arta's grader reads `screens/*.tsx` + `components/*.tsx` + `theme.css` straight off disk — the same shape as `<workspace>/design/`. This is a re-point, not a rewrite.
+Key fit: arta's grader reads `screens/*.tsx` + `components/*.tsx` + `theme.css` straight off disk — the same shape as `<workspace>/design/`. AMENDED (Tiësto, at claim): "re-point, not a rewrite" was optimistic — grade.mjs imports arta-internal helpers (`src/lib/prototype.ts::tokensFromCss`, `vite/proto-manifest.ts` listScreens/listComponents/readConfig, `evals/briefs.json`) that assume the `proto/` subdir shape; porting means vendoring/inlining those helpers into `design-host/review/`. Accepted as implementation judgment.
 
 ## Lead rulings (challenge via `task challenge` if wrong)
 
