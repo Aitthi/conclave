@@ -25,6 +25,14 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Lanes | `conclave lane start <workspaceId> <slug>` | claim + worktree in one step |
 | Lanes | `conclave lane finish <workspaceId> <slug>` | integrator teardown after merge (remove worktree + delete branch) |
 | Lanes | `conclave lane guard install` | install the shared-checkout commit-scope guard |
+| Stage | `conclave stage status <workspaceId> <slug>` | git status, partitioned into in/out of the task's boundary |
+| Stage | `conclave stage diff <workspaceId> <slug>` | git diff HEAD, scoped to the boundary |
+| Stage | `conclave stage commit <workspaceId> <slug> -m <msg>` | private-index commit of ONLY the boundary paths — the shared `.git/index` is never touched, attribution is native git authorship, ledger note posted automatically |
+| Stage | `conclave stage snap <workspaceId> <slug> [-m <label>]` | explicit snapshot of the boundary onto a local op-log ref |
+| Stage | `conclave stage log <workspaceId> <slug>` | list snapshots newest-first |
+| Stage | `conclave stage restore <workspaceId> <slug> <snapSha>` | restore boundary paths from a snapshot (auto-snaps the current state first, so it's itself undoable) |
+| Stage | `conclave stage clear <workspaceId> <slug>` | delete the snapshot ref (only after merged) |
+| Stage | (discouraged in the shared checkout) | raw `git add`/`git commit` risk sweeping a peer's staged work (b9ab709) and land under the shared human identity (c3d8fcb) — prefer `stage commit` |
 | Peers | `conclave agent list <workspaceId>` | roster: ids, roles, skills, working flag |
 | Peers | `conclave tell <agentId> <text...>` | message a peer — the ONLY channel that reaches one |
 | Peers | `conclave send <sessionId> <text...>` | inject into a session by session id (orchestration plumbing; prefer `tell`) |

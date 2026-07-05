@@ -89,6 +89,13 @@ Subcommands:
   lane start  <workspaceId> <slug>      (add lane worktree + claim task if present)
   lane finish <workspaceId> <slug>      (remove worktree + delete branch, after merge)
   lane guard install                    (install the shared-checkout commit-scope guard)
+  stage status  <workspaceId> <slug>                    (git status, partitioned by task boundary)
+  stage diff    <workspaceId> <slug>                    (git diff HEAD, scoped to boundary)
+  stage commit  <workspaceId> <slug> -m <msg>            (private-index commit of boundary paths only; inside a spawned agent)
+  stage snap    <workspaceId> <slug> [-m <label>]        (explicit snapshot onto the op log; inside a spawned agent)
+  stage log     <workspaceId> <slug>                    (list snapshots, newest first)
+  stage restore <workspaceId> <slug> <snapSha>           (restore boundary paths from a snapshot; auto-snaps first; inside a spawned agent)
+  stage clear   <workspaceId> <slug>                    (delete the snapshot ref)
   task create   <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]
   task list     <workspaceId> [--state s]
   task get      <workspaceId> <slug>
@@ -633,6 +640,752 @@ async fn run_lane(argv: &[String], self_instance: Option<&str>) -> ExitCode {
     }
 }
 
+// ── Stage: private-index commit + attribution + snapshot op log (plan stage-v1) ──
+//
+// jj (Jujutsu)-inspired shared-checkout collaboration: a PRIVATE `GIT_INDEX_FILE`
+// means `stage commit`/`stage snap` never read or write the shared `.git/index`,
+// so two agents committing concurrently cannot interfere (the b9ab709 accident
+// class). Attribution uses native git authorship (`GIT_AUTHOR_NAME`/`_EMAIL`)
+// instead of the shared human identity (the c3d8fcb ambiguity) — the committer
+// stays the repo default. Snapshots are ordinary git commits chained onto a
+// local-only ref `refs/conclave/stage/<slug>` — a content-addressed op log that
+// survives everything git survives and is never pushed.
+
+const STAGE_USAGE: &str = "\
+Usage: conclave stage <status|diff|commit|snap|log|restore|clear> ...
+  stage status  <workspaceId> <slug>              git status, partitioned by task boundary
+  stage diff    <workspaceId> <slug>              git diff HEAD, scoped to boundary
+  stage commit  <workspaceId> <slug> -m <msg>     private-index commit of boundary paths only
+  stage snap    <workspaceId> <slug> [-m <label>] explicit snapshot onto the op log
+  stage log     <workspaceId> <slug>              list snapshots, newest first
+  stage restore <workspaceId> <slug> <snapSha>    restore boundary paths from a snapshot (auto-snaps first)
+  stage clear   <workspaceId> <slug>              delete the snapshot ref
+";
+
+/// The local-only op-log ref a task's snapshots chain onto. Never added to a
+/// push refspec (risk ledger) — it lives only in this repo's `.git`.
+fn stage_snapshot_ref(slug: &str) -> String {
+    format!("refs/conclave/stage/{slug}")
+}
+
+/// Mirrors `pre_commit_guard.sh`'s `in_scope`: `path` is in boundary if it
+/// equals a boundary entry or lives under it (`entry/...`), so a boundary of
+/// "src" never matches "srcfoo". A trailing slash on an entry is stripped
+/// first so "docs/" and "docs" behave identically.
+fn path_in_boundary(path: &str, boundary: &[String]) -> bool {
+    boundary.iter().any(|entry| {
+        let e = entry.strip_suffix('/').unwrap_or(entry.as_str());
+        !e.is_empty() && (path == e || path.starts_with(&format!("{e}/")))
+    })
+}
+
+/// A task without a boundary has nothing for `stage` to scope to — the
+/// boundary IS the contract (decision 3); a wrong boundary gets fixed by
+/// amending the plan, never by an ad-hoc path override here.
+fn require_boundary(slug: &str, boundary: Vec<String>) -> Result<Vec<String>, String> {
+    if boundary.is_empty() {
+        return Err(format!(
+            "conclave: task '{slug}' has no fileBoundary — stage refuses to operate without \
+             one (the boundary IS the contract; amend the plan if it's wrong)"
+        ));
+    }
+    Ok(boundary)
+}
+
+/// Read a task's `fileBoundary` over the existing `task get` client path (no
+/// new engine route — the plan's boundary is the CLI-only feature's only
+/// server dependency).
+async fn stage_boundary(ws: &str, slug: &str, self_instance: Option<&str>) -> Result<Vec<String>, String> {
+    let argv = vec![
+        "task".to_string(),
+        "get".to_string(),
+        ws.to_string(),
+        slug.to_string(),
+    ];
+    let result = uds_task_call(argv, self_instance).await?;
+    let boundary: Vec<String> = result
+        .get("fileBoundary")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    require_boundary(slug, boundary)
+}
+
+/// Resolve the calling agent's display name from the workspace roster (over
+/// the existing `agent list` client path) — native git authorship (decision
+/// 4) needs a human-readable name, not just the instance id.
+async fn agent_identity(ws: &str, self_instance: &str) -> Result<(String, String), String> {
+    let argv = vec!["agent".to_string(), "list".to_string(), ws.to_string()];
+    let result = uds_task_call(argv, Some(self_instance)).await?;
+    let rows = result
+        .as_array()
+        .ok_or_else(|| "conclave: agent list: malformed response".to_string())?;
+    rows.iter()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(self_instance))
+        .map(|row| {
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(self_instance)
+                .to_string();
+            (name, self_instance.to_string())
+        })
+        .ok_or_else(|| format!("conclave: agent id '{self_instance}' not found in workspace roster"))
+}
+
+/// Resolve the caller's own instance id for a `stage` verb that mutates
+/// state (commit/snap/restore all end up authoring a commit) — same
+/// requirement as `tell`/`task claim` etc in `expand_self_args`.
+fn require_stage_self<'a>(cmd: &str, self_instance: Option<&'a str>) -> Result<&'a str, String> {
+    self_instance.filter(|s| !s.is_empty()).ok_or_else(|| {
+        format!(
+            "conclave: `stage {cmd}` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
+        )
+    })
+}
+
+/// Run `git <args>` in `repo`, returning trimmed stdout or a user-facing
+/// error including stderr. Threading an explicit `repo` (rather than relying
+/// on the process cwd) is what makes the git-plumbing helpers below
+/// unit-testable against a throwaway repo.
+fn git_output(repo: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .map_err(|e| format!("could not run git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Same as [`git_output`] but with `GIT_INDEX_FILE` pointed at a private
+/// index — the shared `.git/index` is never named on this path, so it is
+/// never read or written (decision 2).
+fn git_with_index(
+    repo: &std::path::Path,
+    index_path: &std::path::Path,
+    args: &[&str],
+) -> Result<String, String> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .env("GIT_INDEX_FILE", index_path)
+        .args(args)
+        .output()
+        .map_err(|e| format!("could not run git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// A path for a throwaway private index, unique per call (a UUIDv4 suffix —
+/// two concurrent `stage` invocations must never collide on the same file).
+fn tmp_index_path() -> PathBuf {
+    std::env::temp_dir().join(format!("conclave-stage-index-{}", uuid::Uuid::new_v4()))
+}
+
+/// Build a tree object representing `base` (any commit-ish) with the CURRENT
+/// working-tree content of `boundary` paths layered on top, via a private
+/// index (decision 2) — the shared index is never touched. `add -A` (not
+/// plain `add`) so a boundary deletion is captured, not just
+/// modifications/additions (test 7).
+fn build_boundary_tree(
+    repo: &std::path::Path,
+    base: &str,
+    boundary: &[String],
+) -> Result<String, String> {
+    let index_path = tmp_index_path();
+    let result = (|| {
+        git_with_index(repo, &index_path, &["read-tree", base])?;
+        let mut args: Vec<&str> = vec!["add", "-A", "--"];
+        args.extend(boundary.iter().map(String::as_str));
+        git_with_index(repo, &index_path, &args)?;
+        git_with_index(repo, &index_path, &["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    result
+}
+
+fn current_branch(repo: &std::path::Path) -> Result<String, String> {
+    git_output(repo, &["symbolic-ref", "--short", "HEAD"])
+        .map_err(|_| "stage commit requires a branch checkout (HEAD is detached)".to_string())
+}
+
+fn head_sha(repo: &std::path::Path) -> Result<String, String> {
+    git_output(repo, &["rev-parse", "HEAD"])
+}
+
+fn tree_of(repo: &std::path::Path, commitish: &str) -> Result<String, String> {
+    git_output(repo, &["rev-parse", &format!("{commitish}^{{tree}}")])
+}
+
+/// `git commit-tree` with agent authorship (decision 4). The COMMITTER is
+/// deliberately left at the repo default (no `GIT_COMMITTER_*` env) — only
+/// the author identifies the agent.
+fn commit_tree(
+    repo: &std::path::Path,
+    tree: &str,
+    parents: &[&str],
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+) -> Result<String, String> {
+    let mut args = vec!["commit-tree", tree];
+    for p in parents {
+        args.push("-p");
+        args.push(p);
+    }
+    args.push("-m");
+    args.push(message);
+    let output = Command::new("git")
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", author_name)
+        .env("GIT_AUTHOR_EMAIL", author_email)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("could not run git commit-tree: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git commit-tree failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Compare-and-swap ref update: `git update-ref <ref> <new> <old>` fails if
+/// `<ref>`'s current value isn't exactly `<old>` — this is what makes two
+/// concurrent `stage commit`s unable to clobber each other (decision 2).
+fn update_ref_cas(
+    repo: &std::path::Path,
+    ref_name: &str,
+    new_sha: &str,
+    expected_old: &str,
+) -> Result<(), String> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["update-ref", ref_name, new_sha, expected_old])
+        .output()
+        .map_err(|e| format!("could not run git update-ref: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Core commit mechanics (decision 2): build a boundary-only tree via a
+/// private index, commit it with agent attribution + `Conclave-Task`/
+/// `Conclave-Agent` trailers (decision 4), then CAS the branch ref forward —
+/// on a stale CAS, refresh HEAD and rebuild the tree rather than failing
+/// outright, since a peer's unrelated commit landing between our read and
+/// write is expected in a shared checkout, not an error condition. Returns
+/// the new commit sha and the number of changed boundary files.
+///
+/// Synchronous and UDS-free (boundary/identity are resolved by the caller)
+/// so it is unit-testable against a throwaway repo — see
+/// [`stage_commit_core_with_hook`] for the CAS-retry test seam.
+fn stage_commit_core(
+    repo: &std::path::Path,
+    branch: &str,
+    slug: &str,
+    boundary: &[String],
+    message: &str,
+    author_name: &str,
+    author_id: &str,
+) -> Result<(String, usize), String> {
+    stage_commit_core_with_hook(
+        repo,
+        branch,
+        slug,
+        boundary,
+        message,
+        author_name,
+        author_id,
+        |_attempt, _repo| {},
+    )
+}
+
+/// [`stage_commit_core`] with a race-injection seam: `race_hook(attempt,
+/// repo)` runs right after an attempt captures its view of HEAD (and before
+/// it tries the CAS), so a test can move the branch ref out from under
+/// attempt 1 and deterministically exercise the CAS-failure-then-
+/// refresh-and-retry path (test 3) without a timing-dependent race.
+/// Production always passes a no-op hook via [`stage_commit_core`].
+#[allow(clippy::too_many_arguments)]
+fn stage_commit_core_with_hook(
+    repo: &std::path::Path,
+    branch: &str,
+    slug: &str,
+    boundary: &[String],
+    message: &str,
+    author_name: &str,
+    author_id: &str,
+    race_hook: impl Fn(u32, &std::path::Path),
+) -> Result<(String, usize), String> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let author_email = format!("{author_id}@agents.conclave.local");
+    let full_message = format!("{message}\n\nConclave-Task: {slug}\nConclave-Agent: {author_id}");
+
+    for attempt in 1..=3u32 {
+        let old_head = head_sha(repo)?;
+        race_hook(attempt, repo);
+        let head_tree = tree_of(repo, &old_head)?;
+        let new_tree = build_boundary_tree(repo, &old_head, boundary)?;
+        if new_tree == head_tree {
+            return Err(format!("nothing to commit in boundary for '{slug}'"));
+        }
+        let new_commit = commit_tree(
+            repo,
+            &new_tree,
+            &[&old_head],
+            &full_message,
+            author_name,
+            &author_email,
+        )?;
+        match update_ref_cas(repo, &branch_ref, &new_commit, &old_head) {
+            Ok(()) => {
+                let n_files = git_output(repo, &["diff", "--name-only", &old_head, &new_commit])
+                    .map(|s| s.lines().filter(|l| !l.is_empty()).count())
+                    .unwrap_or(0);
+                return Ok((new_commit, n_files));
+            }
+            Err(e) if attempt < 3 => {
+                let _ = e; // refresh-and-retry: the loop re-reads HEAD from the top
+                continue;
+            }
+            Err(e) => return Err(format!("branch moving too fast, retry ({e})")),
+        }
+    }
+    unreachable!("loop always returns within 3 attempts")
+}
+
+/// Snapshot `boundary`'s CURRENT working-tree content onto
+/// `refs/conclave/stage/<slug>` (decision 5), chained onto the ref's current
+/// tip (or an orphan first snapshot if the ref doesn't exist yet). Skips the
+/// ref update entirely when the new tree is identical to the previous
+/// snapshot's — the op log stays noise-free (test 9). `reason` becomes the
+/// `<label|auto-...>` segment of the commit message.
+fn snapshot(
+    repo: &std::path::Path,
+    slug: &str,
+    boundary: &[String],
+    reason: &str,
+    author_name: &str,
+    author_email: &str,
+) -> Result<Option<String>, String> {
+    let snap_ref = stage_snapshot_ref(slug);
+    let prev = git_output(repo, &["rev-parse", "--verify", "-q", &snap_ref]).ok();
+
+    let base = prev.clone().unwrap_or_else(|| "HEAD".to_string());
+    let new_tree = build_boundary_tree(repo, &base, boundary)?;
+
+    if let Some(prev_sha) = &prev {
+        let prev_tree = tree_of(repo, prev_sha)?;
+        if new_tree == prev_tree {
+            return Ok(None);
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let message = format!("snap({slug}): {reason} @ {now}");
+    let parent_refs: Vec<&str> = prev.iter().map(String::as_str).collect();
+    let new_commit = commit_tree(repo, &new_tree, &parent_refs, &message, author_name, author_email)?;
+
+    let expected = prev.unwrap_or_else(|| "0".repeat(40));
+    update_ref_cas(repo, &snap_ref, &new_commit, &expected)?;
+    Ok(Some(new_commit))
+}
+
+/// `stage status <ws> <slug>`: `git status --porcelain`, partitioned into
+/// IN-BOUNDARY vs OUT-OF-BOUNDARY sections by [`path_in_boundary`].
+async fn stage_status(ws: &str, slug: &str, self_instance: Option<&str>) -> ExitCode {
+    let boundary = match stage_boundary(ws, slug, self_instance).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let output = match Command::new("git").args(["status", "--porcelain"]).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => {
+            eprintln!(
+                "conclave: git status failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("conclave: could not run git: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut in_boundary = Vec::new();
+    let mut out_of_boundary = Vec::new();
+    for line in output.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let raw_path = &line[3..];
+        // A rename shows as "orig -> new"; the CURRENT path is what matters
+        // for boundary membership.
+        let path = raw_path.split(" -> ").last().unwrap_or(raw_path);
+        if path_in_boundary(path, &boundary) {
+            in_boundary.push(line);
+        } else {
+            out_of_boundary.push(line);
+        }
+    }
+    println!("IN-BOUNDARY ({}):", in_boundary.len());
+    for l in &in_boundary {
+        println!("  {l}");
+    }
+    println!("OUT-OF-BOUNDARY ({}):", out_of_boundary.len());
+    for l in &out_of_boundary {
+        println!("  {l}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// `stage diff <ws> <slug>`: `git diff HEAD -- <boundary paths>`.
+async fn stage_diff(ws: &str, slug: &str, self_instance: Option<&str>) -> ExitCode {
+    let boundary = match stage_boundary(ws, slug, self_instance).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut args = vec!["diff", "HEAD", "--"];
+    args.extend(boundary.iter().map(String::as_str));
+    match Command::new("git").args(&args).status() {
+        Ok(s) => ExitCode::from(s.code().unwrap_or(1).rem_euclid(256) as u8),
+        Err(e) => {
+            eprintln!("conclave: could not run git: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `stage commit <ws> <slug> -m <msg>`: decision 2/4/8 mechanics. Auto-snaps
+/// first (decision 6, once — not per CAS retry), then runs
+/// [`stage_commit_core`] and, on success, posts the ledger stamp (decision
+/// 8) over the existing `task note` client path. A ledger-note failure
+/// (engine down) warns but does not roll back the already-landed commit.
+async fn stage_commit(ws: &str, slug: &str, message: &str, self_instance: Option<&str>) -> ExitCode {
+    let me = match require_stage_self("commit", self_instance) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let boundary = match stage_boundary(ws, slug, self_instance).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (author_name, author_id) = match agent_identity(ws, me).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let repo = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("conclave: stage commit: cannot resolve cwd: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let branch = match current_branch(&repo) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("conclave: stage commit: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let author_email = format!("{author_id}@agents.conclave.local");
+    if let Err(e) = snapshot(&repo, slug, &boundary, "auto-pre-commit", &author_name, &author_email) {
+        eprintln!("conclave: stage commit: auto-snapshot failed: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    match stage_commit_core(&repo, &branch, slug, &boundary, message, &author_name, &author_id) {
+        Ok((sha, n_files)) => {
+            let short = &sha[..12.min(sha.len())];
+            println!("stage commit: {short} — {message} ({n_files} files)");
+            let note_text = format!("stage commit {short} — {message} ({n_files} files)");
+            let note_argv = vec![
+                "task".to_string(),
+                "note".to_string(),
+                ws.to_string(),
+                slug.to_string(),
+                note_text,
+            ];
+            if let Err(e) = uds_task_call(note_argv, self_instance).await {
+                eprintln!("conclave: stage commit: warning — ledger note failed ({e})");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("conclave: stage commit: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `stage snap <ws> <slug> [-m <label>]`: an explicit snapshot (default
+/// label "manual" when `-m` is omitted).
+async fn stage_snap(ws: &str, slug: &str, label: Option<&str>, self_instance: Option<&str>) -> ExitCode {
+    let me = match require_stage_self("snap", self_instance) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let boundary = match stage_boundary(ws, slug, self_instance).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (author_name, author_id) = match agent_identity(ws, me).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let repo = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("conclave: stage snap: cannot resolve cwd: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let reason = label.unwrap_or("manual");
+    let author_email = format!("{author_id}@agents.conclave.local");
+    match snapshot(&repo, slug, &boundary, reason, &author_name, &author_email) {
+        Ok(Some(sha)) => {
+            println!("stage snap: {} ({reason})", &sha[..12.min(sha.len())]);
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            println!("stage snap: no change since the last snapshot — skipped");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("conclave: stage snap: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `stage log <ws> <slug>`: `git log` over the snapshot ref, newest first.
+/// Doesn't need the task boundary (only the slug, to name the ref).
+fn stage_log(slug: &str) -> ExitCode {
+    let repo = std::path::Path::new(".");
+    let snap_ref = stage_snapshot_ref(slug);
+    match git_output(repo, &["log", "--format=%h  %ad  %s", "--date=iso-strict", &snap_ref]) {
+        Ok(out) if !out.is_empty() => {
+            println!("{out}");
+            ExitCode::SUCCESS
+        }
+        Ok(_) => {
+            println!("stage log: no snapshots for '{slug}' yet");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("conclave: stage log: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `stage restore <ws> <slug> <snapSha>`: auto-snaps the current state first
+/// (decision 6 — so the restore itself is undoable), then `git restore
+/// --worktree` from `snapSha`. Never touches the index (no `--staged`).
+async fn stage_restore(ws: &str, slug: &str, snap_sha: &str, self_instance: Option<&str>) -> ExitCode {
+    let me = match require_stage_self("restore", self_instance) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let boundary = match stage_boundary(ws, slug, self_instance).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (author_name, author_id) = match agent_identity(ws, me).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let repo = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("conclave: stage restore: cannot resolve cwd: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let author_email = format!("{author_id}@agents.conclave.local");
+    match snapshot(&repo, slug, &boundary, "auto-pre-restore", &author_name, &author_email) {
+        Ok(Some(sha)) => println!(
+            "stage restore: auto-snapshotted current state as {}",
+            &sha[..12.min(sha.len())]
+        ),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("conclave: stage restore: auto-snapshot failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    println!("stage restore: restoring {} path(s) from {snap_sha}:", boundary.len());
+    for p in &boundary {
+        println!("  {p}");
+    }
+
+    let mut args = vec!["restore", "--worktree", "--source", snap_sha, "--"];
+    args.extend(boundary.iter().map(String::as_str));
+    match Command::new("git").args(&args).status() {
+        Ok(s) if s.success() => {
+            println!("stage restore: done");
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("conclave: git restore failed (exit {})", s.code().unwrap_or(-1));
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("conclave: could not run git: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `stage clear <ws> <slug>`: delete the snapshot ref (decision 7 — never
+/// auto-deleted by `lane finish`/task close; only this explicit verb).
+/// Doesn't need the task boundary, only the slug.
+fn stage_clear(slug: &str) -> ExitCode {
+    let snap_ref = stage_snapshot_ref(slug);
+    match Command::new("git")
+        .args(["update-ref", "-d", &snap_ref])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            println!("stage clear: deleted {snap_ref}");
+            ExitCode::SUCCESS
+        }
+        Ok(o) => {
+            eprintln!(
+                "conclave: git update-ref -d failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("conclave: could not run git: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Dispatch the `stage` subcommand.
+async fn run_stage(argv: &[String], self_instance: Option<&str>) -> ExitCode {
+    match argv.get(1).map(String::as_str) {
+        Some("status") => match (argv.get(2), argv.get(3)) {
+            (Some(ws), Some(slug)) => stage_status(ws, slug, self_instance).await,
+            _ => {
+                eprintln!("conclave: stage status <workspaceId> <slug>");
+                ExitCode::from(2)
+            }
+        },
+        Some("diff") => match (argv.get(2), argv.get(3)) {
+            (Some(ws), Some(slug)) => stage_diff(ws, slug, self_instance).await,
+            _ => {
+                eprintln!("conclave: stage diff <workspaceId> <slug>");
+                ExitCode::from(2)
+            }
+        },
+        Some("commit") => {
+            let m_pos = argv.iter().position(|w| w == "-m");
+            let message = m_pos.and_then(|p| argv.get(p + 1));
+            match (argv.get(2), argv.get(3), message) {
+                (Some(ws), Some(slug), Some(msg)) => stage_commit(ws, slug, msg, self_instance).await,
+                _ => {
+                    eprintln!("conclave: stage commit <workspaceId> <slug> -m <msg>");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("snap") => {
+            let m_pos = argv.iter().position(|w| w == "-m");
+            let label = m_pos.and_then(|p| argv.get(p + 1).map(String::as_str));
+            match (argv.get(2), argv.get(3)) {
+                (Some(ws), Some(slug)) => stage_snap(ws, slug, label, self_instance).await,
+                _ => {
+                    eprintln!("conclave: stage snap <workspaceId> <slug> [-m <label>]");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("log") => match argv.get(3) {
+            Some(slug) => stage_log(slug),
+            None => {
+                eprintln!("conclave: stage log <workspaceId> <slug>");
+                ExitCode::from(2)
+            }
+        },
+        Some("restore") => match (argv.get(2), argv.get(3), argv.get(4)) {
+            (Some(ws), Some(slug), Some(sha)) => stage_restore(ws, slug, sha, self_instance).await,
+            _ => {
+                eprintln!("conclave: stage restore <workspaceId> <slug> <snapSha>");
+                ExitCode::from(2)
+            }
+        },
+        Some("clear") => match argv.get(3) {
+            Some(slug) => stage_clear(slug),
+            None => {
+                eprintln!("conclave: stage clear <workspaceId> <slug>");
+                ExitCode::from(2)
+            }
+        },
+        _ => {
+            eprint!("{STAGE_USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Truncate `text` to at most `max_bytes` bytes, keeping the TAIL (the most
 /// recent output matters for a gate — the failure is usually at the end).
 /// Splits on a UTF-8 boundary via `from_utf8_lossy` rather than requiring one,
@@ -832,6 +1585,13 @@ async fn main() -> ExitCode {
     // a single `cli.exec` — dispatch it before the socket machinery below.
     if argv[0] == "lane" {
         return run_lane(&argv, self_instance.as_deref()).await;
+    }
+
+    // `stage` is handled locally too (private-index git plumbing + a UDS
+    // round-trip only to read the task's boundary/roster) — dispatch before
+    // the generic `cli.exec` machinery below, same as `lane`.
+    if argv[0] == "stage" {
+        return run_stage(&argv, self_instance.as_deref()).await;
     }
 
     // `task gate` needs to both run the command HERE (never engine-side) and
@@ -1054,6 +1814,7 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{expand_self_args, validate_slug, GUARD_HOOK, GUARD_MARKER};
+    use std::path::{Path, PathBuf};
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
@@ -1505,5 +2266,266 @@ mod tests {
             "task", "create", "ws1", "t1", "Title", "--plan-file", "/no/such/file/xyz",
         ]);
         assert!(super::resolve_task_create_plan_file(argv).is_err());
+    }
+
+    // ── stage: private-index commit + attribution + snapshot op log ───────
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .expect("git command failed to run");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A throwaway repo with one committed file inside the (test) boundary
+    /// ("in-scope.txt") and one outside it ("out-of-scope.txt").
+    fn init_repo() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("conclave-stage-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir fixture failed");
+        run_git(&dir, &["init", "-q", "-b", "main"]);
+        run_git(&dir, &["config", "user.name", "Test Human"]);
+        run_git(&dir, &["config", "user.email", "human@example.com"]);
+        std::fs::write(dir.join("in-scope.txt"), "v1\n").expect("write fixture failed");
+        std::fs::write(dir.join("out-of-scope.txt"), "v1\n").expect("write fixture failed");
+        run_git(&dir, &["add", "-A"]);
+        run_git(&dir, &["commit", "-q", "-m", "initial"]);
+        dir
+    }
+
+    #[test]
+    fn path_in_boundary_matches_exact_and_nested_prefixes_only() {
+        let boundary = vec!["src".to_string(), "docs/adr".to_string()];
+        assert!(super::path_in_boundary("src", &boundary));
+        assert!(super::path_in_boundary("src/lib.rs", &boundary));
+        assert!(!super::path_in_boundary("srcfoo", &boundary));
+        assert!(super::path_in_boundary("docs/adr/0001.md", &boundary));
+        assert!(!super::path_in_boundary("docs/other.md", &boundary));
+    }
+
+    #[test]
+    fn require_boundary_refuses_an_empty_boundary() {
+        assert!(super::require_boundary("t1", vec![]).is_err());
+        assert!(super::require_boundary("t1", vec!["a.rs".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn stage_commit_only_touches_boundary_paths_and_shared_index_untouched() {
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        std::fs::write(dir.join("out-of-scope.txt"), "v2\n").unwrap();
+
+        let index_path = dir.join(".git").join("index");
+        let index_before = std::fs::read(&index_path).expect("read shared index");
+
+        let boundary = vec!["in-scope.txt".to_string()];
+        let (sha, n_files) =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "msg", "Test Agent", "agent-1")
+                .expect("commit must succeed");
+        assert_eq!(n_files, 1);
+
+        let index_after = std::fs::read(&index_path).expect("read shared index");
+        assert_eq!(
+            index_before, index_after,
+            "shared .git/index must be byte-identical before/after"
+        );
+
+        // The new commit's tree carries the boundary path's NEW content...
+        let in_scope = super::git_output(&dir, &["show", &format!("{sha}:in-scope.txt")]).unwrap();
+        assert_eq!(in_scope, "v2");
+        // ...but the out-of-boundary edit did NOT land — the commit tree
+        // still has its OLD content (moving the branch never touches the
+        // shared index, so `git status` afterward compares against a now-
+        // stale index; that's the tree-content check that actually matters).
+        let out_of_scope = super::git_output(&dir, &["show", &format!("{sha}:out-of-scope.txt")]).unwrap();
+        assert_eq!(out_of_scope, "v1", "out-of-boundary edit must not be committed");
+
+        // The out-of-boundary edit remains an uncommitted diff against the
+        // new HEAD — "stays dirty and uncommitted" (test 1).
+        let diff = super::git_output(&dir, &["diff", &sha, "--", "out-of-scope.txt"]).unwrap();
+        assert!(!diff.is_empty(), "out-of-boundary edit must remain dirty/uncommitted");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_stamps_author_and_trailers_committer_stays_default() {
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let boundary = vec!["in-scope.txt".to_string()];
+
+        let (sha, _) =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "did a thing", "Dew", "dew-agent-id")
+                .unwrap();
+
+        let author = super::git_output(&dir, &["show", "-s", "--format=%an <%ae>", &sha]).unwrap();
+        assert_eq!(author, "Dew <dew-agent-id@agents.conclave.local>");
+
+        let committer = super::git_output(&dir, &["show", "-s", "--format=%cn <%ce>", &sha]).unwrap();
+        assert_eq!(
+            committer, "Test Human <human@example.com>",
+            "committer stays the repo default"
+        );
+
+        let body = super::git_output(&dir, &["show", "-s", "--format=%B", &sha]).unwrap();
+        assert!(body.contains("Conclave-Task: t1"), "{body}");
+        assert!(body.contains("Conclave-Agent: dew-agent-id"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_core_retries_after_a_simulated_concurrent_branch_move() {
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let boundary = vec!["in-scope.txt".to_string()];
+
+        let (sha, _) = super::stage_commit_core_with_hook(
+            &dir,
+            "main",
+            "t1",
+            &boundary,
+            "mine",
+            "Dew",
+            "dew",
+            |attempt, repo| {
+                if attempt == 1 {
+                    // Simulate a peer's commit landing between attempt 1's
+                    // HEAD read and its update-ref — deterministic (no
+                    // timing race), exercising the CAS-failure-then-
+                    // refresh-and-retry path.
+                    super::git_output(repo, &["commit", "--allow-empty", "-q", "-m", "peer commit"])
+                        .unwrap();
+                }
+            },
+        )
+        .expect("must succeed via CAS retry after the simulated peer commit");
+
+        let head_now = super::git_output(&dir, &["rev-parse", "main"]).unwrap();
+        assert_eq!(head_now, sha, "our commit must land as the final branch tip");
+        let log = super::git_output(&dir, &["log", "--format=%s", "main"]).unwrap();
+        assert!(
+            log.contains("peer commit"),
+            "the peer's commit must survive in history: {log}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_core_nothing_to_commit_leaves_branch_unmoved() {
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+        let head_before = super::head_sha(&dir).unwrap();
+
+        let err =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "msg", "Dew", "dew").unwrap_err();
+        assert!(err.contains("nothing to commit"), "{err}");
+        assert_eq!(
+            super::head_sha(&dir).unwrap(),
+            head_before,
+            "branch ref must not move"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_boundary_deletion_commits_as_a_deletion() {
+        let dir = init_repo();
+        std::fs::remove_file(dir.join("in-scope.txt")).unwrap();
+        let boundary = vec!["in-scope.txt".to_string()];
+
+        let (sha, n_files) =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "delete it", "Dew", "dew").unwrap();
+        assert_eq!(n_files, 1);
+
+        let ls = super::git_output(&dir, &["ls-tree", "--name-only", &sha]).unwrap();
+        assert!(
+            !ls.contains("in-scope.txt"),
+            "deleted file must not be in the commit tree: {ls}"
+        );
+        assert!(ls.contains("out-of-scope.txt"), "untouched file must survive: {ls}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_snapshot_restore_roundtrip_and_auto_snap_recovers_modified_state() {
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+
+        let snap1 = super::snapshot(&dir, "t1", &boundary, "manual", "Dew", "dew@agents.conclave.local")
+            .unwrap()
+            .expect("first snapshot must be created");
+
+        std::fs::write(dir.join("in-scope.txt"), "modified\n").unwrap();
+
+        let auto_snap = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "auto-pre-restore",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap()
+        .expect("auto-snap of modified state must be created");
+        assert_ne!(auto_snap, snap1);
+
+        run_git(&dir, &["restore", "--worktree", "--source", &snap1, "--", "in-scope.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
+            "v1\n"
+        );
+
+        // The modified state is still recoverable via the auto-snap.
+        run_git(
+            &dir,
+            &["restore", "--worktree", "--source", &auto_snap, "--", "in-scope.txt"],
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
+            "modified\n"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_log_lists_snapshots_newest_first_with_labels() {
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+        super::snapshot(&dir, "t1", &boundary, "first", "Dew", "dew@agents.conclave.local").unwrap();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        super::snapshot(&dir, "t1", &boundary, "second", "Dew", "dew@agents.conclave.local").unwrap();
+
+        let log =
+            super::git_output(&dir, &["log", "--format=%s", &super::stage_snapshot_ref("t1")]).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("second"), "newest first: {lines:?}");
+        assert!(lines[1].contains("first"), "newest first: {lines:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_snap_skips_the_ref_update_when_tree_is_unchanged() {
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+        let first = super::snapshot(&dir, "t1", &boundary, "first", "Dew", "dew@agents.conclave.local")
+            .unwrap()
+            .expect("first snapshot created");
+
+        let second = super::snapshot(&dir, "t1", &boundary, "second", "Dew", "dew@agents.conclave.local")
+            .unwrap();
+        assert!(second.is_none(), "identical tree must skip the ref update");
+
+        let tip = super::git_output(&dir, &["rev-parse", &super::stage_snapshot_ref("t1")]).unwrap();
+        assert_eq!(tip, first, "ref must still point at the first snapshot");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
