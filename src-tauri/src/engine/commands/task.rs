@@ -699,9 +699,10 @@ pub async fn rule(state: &AppState, payload: Value) -> Result<Value, AppError> {
         Some(&req.actor_id),
         "ruling",
         &req.text,
-        // A manual ruling is ledger-only (decision 1): the challenger proceeds
-        // on their stated default and pulls the ledger; a deadline auto-ruling
-        // is a separate `challenge`-class notify in task_timer, unaffected here.
+        // A ruling wakes the challenger (decision 1, amended @ 1490b6a): it
+        // answers a challenge they may be waiting on. Every ruling wakes, so no
+        // payload wake-signal is needed. (A deadline auto-ruling is a separate
+        // notify in task_timer, unaffected here.)
         &Value::Null,
     )
     .await?;
@@ -852,13 +853,16 @@ async fn agent_display_name(state: &AppState, instance_id: &str) -> String {
 /// which consults this once — the wake list lives here and nowhere else
 /// (decision 2: no duplicated wake lists).
 ///
-/// Wakes on: every `challenge`; a `state` transition to `review`/`abandoned`/
-/// `merged`; a `gate` whose process `exit != 0`; and a `note` whose text
-/// starts (exact prefix, case-sensitive, position 0) with `READY`, `BLOCKED`,
-/// or `ESCALATION`. Everything else — `claimed`/`in_progress` states, passing
-/// gates, unmarked notes, `ruling`/`watch`/`unwatch` — is ledger-only; the
-/// stall engine ([`crate::engine::runtime::task_timer`]) is the safety net for
-/// an important-but-unmarked note left on a quiet claim.
+/// Wakes on: every `challenge` and its `ruling` (the dispute pair — a ruling
+/// answers a challenger who may be waiting on a stated default; leaving them
+/// unwoken until the stall timer would defeat the challenge protocol's latency
+/// guarantee); a `state` transition to `review`/`abandoned`/`merged`; a `gate`
+/// whose process `exit != 0`; and a `note` whose text starts (exact prefix,
+/// case-sensitive, position 0) with `READY`, `BLOCKED`, or `ESCALATION`.
+/// Everything else — `claimed`/`in_progress` states, passing gates, unmarked
+/// notes, `watch`/`unwatch` — is ledger-only; the stall engine
+/// ([`crate::engine::runtime::task_timer`]) is the safety net for an
+/// important-but-unmarked note left on a quiet claim.
 ///
 /// `payload` carries only the per-kind wake signal (`state`/`exit`/`text`),
 /// deliberately separate from the display `summary` so the decision never
@@ -866,7 +870,7 @@ async fn agent_display_name(state: &AppState, instance_id: &str) -> String {
 /// safe to waking — a missed decision point is worse than one extra nudge.
 fn wakes_watchers(kind: &str, payload: &Value) -> bool {
     match kind {
-        "challenge" => true,
+        "challenge" | "ruling" => true,
         "state" => matches!(
             payload.get("state").and_then(Value::as_str),
             Some("review" | "abandoned" | "merged")
@@ -1918,10 +1922,57 @@ mod tests {
         assert_eq!(inbox_len(&state, &watcher).await, 2, "every challenge wakes");
     }
 
+    #[tokio::test]
+    async fn a_ruling_wakes_watchers_through_the_real_path() {
+        // Decision 1 (amended @ 1490b6a): a ruling answers a challenger who may
+        // be waiting on a stated default, so it must wake watchers too.
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        let challenge_event = challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "the plan is wrong", "evidence": "line 5", "proposal": "fix", "default": "proceed",
+            }),
+        )
+        .await
+        .expect("challenge");
+        assert_eq!(inbox_len(&state, &watcher).await, 1, "the challenge wakes");
+
+        rule(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": owner,
+                "challengeEventId": challenge_event["id"], "text": "ruled: proceed on your default",
+            }),
+        )
+        .await
+        .expect("rule");
+        assert_eq!(
+            inbox_len(&state, &watcher).await,
+            2,
+            "the ruling wakes the watching challenger too"
+        );
+    }
+
     #[test]
     fn wakes_watchers_encodes_exactly_the_decision_1_list() {
-        // challenge — always, regardless of payload.
+        // challenge and its ruling — always, regardless of payload.
         assert!(wakes_watchers("challenge", &Value::Null));
+        assert!(wakes_watchers("ruling", &Value::Null));
 
         // state — only review/abandoned/merged.
         for terminal in ["review", "abandoned", "merged"] {
@@ -1958,7 +2009,7 @@ mod tests {
         }
 
         // everything else is ledger-only.
-        for ledger_only in ["ruling", "watch", "unwatch", "created"] {
+        for ledger_only in ["watch", "unwatch", "created"] {
             assert!(!wakes_watchers(ledger_only, &Value::Null), "{ledger_only} must not wake");
         }
     }

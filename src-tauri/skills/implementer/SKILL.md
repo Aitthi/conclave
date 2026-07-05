@@ -151,8 +151,9 @@ the Collaboration skill; this one only covers what implementing adds.
   them to stay visible.
 - Prefix a note that needs the lead NOW with `READY`, `BLOCKED`, or
   `ESCALATION` (exact word, start of the note). Only marked notes, a failing
-  gate (`exit != 0`), a challenge, and a `review`/`abandoned`/`merged`
-  transition wake watchers; everything else — plain notes, passing gates,
+  gate (`exit != 0`), a challenge or its ruling, and a
+  `review`/`abandoned`/`merged` transition wake watchers; everything else —
+  plain notes, passing gates,
   `claimed`/`in_progress` — records silently. If you go quiet ≥10 minutes
   holding a claim, the stall engine pages the lead to come check, so an
   important-but-unmarked note is never lost, only delayed.

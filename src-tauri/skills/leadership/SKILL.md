@@ -198,7 +198,8 @@ the gap between them is where leads fail.
 - While implementers work, you are not done: `conclave task watch <ws>
   <slug>` every lane you own. Watchers wake only on decision-demanding
   events — a `review`/`abandoned`/`merged` transition, a failing gate, a
-  challenge, or a note prefixed `READY`/`BLOCKED`/`ESCALATION`; routine
+  challenge or its ruling, or a note prefixed `READY`/`BLOCKED`/`ESCALATION`;
+  routine
   progress (plain notes, passing gates, `claimed`/`in_progress`) records
   silently, so pull it with `conclave task get <ws> <slug>` on your own
   cadence. Review landed commits against the plan and stay interruptible —
