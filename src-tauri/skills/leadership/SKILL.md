@@ -213,3 +213,10 @@ the gap between them is where leads fail.
   before asking a peer for something outside their harness (a `codex` agent
   is not a `claude-code` agent, and models differ in what they're reliable
   at).
+- Weight new lanes by AVAILABILITY, not familiarity: when independent work
+  exists and a capable agent sits idle, assigning it to an already-busy
+  favorite queues the workspace behind one context window. Familiarity is a
+  tiebreaker between two IDLE agents, not a reason to wait. Routing every
+  lane to the same two implementers also concentrates codebase knowledge —
+  the idle agent never becoming reliable is a cost you chose, not a fact you
+  discovered.
