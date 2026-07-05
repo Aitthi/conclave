@@ -1,0 +1,28 @@
+{
+  "name": "conclave-design-host",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Conclave-native design canvas host: a Vite dev server the engine spawns and supervises, rendering the React screens an agent writes under a workspace's design/screens/ directory. No dependency on .arta or the Arta studio.",
+  "license": "MIT",
+  "bin": {
+    "conclave-design-host": "bin/host.mjs"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc -b --noEmit",
+    "start": "node bin/host.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^6.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.2"
+  }
+}

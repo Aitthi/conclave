@@ -1,20 +1,19 @@
 //! `design.ensure` / `design.status` — the vendor-neutral bridge between a
-//! Conclave workspace and the design-canvas viewer sidecar
-//! (`runtime::design_viewer`). Scaffolds a workspace's `.arta/` on first use,
+//! Conclave workspace and the design-canvas host sidecar
+//! (`runtime::design_host`). Scaffolds a workspace's `design/` on first use,
 //! keeps the sidecar's shared `registry.json` in sync, and reports the
-//! iframe URL the Design view (Phase 2 Lane D) will embed.
+//! iframe URL the Design view embeds.
 //!
 //! Neither command touches the agent-facing file CONTRACT itself (writing
-//! `state.json` / `proto/*.tsx` is any agent's ordinary Write/Edit tool, per
-//! the `design-canvas` skill) — this module only ensures the viewer CAN show
-//! whatever is already on disk.
+//! `design/screens/*.tsx` is any agent's ordinary Write/Edit tool) — this
+//! module only ensures the host CAN show whatever is already on disk.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::engine::runtime::design_viewer;
+use crate::engine::runtime::design_host;
 use crate::engine::{repo, AppError, AppState};
 
 #[derive(Deserialize)]
@@ -34,15 +33,16 @@ struct DesignInfo {
     port: Option<u16>,
 }
 
-/// `<folder_path>/.arta` for a workspace — the canonical project dir both
-/// `project_id_for` and the registry entry key off.
-fn arta_dir(folder_path: &str) -> PathBuf {
-    Path::new(folder_path).join(".arta")
+/// `<folder_path>/design` for a workspace — the canonical project dir both
+/// `project_id_for` and the registry entry key off. Fully separate from
+/// `.arta` (D1 — the Conclave-native design view never reads or writes it).
+fn design_dir(folder_path: &str) -> PathBuf {
+    Path::new(folder_path).join("design")
 }
 
-fn build_info(dir: &Path, viewer: Option<design_viewer::ViewerInfo>) -> DesignInfo {
-    let project_id = design_viewer::project_id_for(dir);
-    match viewer {
+fn build_info(dir: &Path, host: Option<design_host::HostInfo>) -> DesignInfo {
+    let project_id = design_host::project_id_for(dir);
+    match host {
         Some(v) => DesignInfo {
             url: Some(format!("http://127.0.0.1:{}/?project={}", v.port, project_id)),
             port: Some(v.port),
@@ -60,10 +60,10 @@ fn build_info(dir: &Path, viewer: Option<design_viewer::ViewerInfo>) -> DesignIn
 
 /// `design.ensure { workspaceId }` → `{ url, port, projectId, running: true }`.
 ///
-/// 1. Scaffold `.arta/` in the workspace's linked folder if missing.
+/// 1. Scaffold `design/` in the workspace's linked folder if missing.
 /// 2. Upsert this workspace into the shared `registry.json` — BEFORE
 ///    starting the sidecar (load-bearing ordering, see
-///    `runtime::design_viewer`'s module doc: the sidecar's file watcher can
+///    `runtime::design_host`'s module doc: the sidecar's file watcher can
 ///    miss the registry file's first-ever creation, never an update to an
 ///    already-existing one).
 /// 3. Ensure the sidecar is running (spawns/respawns as needed).
@@ -74,14 +74,14 @@ pub async fn ensure(state: &AppState, payload: Value) -> Result<Value, AppError>
         .await?
         .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
 
-    let dir = arta_dir(&ws.folder_path);
-    scaffold_if_missing(&dir, &ws.name).map_err(|e| AppError::Internal(format!("scaffold .arta/: {e}")))?;
+    let dir = design_dir(&ws.folder_path);
+    scaffold_if_missing(&dir).map_err(|e| AppError::Internal(format!("scaffold design/: {e}")))?;
 
-    let project_id = design_viewer::project_id_for(&dir);
+    let project_id = design_host::project_id_for(&dir);
     upsert_registry(&dir, &ws.name, &project_id)
-        .map_err(|e| AppError::Internal(format!("registering with design viewer: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("registering with design host: {e}")))?;
 
-    let info = design_viewer::ensure_running()
+    let info = design_host::ensure_running()
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -97,72 +97,34 @@ pub async fn status(state: &AppState, payload: Value) -> Result<Value, AppError>
         .await?
         .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
 
-    let dir = arta_dir(&ws.folder_path);
-    let viewer = design_viewer::current().await;
-    serde_json::to_value(build_info(&dir, viewer)).map_err(|e| AppError::Internal(e.to_string()))
+    let dir = design_dir(&ws.folder_path);
+    let host = design_host::current().await;
+    serde_json::to_value(build_info(&dir, host)).map_err(|e| AppError::Internal(e.to_string()))
 }
 
-// ── .arta/ scaffold (Rust port of design-viewer/vite/scaffold.ts) ──────────
+// ── design/ scaffold ────────────────────────────────────────────────────
 //
-// Kept as a Rust-side port rather than calling the sidecar's own
-// `/__arta/scaffold` HTTP route (which shares the same templates) so
-// scaffolding works even when `node` is missing or the sidecar has not
-// started yet — `design.ensure` must create `.arta/state.json` (with this
-// workspace's name) and `.arta/proto/` REGARDLESS of whether the viewer
-// itself can currently boot. Every write is idempotent (skipped if the file
-// already exists), matching `scaffoldProto`'s own contract exactly.
+// Minimal starter so a brand-new workspace's canvas is never empty: one
+// `screens/welcome.tsx` plus a `lib/` dir for whatever an agent wants to
+// share across screens. Every write is idempotent (skipped if the file
+// already exists).
 
-const THEME_CSS: &str = r#"@import "tailwindcss";
-@source "./";
-@custom-variant dark (&:where(.dark, .dark *));
-
-@theme {
-  --color-primary: oklch(0.66 0.2 250);
-  --color-bg: #ffffff;
-  --color-fg: #18181b;
-  --font-sans: "Geist", "Noto Sans Thai", system-ui, sans-serif;
-  --radius-lg: 1rem;
-}
-
-.dark {
-  --color-bg: #0b0b0c;
-  --color-fg: #fafafa;
-}
-
-body { background: var(--color-bg); color: var(--color-fg); font-family: var(--font-sans); }
-"#;
-
-const HOME_TSX: &str = r#"export const meta = { title: "Home" };
-
-export default function Home() {
+const WELCOME_TSX: &str = r#"export default function Welcome() {
   return (
-    <main className="min-h-screen grid place-items-center bg-bg text-fg">
-      <div className="text-center space-y-3">
-        <h1 className="text-4xl font-semibold">Your canvas is live</h1>
-        <p className="opacity-70">Ask your agent to design something — screens are React files in .arta/proto/screens/.</p>
+    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
+      <div style={{ textAlign: "center" }}>
+        <h1>Your canvas is live</h1>
+        <p>Ask your agent to design something — screens are React files in design/screens/.</p>
       </div>
     </main>
   );
 }
 "#;
 
-const CONFIG_JSON: &str = "{ \"start\": \"home\" }\n";
-
-fn scaffold_if_missing(dir: &Path, workspace_name: &str) -> std::io::Result<()> {
-    let proto_dir = dir.join("proto");
-    std::fs::create_dir_all(proto_dir.join("screens"))?;
-    std::fs::create_dir_all(proto_dir.join("lib"))?;
-    std::fs::create_dir_all(proto_dir.join("components"))?;
-
-    write_if_missing(&proto_dir.join("config.json"), CONFIG_JSON)?;
-    write_if_missing(&proto_dir.join("theme.css"), THEME_CSS)?;
-    write_if_missing(&proto_dir.join("screens").join("home.tsx"), HOME_TSX)?;
-
-    let state_file = dir.join("state.json");
-    if !state_file.exists() {
-        let state = serde_json::json!({ "meta": { "name": workspace_name } });
-        write_if_missing(&state_file, &serde_json::to_string_pretty(&state).expect("json"))?;
-    }
+fn scaffold_if_missing(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir.join("screens"))?;
+    std::fs::create_dir_all(dir.join("lib"))?;
+    write_if_missing(&dir.join("screens").join("welcome.tsx"), WELCOME_TSX)?;
     Ok(())
 }
 
@@ -187,7 +149,7 @@ struct RegistryEntry {
 /// never observes a half-written file. Creates `design_home_dir()` and an
 /// empty registry if neither exists yet.
 fn upsert_registry(dir: &Path, name: &str, project_id: &str) -> std::io::Result<()> {
-    let registry_path = design_viewer::registry_file()?;
+    let registry_path = design_host::registry_file()?;
     let mut entries: Vec<RegistryEntry> = std::fs::read_to_string(&registry_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -216,8 +178,8 @@ mod tests {
     use super::*;
 
     /// Full functional round trip: a scratch workspace → `design.ensure` →
-    /// `.arta/proto/` scaffolded → real `node`/Vite sidecar spawned →
-    /// `/__arta/state` and the scratch screen's `/@fs/` module both 200 →
+    /// `design/` scaffolded → real `node`/Vite sidecar spawned →
+    /// `/__design/health` and the scratch screen's `/@fs/` module both 200 →
     /// `design.status` (no side effects) agrees.
     ///
     /// Genuinely spawns a process and polls real HTTP (requires `node`/`pnpm`
@@ -245,20 +207,16 @@ mod tests {
         let url = res["url"].as_str().expect("url present when running").to_owned();
 
         assert!(
-            tmp.join(".arta/proto/screens/home.tsx").is_file(),
+            tmp.join("design/screens/welcome.tsx").is_file(),
             "scaffold must create the starter screen"
-        );
-        assert!(
-            tmp.join(".arta/state.json").is_file(),
-            "scaffold must create state.json with meta.name"
         );
 
         let client = reqwest::Client::new();
-        let resp = client.get(&url).send().await.expect("GET viewer URL");
-        assert!(resp.status().is_success(), "viewer URL must 200: {}", resp.status());
+        let resp = client.get(&url).send().await.expect("GET host URL");
+        assert!(resp.status().is_success(), "host URL must 200: {}", resp.status());
 
         let port = res["port"].as_u64().expect("port present when running");
-        let screen_path = tmp.join(".arta/proto/screens/home.tsx");
+        let screen_path = tmp.join("design/screens/welcome.tsx");
         let fs_url = format!("http://127.0.0.1:{port}/@fs{}", screen_path.display());
         let fs_resp = client.get(&fs_url).send().await.expect("GET /@fs/ screen");
         assert!(
