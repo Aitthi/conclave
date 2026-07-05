@@ -95,6 +95,15 @@ Boundary: `src-tauri/src/engine/migrations/0016_agent_default_level.sql`,
 `src-tauri/src/engine/repo/workspace_agent.rs`,
 `src-tauri/src/engine/commands/agent.rs`
 
+AMENDED (challenge 194d244b, Dabin — upheld): `src-tauri/src/engine/db.rs`
+is a RATIFIED boundary extension, limited to wiring 0016 into `migrate()`
+(the `if version < 16` block + version assertions/tests). The plan's own
+risk ledger named the loader risk yet the boundary omitted the loader file —
+plan defect (Detoro). Mechanism per recorded convention: land the db.rs
+edits as a SEPARATE scoped commit (`git commit -- src-tauri/src/engine/db.rs`
+with Dabin's authorship) since `stage commit` honors only the original
+boundary; everything else rides `stage commit` as usual.
+
 1. Migration 0016 per the pinned contract (check how 0015 registers itself in
    the migrations list/loader and follow the same mechanism).
 2. `agent_definition` repo: add the column to the row struct, `create`,
