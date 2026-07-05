@@ -1644,6 +1644,24 @@ enum OutMode {
     Json,
 }
 
+/// Return the workspace for public CLI task exits that should print the
+/// memory-save nudge after a successful response.
+fn memory_reminder_workspace_id(argv: &[String]) -> Option<String> {
+    match argv {
+        [task, close, workspace_id, _slug] if task == "task" && close == "close" => {
+            Some(workspace_id.clone())
+        }
+        [task, state_verb, workspace_id, _slug, state]
+            if task == "task"
+                && state_verb == "state"
+                && (state == "review" || state == "abandoned") =>
+        {
+            Some(workspace_id.clone())
+        }
+        _ => None,
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -1703,6 +1721,11 @@ async fn main() -> ExitCode {
         argv
     };
 
+    // Capture the public CLI form before self-keyed task verbs gain their
+    // actor-id wire slot. The reminder still prints only after a successful
+    // response below.
+    let task_boundary_workspace_id = memory_reminder_workspace_id(&argv);
+
     // Expand the self-keyed forms (`tell`, `snapshot save`, `snapshot last`,
     // `task claim`/…) to their wire form, filling the instance id from
     // CONCLAVE_INSTANCE_ID (set on spawned agents).
@@ -1713,15 +1736,6 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-
-    // `task close`'s whole point is prompting the memory-nudge afterward
-    // (ADR 0008: "what did this cost to learn that the repo doesn't
-    // record?"). Captured before the request so it survives into the success
-    // path below regardless of `out_mode`.
-    let task_close_workspace_id = (argv.first().map(String::as_str) == Some("task")
-        && argv.get(1).map(String::as_str) == Some("close"))
-    .then(|| argv.get(3).cloned())
-    .flatten();
 
     // Pick how to render a successful result:
     // - `tell` / `snapshot save` echo a full row; printing it into the agent's
@@ -1866,7 +1880,7 @@ async fn main() -> ExitCode {
                 println!("{pretty}");
             }
         }
-        if let Some(ws) = &task_close_workspace_id {
+        if let Some(ws) = &task_boundary_workspace_id {
             println!(
                 "\nBoundary reached — what did this cost to learn that the repo doesn't record? \
                  `conclave memory remember {ws} ...`"
@@ -1893,6 +1907,35 @@ mod tests {
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn memory_reminder_detection_matches_exit_trigger_matrix() {
+        for (argv, expected) in [
+            (v(&["task", "close", "ws1", "t1"]), Some("ws1")),
+            (v(&["task", "state", "ws1", "t1", "review"]), Some("ws1")),
+            (
+                v(&["task", "state", "ws1", "t1", "abandoned"]),
+                Some("ws1"),
+            ),
+            (v(&["task", "state", "ws1", "t1", "in_progress"]), None),
+            (v(&["task", "state", "ws1", "t1", "merged"]), None),
+            (v(&["task", "note", "ws1", "t1", "review"]), None),
+            (v(&["memory", "remember", "ws1", "review"]), None),
+            (v(&[]), None),
+            (v(&["task"]), None),
+            (v(&["task", "close"]), None),
+            (v(&["task", "close", "ws1"]), None),
+            (v(&["task", "state"]), None),
+            (v(&["task", "state", "ws1"]), None),
+            (v(&["task", "state", "ws1", "t1"]), None),
+        ] {
+            assert_eq!(
+                super::memory_reminder_workspace_id(&argv),
+                expected.map(str::to_string),
+                "unexpected reminder detection for {argv:?}"
+            );
+        }
     }
 
     #[test]
