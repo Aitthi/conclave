@@ -18,6 +18,11 @@ exists (task_timer stall engine) — it just pages too slowly (30 min).
 
 1. **Wake (inject to watchers) ONLY these events**:
    - `challenge` — all (deadlines are attached; latency is not optional).
+   - `ruling` — a manual `task rule` answers a waiting challenger, possibly
+     one proceeding on a stated default; latency is not optional here
+     either. (Amended at review: original list omitted it — gap found by
+     Tiësto while implementing; the deadline AUTO-ruling path notifies both
+     parties via task_timer's own channel and needs nothing here.)
    - `state` → `review`, `abandoned`, or `merged`.
    - `gate` with `exit != 0` (a failing gate is a decision point; a passing
      one is ledger evidence to pull later).
