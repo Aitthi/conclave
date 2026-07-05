@@ -88,6 +88,10 @@ export function Terminal({ sessionId }: TerminalProps) {
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: { background: "#1e1e1e", foreground: "#e5e5e5" },
       cursorBlink: true,
+      // xterm defaults to 1000 rows of scrollback; agent sessions routinely
+      // scroll far past that. Must stay ≥ the serialize cap in the unmount
+      // snapshot below, or remounts silently keep less than the live buffer.
+      scrollback: 12000,
       // Required by the Unicode 11 addon (it uses xterm's proposed API).
       allowProposedApi: true,
       // Rescale any glyph that renders wider than its cell back into the cell
@@ -307,7 +311,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       if (isRemount && receivedOutputRef.current) {
         snapshots.set(sessionId, {
           data: serializeAddon.serialize({
-            scrollback: 2000,
+            scrollback: 12000,
             excludeAltBuffer: true,
             excludeModes: true,
           }),
