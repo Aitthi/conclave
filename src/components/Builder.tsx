@@ -221,16 +221,25 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
     return ids.filter((id) => allSkills.some((s) => s.id === id));
   }
 
-  // Pick a role: pre-select its default skills into the existing skill UI
-  // (additive union — the user can still toggle any of them before saving the
-  // agent). The COPY semantics from ADR 0005 live HERE, not in the engine.
+  // Apply role COPY semantics in the UI: remove the outgoing role's live
+  // defaults, then add the incoming role's live defaults. Manual picks outside
+  // those defaults survive the transition; the engine remains uninvolved.
+  function applyRoleTransition(fromId: string, toId?: string, roles = allRoles) {
+    const outgoingRole = roles.find((r) => r.id === fromId);
+    const incomingRole = roles.find((r) => r.id === toId);
+    const outgoingSkillIds = new Set(liveSkillIds(outgoingRole?.skillIds ?? []));
+    const incomingSkillIds = liveSkillIds(incomingRole?.skillIds ?? []);
+    setSkillIds((prev) =>
+      Array.from(
+        new Set([...prev.filter((id) => !outgoingSkillIds.has(id)), ...incomingSkillIds]),
+      ),
+    );
+  }
+
   function selectRole(id: string) {
+    applyRoleTransition(roleId, id);
     setRoleId(id);
     setCustomRoleOpen(false);
-    const picked = allRoles.find((r) => r.id === id);
-    if (picked) {
-      setSkillIds((prev) => Array.from(new Set([...prev, ...liveSkillIds(picked.skillIds)])));
-    }
   }
 
   async function handleCreateCustomRole() {
@@ -248,8 +257,8 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
       });
       const refreshed = await ipc.role.list();
       setAllRoles(refreshed);
+      applyRoleTransition(roleId, created.id, refreshed);
       setRoleId(created.id);
-      setSkillIds((prev) => Array.from(new Set([...prev, ...liveSkillIds(created.skillIds)])));
       setCustomRoleOpen(false);
       setCustomRoleName("");
       setCustomRoleDesc("");
@@ -470,6 +479,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               <button
                 type="button"
                 onClick={() => {
+                  applyRoleTransition(roleId);
                   setRoleId("");
                   setCustomRoleOpen(false);
                 }}
@@ -516,6 +526,7 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               <button
                 type="button"
                 onClick={() => {
+                  applyRoleTransition(roleId);
                   setCustomRoleOpen(true);
                   setRoleId("");
                 }}
