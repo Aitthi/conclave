@@ -45,10 +45,15 @@ Connect them.
    exist to mirror, assert via the commands' test harness with a probe.
 2. Frontend: `npm run build` (tsc && vite build) green — the typed event
    addition compiles end-to-end.
-3. Manual verify note on the ledger: with the dev app open on the graph,
-   `conclave memory remember` from a terminal makes the node appear
-   without reopening (this is the acceptance criterion; record what you
-   observed — dev-mode `npm run dev` + `cargo tauri dev` is fine).
+3. Live acceptance check — AMENDED at review (Dew's escalation, lead-ruled):
+   restarting the app to verify would interrupt every live agent session
+   (the production Conclave.app hosts all agent PTYs), so the implementer
+   does NOT run it. The literal check — graph open, `conclave memory
+   remember` from a terminal, node appears without reopening — moves to
+   the LEAD's post-rebuild go-live verification, alongside the standing
+   two-signal relaunch check. Code-level verification (emit-gating probe
+   tests, camelCase contract test, tsc end-to-end) is the lane's
+   acceptance bar.
 
 ## Boundary
 
