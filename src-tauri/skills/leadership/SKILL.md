@@ -79,7 +79,9 @@ the gap between them is where leads fail.
 - Split authority explicitly: design/spec conflicts escalate to you (filed
   as `task challenge`, ruled with `task rule`) and your answer is final;
   implementation judgment within the plan's intent belongs to the
-  implementer, logged as task notes, never escalated.
+  implementer, logged as task notes, never escalated. Challenges route to the
+  task owner by default and to the lowest common supervisor across chains; you
+  rule anything that reaches you.
 
 ## When the lead implements directly
 
@@ -135,7 +137,11 @@ the gap between them is where leads fail.
   because the record won't know what they agreed.
 - You are the serialization point for rulings: past roughly 2–4 concurrent
   implementers, your ruling latency eats the parallelism. Scale by adding a
-  sub-lead with its own recorded authority, not by widening one lead's span.
+  **sub-lead**: give a senior agent a supervisor link to you and make it the
+  `owner` of a domain's tasks (`conclave position set <ws> <agentId> --level
+  senior --supervisor <yourId>`). Its reports escalate to it; unresolved
+  disputes and lapsed challenges surface up to you automatically. You remain the
+  tiebreaker at the lowest common ancestor.
 
 ## Judge fixes by their own acceptance criteria
 

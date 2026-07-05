@@ -167,10 +167,22 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
         }
 
         // A claimed/in_progress task always has an implementer (`claim` sets
-        // it atomically with the state move) — but the owner is optional
-        // (nobody assigned one at `create`), so there may be no one to alert.
-        let (Some(owner), Some(implementer)) = (&c.owner_agent_id, &c.implementer_agent_id) else {
+        // it atomically with the state move).
+        let Some(implementer) = &c.implementer_agent_id else {
             continue;
+        };
+
+        // Position routing (spec §3.3): page the implementer's SUPERVISOR — the
+        // agent who delegated the work chases the quiet delegate — falling back
+        // to the task owner (today's target), then to no one. With all
+        // supervisors NULL this degrades byte-for-byte to today (owner, or skip
+        // when there's no owner either). Chain read via the P1 primitive.
+        let recipient = match repo::workspace_agent::supervisor_of(&state.db, implementer).await {
+            Ok(Some(supervisor)) => supervisor,
+            _ => match &c.owner_agent_id {
+                Some(owner) => owner.clone(),
+                None => continue,
+            },
         };
 
         // "AUTO" is load-bearing (RULED 2026-07-04, Detoro): the message is
@@ -183,7 +195,7 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
             stale_for.num_minutes(),
             c.state
         );
-        notify(state, implementer, owner, &text).await;
+        notify(state, implementer, &recipient, &text).await;
         ticker.last_stall_alert.insert(c.id, now);
     }
 }
@@ -274,6 +286,26 @@ async fn check_challenge_deadlines(state: &AppState, now: DateTime<Utc>) {
             (Some(actor), _) => notify(state, actor, actor, &text).await,
             (None, Some(owner)) => notify(state, owner, owner, &text).await,
             (None, None) => {}
+        }
+
+        // Position routing (spec §3.2): the default STILL fires exactly as above
+        // (the cannot-stall guarantee is untouchable — Q1); the chain adds
+        // VISIBILITY, not a second timer. If the owner has a supervisor, send
+        // ONE extra AUTO notice up one level so they learn their delegate let a
+        // dispute default (they may re-open with a fresh `rule`). All-NULL: no
+        // owner or no supervisor → nothing extra, byte-for-byte today.
+        if let Some(owner) = &c.owner_agent_id {
+            if let Ok(Some(owner_supervisor)) =
+                repo::workspace_agent::supervisor_of(&state.db, owner).await
+            {
+                // Attributed to the owner (the real delegate whose task it was);
+                // AUTO marks it machine-generated, same contract as above.
+                let escalation = format!(
+                    "[task {}] AUTO default-ruling escalation — a challenge your report owned lapsed to its default: {default_action}",
+                    c.slug
+                );
+                notify(state, owner, &owner_supervisor, &escalation).await;
+            }
         }
     }
 }
@@ -425,6 +457,84 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        task::watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
+            .await
+            .expect("claim failed");
+
+        // Derive the tick from the STORED claim-event timestamp so the rendered
+        // minute is deterministically exactly 11 (stale = last_event + 11m −
+        // last_event) — lets the full line be pinned, not a wildcard middle.
+        let got = task::get(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("get failed");
+        let last_event_at: DateTime<Utc> = got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| DateTime::parse_from_rfc3339(e["createdAt"].as_str().unwrap()).unwrap().with_timezone(&Utc))
+            .max()
+            .expect("has an event");
+        let mut ticker = Ticker::new();
+
+        // Just under the 10-minute threshold — no alert yet.
+        tick(&state, last_event_at + Duration::minutes(9), &mut ticker).await;
+        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
+        assert_eq!(inbox.as_array().unwrap().len(), 0, "must not fire before the threshold");
+
+        // Exactly 11 minutes past the stored last event — alert fires.
+        tick(&state, last_event_at + Duration::minutes(11), &mut ticker).await;
+        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
+        let arr = inbox.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "must fire once past the threshold");
+        // All-NULL byte-for-byte: the COMPLETE exact tuple. from=implementer,
+        // to=owner (today's target), and the FULL deterministic line — the
+        // minute is exactly 11 (deterministic tick), so nothing is a wildcard.
+        assert_eq!(arr[0]["fromInstanceId"], json!(implementer));
+        assert_eq!(arr[0]["toInstanceId"], json!(owner));
+        assert_eq!(
+            arr[0]["text"],
+            json!("[task t1] AUTO stall alert — no activity for 11+ min (state=claimed)")
+        );
+
+        // The stall pages the routing target ONLY — a watcher must NOT be paged
+        // (proves the complete notification set excludes unintended delivery).
+        let watcher_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            watcher_inbox.as_array().unwrap().len(),
+            0,
+            "the stall timer must not page a watcher"
+        );
+    }
+
+    /// Position routing (spec §3.3): with the implementer reporting to a
+    /// supervisor, the stall pages the SUPERVISOR, not the owner — and still
+    /// carries the AUTO marker attributed to the implementer.
+    #[tokio::test]
+    async fn stall_pages_the_implementers_supervisor_when_set() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let supervisor = fixture_instance(&state, &ws, "Supervisor").await;
+        let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        workspace_agent::set_position(&state.db, &implementer, None, Some(&supervisor))
+            .await
+            .expect("set implementer supervisor");
         task::create(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
@@ -435,32 +545,71 @@ mod tests {
             .await
             .expect("claim failed");
 
-        let claimed_at = Utc::now();
         let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
 
-        // Just under the 10-minute threshold — no alert yet.
-        tick(&state, claimed_at + Duration::minutes(9), &mut ticker).await;
-        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+        let sup_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": supervisor }))
             .await
             .expect("list failed");
-        assert_eq!(inbox.as_array().unwrap().len(), 0, "must not fire before the threshold");
+        let sup_arr = sup_inbox.as_array().unwrap();
+        assert_eq!(sup_arr.len(), 1, "the implementer's supervisor is paged");
+        assert!(sup_arr[0]["text"].as_str().unwrap().contains("AUTO"), "routed page keeps AUTO");
 
-        // Past the threshold — alert fires.
-        tick(&state, claimed_at + Duration::minutes(11), &mut ticker).await;
-        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
-        let arr = inbox.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "must fire once past the threshold");
-        let text = arr[0]["text"].as_str().unwrap();
-        assert!(
-            text.contains("AUTO"),
-            "line must carry the machine-generated marker (RULED 2026-07-04): {text}"
+        assert_eq!(
+            owner_inbox.as_array().unwrap().len(),
+            0,
+            "owner is NOT paged once the implementer has a supervisor"
         );
-        assert!(text.contains("stall"), "line must say it's a stall alert: {text}");
-        assert!(text.contains("t1"), "line must name the task: {text}");
-        assert_eq!(arr[0]["fromInstanceId"], json!(implementer));
-        assert_eq!(arr[0]["toInstanceId"], json!(owner));
+    }
+
+    /// Position routing (spec §3.2): a lapsed deadline STILL fires the default
+    /// (unchanged), PLUS exactly one extra AUTO notice up one level to the
+    /// owner's supervisor — visibility, not a second timer.
+    #[tokio::test]
+    async fn lapsed_deadline_adds_one_supervisor_notice() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let owner_sup = fixture_instance(&state, &ws, "OwnerSup").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        workspace_agent::set_position(&state.db, &owner, None, Some(&owner_sup))
+            .await
+            .expect("set owner supervisor");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        task::challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": challenger,
+                "claim": "X", "evidence": "log", "proposal": "fix", "default": "escalate", "deadlineMin": 30
+            }),
+        )
+        .await
+        .expect("challenge failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::minutes(31), &mut ticker).await;
+
+        // The owner's supervisor got exactly one notice, and it is AUTO-marked.
+        let sup_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner_sup }))
+            .await
+            .expect("list failed");
+        let received: Vec<_> = sup_inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["toInstanceId"] == json!(owner_sup))
+            .collect();
+        assert_eq!(received.len(), 1, "exactly one escalation notice up one level");
+        assert!(received[0]["text"].as_str().unwrap().contains("AUTO"), "escalation is AUTO-marked");
+        assert!(received[0]["text"].as_str().unwrap().contains("lapsed"), "names the lapse");
     }
 
     #[tokio::test]
@@ -634,12 +783,16 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
         task::create(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
         )
         .await
         .expect("create failed");
+        task::watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
         let challenge_event = task::challenge(
             &state,
             json!({
@@ -650,6 +803,21 @@ mod tests {
         )
         .await
         .expect("challenge failed");
+
+        // The watcher's baseline: exactly the challenge line (a live-actor
+        // notification, NOT a timer page). Snapshotted here so we can prove the
+        // deadline tick adds NOTHING to the watcher's set.
+        let watcher_baseline = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        let watcher_baseline = watcher_baseline.as_array().unwrap().clone();
+        assert_eq!(watcher_baseline.len(), 1, "watcher got the challenge line");
+        assert_eq!(watcher_baseline[0]["fromInstanceId"], json!(challenger));
+        assert_eq!(watcher_baseline[0]["toInstanceId"], json!(watcher));
+        assert_eq!(
+            watcher_baseline[0]["text"],
+            json!("[task t1] Challenger: challenge — X is broken")
+        );
 
         let filed_at = Utc::now();
         let mut ticker = Ticker::new();
@@ -690,11 +858,15 @@ mod tests {
             .iter()
             .filter(|m| m["toInstanceId"] == json!(owner))
             .collect();
+        // All-NULL byte-for-byte: exact stable tuple — the default-ruling text is
+        // deterministic (no timestamp), so pin from/to/text fully. Owner receives
+        // the line attributed to the challenger (the swapped real sender).
         assert_eq!(owner_received.len(), 1, "owner must receive exactly one notification");
-        assert!(
-            owner_received[0]["text"].as_str().unwrap().contains("AUTO"),
-            "line must carry the machine-generated marker (RULED 2026-07-04): {}",
-            owner_received[0]["text"]
+        assert_eq!(owner_received[0]["fromInstanceId"], json!(challenger));
+        assert_eq!(owner_received[0]["toInstanceId"], json!(owner));
+        assert_eq!(
+            owner_received[0]["text"],
+            json!("[task t1] AUTO default ruling — escalate to lead")
         );
 
         let challenger_inbox =
@@ -708,7 +880,23 @@ mod tests {
             .filter(|m| m["toInstanceId"] == json!(challenger))
             .collect();
         assert_eq!(challenger_received.len(), 1, "challenger must receive exactly one notification");
-        assert!(challenger_received[0]["text"].as_str().unwrap().contains("AUTO"));
+        assert_eq!(challenger_received[0]["fromInstanceId"], json!(owner));
+        assert_eq!(challenger_received[0]["toInstanceId"], json!(challenger));
+        assert_eq!(
+            challenger_received[0]["text"],
+            json!("[task t1] AUTO default ruling — escalate to lead")
+        );
+
+        // The deadline default notifies the two PARTIES only — the watcher's set
+        // is byte-for-byte its pre-tick baseline (no timer-added watcher page).
+        let watcher_after = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            watcher_after.as_array().unwrap(),
+            &watcher_baseline,
+            "the deadline timer must not add a watcher page"
+        );
     }
 
     #[tokio::test]

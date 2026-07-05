@@ -69,3 +69,8 @@ work from degenerating into noise, duplicate work, or runaway conversations.
 - When blocked (conflicting claims, contradictory instructions, missing
   access), report the blocker in your own terminal for the human and pause
   that task — do not try to resolve it by looping with peers.
+- Escalate **up your supervisor chain**, not sideways or around it. Your
+  supervisor is named in your launch briefing and in `conclave agent list`
+  (`supervisorName`); an agent with no supervisor reports to the human. Take a
+  blocker to your supervisor first — only a genuine scope change, spend/publish,
+  or irreversible action goes past the chain to the human.
