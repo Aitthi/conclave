@@ -226,6 +226,152 @@ pub(crate) async fn connect_in_memory() -> SqlitePool {
 mod tests {
     use super::*;
 
+    /// Build an in-memory DB at schema **v13** — the state just before 0014 —
+    /// by applying the migration chain 0001..0013 exactly as [`migrate`] would
+    /// (one transaction, `user_version` bumped inside it), then stopping. Lets
+    /// a test exercise the REAL 0014 upgrade against the OLD `artifact` schema,
+    /// which `connect_in_memory` (already at v14) cannot.
+    async fn connect_at_v13() -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("invalid in-memory connection string")
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("failed to open in-memory pool");
+        let mut tx = pool.begin().await.expect("begin v13 setup");
+        for sql in [
+            include_str!("migrations/0001_init.sql"),
+            include_str!("migrations/0002_seed_core_tools.sql"),
+            include_str!("migrations/0003_agent_cli_config.sql"),
+            include_str!("migrations/0004_skill_system.sql"),
+            include_str!("migrations/0005_drop_skill_kind.sql"),
+            include_str!("migrations/0006_selected_builtin_skills.sql"),
+            include_str!("migrations/0007_workspace_hidden.sql"),
+            include_str!("migrations/0008_role_system.sql"),
+            include_str!("migrations/0009_memory_system.sql"),
+            include_str!("migrations/0010_memory_search_index.sql"),
+            include_str!("migrations/0011_seed_memory_tool.sql"),
+            include_str!("migrations/0012_task_system.sql"),
+            include_str!("migrations/0013_memory_proposal.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(&mut *tx).await.expect("apply pre-0014 migration");
+        }
+        sqlx::raw_sql("PRAGMA user_version = 13;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 13");
+        tx.commit().await.expect("commit v13 setup");
+        pool
+    }
+
+    /// The 0014 upgrade path itself: a real pre-0014 `artifact` row (owned by a
+    /// message, body in `html`) must survive the INSERT..SELECT/DROP/RENAME
+    /// rebuild — folded into `content` as `kind='html'`, with id/message_id/
+    /// filename/sandboxed intact and no FK left dangling. This is the test the
+    /// master plan (docs/2026-07-05-plan-design-artifacts-views.md:72-75)
+    /// requires; the earlier repo-level test only checked the post-migration
+    /// shape and could not catch a lossy rebuild (Armin, challenge 2a190c1a).
+    #[tokio::test]
+    async fn migrate_0014_preserves_legacy_artifact_rows() {
+        use crate::engine::repo::{
+            agent_definition::{self, AgentDefinitionInput},
+            session, workspace, workspace_agent,
+        };
+
+        let pool = connect_at_v13().await;
+
+        // Build a real message to own the legacy artifact (message_id was NOT
+        // NULL pre-0014). These repo helpers write only columns present at v13
+        // (0014 touches nothing but `artifact`), so they work against the old
+        // schema. `instantiate` creates the workspace_agent + its session.
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let def = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "chat".into(),
+                model: Some("m".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def");
+        let wa = workspace_agent::instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate");
+        let sid = session::get_by_instance(&pool, &wa.id)
+            .await
+            .expect("get_by_instance")
+            .expect("session exists")
+            .id;
+
+        sqlx::query(
+            "INSERT INTO message (id, session_id, role, text, created_at) \
+                 VALUES ('msg-1', ?1, 'agent', 'hello', '2020-01-01T00:00:00+00:00')",
+        )
+        .bind(&sid)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+
+        // The pre-0014 artifact: message-owned, body in `html`, sandboxed=1.
+        sqlx::query(
+            "INSERT INTO artifact (id, message_id, filename, html, sandboxed, created_at) \
+                 VALUES ('art-1', 'msg-1', 'page.html', '<h1>hi</h1>', 1, '2020-01-01T00:00:00+00:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pre-0014 artifact");
+
+        // Apply 0014 (only `version < 14` fires).
+        migrate(&pool).await.expect("0014 migration failed");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .expect("user_version query failed");
+        assert_eq!(version, 14, "0014 must advance user_version to 14");
+
+        // The legacy row survived, folded into the new shape.
+        let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
+            .await
+            .expect("get failed")
+            .expect("legacy artifact must survive the rebuild");
+        assert_eq!(row.message_id.as_deref(), Some("msg-1"), "message_id preserved");
+        assert_eq!(row.filename.as_deref(), Some("page.html"), "filename preserved");
+        assert_eq!(row.content.as_deref(), Some("<h1>hi</h1>"), "html folded into content");
+        assert_eq!(row.kind.as_deref(), Some("html"), "legacy rows tagged kind='html'");
+        assert_eq!(row.sandboxed, Some(true), "sandboxed 1 preserved (as bool)");
+        assert!(row.workspace_id.is_none(), "legacy rows were never workspace-scoped");
+
+        // Wire shape of the migrated legacy row (Armin, challenge d66edb10):
+        // sandboxed is a JSON bool, messageId is present, the null
+        // workspace/agent columns are omitted rather than serialised as null.
+        let json = serde_json::to_value(&row).expect("serialize failed");
+        assert_eq!(
+            json.get("sandboxed"),
+            Some(&serde_json::Value::Bool(true)),
+            "sandboxed must serialise as a JSON bool, not the integer 1"
+        );
+        assert_eq!(json.get("messageId").and_then(|v| v.as_str()), Some("msg-1"));
+        assert_eq!(json.get("kind").and_then(|v| v.as_str()), Some("html"));
+        assert!(json.get("workspaceId").is_none(), "null workspaceId omitted");
+        assert!(json.get("agentId").is_none(), "null agentId omitted");
+
+        // No foreign key left dangling by the rebuild.
+        let fk_violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .expect("foreign_key_check query failed");
+        assert!(fk_violations.is_empty(), "0014 left dangling FKs: {fk_violations:?}");
+    }
+
     /// All entity tables must exist after migration.
     #[tokio::test]
     async fn migrate_creates_all_tables() {

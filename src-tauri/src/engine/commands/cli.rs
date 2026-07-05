@@ -477,19 +477,55 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 };
                 let agent = argv.get(2).ok_or_else(usage)?;
                 let workspace_id = argv.get(3).ok_or_else(usage)?;
+
+                // Parse the flags sequentially — this is the security choke
+                // point (M5.1: no passthrough), so it validates strictly rather
+                // than picking the first match and ignoring the rest. Each of
+                // --title/--kind/--content/--filename may appear at most once;
+                // --file is rejected (the client resolves it to --content —
+                // the server never reads files); unknown flags, duplicates, and
+                // dangling values are all errors.
+                let mut title: Option<&str> = None;
+                let mut kind: Option<&str> = None;
+                let mut content: Option<&str> = None;
+                let mut filename: Option<&str> = None;
                 let flags = argv.get(4..).unwrap_or(&[]);
-                let flag = |name: &str| -> Option<&str> {
-                    flags
-                        .iter()
-                        .position(|w| w == name)
-                        .and_then(|i| flags.get(i + 1))
-                        .map(String::as_str)
-                };
-                let title = flag("--title")
+                let mut i = 0;
+                while i < flags.len() {
+                    let name = flags[i].as_str();
+                    let slot: &mut Option<&str> = match name {
+                        "--title" => &mut title,
+                        "--kind" => &mut kind,
+                        "--content" => &mut content,
+                        "--filename" => &mut filename,
+                        "--file" => {
+                            return Err(AppError::Invalid(
+                                "cli: artifact add: --file must be resolved to --content by the client; the server does not read files".into(),
+                            ))
+                        }
+                        other => {
+                            return Err(AppError::Invalid(format!(
+                                "cli: artifact add: unknown flag '{other}'"
+                            )))
+                        }
+                    };
+                    if slot.is_some() {
+                        return Err(AppError::Invalid(format!(
+                            "cli: artifact add: duplicate flag '{name}'"
+                        )));
+                    }
+                    let value = flags.get(i + 1).ok_or_else(|| {
+                        AppError::Invalid(format!("cli: artifact add: flag '{name}' expects a value"))
+                    })?;
+                    *slot = Some(value.as_str());
+                    i += 2;
+                }
+
+                let title = title
                     .ok_or_else(|| AppError::Invalid("cli: artifact add requires --title <t>".into()))?;
-                let kind = flag("--kind")
+                let kind = kind
                     .ok_or_else(|| AppError::Invalid("cli: artifact add requires --kind <k>".into()))?;
-                let content = flag("--content").ok_or_else(|| {
+                let content = content.ok_or_else(|| {
                     AppError::Invalid(
                         "cli: artifact add requires --content <text> or --file <path>".into(),
                     )
@@ -499,7 +535,7 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 if agent != "-" {
                     params["agentId"] = json!(agent);
                 }
-                if let Some(f) = flag("--filename") {
+                if let Some(f) = filename {
                     params["filename"] = json!(f);
                 }
                 Ok(("artifact.add", params))
@@ -1853,6 +1889,47 @@ mod tests {
     #[test]
     fn artifact_unknown_sub_is_invalid() {
         assert!(is_invalid(&["artifact", "bogus", "ws1"]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_both_content_and_file_server_side() {
+        // --file must be resolved client-side; the choke point rejects it even
+        // when --content is also present (a raw cli.exec caller bypasses the
+        // official client's preprocessing).
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
+            "--file", "/etc/passwd",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_bare_file_flag() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--file", "/x",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_duplicate_flag() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "a",
+            "--content", "b",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_unknown_flag() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
+            "--bogus", "y",
+        ]));
+    }
+
+    #[test]
+    fn artifact_add_rejects_dangling_flag_value() {
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content",
+        ]));
     }
 
     // ── security tests ────────────────────────────────────────────────────
