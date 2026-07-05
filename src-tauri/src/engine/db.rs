@@ -194,6 +194,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 15 {
+        sqlx::raw_sql(include_str!("migrations/0015_position_system.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 15;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -230,7 +239,7 @@ mod tests {
     /// by applying the migration chain 0001..0013 exactly as [`migrate`] would
     /// (one transaction, `user_version` bumped inside it), then stopping. Lets
     /// a test exercise the REAL 0014 upgrade against the OLD `artifact` schema,
-    /// which `connect_in_memory` (already at v14) cannot.
+    /// which `connect_in_memory` (already at v15) cannot.
     async fn connect_at_v13() -> SqlitePool {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .expect("invalid in-memory connection string")
@@ -328,14 +337,15 @@ mod tests {
         .await
         .expect("seed pre-0014 artifact");
 
-        // Apply 0014 (only `version < 14` fires).
+        // Apply migrate() from v13; the 0014 rebuild remains the behavior
+        // under test even though later additive migrations may also fire.
         migrate(&pool).await.expect("0014 migration failed");
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 14, "0014 must advance user_version to 14");
+        assert_eq!(version, 15, "migrate() from v13 must reach schema v15");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -386,7 +396,7 @@ mod tests {
         assert_eq!(count, 26, "expected 26 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 11.
+    /// Running migrate twice must not error and must leave user_version == 15.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -419,7 +429,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 14, "user_version should be 14");
+        assert_eq!(version, 15, "user_version should be 15");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -615,7 +625,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -706,7 +716,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -815,7 +825,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped

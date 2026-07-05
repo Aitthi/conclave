@@ -18,6 +18,7 @@ use chain_builder::{Order, QueryBuilder, Sqlite, Value as Bind};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 // ── Row struct ──────────────────────────────────────────────────────────────
@@ -114,6 +115,131 @@ pub async fn list_by_workspace(
         .map_err(cb_err)
 }
 
+/// Return the ordered rank for a position level.
+///
+/// Unknown values (and `NULL`, which callers represent by not calling this
+/// helper) are unranked and sort below every known level.
+#[allow(dead_code)] // consumed by the dependent Position System lanes
+pub fn level_rank(level: &str) -> u8 {
+    match level {
+        "junior" => 1,
+        "mid" => 2,
+        "senior" => 3,
+        "principal" => 4,
+        _ => 0,
+    }
+}
+
+/// Return one hop up the supervisor chain, or `None` for a root/unknown agent.
+#[allow(dead_code)] // consumed by the dependent Position System lanes
+pub async fn supervisor_of(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<String>> {
+    let supervisor: Option<Option<String>> =
+        sqlx::query_scalar("SELECT supervisor_agent_id FROM workspace_agent WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(supervisor.flatten())
+}
+
+/// Return `[self, supervisor, supervisor², …]`, stopping at the workspace root.
+///
+/// The walk is capped at the workspace's agent count, so even a corrupt cycle
+/// inserted outside the command layer cannot loop forever.
+#[allow(dead_code)] // consumed by the dependent Position System lanes
+pub async fn supervisor_chain(pool: &SqlitePool, id: &str) -> sqlx::Result<Vec<String>> {
+    let workspace_id: Option<String> =
+        sqlx::query_scalar("SELECT workspace_id FROM workspace_agent WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(workspace_id) = workspace_id else {
+        return Ok(Vec::new());
+    };
+
+    let depth: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent WHERE workspace_id = ?")
+            .bind(workspace_id)
+            .fetch_one(pool)
+            .await?;
+
+    let mut chain = Vec::with_capacity(depth as usize);
+    let mut current = id.to_owned();
+    for _ in 0..depth {
+        chain.push(current.clone());
+        let Some(supervisor) = supervisor_of(pool, &current).await? else {
+            break;
+        };
+        current = supervisor;
+    }
+    Ok(chain)
+}
+
+/// Return the nearest workspace agent with authority over both agents.
+///
+/// `None` means the two chains meet only at the implicit human root.
+#[allow(dead_code)] // consumed by the dependent Position System lanes
+pub async fn lowest_common_supervisor(
+    pool: &SqlitePool,
+    a: &str,
+    b: &str,
+) -> sqlx::Result<Option<String>> {
+    let chain_a: HashSet<String> = supervisor_chain(pool, a).await?.into_iter().collect();
+    Ok(supervisor_chain(pool, b)
+        .await?
+        .into_iter()
+        .find(|id| chain_a.contains(id)))
+}
+
+/// Return whether setting `agent_id`'s supervisor to `supervisor_agent_id`
+/// would close a cycle.
+///
+/// Scope/existence validation remains the command layer's responsibility.
+#[allow(dead_code)] // consumed by the dependent Position System lanes
+pub async fn would_create_cycle(
+    pool: &SqlitePool,
+    agent_id: &str,
+    supervisor_agent_id: &str,
+) -> sqlx::Result<bool> {
+    if agent_id == supervisor_agent_id {
+        return Ok(true);
+    }
+    Ok(supervisor_chain(pool, supervisor_agent_id)
+        .await?
+        .iter()
+        .any(|id| id == agent_id))
+}
+
+/// Persist an instance's level and supervisor. Validation is performed by the
+/// command layer; this repository primitive is intentionally a plain update.
+#[allow(dead_code)] // consumed by the dependent Position System lanes
+pub async fn set_position(
+    pool: &SqlitePool,
+    id: &str,
+    level: Option<&str>,
+    supervisor_agent_id: Option<&str>,
+) -> sqlx::Result<()> {
+    QueryBuilder::<Sqlite>::table("workspace_agent")
+        .update([
+            (
+                "level",
+                level
+                    .map(|value| Bind::Text(value.to_owned()))
+                    .unwrap_or(Bind::Null),
+            ),
+            (
+                "supervisor_agent_id",
+                supervisor_agent_id
+                    .map(|value| Bind::Text(value.to_owned()))
+                    .unwrap_or(Bind::Null),
+            ),
+        ])
+        .where_eq("id", id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
 /// A self-describing roster entry (ADR 0005): a `workspace_agent` annotated
 /// with its paired session's `launched_skill_ids` (raw JSON text, `None`
 /// before any launch — so the Roster can detect skill drift without a second
@@ -136,6 +262,15 @@ pub struct WorkspaceAgentWithSkills {
     pub added_at: String,
     /// The agent definition's display name.
     pub name: String,
+    /// Ordered seniority within the agent's track.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// The supervising workspace-agent instance; `None` reports to human/top.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor_agent_id: Option<String>,
+    /// Resolved display name of `supervisor_agent_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor_name: Option<String>,
     /// The role's display name — from the resolved role (builtin or custom),
     /// falling back to the legacy free-text `agent_definition.role` label when
     /// no `role_id` is set (or it dangles). `None` for a role-less agent.
@@ -204,6 +339,9 @@ struct RosterQueryRow {
     added_at: String,
     launched_skill_ids: Option<String>,
     agent_name: String,
+    level: Option<String>,
+    supervisor_agent_id: Option<String>,
+    supervisor_name: Option<String>,
     role_id: Option<String>,
     role_text: Option<String>,
     model: Option<String>,
@@ -232,11 +370,14 @@ pub async fn list_by_workspace_with_launched_skills(
     // would silently VANISH from the roster here; make it a LEFT JOIN then.
     let rows: Vec<RosterQueryRow> = sqlx::query_as(
         "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
+         wa.level, wa.supervisor_agent_id, supervisor_def.name AS supervisor_name, \
          sess.launched_skill_ids, \
          ad.name AS agent_name, ad.role_id AS role_id, ad.role AS role_text, \
          ad.model AS model, ad.cli_kind AS cli_kind \
          FROM workspace_agent wa \
          LEFT JOIN session sess ON sess.workspace_agent_id = wa.id \
+         LEFT JOIN workspace_agent supervisor ON supervisor.id = wa.supervisor_agent_id \
+         LEFT JOIN agent_definition supervisor_def ON supervisor_def.id = supervisor.agent_def_id \
          JOIN agent_definition ad ON ad.id = wa.agent_def_id \
          WHERE wa.workspace_id = ? \
          ORDER BY wa.added_at ASC, wa.id ASC",
@@ -246,12 +387,11 @@ pub async fn list_by_workspace_with_launched_skills(
     .await?;
 
     // Build id→name / id→role lookup maps ONCE (builtin folders + DB tables).
-    let skill_names: std::collections::HashMap<String, String> =
-        super::skill::list_builtin()
-            .into_iter()
-            .chain(super::skill::list(pool).await?)
-            .map(|s| (s.id, s.name))
-            .collect();
+    let skill_names: std::collections::HashMap<String, String> = super::skill::list_builtin()
+        .into_iter()
+        .chain(super::skill::list(pool).await?)
+        .map(|s| (s.id, s.name))
+        .collect();
     let roles: std::collections::HashMap<String, super::role::RoleRow> =
         super::role::list_builtin()
             .into_iter()
@@ -289,6 +429,9 @@ pub async fn list_by_workspace_with_launched_skills(
                 status: r.status,
                 added_at: r.added_at,
                 name: r.agent_name,
+                level: r.level,
+                supervisor_agent_id: r.supervisor_agent_id,
+                supervisor_name: r.supervisor_name,
                 role_name,
                 role_description,
                 skill_names: skill_names_resolved,
@@ -494,6 +637,13 @@ pub async fn remove(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
         .execute(&mut *tx)
         .await?;
 
+    sqlx::query(
+        "UPDATE workspace_agent SET supervisor_agent_id = NULL WHERE supervisor_agent_id = ?",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
     let res = sqlx::query("DELETE FROM workspace_agent WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -541,6 +691,202 @@ mod tests {
         .await
         .expect("create agent_def failed");
         (ws.id, def.id)
+    }
+
+    async fn instance_named(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        name: &str,
+    ) -> WorkspaceAgentRow {
+        let def = agent_definition::create(
+            pool,
+            &AgentDefinitionInput {
+                name: name.into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create named agent");
+        instantiate(pool, workspace_id, &def.id)
+            .await
+            .expect("instantiate named agent")
+    }
+
+    #[test]
+    fn level_rank_orders_known_levels_and_defaults_unknown_to_zero() {
+        assert_eq!(level_rank("junior"), 1);
+        assert_eq!(level_rank("mid"), 2);
+        assert_eq!(level_rank("senior"), 3);
+        assert_eq!(level_rank("principal"), 4);
+        assert_eq!(level_rank(""), 0);
+        assert_eq!(level_rank("lead"), 0);
+    }
+
+    #[tokio::test]
+    async fn supervisor_chain_walks_to_root_and_is_depth_bounded_on_cycle() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let a = instance_named(&pool, &ws.id, "A").await;
+        let b = instance_named(&pool, &ws.id, "B").await;
+        let c = instance_named(&pool, &ws.id, "C").await;
+
+        set_position(&pool, &a.id, None, Some(&b.id))
+            .await
+            .expect("set a supervisor");
+        set_position(&pool, &b.id, None, Some(&c.id))
+            .await
+            .expect("set b supervisor");
+
+        assert_eq!(
+            supervisor_of(&pool, &a.id).await.unwrap(),
+            Some(b.id.clone())
+        );
+        assert_eq!(
+            supervisor_chain(&pool, &a.id).await.unwrap(),
+            vec![a.id.clone(), b.id.clone(), c.id.clone()]
+        );
+        assert!(
+            would_create_cycle(&pool, &c.id, &a.id).await.unwrap(),
+            "c -> a would close the existing a -> b -> c chain"
+        );
+        assert!(would_create_cycle(&pool, &a.id, &a.id).await.unwrap());
+
+        // Bypass the command guard to model a corrupt/direct-DB cycle. The
+        // chain returns at most the workspace's three members.
+        set_position(&pool, &c.id, None, Some(&a.id))
+            .await
+            .expect("seed cycle");
+        assert_eq!(
+            supervisor_chain(&pool, &a.id).await.unwrap(),
+            vec![a.id, b.id, c.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn lowest_common_supervisor_handles_same_cross_and_disjoint_chains() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let root = instance_named(&pool, &ws.id, "Root").await;
+        let left = instance_named(&pool, &ws.id, "Left").await;
+        let leaf = instance_named(&pool, &ws.id, "Leaf").await;
+        let right = instance_named(&pool, &ws.id, "Right").await;
+        let other_root = instance_named(&pool, &ws.id, "OtherRoot").await;
+
+        set_position(&pool, &left.id, None, Some(&root.id))
+            .await
+            .unwrap();
+        set_position(&pool, &leaf.id, None, Some(&left.id))
+            .await
+            .unwrap();
+        set_position(&pool, &right.id, None, Some(&root.id))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lowest_common_supervisor(&pool, &leaf.id, &left.id)
+                .await
+                .unwrap(),
+            Some(left.id)
+        );
+        assert_eq!(
+            lowest_common_supervisor(&pool, &leaf.id, &right.id)
+                .await
+                .unwrap(),
+            Some(root.id)
+        );
+        assert_eq!(
+            lowest_common_supervisor(&pool, &leaf.id, &other_root.id)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn set_position_round_trips_through_roster() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let supervisor = instance_named(&pool, &ws.id, "Supervisor").await;
+        let report = instance_named(&pool, &ws.id, "Report").await;
+
+        set_position(&pool, &report.id, Some("senior"), Some(&supervisor.id))
+            .await
+            .expect("set position");
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("list roster");
+        let row = roster.iter().find(|row| row.id == report.id).unwrap();
+        assert_eq!(row.level.as_deref(), Some("senior"));
+        assert_eq!(
+            row.supervisor_agent_id.as_deref(),
+            Some(supervisor.id.as_str())
+        );
+        assert_eq!(row.supervisor_name.as_deref(), Some("Supervisor"));
+
+        set_position(&pool, &report.id, None, None)
+            .await
+            .expect("clear position");
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("list cleared roster");
+        let row = roster.iter().find(|row| row.id == report.id).unwrap();
+        assert!(row.level.is_none());
+        assert!(row.supervisor_agent_id.is_none());
+        assert!(row.supervisor_name.is_none());
+        let json = serde_json::to_value(row).expect("serialize roster");
+        assert!(json.get("level").is_none());
+        assert!(json.get("supervisorAgentId").is_none());
+        assert!(json.get("supervisorName").is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_supervisor_row_nulls_reports_via_fk_action() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let supervisor = instance_named(&pool, &ws.id, "Supervisor").await;
+        let report = instance_named(&pool, &ws.id, "Report").await;
+
+        set_position(&pool, &report.id, Some("mid"), Some(&supervisor.id))
+            .await
+            .expect("set position");
+
+        sqlx::query("DELETE FROM workspace_agent WHERE id = ?")
+            .bind(&supervisor.id)
+            .execute(&pool)
+            .await
+            .expect("delete supervisor");
+
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("list roster after supervisor delete");
+        let row = roster.iter().find(|row| row.id == report.id).unwrap();
+        assert_eq!(row.level.as_deref(), Some("mid"));
+        assert!(
+            row.supervisor_agent_id.is_none(),
+            "FK ON DELETE SET NULL should clear supervisor_agent_id"
+        );
+        assert!(
+            row.supervisor_name.is_none(),
+            "resolved supervisor name should disappear with the FK"
+        );
+
+        let stored_supervisor: Option<String> =
+            sqlx::query_scalar("SELECT supervisor_agent_id FROM workspace_agent WHERE id = ?")
+                .bind(&report.id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch surviving report");
+        assert!(stored_supervisor.is_none(), "stored FK should be NULL");
     }
 
     /// create → get round-trip: every field is preserved.
@@ -630,6 +976,9 @@ mod tests {
         let b = instantiate(&pool, &ws_id, &def2.id)
             .await
             .expect("instantiate b");
+        set_position(&pool, &b.id, None, Some(&a.id))
+            .await
+            .expect("seed supervisor link");
         let b_session = crate::engine::repo::session::get_by_instance(&pool, &b.id)
             .await
             .expect("b session lookup")
@@ -769,6 +1118,16 @@ mod tests {
         assert!(
             resp_inst.is_none(),
             "fusion_panel_response.instance_id should be NULL"
+        );
+        let b_supervisor: Option<String> =
+            sqlx::query_scalar("SELECT supervisor_agent_id FROM workspace_agent WHERE id = ?")
+                .bind(&b.id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch surviving report");
+        assert!(
+            b_supervisor.is_none(),
+            "workspace_agent.supervisor_agent_id should be NULL"
         );
     }
 
@@ -1149,8 +1508,14 @@ mod tests {
         assert_eq!(roster[0].cli_kind.as_deref(), Some("claude-code"));
 
         let json = serde_json::to_value(&roster[0]).expect("serialize failed");
-        assert_eq!(json.get("model").and_then(|v| v.as_str()), Some("claude-sonnet-5"));
-        assert_eq!(json.get("cliKind").and_then(|v| v.as_str()), Some("claude-code"));
+        assert_eq!(
+            json.get("model").and_then(|v| v.as_str()),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            json.get("cliKind").and_then(|v| v.as_str()),
+            Some("claude-code")
+        );
         assert!(json.get("cli_kind").is_none(), "must NOT have cli_kind");
     }
 
