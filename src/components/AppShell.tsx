@@ -16,7 +16,6 @@ import { Blackboard } from "./Blackboard";
 import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
 import { LaneBoard } from "./LaneBoard";
-import { ArtifactsView } from "./ArtifactsView";
 
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
@@ -145,11 +144,11 @@ export function AppShell() {
         return;
       }
       if (key === "a" && e.shiftKey && !e.altKey && !e.ctrlKey) {
+        // ⌘⇧A mirrors ⌘D now that Artifacts shares the canvas slot with Design
+        // (plan D3/D4): toggle it, clear the OTHER slot flag, and leave the
+        // center-screen flags alone so Artifacts stays latent behind them.
         e.preventDefault();
-        setShowBlackboard(false);
-        setShowChat(false);
-        setShowMemory(false);
-        setShowLaneBoard(false);
+        setShowDesign(false);
         setShowArtifacts((v) => !v);
       }
     }
@@ -183,10 +182,13 @@ export function AppShell() {
   // Center-pane destinations that REPLACE the live WorkspacePane (each renders
   // full-page instead of it). This is the ONE canonical list — adding a new
   // center screen means adding its flag HERE, and both `workspacePaneVisible`
-  // (which drives the WorkspacePane render branch below) and `designFullWindow`
+  // (which drives the WorkspacePane render branch below) and `slotFullWindow`
   // update together, so the two can't silently diverge (Armin rot-guard).
+  // NOTE: showArtifacts is NOT here — Artifacts moved into the canvas slot
+  // (like showDesign), so it renders INSIDE the WorkspacePane, not instead of
+  // it (plan D3).
   const centerScreenOpen =
-    showChat || showBlackboard || showMemory || showLaneBoard || showArtifacts;
+    showChat || showBlackboard || showMemory || showLaneBoard;
 
   // The live WorkspacePane (agent pane + the always-mounted Design slot) is the
   // visible center content exactly when a workspace is active and no center
@@ -194,15 +196,16 @@ export function AppShell() {
   // gate for full-window Design mode.
   const workspacePaneVisible = !!activeWorkspaceId && !centerScreenOpen;
 
-  // Full-window Design mode (human ruling D3): while the Design view is OPEN and
-  // actually on screen, hide the Rail + Roster columns so the window becomes
-  // canvas-left + agent-terminal-right. `showDesign` alone is not enough — it is
-  // a latent flag that stays true behind a center-pane screen, where DesignView
-  // is NOT rendered (it lives inside the WorkspacePane branch); hiding the
-  // sidebars then would strand the user in a full-screen center view with no
-  // navigation. So gate on `workspacePaneVisible` — the exact condition under
-  // which the WorkspacePane branch (and thus DesignView) renders.
-  const designFullWindow = showDesign && workspacePaneVisible;
+  // Full-window slot mode (human ruling D3): while a canvas-slot view (Design OR
+  // Artifacts) is OPEN and actually on screen, hide the Rail + Roster columns so
+  // the window becomes canvas-left + agent-terminal-right. The slot flag alone
+  // is not enough — each is latent and stays true behind a center-pane screen,
+  // where the slot content is NOT rendered (it lives inside the WorkspacePane
+  // branch); hiding the sidebars then would strand the user in a full-screen
+  // center view with no navigation. So gate on `workspacePaneVisible` — the
+  // exact condition under which the WorkspacePane branch (and thus the slot)
+  // renders.
+  const slotFullWindow = (showDesign || showArtifacts) && workspacePaneVisible;
 
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
@@ -229,11 +232,11 @@ export function AppShell() {
             strip over the canvas + terminal below. */}
         {/* Rail column bg */}
         <div
-          className={`${designFullWindow ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+          className={`${slotFullWindow ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
         />
         {/* Roster column bg */}
         <div
-          className={`${designFullWindow ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+          className={`${slotFullWindow ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
         />
         {/* Main content bg */}
         <div className="flex-1 bg-sidebar pointer-events-none" />
@@ -251,9 +254,9 @@ export function AppShell() {
             CSS clipping hides pixels only, leaving focusables tabbable (Armin
             F1). */}
         <div
-          inert={designFullWindow}
-          aria-hidden={designFullWindow || undefined}
-          className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
+          inert={slotFullWindow}
+          aria-hidden={slotFullWindow || undefined}
+          className={slotFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
         >
           <Rail
             workspaces={workspaces}
@@ -267,11 +270,10 @@ export function AppShell() {
               setShowDesign((v) => !v);
             }}
             onOpenArtifacts={() => {
+              // Mirror of onOpenDesign: Artifacts shares the canvas slot, so
+              // toggle it and clear the OTHER slot flag only (D3/D4).
               if (!activeWorkspaceId) return;
-              setShowBlackboard(false);
-              setShowChat(false);
-              setShowMemory(false);
-              setShowLaneBoard(false);
+              setShowDesign(false);
               setShowArtifacts((v) => !v);
             }}
             onOpenLibrary={() => {
@@ -295,9 +297,9 @@ export function AppShell() {
                 `aria-hidden` when collapsed remove its clipped-but-mounted
                 focusables from the tab order + a11y tree (Armin F1). */}
             <div
-              inert={designFullWindow}
-              aria-hidden={designFullWindow || undefined}
-              className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
+              inert={slotFullWindow}
+              aria-hidden={slotFullWindow || undefined}
+              className={slotFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
             >
             <Roster
               workspaceId={activeWorkspaceId}
@@ -305,12 +307,14 @@ export function AppShell() {
               folderPath={activeWorkspace?.folderPath}
               selectedId={selectedId}
               onSelect={(id) => {
-                // Selecting an agent returns from any center-pane screen to the pane.
+                // Selecting an agent returns from any center-pane screen to the
+                // pane. Does NOT clear showArtifacts (nor showDesign): both are
+                // canvas-slot flags now, so a click just returns to whichever
+                // slot view was latent — mirroring design's latency (D4).
                 setShowBlackboard(false);
                 setShowChat(false);
                 setShowMemory(false);
                 setShowLaneBoard(false);
-                setShowArtifacts(false);
                 setSelectedId(id);
               }}
               // "Create new agent…" (from inside the picker) still opens the Builder.
@@ -329,7 +333,8 @@ export function AppShell() {
               onOpenBlackboard={
                 activeWorkspaceId
                   ? () => {
-                      setShowArtifacts(false);
+                      // Do NOT clear showArtifacts: it's a canvas-slot flag now
+                      // (like showDesign), latent behind center screens (D4).
                       setShowChat(false);
                       setShowMemory(false);
                       setShowLaneBoard(false);
@@ -341,7 +346,6 @@ export function AppShell() {
               onOpenMemory={
                 activeWorkspaceId
                   ? () => {
-                      setShowArtifacts(false);
                       setShowBlackboard(false);
                       setShowChat(false);
                       setShowLaneBoard(false);
@@ -353,7 +357,6 @@ export function AppShell() {
               onOpenChat={
                 activeWorkspaceId
                   ? () => {
-                      setShowArtifacts(false);
                       setShowBlackboard(false);
                       setShowMemory(false);
                       setShowLaneBoard(false);
@@ -365,7 +368,6 @@ export function AppShell() {
               onOpenLaneBoard={
                 activeWorkspaceId
                   ? () => {
-                      setShowArtifacts(false);
                       setShowBlackboard(false);
                       setShowChat(false);
                       setShowMemory(false);
@@ -408,17 +410,10 @@ export function AppShell() {
                 workspaceName={activeWorkspace?.name}
                 onClose={() => setShowLaneBoard(false)}
               />
-            ) : showArtifacts && activeWorkspaceId ? (
-              <ArtifactsView
-                key={activeWorkspaceId}
-                workspaceId={activeWorkspaceId}
-                workspaceName={activeWorkspace?.name}
-                onClose={() => setShowArtifacts(false)}
-              />
             ) : workspacePaneVisible ? (
               // Remount per workspace AND per agents change so the pane refetches
               // its tabs when an agent is added/removed. `workspacePaneVisible` is
-              // the shared predicate (also gating designFullWindow); reaching this
+              // the shared predicate (also gating slotFullWindow); reaching this
               // arm with a workspace active already implies no center screen is up,
               // so it is equivalent to the former `activeWorkspaceId` guard.
               <WorkspacePane
@@ -426,13 +421,18 @@ export function AppShell() {
                 workspaceId={activeWorkspaceId}
                 workspaceName={activeWorkspace?.name}
                 focusInstanceId={selectedId}
+                onActiveInstanceChange={(id) => setSelectedId(id)}
                 designOpen={showDesign}
                 onCloseDesign={() => setShowDesign(false)}
+                artifactsOpen={showArtifacts}
+                onCloseArtifacts={() => setShowArtifacts(false)}
                 onOpenChat={() => {
+                  // Do NOT clear showArtifacts (nor showDesign): both are canvas-
+                  // slot flags, latent behind the ChatHub center screen — same
+                  // latency as Design (Mellow F1, ruled; plan D4 guard case).
                   setShowBlackboard(false);
                   setShowMemory(false);
                   setShowLaneBoard(false);
-                  setShowArtifacts(false);
                   setShowChat(true);
                 }}
               />

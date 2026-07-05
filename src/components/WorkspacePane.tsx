@@ -8,6 +8,7 @@ import { ChatView } from "./ChatView";
 import { FusionView } from "./FusionView";
 import { ChatRail } from "./ChatRail";
 import { DesignView } from "./DesignView";
+import { ArtifactsView } from "./ArtifactsView";
 import { ContextTopBar, ContextBottomBar } from "./ContextBars";
 import { useSessionSnapshots } from "../lib/useSessionSnapshots";
 import { getTermTabMode } from "../lib/termMode";
@@ -31,6 +32,11 @@ interface WorkspacePaneProps {
    *  auto-focus-first-tab behavior in the load effect is unaffected — this effect
    *  runs after it and only overrides when the id is a real loaded tab. */
   focusInstanceId?: string | null;
+  /** Called when the USER clicks a tab in the strip (not on auto-focus or the
+   *  honor-focus effect). AppShell wires it to `setSelectedId` so Roster's
+   *  selection, the terminal, StdinBar, and the tab strip never desync — the
+   *  parent half of the bidirectional focus sync (plan D2). */
+  onActiveInstanceChange?: (id: string) => void;
   /** Opens the workspace Chat Hub (threaded down to the Context drawer's
    *  "Open chat" affordance). */
   onOpenChat?: () => void;
@@ -41,6 +47,13 @@ interface WorkspacePaneProps {
   designOpen?: boolean;
   /** Clears `designOpen` in the parent — wired to DesignView's close X. */
   onCloseDesign?: () => void;
+  /** Artifacts view: shares the SAME canvas slot as Design (mutually exclusive
+   *  with it — see AppShell), so opening Artifacts renders artifacts-left +
+   *  terminal-right full-window, the terminal column never remounting. Owned by
+   *  AppShell/Rail's ⌘⇧A toggle. */
+  artifactsOpen?: boolean;
+  /** Clears `artifactsOpen` in the parent — wired to ArtifactsView's close X. */
+  onCloseArtifacts?: () => void;
 }
 
 // View-model for one agent tab (any type). Carries the full `AgentDefinition`
@@ -90,10 +103,17 @@ export function WorkspacePane({
   workspaceId,
   workspaceName,
   focusInstanceId,
+  onActiveInstanceChange,
   onOpenChat,
   designOpen = false,
   onCloseDesign,
+  artifactsOpen = false,
+  onCloseArtifacts,
 }: WorkspacePaneProps) {
+  // The canvas slot is OPEN when either full-window view wants it. Design and
+  // Artifacts are mutually exclusive (AppShell clears one when opening the
+  // other), so at most one renders inside the slot at a time.
+  const slotOpen = designOpen || artifactsOpen;
   const [tabs, setTabs] = useState<AgentTab[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -181,15 +201,26 @@ export function WorkspacePane({
     };
   }, [workspaceId]);
 
+  // Last focusInstanceId this effect actually APPLIED. `tabs` gets a fresh array
+  // identity on every `session:status` event (the status-patch setState below
+  // maps a new array), so this effect re-fires constantly — without this guard
+  // it would re-apply the SAME (possibly stale) focus every time, snapping the
+  // active tab back after the user picked another one. Guarding on the applied
+  // value makes each focusInstanceId take effect at most once (plan D2).
+  const lastAppliedFocus = useRef<string | null>(null);
+
   // Honor Roster selection: when focusInstanceId changes (user clicked an agent
   // in the Roster sidebar), switch the active tab to it — but ONLY if the tab is
   // loaded. Guard: if tabs haven't loaded yet (empty array or id not found) the
-  // effect is a no-op; it re-fires when tabs arrive and the id then matches.
+  // effect is a no-op; it re-fires when tabs arrive and the id then matches (so
+  // `tabs` stays in the deps for that late-load case).
   // No double-spawn risk: the spawn effect below is guarded by spawnAttempted.
   useEffect(() => {
     if (focusInstanceId == null) return;
+    if (focusInstanceId === lastAppliedFocus.current) return;
     if (tabs.some((t) => t.instanceId === focusInstanceId)) {
       setActiveInstanceId(focusInstanceId);
+      lastAppliedFocus.current = focusInstanceId;
     }
   }, [focusInstanceId, tabs]);
 
@@ -306,16 +337,22 @@ export function WorkspacePane({
   if (loading || tabs.length === 0) {
     return (
       <div className="flex-1 flex min-w-0 bg-surface">
-        <div className={designOpen ? "flex-1 flex flex-col min-w-0 border-r border-overlay/[0.06]" : "w-0 shrink-0 overflow-hidden"}>
-          {designOpen && (
+        <div className={slotOpen ? "flex-1 flex flex-col min-w-0 border-r border-overlay/[0.06]" : "w-0 shrink-0 overflow-hidden"}>
+          {designOpen ? (
             <DesignView
               workspaceId={workspaceId}
               workspaceName={workspaceName}
               onClose={() => onCloseDesign?.()}
             />
-          )}
+          ) : artifactsOpen ? (
+            <ArtifactsView
+              workspaceId={workspaceId}
+              workspaceName={workspaceName}
+              onClose={() => onCloseArtifacts?.()}
+            />
+          ) : null}
         </div>
-        <main className={designOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
+        <main className={slotOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
           <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary px-6 text-center">
             {loading
               ? "Loading…"
@@ -332,24 +369,32 @@ export function WorkspacePane({
 
   return (
     <div className="flex-1 flex min-w-0 bg-surface">
-      {/* Design slot (master plan Lane D) — ALWAYS mounted in this exact tree
-          position, both modes. Only this div's className and DesignView's
-          presence inside it change when `designOpen` toggles; `<main>` below
-          and `<ChatRail>` at the end are the SAME two siblings either way,
-          just with different classNames — the terminal's ancestor chain
-          never changes shape, so it never remounts (the one hard constraint
-          of this lane). DesignView itself (and its iframe) unmounting/
-          remounting on toggle is fine — only the SLOT needs to be stable. */}
-      <div className={designOpen ? "flex-1 flex flex-col min-w-0 border-r border-overlay/[0.06]" : "w-0 shrink-0 overflow-hidden"}>
-        {designOpen && (
+      {/* Canvas slot (master plan Lane D + canvas-slot-artifacts) — ALWAYS
+          mounted in this exact tree position, in EVERY mode (Design open,
+          Artifacts open, or neither). Only this div's className and its child
+          (DesignView | ArtifactsView | nothing) change when the slot toggles;
+          `<main>` below and `<ChatRail>` at the end are the SAME two siblings
+          either way, just with different classNames — the terminal's ancestor
+          chain never changes shape, so it never remounts (the one hard
+          constraint of this lane). The slot's OWN child (DesignView/iframe or
+          ArtifactsView) mounting/unmounting on toggle is fine — only the SLOT
+          div, `<main>`, and the ChatRail wrapper must stay stable siblings. */}
+      <div className={slotOpen ? "flex-1 flex flex-col min-w-0 border-r border-overlay/[0.06]" : "w-0 shrink-0 overflow-hidden"}>
+        {designOpen ? (
           <DesignView
             workspaceId={workspaceId}
             workspaceName={workspaceName}
             onClose={() => onCloseDesign?.()}
           />
-        )}
+        ) : artifactsOpen ? (
+          <ArtifactsView
+            workspaceId={workspaceId}
+            workspaceName={workspaceName}
+            onClose={() => onCloseArtifacts?.()}
+          />
+        ) : null}
       </div>
-      <main className={designOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
+      <main className={slotOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
         {/* Tab strip — one tab per instance, with a per-type glyph. 48px tall to
             line up with the Roster and Context headers so the three column
             dividers form one continuous macOS-style toolbar rule. The strip is
@@ -365,7 +410,14 @@ export function WorkspacePane({
             return (
               <button
                 key={tab.instanceId}
-                onClick={() => setActiveInstanceId(tab.instanceId)}
+                onClick={() => {
+                  // User-driven focus change: update local state AND report up so
+                  // the parent's Roster selection stays in sync (plan D2). Only
+                  // here — never in auto-focus or the honor-focus effect, which
+                  // apply values the parent already knows.
+                  setActiveInstanceId(tab.instanceId);
+                  onActiveInstanceChange?.(tab.instanceId);
+                }}
                 className={`flex items-center gap-2 px-3 h-7 rounded-md text-[13px] transition-colors${
                   isActive ? " bg-overlay/[0.06] font-semibold" : " hover:bg-overlay/[0.04] text-text-secondary"
                 }`}
@@ -504,15 +556,22 @@ export function WorkspacePane({
 
       {/* Right Chats rail — workspace-scoped, NOT per-tab: mounted
           unconditionally so switching tabs (or having none active) never
-          resets its room selection or unread state. In Design mode it's
-          visually collapsed (judgment call — three full columns plus a
-          narrowed terminal is too cramped) via a WRAPPING div's className,
-          never by conditionally rendering ChatRail itself — it stays
-          mounted, same "never unmount a sibling" discipline as the design
-          slot above. `display: contents` when not collapsed makes the
-          wrapper transparent to the flex layout, so it changes nothing
-          when Design is closed. */}
-      <div className={designOpen ? "w-0 shrink-0 overflow-hidden" : "contents"}>
+          resets its room selection or unread state. In any full-window slot
+          mode (Design OR Artifacts) it's visually collapsed (judgment call —
+          three full columns plus a narrowed terminal is too cramped) via a
+          WRAPPING div's className, never by conditionally rendering ChatRail
+          itself — it stays mounted, same "never unmount a sibling" discipline
+          as the canvas slot above. `display: contents` when not collapsed
+          makes the wrapper transparent to the flex layout, so it changes
+          nothing when the slot is closed. `inert` + `aria-hidden` when
+          collapsed pull its clipped-but-mounted focusables out of the tab
+          order and the a11y tree (CSS clipping hides pixels only — Armin F1
+          / plan D5). */}
+      <div
+        inert={slotOpen}
+        aria-hidden={slotOpen || undefined}
+        className={slotOpen ? "w-0 shrink-0 overflow-hidden" : "contents"}
+      >
         <ChatRail workspaceId={workspaceId} roster={roster} statuses={statuses} onOpenChat={onOpenChat} />
       </div>
     </div>

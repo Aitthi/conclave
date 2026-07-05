@@ -205,8 +205,11 @@ export function ArtifactsView({
   const activeKind = normalizeKind(activeArtifact?.kind);
   const canPreviewToggle = activeKind === "html" || activeKind === "svg";
 
+  // Root is a <section>, not <main>: ArtifactsView now renders INSIDE the
+  // WorkspacePane canvas slot, which lives beside the page's single <main>
+  // (the terminal column). Two <main> landmarks on a page is an a11y defect.
   return (
-    <main className="flex-1 min-w-0 relative overflow-hidden">
+    <section className="flex-1 min-w-0 relative overflow-hidden">
       <div
         className="absolute top-0 left-0 right-0 h-12 z-20 flex items-center gap-3 px-4 border-b border-overlay/[0.06]"
         style={{
@@ -356,6 +359,6 @@ export function ArtifactsView({
           )}
         </section>
       </div>
-    </main>
+    </section>
   );
 }
