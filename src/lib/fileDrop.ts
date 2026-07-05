@@ -62,7 +62,18 @@ function clearOver() {
 function ensureSubscribed() {
   if (subscribed) return;
   subscribed = true;
-  getCurrentWebview()
+  let webview: ReturnType<typeof getCurrentWebview>;
+  try {
+    // In plain Chrome (fixture mode / `vite` without the shell)
+    // getCurrentWebview() throws SYNCHRONOUSLY reading __TAURI_INTERNALS__ —
+    // the throw escapes the promise .catch() below, so guard it here. No-op
+    // and allow a later retry if a real webview ever mounts.
+    webview = getCurrentWebview();
+  } catch {
+    subscribed = false;
+    return;
+  }
+  webview
     .onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === "over") {
