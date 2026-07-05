@@ -173,15 +173,23 @@ pub async fn list_by_state(
 /// already approved or rejected matches nothing and returns `None`, so the
 /// caller reports "not pending" without a separate check racing the update.
 /// `chunk_id` is set only on approval.
-pub async fn set_reviewed(
-    pool: &SqlitePool,
+///
+/// Generic over the sqlx executor so the transactional approve path can run
+/// this UPDATE on the SAME transaction as the chunk upsert: a 0-row result
+/// (proposal no longer pending) then rolls the chunk write back with it.
+/// Existing callers pass `&SqlitePool` unchanged.
+pub async fn set_reviewed<'e, E>(
+    executor: E,
     workspace_id: &str,
     id: &str,
     new_state: &str,
     reviewer_id: &str,
     review_reason: Option<&str>,
     chunk_id: Option<&str>,
-) -> Result<Option<MemoryProposalRow>, AppError> {
+) -> Result<Option<MemoryProposalRow>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let now = Utc::now().to_rfc3339();
     let row = sqlx::query_as::<_, MemoryProposalRow>(
         "UPDATE memory_proposal SET \
@@ -199,7 +207,7 @@ pub async fn set_reviewed(
     .bind(&now)
     .bind(workspace_id)
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(AppError::from)?;
     Ok(row)
@@ -329,5 +337,71 @@ mod tests {
         .expect("seed chunk");
         assert!(chunk_hash_exists(&pool, &ws, "hash-live").await.unwrap());
         assert!(!chunk_hash_exists(&pool, &ws, "hash-other").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rolled_back_approve_txn_leaves_no_orphan_chunk() {
+        // F1 regression: the approve path upserts the chunk and stamps the
+        // proposal in ONE transaction. If a reject won the race (the proposal
+        // is no longer pending), set_reviewed matches 0 rows and the whole tx
+        // rolls back — the chunk must NOT survive. On the pre-fix code the
+        // upsert committed independently, leaving an orphan `distilled` chunk.
+        let pool = connect_in_memory().await;
+        let ws = fixture_workspace(&pool, "proposal-toctou").await;
+        let created = create(&pool, input(&ws, "agent-1", "raced fact", "hash-race"))
+            .await
+            .expect("create")
+            .row
+            .expect("row");
+
+        // The racing reviewer moves it out of pending first.
+        set_reviewed(&pool, &ws, &created.id, "rejected", "agent-2", None, None)
+            .await
+            .expect("reject wins the race")
+            .expect("pending -> rejected");
+
+        // Drive the approve transaction: upsert the chunk, then set_reviewed
+        // finds no pending row -> roll the whole thing back.
+        let mut tx = pool.begin().await.expect("begin");
+        crate::engine::repo::memory::upsert_chunk_on(
+            &mut tx,
+            crate::engine::repo::memory::UpsertChunkInput {
+                workspace_id: &ws,
+                model_id: "fake-embedder-v1",
+                source_kind: "distilled",
+                source_id: Some("agent-1"),
+                text: "raced fact",
+                embedding: &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                content_hash: "hash-race",
+            },
+        )
+        .await
+        .expect("upsert inside the txn");
+        let reviewed = set_reviewed(
+            &mut *tx,
+            &ws,
+            &created.id,
+            "approved",
+            "agent-3",
+            None,
+            Some("chunk-x"),
+        )
+        .await
+        .expect("set_reviewed runs");
+        assert!(
+            reviewed.is_none(),
+            "an already-rejected proposal must not transition"
+        );
+        tx.rollback().await.expect("rollback");
+
+        // The orphan is gone: no chunk carries the raced content hash.
+        assert!(
+            !chunk_hash_exists(&pool, &ws, "hash-race").await.unwrap(),
+            "a rolled-back approve must leave no distilled chunk (F1)"
+        );
+        // And the proposal's rejected outcome stands, untouched by the rollback.
+        let rejected = list_by_state(&pool, &ws, "rejected").await.unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].id, created.id);
     }
 }
