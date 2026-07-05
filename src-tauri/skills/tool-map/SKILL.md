@@ -18,6 +18,7 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Work items | `conclave task state <workspaceId> <slug> <state>` | move state (implementers: review\|abandoned; merged = integrator) |
 | Work items | `conclave task note <workspaceId> <slug> <text...>` | log progress, decisions, outcomes |
 | Work items | `conclave task gate <workspaceId> <slug> -- <cmd...>` | run a verification, proof recorded on the ledger — commit first, then gate — the gate pins `git rev-parse HEAD` at run time; words after `--` pass verbatim (not shell-reparsed); wrap shell syntax in `sh -c "…"` |
+| Work items | `conclave uishot [--task <slug>] <args...>` | run the workspace's UI capture script (package.json `uishot`) and SEE the result; `--task` records it as a task gate |
 | Work items | `conclave task challenge <workspaceId> <slug> --claim t --evidence t --proposal t --default t [--deadline-min N]` | dispute a plan/decision with a stated default |
 | Work items | `conclave task rule <workspaceId> <slug> <challengeEventId> <text...>` | settle a challenge (lead) |
 | Work items | `conclave task close <workspaceId> <slug>` | live state → merged shortcut + memory-save reminder |
