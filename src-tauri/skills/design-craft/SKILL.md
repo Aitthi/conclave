@@ -33,6 +33,16 @@ already know the fix. Don't ship them; rework the element.
 - **hero-eyebrow-chip** — a pulsing `animate-ping` dot, or a rounded-full dot + micro-label
   pill sitting right above the hero `<h1>` ("● NOW IN BETA"). Lead with the headline; state a
   real status in plain words inline.
+- **cream-palette** — a warm off-white / beige page background (`bg-amber/orange/yellow-50`, a
+  cream hex), the convergence default for "premium/editorial". Keep a true off-white or commit to
+  a deep brand surface; carry warmth in the accent, type, imagery.
+- **ai-color-palette** — the generic AI purple/indigo (a `from-purple-…via-violet-…` gradient or
+  the tell-tale hexes). Choose a distinctive brand hue.
+
+A finding's **severity label** (`error`/`warn`/`info`) is the detector's *confidence*; what FAILS
+the gate is *membership in the serious set*. The two colour-convergence tells above
+(`cream-palette`, `ai-color-palette`) emit at `warn` confidence but ARE in that set, so they gate
+the review as serious — fix them like the rest.
 
 **Warn (judge in context — a good design *can* use some of these once, on purpose):**
 - **transition-all** — `transition: all`; name the properties you animate.
@@ -43,11 +53,6 @@ already know the fix. Don't ship them; rework the element.
 - **over-rounded** — a card rounded past ~16px (`rounded-3xl`, big `rounded-[Npx]`); cards top
   out 12–16px (pills are fine).
 - **mixed-icon-libs** — two icon libraries on one screen; stay in `lucide-react`.
-- **cream-palette** — a warm off-white / beige page background (`bg-amber/orange/yellow-50`, a
-  cream hex), the convergence default for "premium/editorial". Keep a true off-white or commit
-  to a deep brand surface; carry warmth in the accent, type, imagery.
-- **ai-color-palette** — the generic AI purple/indigo (a `from-purple-…via-violet-…` gradient or
-  the tell-tale hexes). Choose a distinctive brand hue.
 - **unmodified-kit-default** — a starter kit's *example* accent shipped unchanged, so every build
   shares one palette. Give the project its OWN accent hue.
 - **em-dash-overuse** — 5+ em-dashes; vary with commas, colons, periods, parentheses.
@@ -83,10 +88,10 @@ gates, so prose and detector agree.)*
   shade the kit lacks, add it to `theme.css`. The repeated **semantic palette** (status/severity
   colours) lives in tokens too, defined once — inlining the same hex 10× across screens is the
   classic "has a design system but doesn't use it" miss.
-- **Commit to ONE colour strategy on purpose:** *restrained* (tinted neutrals + one accent
-  ≤10%), *committed* (one saturated colour on 30–60% of the surface), *full palette* (3–4 named
-  roles), or *drenched* (the surface IS the colour). Product/tool UI floors at restrained;
-  brand/marketing earns committed-or-louder. Beige + one accent on a bold brief is a hedge.
+- **Commit to ONE colour strategy on purpose:** *restrained* (tinted neutrals + one accent ≤10%),
+  *committed* (one saturated colour on 30–60% of the surface), *full palette* (3–4 named roles),
+  or *drenched* (the surface IS the colour). Product/tool UI floors at restrained; brand/marketing
+  earns louder. Beige + one accent on a bold brief is a hedge.
 - **Make it *this* project, not its category (the reflex check).** *First-order:* could someone
   guess the palette + type from the category alone ("dashboard → dark + indigo")? If yes, rework
   it. *Second-order:* could they guess it from the category plus the obvious anti-move? Keep
