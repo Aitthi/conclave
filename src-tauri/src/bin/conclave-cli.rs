@@ -2459,7 +2459,8 @@ mod tests {
             "task": { "fileBoundary": [] },
             "events": []
         });
-        assert!(super::parse_task_boundary(&envelope, "t1").is_err());
+        let err = super::parse_task_boundary(&envelope, "t1").expect_err("must refuse");
+        assert!(err.contains("no fileBoundary"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2467,7 +2468,8 @@ mod tests {
         // No `task` wrapper at all — must not fall back to a top-level
         // `fileBoundary`; the envelope is the only shape the engine sends.
         let flat = serde_json::json!({ "fileBoundary": ["a.ts"] });
-        assert!(super::parse_task_boundary(&flat, "t1").is_err());
+        let err = super::parse_task_boundary(&flat, "t1").expect_err("must refuse");
+        assert!(err.contains("no fileBoundary"), "unexpected error: {err}");
     }
 
     #[test]
