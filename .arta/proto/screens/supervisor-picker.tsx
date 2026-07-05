@@ -32,13 +32,21 @@ export const meta = { title: "Supervisor picker · states" };
         disables Tiësto[self] and Dew[descendant], per wouldCycle); a member is
         selected to show the fill + Check state.
 
-   FOOTER MODEL (resolves a D4 ambiguity, flagged to Detoro): D4 lists both an
-   explicit "Reports to Human" ROW and a separate "Skip" button. With the Human
-   row present and pre-selected as the safe default, Skip is redundant: the
-   primary "Add agent" already commits Human in one tap, and picking a member
-   diverges from it. So there is NO Skip button. The Human row IS the
-   no-supervisor choice, giving both variants one model. Footer = Cancel +
-   primary (Add agent / Confirm); the X and back arrow cover escape.
+   FOOTER MODEL (human-ruled, 2d03b21a): the human overruled the no-Skip
+   resolution — a visible Skip button is required in the add-flow ("supervisor
+   isn't required; give me a Skip"). Human wish outranks the redundancy
+   argument; the rest of the challenge ruling stands. Kept coherent by NOT
+   pre-selecting the Human row: nothing is selected initially, so Skip and the
+   list read as two distinct intents rather than two defaults for one outcome.
+     · Skip (secondary, left) = add now with no supervisor (reports to human);
+       the bypass for "decide later" — changeable from the roster chip (panel C).
+     · Add agent (primary, right) = commit the picked supervisor; DISABLED until
+       a row is selected, so it never duplicates Skip.
+     · X / back arrow = abort the whole add.
+   The Human row stays PRESENT (ruling upheld) as an explicit positive choice,
+   just no longer the pre-selection — that is the one amendment vs the prior
+   canon. The edit variant (C) has NO Skip (you're changing an existing link,
+   not adding) and keeps its current supervisor pre-selected: Cancel + Confirm.
 
    The row markup below is COPIED from builder-position.tsx's SupervisorRow so
    the proto literally IS the composition: reuse it, do not restyle. Frame
@@ -163,10 +171,14 @@ function Subject({ id, sub }: { id: string; sub: React.ReactNode }) {
   );
 }
 
-function Btn({ kind, children }: { kind: "ghost" | "accent"; children: React.ReactNode }) {
+function Btn({ kind, children, disabled }: { kind: "ghost" | "accent"; children: React.ReactNode; disabled?: boolean }) {
   if (kind === "accent")
     return (
-      <button className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold px-3.5 py-1.5 rounded-lg" style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}>
+      <button
+        disabled={disabled}
+        className={`inline-flex items-center gap-1.5 text-[12.5px] font-semibold px-3.5 py-1.5 rounded-lg ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
+        style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}
+      >
         {children}
       </button>
     );
@@ -202,7 +214,7 @@ export default function SupervisorPickerStates() {
               step="Step 2 of 2"
               footer={
                 <>
-                  <Btn kind="ghost">Cancel</Btn>
+                  <Btn kind="ghost">Skip</Btn>
                   <span className="ml-auto" />
                   <Btn kind="accent"><UserPlus size={13} /> Add agent</Btn>
                 </>
@@ -211,15 +223,16 @@ export default function SupervisorPickerStates() {
               <Subject id="guetta" sub="You're adding this agent to the workspace" />
               <div className="p-2 flex-1 min-h-0 overflow-y-auto scroll-thin" style={{ maxHeight: 260 }}>
                 <div className="rounded-xl p-1" style={{ background: "var(--color-app)", border: "1px solid var(--color-border)" }}>
-                  <HumanRow selId={null} />
+                  <HumanRow selId="tiesto" />
                   <div className="h-px my-1 mx-2" style={{ background: "var(--color-border-soft)" }} />
                   {ADD_MEMBERS.map((id) => (
-                    <SupervisorRow key={id} id={id} editId={null} selId={null} />
+                    <SupervisorRow key={id} id={id} editId={null} selId="tiesto" />
                   ))}
                 </div>
                 <p className="text-[10.5px] faint leading-snug mt-1.5 px-1">
-                  Human is the pre-selected default: Add commits it, or pick a member first. No rows are disabled (the new
-                  agent has no reports yet, so no pick can form a cycle).
+                  Nothing is pre-selected — Add enables once a row is picked (Tiësto here). Skip adds now with no supervisor
+                  (reports to the human); it's changeable later from the roster chip. No rows disabled: the new agent has no
+                  reports yet, so no pick can cycle.
                 </p>
               </div>
             </Modal>
@@ -234,19 +247,20 @@ export default function SupervisorPickerStates() {
               step="Step 2 of 2"
               footer={
                 <>
-                  <Btn kind="ghost">Cancel</Btn>
+                  <Btn kind="ghost">Skip</Btn>
                   <span className="ml-auto" />
-                  <Btn kind="accent"><UserPlus size={13} /> Add agent</Btn>
+                  <Btn kind="accent" disabled><UserPlus size={13} /> Add agent</Btn>
                 </>
               }
             >
               <Subject id="guetta" sub="You're adding this agent to the workspace" />
               <div className="p-2">
                 <div className="rounded-xl p-1" style={{ background: "var(--color-app)", border: "1px solid var(--color-border)" }}>
-                  <HumanRow selId={null} />
+                  <HumanRow selId="none" />
                 </div>
                 <p className="text-[10.5px] faint leading-snug mt-1.5 px-1">
-                  No other members yet, so this agent reports to the human. The list is complete, not empty: Add stays enabled.
+                  No other members yet. Nothing selected → Add is disabled; Skip adds now (reports to the human), or pick the
+                  row to commit it explicitly. The list is complete, not broken.
                 </p>
               </div>
             </Modal>
