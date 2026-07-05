@@ -91,7 +91,16 @@ Boundary: `src-tauri/src/engine/commands/memory.rs`,
 
 Boundary: `src-tauri/src/engine/runtime/task_timer.rs`,
 `src-tauri/skills/memory-distiller/SKILL.md`,
-`src-tauri/skills/tool-map/SKILL.md` (config-key row).
+`src-tauri/skills/tool-map/SKILL.md` (config-key row),
+`src-tauri/src/engine/repo/task.rs` *(amended 2026-07-05 by lead on Dew's
+escalation: condition (c) needed `has_task_event_since`, a pure-additive repo
+query with no existing home in the boundary; inlining raw SQL in
+task_timer.rs would break that file's route-through-repo convention. Guard,
+same class as the v1 router-gap lesson: a plan whose conditions imply a NEW
+query names the repo module in the boundary by default. Note: the task
+object's fileBoundary cannot be edited post-create — no CLI verb exists —
+so this doc plus the task-ledger ruling IS the boundary record; deferred
+small: add a `task boundary` verb.)*
 
 - New `check_distill_nudge(state, now, ticker)` called from `tick`
   (task_timer.rs:90), sibling of `check_stalls` (:106) and
