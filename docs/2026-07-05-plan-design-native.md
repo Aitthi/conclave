@@ -82,6 +82,16 @@ src-tauri/src/engine/runtime/design_host.rs, src-tauri/src/engine/runtime/mod.rs
 src-tauri/src/engine/commands/design.rs, design-viewer/**` (the last for
 deletion only).
 
+AMENDMENT (lead, post-hoc — plan defect found by Dew): the module rename has
+ONE call site outside this boundary, `src-tauri/src/lib.rs` (RunEvent::Exit →
+`kill_on_exit`). The original boundary omitted it, so the crate could not
+compile from in-boundary commits alone. Dew landed the 3-line mechanical fix
+as a separate scoped raw commit (3c7220d) per the standing boundary-widening
+convention and flagged it — accepted and ratified by lead ruling on the
+design-host ledger. Guard for future plans: when a lane renames a module, grep
+the crate for the module path (`codegraph find-refs`) and put every call site
+in the boundary up front.
+
 ### Lane B — `design-native-view` (frontend; CUT AFTER canon + Lane A land)
 1. **AppShell full-window mode**: when `designOpen`, hide the Rail and Roster
    columns (`AppShell.tsx:203-244` area); restore on close. Keep the design
