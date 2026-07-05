@@ -24,18 +24,34 @@ use uuid::Uuid;
 /// A stored artifact row. Serialises to camelCase across the Tauri IPC
 /// boundary. `message_id`/`sandboxed` survive from the pre-0014 chat-parsed
 /// rows; new CLI-created artifacts leave them `NULL`.
+///
+/// Every optional field carries `skip_serializing_if = "Option::is_none"` so
+/// an absent value is OMITTED, not emitted as JSON `null` — matching the
+/// optional (non-nullable) fields in `src/ipc/types.ts` `Artifact` (same
+/// convention as `InterAgentMessageRow::auto_submitted`). `sandboxed` is
+/// `Option<bool>`, not `Option<i64>`: SQLite stores the flag as INTEGER but
+/// sqlx decodes 0/1 → bool, and the TS contract declares `sandboxed?: boolean`
+/// (same as `ToolRow::is_core`).
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactRow {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    pub sandboxed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandboxed: Option<bool>,
     pub created_at: String,
 }
 
@@ -125,6 +141,7 @@ pub async fn get_artifact(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<Ar
 mod tests {
     use super::*;
     use crate::engine::db::connect_in_memory;
+    use serde_json::Value;
 
     async fn fixture_workspace(pool: &SqlitePool) -> String {
         crate::engine::repo::workspace::create(pool, "WS", "/tmp/ws", None)
@@ -203,26 +220,36 @@ mod tests {
             .await
             .expect("insert failed");
 
+        // A new artifact has workspaceId + agentId, but message_id/sandboxed
+        // are None → those keys must be OMITTED (not `null`), matching the
+        // optional TS fields.
         let json = serde_json::to_value(&art).expect("serialize failed");
-        assert!(json.get("workspaceId").is_some(), "must have workspaceId key");
+        assert_eq!(json.get("workspaceId").and_then(Value::as_str), Some(ws.as_str()));
         assert!(json.get("agentId").is_some(), "must have agentId key");
         assert!(json.get("createdAt").is_some(), "must have createdAt key");
         assert!(json.get("workspace_id").is_none(), "no snake_case workspace_id");
         assert!(json.get("created_at").is_none(), "no snake_case created_at");
+        // skip_serializing_if: absent optionals are omitted, never JSON null.
+        assert!(json.get("messageId").is_none(), "absent messageId must be omitted, not null");
+        assert!(json.get("sandboxed").is_none(), "absent sandboxed must be omitted, not null");
+        assert!(!json.as_object().unwrap().values().any(Value::is_null), "no field serializes as null");
     }
 
-    /// The 0014 rebuild must preserve pre-existing chat-parsed rows: an old
-    /// `artifact(message_id, html, filename, sandboxed)` row survives as a
-    /// `kind='html'` row with `html` folded into `content`.
+    /// Wire-shape contract for a chat-parsed (`kind='html'`) row: `sandboxed`
+    /// must serialise as a JSON BOOLEAN (not the integer 0/1 SQLite stores),
+    /// and the null workspace/agent columns must be OMITTED, not `null`. (This
+    /// asserts the SERIALISATION shape on a directly-inserted row; the actual
+    /// 0014 data-preservation upgrade path — including the serialised shape of a
+    /// real message-owned migrated row — is proven by
+    /// `db::tests::migrate_0014_preserves_legacy_artifact_rows`.)
     #[tokio::test]
-    async fn migration_preserves_legacy_html_rows() {
+    async fn legacy_html_row_serialises_sandboxed_as_bool() {
         let pool = connect_in_memory().await;
-        // After migration the table is already the new shape. Simulate a
-        // legacy row by inserting one the way the migration's SELECT would have
-        // produced it, then confirm it reads back through the repo.
+        // message_id NULL keeps this a self-contained serialization unit test
+        // (no FK chain needed); the message-owned case lives in the db test.
         sqlx::query(
             "INSERT INTO artifact (id, workspace_id, agent_id, message_id, title, kind, filename, content, sandboxed, created_at) \
-             VALUES ('legacy-1', NULL, NULL, NULL, NULL, 'html', 'old.html', '<h1>hi</h1>', 1, '2020-01-01T00:00:00+00:00')",
+             VALUES ('legacy-1', NULL, NULL, NULL, NULL, 'html', 'old.html', '<h1>hi</h1>', 0, '2020-01-01T00:00:00+00:00')",
         )
         .execute(&pool)
         .await
@@ -234,7 +261,13 @@ mod tests {
             .expect("legacy row exists");
         assert_eq!(row.kind.as_deref(), Some("html"));
         assert_eq!(row.content.as_deref(), Some("<h1>hi</h1>"));
-        assert_eq!(row.sandboxed, Some(1));
-        assert!(row.workspace_id.is_none());
+        assert_eq!(row.sandboxed, Some(false), "INTEGER 0 decodes to bool false");
+
+        let json = serde_json::to_value(&row).expect("serialize failed");
+        assert_eq!(json.get("sandboxed"), Some(&Value::Bool(false)), "sandboxed must be a JSON bool");
+        assert!(json.get("workspaceId").is_none(), "null workspaceId omitted, not null");
+        assert!(json.get("agentId").is_none(), "null agentId omitted, not null");
+        assert!(json.get("messageId").is_none(), "null messageId omitted, not null");
+        assert!(!json.as_object().unwrap().values().any(Value::is_null), "no field is JSON null");
     }
 }
