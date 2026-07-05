@@ -457,46 +457,68 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
         task::create(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
         )
         .await
         .expect("create failed");
+        task::watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
         task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
             .await
             .expect("claim failed");
 
-        let claimed_at = Utc::now();
+        // Derive the tick from the STORED claim-event timestamp so the rendered
+        // minute is deterministically exactly 11 (stale = last_event + 11m −
+        // last_event) — lets the full line be pinned, not a wildcard middle.
+        let got = task::get(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("get failed");
+        let last_event_at: DateTime<Utc> = got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| DateTime::parse_from_rfc3339(e["createdAt"].as_str().unwrap()).unwrap().with_timezone(&Utc))
+            .max()
+            .expect("has an event");
         let mut ticker = Ticker::new();
 
         // Just under the 10-minute threshold — no alert yet.
-        tick(&state, claimed_at + Duration::minutes(9), &mut ticker).await;
+        tick(&state, last_event_at + Duration::minutes(9), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
         assert_eq!(inbox.as_array().unwrap().len(), 0, "must not fire before the threshold");
 
-        // Past the threshold — alert fires.
-        tick(&state, claimed_at + Duration::minutes(11), &mut ticker).await;
+        // Exactly 11 minutes past the stored last event — alert fires.
+        tick(&state, last_event_at + Duration::minutes(11), &mut ticker).await;
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
         let arr = inbox.as_array().unwrap();
         assert_eq!(arr.len(), 1, "must fire once past the threshold");
-        // All-NULL byte-for-byte: exact stable tuple — from=implementer, to=owner
-        // (today's target), and the exact text bar the timestamp-derived minute
-        // count (the ONLY nondeterministic field, excluded per the tuple carve-out).
+        // All-NULL byte-for-byte: the COMPLETE exact tuple. from=implementer,
+        // to=owner (today's target), and the FULL deterministic line — the
+        // minute is exactly 11 (deterministic tick), so nothing is a wildcard.
         assert_eq!(arr[0]["fromInstanceId"], json!(implementer));
         assert_eq!(arr[0]["toInstanceId"], json!(owner));
-        let text = arr[0]["text"].as_str().unwrap();
-        assert!(
-            text.starts_with("[task t1] AUTO stall alert — no activity for "),
-            "exact stable prefix (AUTO marker + task + phrasing): {text}"
+        assert_eq!(
+            arr[0]["text"],
+            json!("[task t1] AUTO stall alert — no activity for 11+ min (state=claimed)")
         );
-        assert!(
-            text.ends_with("+ min (state=claimed)"),
-            "exact stable suffix (state), minute excluded: {text}"
+
+        // The stall pages the routing target ONLY — a watcher must NOT be paged
+        // (proves the complete notification set excludes unintended delivery).
+        let watcher_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            watcher_inbox.as_array().unwrap().len(),
+            0,
+            "the stall timer must not page a watcher"
         );
     }
 
@@ -761,12 +783,16 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
         task::create(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
         )
         .await
         .expect("create failed");
+        task::watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
         let challenge_event = task::challenge(
             &state,
             json!({
@@ -777,6 +803,21 @@ mod tests {
         )
         .await
         .expect("challenge failed");
+
+        // The watcher's baseline: exactly the challenge line (a live-actor
+        // notification, NOT a timer page). Snapshotted here so we can prove the
+        // deadline tick adds NOTHING to the watcher's set.
+        let watcher_baseline = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        let watcher_baseline = watcher_baseline.as_array().unwrap().clone();
+        assert_eq!(watcher_baseline.len(), 1, "watcher got the challenge line");
+        assert_eq!(watcher_baseline[0]["fromInstanceId"], json!(challenger));
+        assert_eq!(watcher_baseline[0]["toInstanceId"], json!(watcher));
+        assert_eq!(
+            watcher_baseline[0]["text"],
+            json!("[task t1] Challenger: challenge — X is broken")
+        );
 
         let filed_at = Utc::now();
         let mut ticker = Ticker::new();
@@ -844,6 +885,17 @@ mod tests {
         assert_eq!(
             challenger_received[0]["text"],
             json!("[task t1] AUTO default ruling — escalate to lead")
+        );
+
+        // The deadline default notifies the two PARTIES only — the watcher's set
+        // is byte-for-byte its pre-tick baseline (no timer-added watcher page).
+        let watcher_after = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            watcher_after.as_array().unwrap(),
+            &watcher_baseline,
+            "the deadline timer must not add a watcher page"
         );
     }
 
