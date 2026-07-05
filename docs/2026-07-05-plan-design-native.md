@@ -34,13 +34,27 @@ through our own Vite canvas host, and the app shows that canvas **full-window**
   write-before-spawn, login-shell `node` resolution, first-run `pnpm install`,
   health-check + capped-backoff respawn, single-flight lock. Security config
   carries over verbatim from ruling 4d81be26: bind 127.0.0.1 only, `cors:
-  false`, `server.fs.allow` scoped to the host app + the workspace `design/`
-  dir, `fs.deny` secrets patterns.
-- **D6 — Screen discovery lives in the host, not IPC.** The host app lists
-  `screens/*.tsx` via `import.meta.glob`; the `design.ensure` / `design.status`
+  false`, explicit `allowedHosts`, `fs.deny` secrets patterns.
+  AMENDED (lead, at Lane A review): the original wording here said
+  "`server.fs.allow` scoped" — that was wrong; static `fs.allow` cannot cover
+  workspace `design/` dirs resolved only at request time, which is exactly why
+  the old posture used `fs.strict: false` and why "registry-driven dynamic
+  fs.allow" sat in the (superseded) hardening task. The 4d81be26 posture as
+  actually shipped — `fs.strict: false` + the cors/allowedHosts/fs.deny trio,
+  residual same-user `/@fs/` read accepted and documented — carries over
+  verbatim; the Host/Origin guard middleware stays the deferred follow-up (D7).
+- **D6 — Screen discovery lives in the host, not IPC.** The host discovers
+  `screens/*.tsx` itself; the `design.ensure` / `design.status`
   IPC shape (`{ workspaceId } → { url, port, projectId, running }`) is
   UNCHANGED so `DesignView.tsx`'s contract stays stable. No new backend
-  commands.
+  commands. AMENDED (lead, at Lane A review): the original wording prescribed
+  `import.meta.glob`, which cannot take a runtime-resolved external directory
+  (its pattern must be compile-time static, and `design/` dirs live outside
+  the host package root). The mechanism is a generated per-project manifest
+  (`design-host/vite/screens.ts`), the same technique the predecessor's
+  `proto-manifest.ts` used for the identical constraint. The RULE of D6 —
+  discovery inside the host, zero new IPC — is unchanged. Credit: Dew for
+  flagging instead of silently deviating.
 - **D7 — `design-viewer-hardening` task is superseded** (it hardened the Arta
   embed). Its middleware/fs.allow requirements become acceptance criteria of
   Lane A below. Prod packaging of the sidecar (node-at-runtime question)
