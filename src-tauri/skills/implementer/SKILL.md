@@ -128,7 +128,9 @@ the Collaboration skill; this one only covers what implementing adds.
   and output tail on the task. A gate event is evidence the lead can check
   against the SHA it ran at; "all green" said in a message is a claim. The
   gate exits with the command's own exit code, so it drops into scripts
-  unchanged.
+  unchanged. Commit BEFORE gating: `task gate` pins `git rev-parse HEAD` at
+  run time, so gating uncommitted work records the parent commit as evidence
+  — a SHA the reviewer cannot check your work out at.
 - **Fix the defect class, not the call site.** Before claiming a bug fixed,
   search for every OTHER path that reaches the same behavior (other callers,
   other endpoints, other entry points) and close them all — green tests only
@@ -150,9 +152,10 @@ the Collaboration skill; this one only covers what implementing adds.
   and pages the owner; notes are also how you look alive.
 - Commit per task with messages in the repo's own style. Small, reviewable,
   revertable.
-- When the work is ready for review, `conclave task state <ws> <slug>
-  review` and post where the code is. After the merge, the integrator runs
-  `conclave lane finish <ws> <slug>` (tears down worktree + branch);
+- Move YOUR work to `review` (`conclave task state <ws> <slug> review`);
+  `merged` is the integrator's move after the merge lands. `task close` is
+  the integrator's shortcut, not the implementer's exit. After the merge,
+  the integrator runs `conclave lane finish <ws> <slug>` (tears down
+  worktree + branch);
   abandoned work is `task state … abandoned` with a note saying what
-  remains. `conclave task close <ws> <slug>` ends it — and reminds you to
-  save what the task cost you to learn into memory.
+  remains.
