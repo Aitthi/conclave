@@ -16,6 +16,14 @@ type State =
   | { kind: "error"; nodeMissing: boolean; message: string }
   | { kind: "ready"; url: string; projectId: string };
 
+// Substring match against the ipc error string — `AppError` collapses every
+// backend error to a plain string at the Tauri boundary (no typed code/enum
+// crosses the wire), so this is the only signal available without widening
+// that boundary just for this one case. COUPLED to
+// `DesignViewerError::NodeNotFound`'s exact `Display` text in
+// `src-tauri/src/engine/runtime/design_viewer.rs` — if that message changes,
+// update this marker too (nothing currently enforces the two staying in
+// sync; a shared error-code field would, but is out of scope here).
 const NODE_MISSING_MARKER = "node was not found on PATH";
 
 export function DesignView({ workspaceId, workspaceName, onClose }: DesignViewProps) {
