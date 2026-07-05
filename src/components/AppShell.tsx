@@ -362,8 +362,10 @@ export function AppShell() {
               <WorkspacePane
                 key={`${activeWorkspaceId}:${agentsVersion}`}
                 workspaceId={activeWorkspaceId}
+                workspaceName={activeWorkspace?.name}
                 focusInstanceId={selectedId}
-                showDesign={showDesign}
+                designOpen={showDesign}
+                onCloseDesign={() => setShowDesign(false)}
                 onOpenChat={() => {
                   setShowBlackboard(false);
                   setShowMemory(false);

@@ -7,6 +7,7 @@ import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
 import { FusionView } from "./FusionView";
 import { ChatRail } from "./ChatRail";
+import { DesignView } from "./DesignView";
 import { ContextTopBar, ContextBottomBar } from "./ContextBars";
 import { useSessionSnapshots } from "../lib/useSessionSnapshots";
 import { getTermTabMode } from "../lib/termMode";
@@ -23,6 +24,8 @@ export type { RoutingTarget };
 
 interface WorkspacePaneProps {
   workspaceId: string;
+  /** For the Design view's header (DesignView has no other way to know it). */
+  workspaceName?: string;
   /** Optional: when set, switches the active tab to the matching instanceId (if
    *  it exists in the loaded tabs). Used to honor Roster selection. The existing
    *  auto-focus-first-tab behavior in the load effect is unaffected — this effect
@@ -31,9 +34,13 @@ interface WorkspacePaneProps {
   /** Opens the workspace Chat Hub (threaded down to the Context drawer's
    *  "Open chat" affordance). */
   onOpenChat?: () => void;
-  /** Shell-plumbed placeholder for the Design view. Lane D renders inside the
-   *  mounted workspace pane so terminals stay alive; this lane does not use it. */
-  showDesign?: boolean;
+  /** Design view (master plan Lane D): renders inside a permanent slot in
+   *  THIS component's own tree (never a full-page replace-pane like Chat/
+   *  Blackboard/Memory/LaneBoard) so the terminal column beside it never
+   *  remounts. Owned by AppShell/Rail's ⌘D toggle. */
+  designOpen?: boolean;
+  /** Clears `designOpen` in the parent — wired to DesignView's close X. */
+  onCloseDesign?: () => void;
 }
 
 // View-model for one agent tab (any type). Carries the full `AgentDefinition`
@@ -81,9 +88,11 @@ function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
  */
 export function WorkspacePane({
   workspaceId,
+  workspaceName,
   focusInstanceId,
   onOpenChat,
-  showDesign: _showDesign,
+  designOpen = false,
+  onCloseDesign,
 }: WorkspacePaneProps) {
   const [tabs, setTabs] = useState<AgentTab[]>([]);
   const [loading, setLoading] = useState(true);
@@ -290,27 +299,32 @@ export function WorkspacePane({
   // consume THIS instance, never a second one of their own.
   const sessionSnapshots = useSessionSnapshots(activeSessionId ?? "");
 
-  // Loading state: don't flash "no agents" during the initial fetch.
-  if (loading) {
+  // Loading / empty / load-error states also carry the design slot — no
+  // Terminal exists in either (nothing to protect from remounting), but
+  // Design is still useful in a workspace with zero agents, so it shouldn't
+  // disappear just because the tab strip hasn't loaded yet.
+  if (loading || tabs.length === 0) {
     return (
-      <main className="flex-1 flex flex-col min-w-0 bg-surface">
-        <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
-          Loading…
+      <div className="flex-1 flex min-w-0 bg-surface">
+        <div className={designOpen ? "flex-1 flex flex-col min-w-0 border-r border-overlay/[0.06]" : "w-0 shrink-0 overflow-hidden"}>
+          {designOpen && (
+            <DesignView
+              workspaceId={workspaceId}
+              workspaceName={workspaceName}
+              onClose={() => onCloseDesign?.()}
+            />
+          )}
         </div>
-      </main>
-    );
-  }
-
-  // Empty / load-error state.
-  if (tabs.length === 0) {
-    return (
-      <main className="flex-1 flex flex-col min-w-0 bg-surface">
-        <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary px-6 text-center">
-          {loadError
-            ? "Failed to load agents"
-            : "No agents in this workspace yet"}
-        </div>
-      </main>
+        <main className={designOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
+          <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary px-6 text-center">
+            {loading
+              ? "Loading…"
+              : loadError
+                ? "Failed to load agents"
+                : "No agents in this workspace yet"}
+          </div>
+        </main>
+      </div>
     );
   }
 
@@ -318,7 +332,24 @@ export function WorkspacePane({
 
   return (
     <div className="flex-1 flex min-w-0 bg-surface">
-      <main className="flex-1 flex flex-col min-w-0">
+      {/* Design slot (master plan Lane D) — ALWAYS mounted in this exact tree
+          position, both modes. Only this div's className and DesignView's
+          presence inside it change when `designOpen` toggles; `<main>` below
+          and `<ChatRail>` at the end are the SAME two siblings either way,
+          just with different classNames — the terminal's ancestor chain
+          never changes shape, so it never remounts (the one hard constraint
+          of this lane). DesignView itself (and its iframe) unmounting/
+          remounting on toggle is fine — only the SLOT needs to be stable. */}
+      <div className={designOpen ? "flex-1 flex flex-col min-w-0 border-r border-overlay/[0.06]" : "w-0 shrink-0 overflow-hidden"}>
+        {designOpen && (
+          <DesignView
+            workspaceId={workspaceId}
+            workspaceName={workspaceName}
+            onClose={() => onCloseDesign?.()}
+          />
+        )}
+      </div>
+      <main className={designOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
         {/* Tab strip — one tab per instance, with a per-type glyph. 48px tall to
             line up with the Roster and Context headers so the three column
             dividers form one continuous macOS-style toolbar rule. The strip is
@@ -473,8 +504,17 @@ export function WorkspacePane({
 
       {/* Right Chats rail — workspace-scoped, NOT per-tab: mounted
           unconditionally so switching tabs (or having none active) never
-          resets its room selection or unread state. */}
-      <ChatRail workspaceId={workspaceId} roster={roster} statuses={statuses} onOpenChat={onOpenChat} />
+          resets its room selection or unread state. In Design mode it's
+          visually collapsed (judgment call — three full columns plus a
+          narrowed terminal is too cramped) via a WRAPPING div's className,
+          never by conditionally rendering ChatRail itself — it stays
+          mounted, same "never unmount a sibling" discipline as the design
+          slot above. `display: contents` when not collapsed makes the
+          wrapper transparent to the flex layout, so it changes nothing
+          when Design is closed. */}
+      <div className={designOpen ? "w-0 shrink-0 overflow-hidden" : "contents"}>
+        <ChatRail workspaceId={workspaceId} roster={roster} statuses={statuses} onOpenChat={onOpenChat} />
+      </div>
     </div>
   );
 }
