@@ -393,10 +393,16 @@ Track descriptions in `roles/*/ROLE.md` are unchanged; position is orthogonal to
    in-flight. The position migration takes the next free index **after** those land, with the matching
    `db.rs` `if version < NN` block. Do not author `0015`/`db.rs` until the in-flight lanes merge, or rebase
    the number at integration.
-3. **Auto-notify attribution.** Every new routed notification (stall→supervisor, deadline→supervisor,
-   challenge→ruler) reuses `message::inject`, attributes to a **real** party, and carries the in-body `AUTO`
-   marker — the RULED-2026-07-04 contract (`task_timer.rs:180,268`). A routed page missing `AUTO` is a
-   review block.
+3. **Auto-notify attribution (AMENDED at P3 review — the original lumped two classes together).**
+   TIMER-generated pages (stall→supervisor, deadline→supervisor) reuse `message::inject`, attribute to a
+   **real** party, and carry the in-body `AUTO` marker — they fire spontaneously in a party's voice, which
+   is what AUTO disambiguates. COMMAND-path supplements (challenge→ruler, review-ready→owner) are
+   event-notification lines fanned out from a live actor's action, the same class as today's watcher
+   wakes — which carry NO `AUTO` (verified: task.rs has none) — so they match the watcher-line format
+   exactly, no AUTO. A watching ruler must receive the byte-identical line format they receive today.
+   The RULED-2026-07-04 contract (`task_timer.rs:180,268`) governs the timer class: a TIMER page
+   missing `AUTO` is a review block; a command-path supplement carrying a spurious `AUTO` is equally a
+   defect (it would differ from the watcher line beside it).
 4. **Live task system, 13+ merged tasks of history.** Every existing task has NULL owner/implementer
    supervisors → the backward-compat invariant (§3) makes all four routing paths behave exactly as today.
    New behavior only activates once someone sets a link. No data migration of existing tasks.
