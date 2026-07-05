@@ -2379,7 +2379,10 @@ mod tests {
 
     #[test]
     fn resolve_task_create_plan_file_reads_the_file_and_rewrites_the_flag() {
-        let path = std::env::temp_dir().join("conclave-cli-test-plan-file.txt");
+        // Unique per run — a fixed temp path races create/remove with a
+        // concurrent `cargo test` and dies with NotFound (see :2333).
+        let path = std::env::temp_dir()
+            .join(format!("conclave plan-file test {}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "the plan body").expect("write fixture failed");
 
         let argv = v(&[
