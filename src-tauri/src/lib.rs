@@ -68,14 +68,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
-            // The design-viewer sidecar is a plain child process (no PTY), so
+            // The design-host sidecar is a plain child process (no PTY), so
             // it does not die implicitly the way a PTY-backed CLI agent's
             // child does when its master fd closes — this is the one place
             // that must reach in and kill it explicitly before the process
-            // exits (see `runtime::design_viewer::kill_on_exit`'s doc comment
+            // exits (see `runtime::design_host::kill_on_exit`'s doc comment
             // for why this can't just wait for the async crash-monitor task).
             if let tauri::RunEvent::Exit = event {
-                engine::runtime::design_viewer::kill_on_exit();
+                engine::runtime::design_host::kill_on_exit();
             }
         });
 }
