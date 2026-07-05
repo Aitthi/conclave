@@ -446,7 +446,15 @@ pub async fn claim(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
     let row = repo::task::claim(&state.db, &req.workspace_id, &req.slug, &req.actor_id).await?;
     emit_changed(state, &row);
-    notify_watchers(state, &row, &req.actor_id, "state", "-> claimed").await;
+    notify_watchers(
+        state,
+        &row,
+        &req.actor_id,
+        "state",
+        "-> claimed",
+        &json!({ "state": "claimed" }),
+    )
+    .await;
     Ok(task_to_json(&row))
 }
 
@@ -480,7 +488,15 @@ pub async fn set_state(state: &AppState, payload: Value) -> Result<Value, AppErr
     .await?;
     emit_changed(state, &row);
     if let Some(actor) = &req.actor_id {
-        notify_watchers(state, &row, actor, "state", &format!("-> {}", req.state)).await;
+        notify_watchers(
+            state,
+            &row,
+            actor,
+            "state",
+            &format!("-> {}", req.state),
+            &json!({ "state": req.state }),
+        )
+        .await;
     }
     Ok(task_to_json(&row))
 }
@@ -520,6 +536,7 @@ pub async fn note(state: &AppState, payload: Value) -> Result<Value, AppError> {
         req.actor_id.as_deref(),
         "note",
         &req.text,
+        &json!({ "text": req.text }),
     )
     .await?;
     Ok(task_event_to_json(&event))
@@ -574,6 +591,7 @@ pub async fn gate(state: &AppState, payload: Value) -> Result<Value, AppError> {
         req.actor_id.as_deref(),
         "gate",
         &format!("{} exit={}", req.cmd, req.exit),
+        &json!({ "exit": req.exit }),
     )
     .await?;
     Ok(task_event_to_json(&event))
@@ -634,6 +652,8 @@ pub async fn challenge(state: &AppState, payload: Value) -> Result<Value, AppErr
         req.actor_id.as_deref(),
         "challenge",
         &req.claim,
+        // Challenges always wake (deadlines ride them); no wake-signal needed.
+        &Value::Null,
     )
     .await?;
     Ok(task_event_to_json(&event))
@@ -679,6 +699,10 @@ pub async fn rule(state: &AppState, payload: Value) -> Result<Value, AppError> {
         Some(&req.actor_id),
         "ruling",
         &req.text,
+        // A manual ruling is ledger-only (decision 1): the challenger proceeds
+        // on their stated default and pulls the ledger; a deadline auto-ruling
+        // is a separate `challenge`-class notify in task_timer, unaffected here.
+        &Value::Null,
     )
     .await?;
     Ok(task_event_to_json(&event))
@@ -705,7 +729,15 @@ pub async fn close(state: &AppState, payload: Value) -> Result<Value, AppError> 
     let row = repo::task::close(&state.db, &req.workspace_id, &req.slug, req.actor_id.as_deref()).await?;
     emit_changed(state, &row);
     if let Some(actor) = &req.actor_id {
-        notify_watchers(state, &row, actor, "state", "-> merged").await;
+        notify_watchers(
+            state,
+            &row,
+            actor,
+            "state",
+            "-> merged",
+            &json!({ "state": "merged" }),
+        )
+        .await;
     }
     Ok(task_to_json(&row))
 }
@@ -734,6 +766,7 @@ pub async fn watch(state: &AppState, payload: Value) -> Result<Value, AppError> 
         Some(&req.actor_id),
         "watch",
         "started watching",
+        &Value::Null,
     )
     .await?;
     Ok(json!({ "watching": true }))
@@ -753,6 +786,7 @@ pub async fn unwatch(state: &AppState, payload: Value) -> Result<Value, AppError
         Some(&req.actor_id),
         "unwatch",
         "stopped watching",
+        &Value::Null,
     )
     .await?;
     Ok(json!({ "watching": false }))
@@ -773,11 +807,12 @@ async fn on_task_mutated(
     actor_id: Option<&str>,
     kind: &str,
     summary: &str,
+    payload: &Value,
 ) -> Result<(), AppError> {
     if let Some(row) = repo::task::get(&state.db, workspace_id, slug).await? {
         emit_changed(state, &row);
         if let Some(actor_id) = actor_id {
-            notify_watchers(state, &row, actor_id, kind, summary).await;
+            notify_watchers(state, &row, actor_id, kind, summary, payload).await;
         }
     }
     Ok(())
@@ -810,13 +845,73 @@ async fn agent_display_name(state: &AppState, instance_id: &str) -> String {
     }
 }
 
+/// The single wake list (plan `watch-filter`, decision 1): the ONE predicate
+/// deciding whether a task event is decision-demanding enough to inject into
+/// every watcher's live session, or merely records on the ledger for
+/// pull-based reading. Every event emitter funnels through [`notify_watchers`],
+/// which consults this once — the wake list lives here and nowhere else
+/// (decision 2: no duplicated wake lists).
+///
+/// Wakes on: every `challenge`; a `state` transition to `review`/`abandoned`/
+/// `merged`; a `gate` whose process `exit != 0`; and a `note` whose text
+/// starts (exact prefix, case-sensitive, position 0) with `READY`, `BLOCKED`,
+/// or `ESCALATION`. Everything else — `claimed`/`in_progress` states, passing
+/// gates, unmarked notes, `ruling`/`watch`/`unwatch` — is ledger-only; the
+/// stall engine ([`crate::engine::runtime::task_timer`]) is the safety net for
+/// an important-but-unmarked note left on a quiet claim.
+///
+/// `payload` carries only the per-kind wake signal (`state`/`exit`/`text`),
+/// deliberately separate from the display `summary` so the decision never
+/// depends on how a line is rendered. A `gate` with no readable `exit` fails
+/// safe to waking — a missed decision point is worse than one extra nudge.
+fn wakes_watchers(kind: &str, payload: &Value) -> bool {
+    match kind {
+        "challenge" => true,
+        "state" => matches!(
+            payload.get("state").and_then(Value::as_str),
+            Some("review" | "abandoned" | "merged")
+        ),
+        "gate" => payload
+            .get("exit")
+            .and_then(Value::as_i64)
+            .is_none_or(|exit| exit != 0),
+        "note" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(note_wakes_watchers),
+        _ => false,
+    }
+}
+
+/// A note wakes watchers only when its text opens with a decision marker —
+/// exact prefix, case-sensitive, at position 0 (decision 1). `"ready …"`
+/// (lowercase) and `" READY …"` (leading space) do NOT match.
+fn note_wakes_watchers(text: &str) -> bool {
+    ["READY", "BLOCKED", "ESCALATION"]
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
 /// Notify every OTHER watcher of a task mutation (ADR 0008 Lane B), one line
 /// per watcher: `[task <slug>] <actor-name>: <kind> — <summary>`. Delivered
 /// via `commands::message::inject` — the SAME delivery path `tell` uses (risk
 /// ledger: "reuse whatever queueing `tell` already does... do not invent a
 /// second injection path"). Best-effort: a delivery failure (unknown/offline
 /// watcher) must never fail the mutating command that triggered it.
-async fn notify_watchers(state: &AppState, task: &TaskRow, actor_id: &str, kind: &str, summary: &str) {
+///
+/// Injects only when [`wakes_watchers`] passes for `(kind, payload)`; a
+/// filtered-out event still recorded on the ledger, it simply wakes no one.
+async fn notify_watchers(
+    state: &AppState,
+    task: &TaskRow,
+    actor_id: &str,
+    kind: &str,
+    summary: &str,
+    payload: &Value,
+) {
+    if !wakes_watchers(kind, payload) {
+        return;
+    }
     let Ok(watcher_ids) = repo::task::watchers(&state.db, &task.id).await else {
         return;
     };
@@ -1532,7 +1627,10 @@ mod tests {
     // ── Lane B: watch-notify hook ───────────────────────────────────────────
 
     #[tokio::test]
-    async fn claim_notifies_a_watching_second_agent() {
+    async fn claimed_and_in_progress_states_do_not_wake_watchers() {
+        // Plan watch-filter, decision 1 + Test 2: routine progression states
+        // record on the ledger but inject NOTHING. Before this lane both of
+        // these fired a watcher notify; now neither does.
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
@@ -1547,19 +1645,65 @@ mod tests {
         claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
             .await
             .expect("claim failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": actor }),
+        )
+        .await
+        .expect("set_state in_progress failed");
 
-        // The watcher is offline in this test (no live PTY registered), so the
-        // notification is recorded as `queued` — still asserts delivery was
-        // ATTEMPTED via the real `commands::message::inject` path (risk
-        // ledger: no second injection mechanism), not just that claim worked.
+        let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
+            .await
+            .expect("list failed");
+        assert_eq!(
+            inbox.as_array().expect("array").len(),
+            0,
+            "claimed/in_progress must be ledger-only — no watcher injection"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_state_wakes_watchers_via_the_real_inject_path() {
+        // The complement: a `review` transition IS decision-demanding and wakes
+        // watchers with the same one-line shape as before (only the filter is
+        // new). Watcher is offline here, so delivery is `queued` — still proves
+        // it was ATTEMPTED via the real `message::inject` path (risk ledger: no
+        // second injection mechanism).
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
+            .await
+            .expect("claim failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": actor }),
+        )
+        .await
+        .expect("in_progress failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": actor }),
+        )
+        .await
+        .expect("review failed");
+
         let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
             .await
             .expect("list failed");
         let arr = inbox.as_array().expect("array");
-        assert_eq!(arr.len(), 1, "watcher must receive exactly one notify");
+        assert_eq!(arr.len(), 1, "only the review transition wakes; the two earlier states do not");
         let text = arr[0]["text"].as_str().expect("text present");
         assert!(text.contains("[task t1]"), "line must name the task: {text}");
-        assert!(text.contains("claimed"), "line must summarize the mutation: {text}");
+        assert!(text.contains("review"), "line must summarize the mutation: {text}");
         assert_eq!(arr[0]["fromInstanceId"], json!(actor), "attributed to the real actor");
         assert_eq!(arr[0]["toInstanceId"], json!(watcher));
     }
@@ -1570,7 +1714,7 @@ mod tests {
     /// `commands::message`'s own `inject_live_target_delivers` test) so the
     /// notify actually reaches a "live" stdin, not just a queued DB row.
     #[tokio::test]
-    async fn claim_notify_arrives_in_a_live_watchers_pty() {
+    async fn waking_notify_arrives_in_a_live_watchers_pty() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
@@ -1595,15 +1739,23 @@ mod tests {
             "registering the watcher's live placeholder must succeed"
         );
 
+        // `claim` is now silent (ledger-only); drive a WAKING transition
+        // (claimed -> abandoned) so a live watcher actually receives the line.
         claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
             .await
             .expect("claim failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
+        )
+        .await
+        .expect("abandon failed");
 
         let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
             .await
             .expect("list failed");
         let arr = inbox.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
+        assert_eq!(arr.len(), 1, "only the abandoned transition wakes, not the claim");
         assert_eq!(
             arr[0]["status"],
             json!("delivered"),
@@ -1625,9 +1777,17 @@ mod tests {
             .await
             .expect("watch failed");
 
+        // Drive a WAKING self-mutation (claimed -> abandoned): the 0-count then
+        // proves self-exclusion, not merely that the event was filtered out.
         claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
             .await
             .expect("claim failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
+        )
+        .await
+        .expect("abandon failed");
 
         let inbox = super::super::message::list(&state, json!({ "instanceId": actor }))
             .await
@@ -1648,14 +1808,23 @@ mod tests {
             .await
             .expect("create failed");
 
-        // No watch() call at all — must not panic or error.
+        // No watch() call at all — a waking transition must not panic or error.
         claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
             .await
             .expect("claim failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
+        )
+        .await
+        .expect("abandon failed");
     }
 
     #[tokio::test]
-    async fn note_notifies_watchers_with_the_note_text() {
+    async fn marked_note_notifies_watchers_but_unmarked_note_does_not() {
+        // Plan watch-filter, decision 1 + Test 2: a note wakes watchers ONLY
+        // when its text opens with READY/BLOCKED/ESCALATION; the injected line
+        // has the same shape as before. An unmarked note is ledger-only.
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
@@ -1667,21 +1836,131 @@ mod tests {
             .await
             .expect("watch failed");
 
+        // Unmarked note: no wake.
         note(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": "making progress" }),
         )
         .await
-        .expect("note failed");
+        .expect("unmarked note failed");
+        assert_eq!(
+            super::super::message::list(&state, json!({ "instanceId": watcher }))
+                .await
+                .expect("list failed")
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "an unmarked note must be ledger-only"
+        );
+
+        // Marked note: wakes, same one-line shape as before.
+        note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": "READY for review at abc123" }),
+        )
+        .await
+        .expect("marked note failed");
 
         let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
             .await
             .expect("list failed");
         let arr = inbox.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
+        assert_eq!(arr.len(), 1, "only the READY note wakes");
         let text = arr[0]["text"].as_str().unwrap();
         assert!(text.contains("note"), "kind must be in the line: {text}");
-        assert!(text.contains("making progress"), "summary must be the note text: {text}");
+        assert!(text.contains("READY for review"), "summary must be the note text: {text}");
+    }
+
+    async fn inbox_len(state: &AppState, instance: &str) -> usize {
+        super::super::message::list(state, json!({ "instanceId": instance }))
+            .await
+            .expect("list failed")
+            .as_array()
+            .expect("array")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn failing_gate_and_challenge_wake_but_passing_gate_does_not() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Actor").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
+        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
+            .await
+            .expect("create failed");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
+            .await
+            .expect("watch failed");
+
+        let gate_payload = |exit: i64| {
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "cmd": "cargo test", "exit": exit, "sha": "abc", "tail": "…", "cwd": "/tmp",
+            })
+        };
+        gate(&state, gate_payload(0)).await.expect("passing gate");
+        assert_eq!(inbox_len(&state, &watcher).await, 0, "a passing gate is ledger-only");
+
+        gate(&state, gate_payload(101)).await.expect("failing gate");
+        assert_eq!(inbox_len(&state, &watcher).await, 1, "a failing gate wakes");
+
+        challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "the plan is wrong", "evidence": "line 5", "proposal": "fix it", "default": "proceed",
+            }),
+        )
+        .await
+        .expect("challenge");
+        assert_eq!(inbox_len(&state, &watcher).await, 2, "every challenge wakes");
+    }
+
+    #[test]
+    fn wakes_watchers_encodes_exactly_the_decision_1_list() {
+        // challenge — always, regardless of payload.
+        assert!(wakes_watchers("challenge", &Value::Null));
+
+        // state — only review/abandoned/merged.
+        for terminal in ["review", "abandoned", "merged"] {
+            assert!(
+                wakes_watchers("state", &json!({ "state": terminal })),
+                "{terminal} must wake"
+            );
+        }
+        for routine in ["claimed", "in_progress", "planned"] {
+            assert!(
+                !wakes_watchers("state", &json!({ "state": routine })),
+                "{routine} must not wake"
+            );
+        }
+
+        // gate — exit != 0 wakes; exit 0 does not; unreadable exit fails safe.
+        assert!(!wakes_watchers("gate", &json!({ "exit": 0 })));
+        assert!(wakes_watchers("gate", &json!({ "exit": 1 })));
+        assert!(wakes_watchers("gate", &json!({ "exit": -1 })));
+        assert!(
+            wakes_watchers("gate", &json!({})),
+            "an unreadable exit fails safe to waking"
+        );
+
+        // note — exact-prefix, case-sensitive markers only.
+        for wake in ["READY at abc", "BLOCKED on x", "ESCALATION: y", "READY", "BLOCKED"] {
+            assert!(wakes_watchers("note", &json!({ "text": wake })), "{wake:?} must wake");
+        }
+        for quiet in ["ready lower", " READY leading-space", "escalation", "just progress", "note READY mid"] {
+            assert!(
+                !wakes_watchers("note", &json!({ "text": quiet })),
+                "{quiet:?} must not wake"
+            );
+        }
+
+        // everything else is ledger-only.
+        for ledger_only in ["ruling", "watch", "unwatch", "created"] {
+            assert!(!wakes_watchers(ledger_only, &Value::Null), "{ledger_only} must not wake");
+        }
     }
 
     #[tokio::test]
@@ -1697,7 +1976,9 @@ mod tests {
             .await
             .expect("watch failed");
 
-        let long_text = "x".repeat(500);
+        // Marked so it wakes (a plain note is now ledger-only); still long
+        // enough that the notify line must truncate its summary.
+        let long_text = format!("READY {}", "x".repeat(500));
         note(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": long_text }),
@@ -1733,9 +2014,17 @@ mod tests {
             .await
             .expect("unwatch failed");
 
+        // A WAKING mutation (claimed -> abandoned) after unwatch: the 0-count
+        // proves the unsubscribe, not merely that the event was filtered out.
         claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
             .await
             .expect("claim failed");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
+        )
+        .await
+        .expect("abandon failed");
 
         let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
             .await

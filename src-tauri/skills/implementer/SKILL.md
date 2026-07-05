@@ -146,10 +146,16 @@ the Collaboration skill; this one only covers what implementing adds.
 
 - Post a task note (`conclave task note <ws> <slug> <text>`) when a task or
   phase lands: what finished, the commit SHA, what's next, anything you
-  decided along the way. The lead reads it pull-based (watchers are
-  notified automatically) — you don't need to interrupt them to be visible.
-  A claimed task with no events for 30 minutes looks stalled to the engine
-  and pages the owner; notes are also how you look alive.
+  decided along the way. Routine notes are ledger-only — the lead pulls them
+  with `task get`, not woken into their session — so you don't interrupt
+  them to stay visible.
+- Prefix a note that needs the lead NOW with `READY`, `BLOCKED`, or
+  `ESCALATION` (exact word, start of the note). Only marked notes, a failing
+  gate (`exit != 0`), a challenge, and a `review`/`abandoned`/`merged`
+  transition wake watchers; everything else — plain notes, passing gates,
+  `claimed`/`in_progress` — records silently. If you go quiet ≥10 minutes
+  holding a claim, the stall engine pages the lead to come check, so an
+  important-but-unmarked note is never lost, only delayed.
 - Commit per task with messages in the repo's own style. Small, reviewable,
   revertable.
 - Move YOUR work to `review` (`conclave task state <ws> <slug> review`);
