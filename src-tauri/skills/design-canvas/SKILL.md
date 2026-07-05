@@ -1,96 +1,98 @@
 ---
 name: Design Canvas
-description: The .arta/ file contract for the built-in Design view — a live design canvas any agent writes into with its ordinary file tools (no MCP, no CLI-vendor tool), that the human watches update in real time.
+description: The design/ file contract for the built-in Design view — a live design canvas any agent writes into with its ordinary file tools (no MCP, no CLI-vendor tool), rendered by a supervised HMR host the human watches update in real time beside your terminal.
 mandatory: false
 ---
 
-The Design view shows a live canvas of an app being designed — prototype
-screens, spec, data model, flow, architecture, plan — that the human watches
-in the browser-based viewer while your terminal stays open beside it. There
-is no special tool for this: `.arta/` is a plain folder in the workspace's
-linked project directory, and you read/write it with your normal file tools.
-Everything here works the same regardless of which CLI you are.
+The Design view shows a live canvas of an app being designed — the React screens
+you write — that the human watches render in real time while your terminal stays
+open beside it. There is no special tool for this: `design/` is a plain folder in
+the workspace's linked project directory, and you read/write it with your normal
+file tools. A Conclave-supervised Vite host serves the folder with hot reload, so
+a screen you save appears (or updates) in the canvas within a second. Everything
+here works the same regardless of which CLI you are. For the CRAFT of what to put
+in these files — the anti-slop rules and the critique rubric — load the
+**Design Craft** skill; this one is only the file contract.
 
 ## Where the canvas lives
 
-- `.arta/` sits at the root of the workspace's linked folder (the same folder
-  your terminal's `cwd` is under). If it doesn't exist yet, ask the lead or
-  human to open the Design view once (or call `design.ensure` for this
-  workspace) — that scaffolds a starter canvas. Do not hand-create the
-  top-level layout yourself; only add to what's already there.
-- `.arta/state.json` — the non-prototype sections: `meta`, `spec`, `plan`,
-  `dataModel`, `flow`, `api`, `architecture`. Never put prototype screens in
-  here; the viewer assembles `prototype` fresh from `.arta/proto/` on every
-  read; anything you write to a `prototype` key in this file is discarded.
-- `.arta/proto/` — the prototype, as real files (see below).
-- `.arta/feedback.json`, `.arta/runtime.json` — the human → agent channel
-  (read-only for you; the viewer writes these).
+- `design/` sits at the root of the workspace's linked folder (the same folder
+  your terminal's `cwd` is under). If it doesn't exist yet, ask the lead or human
+  to open the Design view once (or run `design.ensure` for this workspace) — that
+  scaffolds a starter canvas (`design/screens/welcome.tsx`, `design/lib/`, and a
+  minimal `design/theme.css`). Do not hand-create the top-level layout yourself;
+  only add to what's already there.
+- There is no `state.json`, no `feedback.json`, no viewer database — the design
+  IS the files under `design/`. Non-screen artifacts (spec, data model, flow,
+  plan) are ordinary prose you write to the task plan / a doc, not canvas tabs.
 
-## state.json — spec, data model, flow, architecture, plan
+## screens/ — the prototype, as real screens
 
-Read and write this file directly with your normal tools; it's plain JSON.
-Every section is optional and independently gradeable — write what you know,
-leave the rest absent, and the viewer degrades gracefully rather than
-breaking. The schema is documented as TypeScript types in
-`design-viewer/src/lib/types.ts` (`Meta`, `Spec`, `DataModel`, `Flow`,
-`ApiDoc`, `Architecture`, `Plan` — the top-level shape is `ArtaState`); treat
-that file as the source of truth over this summary. Set `meta.name` (the
-canvas title) and keep `meta.phase` current (`"prototype" | "data" | "flow" |
-"architecture" | "plan"`) as you move between sections, so the viewer's tab
-tracks where the work actually is.
+- One screen = one file: `design/screens/<id>.tsx`. The FILE NAME is the screen's
+  id — the host's in-canvas switcher lists screens by it, and navigation targets
+  it. No registry to keep in sync; the filesystem is the only source of truth.
+- Every screen file exports `export const meta = { title: "…" }` as a pure object
+  literal, plus a **default-exported** React component. The host renders the
+  selected screen full-bleed.
+- **Zero imports from the host.** A screen is a plain React component: it cannot
+  tell it is being designed here, which is exactly what lets it lift into a
+  production codebase unmodified later. Navigation is ordinary `react-router-dom`
+  (`<Link to="/checkout">`, `useNavigate`); state is ordinary React under
+  `design/lib/`.
+- Imports come from the curated set ONLY: `react`, `react-router-dom`, `motion`,
+  `lucide-react`, `recharts`, `clsx`, `tailwind-merge`. Anything else will not
+  resolve — the host aliases exactly these to its own single copy so two React
+  instances never load into one page. Never use emoji as icons; use a
+  `lucide-react` glyph.
 
-## proto/ — the prototype, as real screens
+## components/ and lib/ — shared parts
 
-- One screen = one file: `.arta/proto/screens/<id>.tsx`. The FILE NAME is the
-  screen's id — referenced by flow nodes, feedback, and navigation. No
-  registry to keep in sync; the filesystem is the only source of truth.
-- Every screen file exports `export const meta = { title: "…", ... }` as a
-  pure object literal (frame/safeArea/chrome overrides go here too — see
-  `Screen` in types.ts) plus a default-exported React component.
-- **Zero imports from the viewer.** A screen is a plain React component: it
-  cannot tell it is being designed here, which is exactly what lets it lift
-  into a production codebase unmodified later. Navigation is ordinary
-  `react-router-dom` (`<Link to="/checkout">`, `useNavigate`); state is
-  ordinary React under `.arta/proto/lib/`.
-- Imports come from the curated set ONLY: `react`, `react-router-dom`,
-  `motion`, `lucide-react`, `recharts`, `clsx`, `tailwind-merge`. Anything
-  else will not resolve — the viewer aliases exactly these to its own single
-  copy so two React instances never load into one page.
-- Shared components live in `.arta/proto/components/<name>.tsx`, same rules.
-- `.arta/proto/config.json` holds prototype-level defaults (`start` screen,
-  default `frame`/`safeArea`/`chrome` — see `Prototype` in types.ts).
+- Shared components live in `design/components/<name>.tsx`, same rules as screens.
+  Repeated chrome (a nav rail, a card, a page header) is a component, not markup
+  pasted onto every screen.
+- Shared React state lives under `design/lib/` — plain hooks/stores that screens
+  and components import. Nothing design-view-specific about it; it lifts too.
 
 ## theme.css — the one design-tokens file
 
-- `.arta/proto/theme.css` is Tailwind v4 CSS-first config: tokens as
-  `@theme { --color-*, --font-*, --radius-*, ... }` custom properties, dark
-  theme as `.dark { ... }` overrides. This is the single source every screen
-  styles from — there is no separate JSON design-tokens file.
+- `design/theme.css` is Tailwind v4 CSS-first config: tokens as
+  `@theme { --color-*, --font-*, --radius-*, … }` custom properties, dark theme as
+  `.dark { … }` overrides. This is the single source every screen styles from —
+  every `--color-*`/`--font-*`/`--radius-*` becomes a matching Tailwind utility
+  (`bg-accent`, `font-display`, `rounded-md`). There is no separate JSON tokens
+  file. Style screens with those utility classes in `className`, not inline
+  `style={{…}}`, and never raw hex in a screen body.
 - Never remove its `@import "tailwindcss"`, `@source "./"`, or
-  `@custom-variant dark (&:where(.dark, .dark *));` lines — they are
-  load-bearing; the prototype fails to compile without them.
-- If you introduce a font stack, keep a Thai-script fallback in it (the
-  platform already does this for token `--font-*` values automatically —
-  match that intent in any stack you add by hand).
+  `@custom-variant dark (&:where(.dark, .dark *));` lines — they are load-bearing;
+  the canvas fails to compile without them.
+- If you introduce a font stack with a Latin display face, keep a matching
+  non-Latin fallback in it (e.g. a Noto Thai family) so Thai/CJK glyphs render
+  clean rather than falling back to a broken system face.
 
-## The feedback loop — read-only channel from the human
+## config.json — optional prototype defaults
 
-- `.arta/feedback.json` is a list the human appends to by clicking an
-  element in the viewer's annotate mode: `{ text, tab, screen, element, at,
-  read }`. Read it at natural pauses (starting a session, finishing a
-  screen); a comment sitting there is the human's most recent, most specific
-  ask. After you act on an item, mark it handled by rewriting that entry with
-  `read: true` — do not delete entries, and never overwrite ones you haven't
-  gotten to.
-- `.arta/runtime.json` tells you what the human is currently looking at
-  (`tab`, `screen`, `screens` seen this session, any live compile/render
-  `errors`) — written by the viewer, not by you. Check it before making a
-  change that depends on which screen is currently in view.
+- `design/config.json` is optional. `{ "start": "<screen>" }` names the screen
+  the canvas opens on and the entry point for navigation-reachability checks. The
+  scaffold does NOT create it (nav checks are simply skipped when it's absent);
+  add it once your screens link to each other and you want a defined start.
+
+## The loop — the human watches; you converse in the terminal
+
+- The host renders every save live, so the human sees your work as you write it.
+  There is no separate feedback file — the human reacts by talking to you in the
+  terminal beside the canvas. Fold each reaction into the next iteration; work one
+  screen (or component) at a time so the canvas repaints cleanly.
+- A compile or render error surfaces in the canvas (the host's HMR error overlay).
+  Treat it like any failing build: read it, fix the screen, confirm it clears.
+- Before calling a screen or the design done, run the review gate:
+  `conclave design review <workspaceId>` — it scans `design/` for the anti-slop
+  tells and must return zero serious findings. Pair it with the Design Craft
+  critique rubric (the taste the detector can't see).
 
 ## Working with a design lead
 
-If another agent already owns this canvas (check `conclave task list
-<ws>`/`conclave bb list <ws>` for a design-in-progress marker before writing),
-coordinate before reshaping screens they're iterating on — the file contract
-has no locking, so two agents editing the same screen concurrently will
-clobber each other's work exactly like any other shared file.
+If another agent already owns this canvas (check `conclave task list <ws>` /
+`conclave bb list <ws>` for a `design:<project>` marker before writing),
+coordinate before reshaping screens they're iterating on — the file contract has
+no locking, so two agents editing the same screen concurrently will clobber each
+other's work exactly like any other shared file.
