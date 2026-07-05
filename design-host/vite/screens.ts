@@ -37,6 +37,17 @@ export function listScreens(designDir: string): Screen[] {
 export function manifestCode(designDir: string): string {
   const screens = listScreens(designDir);
   const out: string[] = [];
+  // R6 (Arta authoring parity): pull in the workspace's Tailwind v4 sheet so
+  // `@tailwindcss/vite` compiles its `@theme` tokens + the utilities the screens use.
+  // A static top-of-module import (not a dynamic one) so Vite treats it as a real CSS
+  // entry and injects the compiled stylesheet. Emitted only when the file exists — a
+  // workspace without a theme.css simply renders unstyled screens rather than 500ing on
+  // a missing import. The sheet's own `@source` globs (relative to this dir) decide
+  // what gets scanned for utility classes.
+  const themeFile = path.join(designDir, "theme.css");
+  if (fs.existsSync(themeFile)) {
+    out.push(`import ${JSON.stringify("/@fs/" + themeFile)};`);
+  }
   out.push(`export const screens = {`);
   for (const s of screens) out.push(`  ${JSON.stringify(s.id)}: () => import(${JSON.stringify("/@fs/" + s.file)}),`);
   out.push(`};`);

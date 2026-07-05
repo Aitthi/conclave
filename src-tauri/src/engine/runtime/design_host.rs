@@ -298,6 +298,37 @@ fn bundled_design_host_dir() -> Option<PathBuf> {
     Some(exe.parent()?.parent()?.join("Resources").join("design-host"))
 }
 
+/// Run the deterministic design-review grader (`review/review.mjs`) against a
+/// workspace `design/` dir and return its parsed `{ pass, findings, assertions }`
+/// report.
+///
+/// Resolves `node` via the login-shell PATH exactly like the host sidecar (so an
+/// nvm-/Homebrew-installed node is found), then spawns
+/// `node review/review.mjs <dir> --json`. In `--json` mode `review.mjs` prints
+/// EXACTLY that one JSON object on stdout and nothing else, so we parse stdout
+/// directly. A NON-ZERO child exit is EXPECTED and benign when the design has
+/// findings — the report's own `pass` field is the signal the caller acts on, not
+/// the exit code — so a non-zero exit is not itself an error here; only failing to
+/// spawn node or to parse the report is.
+pub async fn review(design_dir: &Path) -> Result<serde_json::Value, DesignHostError> {
+    let node = resolve_node().await?;
+    let script = design_host_dir().join("review").join("review.mjs");
+    let output = Command::new(&node)
+        .arg(&script)
+        .arg(design_dir)
+        .arg("--json")
+        .output()
+        .await
+        .map_err(|e| DesignHostError::Spawn(format!("spawning design review: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(stdout.trim()).map_err(|e| {
+        DesignHostError::Spawn(format!(
+            "design review did not produce a parseable report ({e}); stderr: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    })
+}
+
 /// First-run `pnpm install` inside `dir` if `node_modules` is missing —
 /// dev-mode behavior, accepted by the plan's risk ledger. Logs progress to
 /// stderr (this crate has no structured logger yet; mirrors `bus.rs`'s

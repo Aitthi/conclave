@@ -117,6 +117,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         // ── design (Phase 1 Lane B) ───────────────────────────────────────
         "design.ensure" => design::ensure(state, payload).await,
         "design.status" => design::status(state, payload).await,
+        "design.review" => design::review(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

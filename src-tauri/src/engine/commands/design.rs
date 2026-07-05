@@ -102,6 +102,67 @@ pub async fn status(state: &AppState, payload: Value) -> Result<Value, AppError>
     serde_json::to_value(build_info(&dir, host)).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewReq {
+    workspace_id: String,
+    /// Data mode vs gate mode (lead-ratified exit-code contract — see below).
+    #[serde(default)]
+    json: bool,
+}
+
+/// `design.review { workspaceId, json? }` → runs the deterministic design-review
+/// grader (`design-host/review/review.mjs`) against the workspace's `design/` dir
+/// and returns its `{ pass, findings, assertions }` report.
+///
+/// Exit-code contract (ruled by the lead, ledger note on `design-review`): the
+/// PLAIN form (`json: false`, i.e. `conclave design review <ws>`) is the GATE —
+/// it must fail loudly on serious findings so it drops into `conclave task gate`
+/// and `… && next` scripting. Since the CLI maps any handler `Err` to a non-zero
+/// process exit and an `Ok` to exit 0, "not passing" is surfaced as `Err` here.
+/// The `--json` form (`json: true`) is DATA retrieval — it always returns `Ok`
+/// with the full report so a caller can read `pass`/`findings` itself; using it as
+/// a gate would silently always pass, which the CLI help line warns against.
+pub async fn review(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = serde_json::from_value::<ReviewReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
+    let ws = repo::workspace::get(&state.db, &req.workspace_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+
+    let dir = design_dir(&ws.folder_path);
+    if !dir.is_dir() {
+        return Err(AppError::Invalid(format!(
+            "design review: no design/ directory for workspace {} — open the Design view or write design/screens/ first",
+            req.workspace_id
+        )));
+    }
+
+    let report = design_host::review(&dir)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let pass = report.get("pass").and_then(Value::as_bool).unwrap_or(false);
+
+    // Data mode, or a clean pass → return the report (CLI exits 0). Gate mode with
+    // findings → Err (CLI exits non-zero) carrying a one-line summary + a pointer to
+    // the full JSON. `AppError` has no dedicated "check failed" variant and `error.rs`
+    // is outside this lane's boundary, so `Invalid` carries it — the message leads
+    // with "design review:" so the intent is unambiguous in a gate tail.
+    if req.json || pass {
+        Ok(report)
+    } else {
+        let n = report
+            .get("findings")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        Err(AppError::Invalid(format!(
+            "design review: not passing — {n} serious finding(s); run `conclave design review {} --json` for the full report",
+            req.workspace_id
+        )))
+    }
+}
+
 // ── design/ scaffold ────────────────────────────────────────────────────
 //
 // Minimal starter so a brand-new workspace's canvas is never empty: one
@@ -109,12 +170,46 @@ pub async fn status(state: &AppState, payload: Value) -> Result<Value, AppError>
 // share across screens. Every write is idempotent (skipped if the file
 // already exists).
 
+// `design/theme.css` — a real Tailwind v4 CSS-first sheet (R4 + R6). `@import
+// "tailwindcss"` makes `@tailwindcss/vite` (wired in design-host/vite.config.ts)
+// compile it; `@source` globs (relative to this file = the workspace `design/` dir)
+// tell Tailwind which files to scan for utility classes; `@theme` declares the token
+// set the grader's A1a asserts exists and the welcome screen's utilities are built
+// from (so A1b sees no hardcoded hex). This is the Arta-parity authoring contract the
+// `design-craft` skills teach — edit tokens here, use `bg-canvas`/`text-ink`/… in
+// screens.
+const THEME_CSS: &str = r#"@import "tailwindcss";
+
+@source "./screens/**/*.tsx";
+@source "./components/**/*.tsx";
+@source "./lib/**/*.{ts,tsx}";
+
+@theme {
+  --color-canvas: #0b0b0f;
+  --color-surface: #17171d;
+  --color-ink: #ececf1;
+  --color-muted: #9a9aa7;
+  --color-accent: #6d6df0;
+  --color-border: #262630;
+
+  --radius-panel: 0.875rem;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+"#;
+
 const WELCOME_TSX: &str = r#"export default function Welcome() {
   return (
-    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
-      <div style={{ textAlign: "center" }}>
-        <h1>Your canvas is live</h1>
-        <p>Ask your agent to design something — screens are React files in design/screens/.</p>
+    <main className="min-h-screen grid place-items-center bg-canvas font-sans">
+      <div className="max-w-md px-8 text-center">
+        <h1 className="text-2xl font-semibold text-ink">Your canvas is live</h1>
+        <p className="mt-3 text-sm leading-relaxed text-muted">
+          Ask your agent to design something. Screens are React files in{" "}
+          <span className="text-ink">design/screens/</span>, styled with Tailwind
+          utilities built from the tokens in{" "}
+          <span className="text-ink">design/theme.css</span>.
+        </p>
       </div>
     </main>
   );
@@ -124,6 +219,7 @@ const WELCOME_TSX: &str = r#"export default function Welcome() {
 fn scaffold_if_missing(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir.join("screens"))?;
     std::fs::create_dir_all(dir.join("lib"))?;
+    write_if_missing(&dir.join("theme.css"), THEME_CSS)?;
     write_if_missing(&dir.join("screens").join("welcome.tsx"), WELCOME_TSX)?;
     Ok(())
 }

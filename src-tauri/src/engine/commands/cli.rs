@@ -684,6 +684,32 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             ))
         }
 
+        // ── design (Lane R: deterministic design-review gate) ─────────────
+        // `design review <workspaceId> [--json]` → design.review. The PLAIN
+        // form is the GATE — it exits non-zero on serious findings, so it drops
+        // into `conclave task gate` / `… && next`. `--json` is DATA retrieval —
+        // it always exits 0 and returns the full `{ pass, findings, assertions }`
+        // report (gate with the plain form; see the design.review handler).
+        "design" => match argv.get(1).map(String::as_str) {
+            Some("review") => {
+                let usage =
+                    || AppError::Invalid("cli: design review <workspaceId> [--json]".into());
+                let ws = argv.get(2).ok_or_else(usage)?;
+                let json = match argv.get(3).map(String::as_str) {
+                    None => false,
+                    Some("--json") => true,
+                    Some(_) => return Err(usage()),
+                };
+                if argv.len() > 4 {
+                    return Err(usage());
+                }
+                Ok(("design.review", json!({ "workspaceId": ws, "json": json })))
+            }
+            _ => Err(AppError::Invalid(
+                "cli: design review <workspaceId> [--json] — unknown design subcommand".into(),
+            )),
+        },
+
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
             "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, memory, task, run, restart)"

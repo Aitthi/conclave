@@ -1,0 +1,29 @@
+{
+  "_doc": "Regression-gate baseline for design-host/evals/gate.mjs. Deterministic targets graded with no LLM (adapted from Arta's evals/thresholds.json — Layer-B suite/handoff/builder-loop sections dropped as out of scope). grade.mjs reads a FLAT design/ root (config.json/theme.css/screens/*.tsx/components/*.tsx — no proto/ prefix). A3_interactivity runs only when config.json exists; both fixtures ship a config.json so A3 is graded (and passes) in both. A5 runs the vendored JSX-aware slop detector (slop-detect.mjs detectSlopJsx) in-process — no npx/network/install.",
+  "version": 1,
+  "baselineDate": "2026-07-05",
+  "targets": [
+    {
+      "id": "good-fixture",
+      "kind": "ship",
+      "dir": "fixtures/good",
+      "note": "A clean flat design/ tree — real @theme token set, 2 screens, a shared TopNav imported by both, config.json wiring nav. Must stay a full pass on all six assertions.",
+      "require": {
+        "A1a_tokens_defined": true,
+        "A1b_tokens_used": true,
+        "A2_shared": true,
+        "A3_interactivity": true,
+        "A4_render": true,
+        "A5_design": true
+      }
+    },
+    {
+      "id": "bad-fixture",
+      "kind": "guard",
+      "dir": "fixtures/bad",
+      "note": "Deliberately bad — 2 near-identical screens, a 2-colour theme.css, raw inline hex everywhere, a gradient-text headline, a lone unshared component, and a real TSX parse error in two.tsx. Guards the grader against silently going permissive. Nav between the two screens is intentionally WORKING (real <Link>) so A3_interactivity stays a clean pass on purpose — the fixture's job is to prove the OTHER five checks still discriminate.",
+      "mustFail": ["A1a_tokens_defined", "A1b_tokens_used", "A2_shared", "A4_render", "A5_design"],
+      "mustPass": ["A3_interactivity"]
+    }
+  ]
+}

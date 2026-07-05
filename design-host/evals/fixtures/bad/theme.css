@@ -1,0 +1,9 @@
+/* DELIBERATELY BAD — regression guard for design-host/evals/gate.mjs. A near-empty token
+   set (only 2 colours, no type scale, no font tokens) so A1a_tokens_defined stays FAILING:
+   the gate asserts this fixture NEVER passes, guarding grade.mjs against silently going
+   permissive. Do not "improve" this file. */
+@import "tailwindcss";
+@theme {
+  --color-blue: #3b82f6;
+  --color-gray: #888888;
+}
