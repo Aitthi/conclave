@@ -52,5 +52,14 @@
   "errors": [],
   "updatedAt": "16:07:28",
   "reportedAt": "2026-07-05T09:07:28.723Z",
-  "gates": []
+  "gates": [
+    {
+      "antipattern": "em-dash-overuse",
+      "severity": "warn",
+      "file": "screens/supervisor-picker.tsx",
+      "line": 36,
+      "snippet": "esolution — a visible Skip button is required in the add-flow (\"supervisor isn't required; give m",
+      "message": "Em-dash overuse — em-dash overuse (10) — vary with commas, colons, periods, parentheses"
+    }
+  ]
 }
