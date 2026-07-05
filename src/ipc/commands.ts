@@ -20,6 +20,7 @@ import type {
   Task,
   TaskListRow,
   TaskEvent,
+  DesignInfo,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -278,6 +279,18 @@ export interface Commands {
     req: { argv: string[] };
     res: unknown;
   };
+  // ── design (Phase 1 Lane B) ───────────────────────────────────────────────
+  // Scaffolds `.arta/` in the workspace's linked folder if missing, registers
+  // it with the sidecar, and ensures the sidecar is running.
+  "design.ensure": {
+    req: { workspaceId: string };
+    res: DesignInfo;
+  };
+  // Same shape as `ensure`, but never scaffolds, registers, or spawns.
+  "design.status": {
+    req: { workspaceId: string };
+    res: DesignInfo;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -388,5 +401,9 @@ export const ipc = {
   },
   cli: {
     exec: (req: Commands["cli.exec"]["req"]) => call("cli.exec", req),
+  },
+  design: {
+    ensure: (req: Commands["design.ensure"]["req"]) => call("design.ensure", req),
+    status: (req: Commands["design.status"]["req"]) => call("design.status", req),
   },
 } as const;

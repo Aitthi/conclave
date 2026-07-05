@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    // Lets vite/arta-watch.ts import vite/slop-detect.mjs (a plain dependency-free JS
+    // module, deliberately not ported to TS — see its own header) directly, picking up
+    // its JSDoc type annotations instead of needing a hand-maintained .d.ts shim.
+    "allowJs": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts", "vite/**/*.ts"]
+}
