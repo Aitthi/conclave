@@ -35,6 +35,15 @@ Boundary: `src-tauri/src/bin/conclave-cli.rs`
      machinery with the composed command so the ledger entry is byte-identical in shape
      to a manual `task gate` (cmd, exit, sha, cwd, tail). Preserve its
      `CONCLAVE_INSTANCE_ID` requirement and error wording.
+   - **workspaceId resolution for `--task`** (amended by ruling on challenge 1241c1dc,
+     credit: Tiësto): `run_task_gate` needs an explicit workspaceId. Resolve it from
+     `CONCLAVE_WORKSPACE_ID` — set by the spawner on every agent precisely so ids need
+     not be repeated per call (engine/commands/instance.rs:620-621), and guaranteed
+     present wherever `--task` can run at all (same spawner sets `CONCLAVE_INSTANCE_ID`,
+     which `--task` already requires). Optional explicit override `--ws <workspaceId>`
+     wins over the env. Neither present → error in the exact voice of the instance-id
+     error: `conclave: uishot --task needs a workspace (CONCLAVE_WORKSPACE_ID unset; pass --ws <workspaceId>)`,
+     exit 1. The user-facing spelling stays `conclave uishot [--task <slug>] <args...>`.
 3. Help text: one row under the task/gate section:
    `uishot [--task <slug>] <args...>   (runs the workspace's package.json "uishot" script here; with --task also records it as a task gate)`
 4. Unit tests beside the existing conclave-cli tests: resolution found/missing,
@@ -77,6 +86,9 @@ Boundary: `src-tauri/skills/tool-map/SKILL.md`, `src-tauri/skills/implementer/SK
   the attempted command; do not silently fall back to npm/npx.
 - **Verb collision:** confirm `uishot` collides with no existing verb or prefix in the
   dispatch before wiring it (search the parser, not just the help text).
+- **Guard (from challenge 1241c1dc):** any new flag or verb needing workspace context
+  defaults from `CONCLAVE_WORKSPACE_ID` (with an explicit `--ws` override) — never add a
+  new positional workspaceId when the spawner already provides it.
 - **Lane C and Lane S are independent** (disjoint files); Lane S documents the verb Lane C
   builds — if Lane C's final flag/verb spelling changes, Lane C's implementer must note it
   on BOTH task ledgers so Lane S copies the real spelling.
