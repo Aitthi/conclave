@@ -176,6 +176,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 13 {
+        sqlx::raw_sql(include_str!("migrations/0013_memory_proposal.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 13;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -219,7 +228,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("table-count query failed");
-        assert_eq!(count, 25, "expected 25 tables, got {count}");
+        assert_eq!(count, 26, "expected 26 tables, got {count}");
     }
 
     /// Running migrate twice must not error and must leave user_version == 11.
@@ -247,15 +256,15 @@ mod tests {
         .await
         .expect("table-count query failed");
         assert_eq!(
-            count, 25,
-            "expected 25 tables after idempotent run, got {count}"
+            count, 26,
+            "expected 26 tables after idempotent run, got {count}"
         );
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 12, "user_version should be 12");
+        assert_eq!(version, 13, "user_version should be 13");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -451,7 +460,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -542,7 +551,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -651,7 +660,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped

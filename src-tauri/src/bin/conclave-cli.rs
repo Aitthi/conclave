@@ -82,6 +82,10 @@ Subcommands:
   memory search   <workspaceId> <query...> [--limit N]
   memory delete   <workspaceId> <chunkId>
   memory status   <workspaceId>
+  memory propose  <workspaceId> <text...> [--source-note NOTE]   (distilled candidate; inside a spawned agent)
+  memory queue    <workspaceId> [--state pending|approved|rejected]
+  memory approve  <workspaceId> <proposalId> [--reason TEXT...]  (reviewer ≠ proposer; inside a spawned agent)
+  memory reject   <workspaceId> <proposalId> [--reason TEXT...]  (inside a spawned agent)
   lane start  <workspaceId> <slug>      (add lane worktree + claim task if present)
   lane finish <workspaceId> <slug>      (remove worktree + delete branch, after merge)
   lane guard install                    (install the shared-checkout commit-scope guard)
@@ -234,6 +238,30 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             out.push("remember".to_string());
             out.push(author.to_string()); // author (injected from env, or "-")
             out.extend_from_slice(&argv[2..]); // workspaceId + text...
+            Ok(out)
+        }
+        // plan memory-distill-queue: the review-queue verbs stamp the caller's
+        // own agent id as proposer (`propose`) or reviewer (`approve`/`reject`).
+        // Unlike `memory remember`, these REQUIRE a spawned-agent context — the
+        // gate compares proposer vs reviewer by real agent id, and the "-"
+        // sentinel is never a valid agent. `memory queue` is a read-only list
+        // and passes through untouched.
+        Some("memory")
+            if matches!(
+                argv.get(1).map(String::as_str),
+                Some("propose" | "approve" | "reject")
+            ) =>
+        {
+            let verb = argv[1].clone();
+            let me = require_self(&format!("memory {verb}"))?;
+            if argv.len() < 3 {
+                return Err(format!("conclave: memory {verb} <workspaceId> ..."));
+            }
+            let mut out = Vec::with_capacity(argv.len() + 1);
+            out.push("memory".to_string());
+            out.push(verb);
+            out.push(me.to_string()); // proposer/reviewer (injected from env)
+            out.extend_from_slice(&argv[2..]); // workspaceId + rest...
             Ok(out)
         }
         _ => Ok(argv),
@@ -1145,6 +1173,37 @@ mod tests {
         );
         let status = v(&["memory", "status", "ws1"]);
         assert_eq!(expand_self_args(status.clone(), None).unwrap(), status);
+    }
+
+    // ── memory review queue (plan memory-distill-queue) ────────────────────
+
+    #[test]
+    fn memory_propose_approve_reject_inject_self_agent_id() {
+        let propose =
+            expand_self_args(v(&["memory", "propose", "ws1", "a", "fact"]), Some("self1")).unwrap();
+        assert_eq!(propose, v(&["memory", "propose", "self1", "ws1", "a", "fact"]));
+        let approve =
+            expand_self_args(v(&["memory", "approve", "ws1", "p1"]), Some("self1")).unwrap();
+        assert_eq!(approve, v(&["memory", "approve", "self1", "ws1", "p1"]));
+        let reject =
+            expand_self_args(v(&["memory", "reject", "ws1", "p1"]), Some("self1")).unwrap();
+        assert_eq!(reject, v(&["memory", "reject", "self1", "ws1", "p1"]));
+    }
+
+    #[test]
+    fn memory_propose_approve_reject_require_a_spawned_agent() {
+        // Unlike `remember`, these have no "-" sentinel: the gate needs a real
+        // agent id, so they error outside a spawned-agent context.
+        assert!(expand_self_args(v(&["memory", "propose", "ws1", "x"]), None).is_err());
+        assert!(expand_self_args(v(&["memory", "approve", "ws1", "p1"]), Some("")).is_err());
+        assert!(expand_self_args(v(&["memory", "reject", "ws1", "p1"]), None).is_err());
+    }
+
+    #[test]
+    fn memory_queue_passes_through_untouched() {
+        let queue = v(&["memory", "queue", "ws1", "--state", "pending"]);
+        assert_eq!(expand_self_args(queue.clone(), Some("self1")).unwrap(), queue);
+        assert_eq!(expand_self_args(queue.clone(), None).unwrap(), queue);
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod inter_agent_message;
 // T2 lands this repository seam before the T4 command/search consumers.
 #[allow(dead_code)]
 pub mod memory;
+pub mod memory_proposal;
 pub mod provider;
 pub mod role;
 pub mod session;
