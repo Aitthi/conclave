@@ -427,10 +427,12 @@ export function AppShell() {
                 artifactsOpen={showArtifacts}
                 onCloseArtifacts={() => setShowArtifacts(false)}
                 onOpenChat={() => {
+                  // Do NOT clear showArtifacts (nor showDesign): both are canvas-
+                  // slot flags, latent behind the ChatHub center screen — same
+                  // latency as Design (Mellow F1, ruled; plan D4 guard case).
                   setShowBlackboard(false);
                   setShowMemory(false);
                   setShowLaneBoard(false);
-                  setShowArtifacts(false);
                   setShowChat(true);
                 }}
               />
