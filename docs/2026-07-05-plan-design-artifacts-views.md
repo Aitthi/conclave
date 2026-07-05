@@ -135,8 +135,27 @@ Lane C lands before Lane D (C owns the shared shell wiring; D consumes it).
   `conclave task gate` (gate pins HEAD).
 - Lane worktrees via `conclave lane start`; lead integrates; nobody merges
   their own lane.
-- mod.rs / commands.ts wiring lines WILL conflict across lanes — keep those
-  edits one-line-minimal; lead resolves at merge.
+- **Shared wiring files** (AMENDED 2026-07-05 per challenge d34d6393 on
+  design-artifact-store, found by Tiësto, verified by Armin — the original
+  plan named only mod.rs/commands.ts and was wrong): any lane that adds a
+  command, event, CLI verb, or migration ALSO touches these choke points, and
+  a lane plan must name them in its boundary by default:
+  - `src-tauri/src/engine/router.rs` — dispatcher match arm (ipc AND cli.exec
+    both route through it)
+  - `src-tauri/src/engine/commands/cli.rs` — `map_argv` allowlist arm (the
+    no-passthrough security choke point)
+  - `src-tauri/src/engine/bus.rs` — event-name constant + payload struct
+  - `src-tauri/src/engine/db.rs` — `migrate()` needs an explicit
+    `if version < N` block per migration; a .sql file alone NEVER runs
+  - `src-tauri/src/engine/{commands,repo,runtime}/mod.rs`, and
+    `src/ipc/{commands,events,types}.ts`
+  Edits to all of these stay one-arm/one-line additive; lead resolves merge
+  collisions at integration. Lane A's contested set (db.rs, router.rs,
+  commands/cli.rs, bus.rs) and Lane B's (router.rs, db.rs if 0015 exists)
+  land per the immutable-boundary protocol: ruling on the ledger + this
+  amendment = the boundary record; the files land as a separate raw git
+  commit in the lane worktree with explicit pathspec and
+  `--author "Name <agentId@agents.conclave.local>"`.
 
 ## Risk ledger
 
