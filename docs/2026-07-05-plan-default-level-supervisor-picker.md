@@ -162,6 +162,16 @@ original boundary).
    Arta — upheld): NO Skip button. The "Reports to the human" row IS the
    no-supervisor choice, PRE-SELECTED as the default; footer = Cancel +
    "Add agent" (primary). One selection model, same as the edit variant.
+   RE-AMENDED (HUMAN ruling, 2026-07-05 ~20:0x, verbatim: "Supervisor
+   ไม่จำเป็นต้องเลือกก็ได้มี ปุ่มให้ Skip ด้วย"): the add-flow DOES carry a
+   visible Skip button — the human wants an explicit one-tap bypass of the
+   supervisor step, over the redundancy argument. Human ruling supersedes
+   ruling 1ddff9aa on this point ONLY; the rest of the Arta amendment
+   (Human row + proto @18149cc chrome/states, edit-variant model) stands.
+   Footer: "Skip" (secondary; = add with no supervisor, regardless of
+   selection) + "Add agent" (primary; commits the selection). Whether the
+   Human row stays pre-selected alongside Skip is Arta's to fine-tune
+   within this constraint.
    Design canon extended: proto @18149cc
    (`.arta/proto/screens/supervisor-picker.tsx`) pins the 3 states
    composition underspecified — add-flow step-2 chrome, empty-members case,
