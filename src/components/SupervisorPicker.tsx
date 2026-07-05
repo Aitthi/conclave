@@ -303,6 +303,22 @@ export function SupervisorPicker({
               Cancel
             </button>
           )}
+          {/* Remove supervisor — edit variant, current != null only (Arta
+              proto @d2ac161, amends @3fd0f6e). One-click onPick(null), the
+              edit-mode twin of add-flow Skip. Ban+rose (mapped to
+              --color-danger per LaneBoard.tsx precedent) disambiguates it
+              from the adjacent Cancel — disambiguation, not distance. */}
+          {variant === "edit" && current != null && (
+            <button
+              type="button"
+              onClick={() => onPick(null)}
+              disabled={submitting}
+              className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-text-secondary px-3 py-1.5 rounded-lg hover:bg-overlay/[0.05] disabled:opacity-50"
+            >
+              <Ban className="w-3 h-3" style={{ color: "var(--color-danger)" }} />
+              Remove supervisor
+            </button>
+          )}
           {variant === "add" && (
             // Human-ruled (2d03b21a, proto @3fd0f6e): Skip adds with no
             // supervisor REGARDLESS of the current row selection — a bypass
