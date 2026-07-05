@@ -46,7 +46,22 @@ export const meta = { title: "Supervisor picker · states" };
    The Human row stays PRESENT (ruling upheld) as an explicit positive choice,
    just no longer the pre-selection — that is the one amendment vs the prior
    canon. The edit variant (C) has NO Skip (you're changing an existing link,
-   not adding) and keeps its current supervisor pre-selected: Cancel + Confirm.
+   not adding) and keeps its current supervisor pre-selected. Its footer is
+   Cancel + Confirm PLUS a "Remove supervisor" action in the left slot — an
+   AMENDMENT to canon @3fd0f6e, ruled by Arta 2026-07-05 after the human could
+   not discover how to take a supervisor out ("Change forces a pick — no way to
+   take the supervisor out"). Remove is rendered ONLY when the subject currently
+   HAS a supervisor (current != null); it is a ONE-CLICK write of onPick(null) —
+   the SAME gesture as add-flow Skip, and symmetric in meaning: "no supervisor,
+   one click, reversible from the chip later." That symmetry is deliberate: the
+   human anchors on Skip, so Remove is its edit-mode twin, not a new model. The
+   Cancel-adjacency misclick (the 99ffd9ed lesson) is defused by DISAMBIGUATION,
+   not distance — Remove carries a Ban icon in the rose hue so it never reads as
+   a second Cancel, and a misclick is cheap because reports-to-human is
+   reversible, not data loss. Order: Cancel · Remove supervisor (Cancel at the
+   edge). When current == null the button is HIDDEN (panel D): the agent already
+   reports to the human, so there is nothing to remove; the Human row already
+   carries that state. The Human row stays unchanged in both cases.
 
    The row markup below is COPIED from builder-position.tsx's SupervisorRow so
    the proto literally IS the composition: reuse it, do not restyle. Frame
@@ -274,6 +289,12 @@ export default function SupervisorPickerStates() {
               footer={
                 <>
                   <Btn kind="ghost">Cancel</Btn>
+                  {/* Remove supervisor — edit variant, current != null only.
+                      One-click onPick(null), Skip's edit-mode twin. Ban+rose
+                      disambiguates it from Cancel (the misclick guard). */}
+                  <button className="inline-flex items-center gap-1.5 text-[12.5px] font-medium dim px-3 py-1.5 rounded-lg hover:bg-[var(--color-hover)]">
+                    <Ban size={12} style={{ color: "var(--color-rose)" }} /> Remove supervisor
+                  </button>
                   <span className="ml-auto" />
                   <Btn kind="accent"><Check size={13} /> Confirm</Btn>
                 </>
@@ -292,7 +313,41 @@ export default function SupervisorPickerStates() {
                 </div>
                 <p className="text-[10.5px] faint leading-snug mt-1.5 px-1">
                   Tiësto (self) and Dew (its report) are disabled — either would loop the chain. Rejected client-side and,
-                  as a backstop, at write time.
+                  as a backstop, at write time. Footer gains <span className="heading">Remove supervisor</span> (has a
+                  supervisor → shown): one click writes <span className="mono">onPick(null)</span>, the edit-mode twin of
+                  add-flow Skip. Ban + rose keeps it from reading as a second Cancel.
+                </p>
+              </div>
+            </Modal>
+          </div>
+
+          {/* D — roster edit, subject already reports to human: no Remove button */}
+          <div className="flex flex-col">
+            <span className="label faint mb-2">D · Roster chip — already reports to human (no Remove)</span>
+            <Modal
+              title="Change supervisor"
+              footer={
+                <>
+                  <Btn kind="ghost">Cancel</Btn>
+                  {/* current == null → Remove supervisor is HIDDEN; nothing to remove */}
+                  <span className="ml-auto" />
+                  <Btn kind="accent"><Check size={13} /> Confirm</Btn>
+                </>
+              }
+            >
+              <Subject id="mellow" sub="Currently reports to the human" />
+              <div className="p-2 flex-1 min-h-0 overflow-y-auto scroll-thin" style={{ maxHeight: 260 }}>
+                <div className="rounded-xl p-1" style={{ background: "var(--color-app)", border: "1px solid var(--color-border)" }}>
+                  <HumanRow selId={null} />
+                  <div className="h-px my-1 mx-2" style={{ background: "var(--color-border-soft)" }} />
+                  {["detoro", "tiesto", "dew", "arta", "guetta"].map((id) => (
+                    <SupervisorRow key={id} id={id} editId="mellow" selId={null} />
+                  ))}
+                </div>
+                <p className="text-[10.5px] faint leading-snug mt-1.5 px-1">
+                  Subject already reports to the human (current == null), so <span className="heading">Remove supervisor</span>
+                  {" "}is not rendered — the Human row already carries that state and is pre-selected. Footer is Cancel +
+                  Confirm, unchanged. Pick a member and Confirm to give it a supervisor.
                 </p>
               </div>
             </Modal>
