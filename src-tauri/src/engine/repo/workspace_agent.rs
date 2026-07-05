@@ -1899,72 +1899,92 @@ mod tests {
         }
     }
 
-    /// Concurrent A->B and B->A on SEPARATE connections must yield EXACTLY ONE
-    /// success + one cycle rejection — `BEGIN IMMEDIATE` serialises them so the
-    /// loser validates against the committed forest (ruling ef969027). Without
-    /// it, both observe the pre-write forest on their own WAL snapshot and both
-    /// commit → a cycle lands.
+    /// FORCED-interleaving cycle race (ruling ef969027 harness clause): a bare
+    /// `tokio::join!` can run sequentially and pass even against broken code, so
+    /// this test MAKES the contention deterministic — writer A holds a
+    /// `BEGIN IMMEDIATE` tx open (a->b written, uncommitted), then the
+    /// conflicting `set_position_validated(b->a)` is launched on another
+    /// connection and PROBED (bounded timeout) to confirm it BLOCKS on A's write
+    /// lock rather than running to completion. Only after A commits can B
+    /// proceed — and it must then see the committed a->b forest and REJECT the
+    /// cycle. Demonstrated once to FAIL against the pre-c56d48e non-atomic path
+    /// (see the task ledger note): there B's reads observe the pre-commit forest,
+    /// find no cycle, and land b->a.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_reciprocal_supervisor_writes_cannot_both_win() {
+    async fn forced_race_reciprocal_supervisor_rejects_the_cycle() {
         let (pool, path) = connect_file_multi().await;
         let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
         let a = instance_named(&pool, &ws.id, "A").await;
         let b = instance_named(&pool, &ws.id, "B").await;
 
-        let (p1, p2) = (pool.clone(), pool.clone());
-        let (ws1, ws2) = (ws.id.clone(), ws.id.clone());
-        let (a1, b1) = (a.id.clone(), b.id.clone());
-        let (a2, b2) = (a.id.clone(), b.id.clone());
-        let (r1, r2) = tokio::join!(
-            async move {
-                set_position_validated(&p1, &ws1, &a1, PositionField::Keep, PositionField::Set(b1)).await
-            },
-            async move {
-                set_position_validated(&p2, &ws2, &b2, PositionField::Keep, PositionField::Set(a2)).await
-            },
-        );
-        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
-        let cycles = [&r1, &r2]
-            .iter()
-            .filter(|r| matches!(r, Err(SetPositionError::Cycle)))
-            .count();
-        assert_eq!(oks, 1, "exactly one write may win: {r1:?} {r2:?}");
-        assert_eq!(cycles, 1, "the loser must be a cycle rejection: {r1:?} {r2:?}");
+        // Writer A: BEGIN IMMEDIATE, write a->b, HOLD (post-validate pre-commit).
+        let mut conn_a = pool.acquire().await.expect("acquire A");
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn_a).await.expect("begin A");
+        sqlx::query("UPDATE workspace_agent SET supervisor_agent_id = ? WHERE id = ?")
+            .bind(&b.id)
+            .bind(&a.id)
+            .execute(&mut *conn_a)
+            .await
+            .expect("A writes a->b");
+
+        // Writer B: the conflicting b->a on a different connection.
+        let (pb, wsb, aid, bid) = (pool.clone(), ws.id.clone(), a.id.clone(), b.id.clone());
+        let mut b_task = tokio::spawn(async move {
+            set_position_validated(&pb, &wsb, &bid, PositionField::Keep, PositionField::Set(aid)).await
+        });
+
+        // PROBE: B must still be blocked after a bounded wait (not sleep-hope).
+        let probe = tokio::time::timeout(std::time::Duration::from_millis(400), &mut b_task).await;
+        assert!(probe.is_err(), "B must BLOCK on A's write lock, not complete");
+
+        // Release A → B unblocks, sees a->b, rejects the cycle.
+        sqlx::query("COMMIT").execute(&mut *conn_a).await.expect("commit A");
+        drop(conn_a);
+
+        let b_result = b_task.await.expect("join B");
+        assert!(matches!(b_result, Err(SetPositionError::Cycle)), "B must reject: {b_result:?}");
+        assert_eq!(supervisor_of(&pool, &b.id).await.unwrap(), None, "no cycle landed");
+        assert_eq!(supervisor_of(&pool, &a.id).await.unwrap(), Some(b.id.clone()));
         cleanup_file(pool, path);
     }
 
-    /// A level-only write racing a supervisor-only write on the same agent
-    /// (separate connections) must preserve BOTH fields — the serialised tx
-    /// reads each `Keep` against the other's committed value, so neither clobbers
-    /// the other (ruling ef969027). Without atomicity both resolve `Keep` against
-    /// the same pre-write row → the last writer wipes the other's field.
+    /// FORCED-interleaving partial-update race: writer A holds a `BEGIN IMMEDIATE`
+    /// tx open having set X.level='senior' (uncommitted); a `set_position_validated`
+    /// that touches ONLY X's supervisor is launched, PROBED to confirm it blocks,
+    /// then A commits. B must read the committed level inside its own tx and keep
+    /// it — so BOTH fields survive. Against the pre-fix path B's `Keep` resolves
+    /// to the stale pre-commit level (NULL) and the write wipes A's 'senior'.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_partial_updates_preserve_both_fields() {
+    async fn forced_race_partial_updates_preserve_both_fields() {
         let (pool, path) = connect_file_multi().await;
         let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
-        let a = instance_named(&pool, &ws.id, "A").await;
+        let x = instance_named(&pool, &ws.id, "X").await;
         let sup = instance_named(&pool, &ws.id, "Sup").await;
 
-        let (p1, p2) = (pool.clone(), pool.clone());
-        let (ws1, ws2) = (ws.id.clone(), ws.id.clone());
-        let (a1, a2) = (a.id.clone(), a.id.clone());
-        let sup1 = sup.id.clone();
-        let (r1, r2) = tokio::join!(
-            async move {
-                set_position_validated(&p1, &ws1, &a1, PositionField::Set("senior".into()), PositionField::Keep).await
-            },
-            async move {
-                set_position_validated(&p2, &ws2, &a2, PositionField::Keep, PositionField::Set(sup1)).await
-            },
-        );
-        r1.expect("level-only write");
-        r2.expect("supervisor-only write");
-        assert_eq!(level_of(&pool, &a.id).await.as_deref(), Some("senior"), "level survived");
-        assert_eq!(
-            supervisor_of(&pool, &a.id).await.unwrap(),
-            Some(sup.id.clone()),
-            "supervisor survived"
-        );
+        // Writer A: BEGIN IMMEDIATE, set X.level='senior', HOLD.
+        let mut conn_a = pool.acquire().await.expect("acquire A");
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn_a).await.expect("begin A");
+        sqlx::query("UPDATE workspace_agent SET level = 'senior' WHERE id = ?")
+            .bind(&x.id)
+            .execute(&mut *conn_a)
+            .await
+            .expect("A writes level");
+
+        // Writer B: supervisor-only (level Keep).
+        let (pb, wsb, xid, sid) = (pool.clone(), ws.id.clone(), x.id.clone(), sup.id.clone());
+        let mut b_task = tokio::spawn(async move {
+            set_position_validated(&pb, &wsb, &xid, PositionField::Keep, PositionField::Set(sid)).await
+        });
+
+        let probe = tokio::time::timeout(std::time::Duration::from_millis(400), &mut b_task).await;
+        assert!(probe.is_err(), "B must BLOCK on A's write lock, not complete");
+
+        sqlx::query("COMMIT").execute(&mut *conn_a).await.expect("commit A");
+        drop(conn_a);
+
+        b_task.await.expect("join B").expect("supervisor-only write");
+        assert_eq!(level_of(&pool, &x.id).await.as_deref(), Some("senior"), "level survived");
+        assert_eq!(supervisor_of(&pool, &x.id).await.unwrap(), Some(sup.id.clone()), "supervisor survived");
         cleanup_file(pool, path);
     }
 }
