@@ -63,6 +63,16 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 
+/// Budget for [`ensure_running`]'s reuse check on an EXISTING slot. Kept
+/// short (this runs on every `design.ensure` call, not just at spawn time)
+/// but long enough to tolerate a momentarily-slow-but-alive dev server under
+/// load — review finding F3 (Mellow) flagged a too-tight budget as a false
+/// "dead" verdict; correctness no longer depends on this being long enough
+/// (a false negative now kills-and-respawns cleanly instead of orphaning,
+/// see the `kill_pid` call in `ensure_running`), so this is a performance/
+/// respawn-frequency tradeoff, not a safety one.
+const REUSE_HEALTH_BUDGET: Duration = Duration::from_secs(2);
+
 /// What [`ensure_running`] hands back to `commands::design` — everything it
 /// needs to build the iframe URL (the project id / query string is the
 /// caller's concern, not the sidecar's).
@@ -161,13 +171,18 @@ pub fn registry_file() -> std::io::Result<PathBuf> {
 /// computing the same id for the same directory as the JS side; do not
 /// "improve" this without updating both and the cross-language test below.
 ///
-/// `dir` MUST already be a clean absolute path (no `.`/`..` segments, no
-/// trailing slash) — the JS side hashes `path.resolve(dir)`'s LEXICAL
-/// normalization (never a symlink-following `realpath`), and every caller
-/// here already has one (workspace `folder_path` from the DB, or a `.arta`
-/// dir this module joins onto it), so this does not re-derive one.
+/// The JS side hashes `path.resolve(dir)` — a LEXICAL normalization (`.`/`..`
+/// segments, redundant separators), never a symlink-following `realpath`.
+/// [`lexical_normalize`] mirrors that here: found in review (Mellow, F2)
+/// that `workspace.link` stores `folder_path` verbatim with no
+/// normalization (`commands::workspace::link`), so a workspace linked with a
+/// trailing slash or a `..` segment would otherwise hash to a DIFFERENT id
+/// than the JS side computes for the same directory — that workspace's
+/// canvas would silently render blank (wrong/no registry match) despite
+/// `design.ensure` reporting success.
 pub fn project_id_for(dir: &Path) -> String {
-    let s = dir.to_string_lossy();
+    let resolved = lexical_normalize(dir);
+    let s = resolved.to_string_lossy();
     let mut h: u32 = 2166136261;
     for b in s.as_bytes() {
         // JS's `charCodeAt` is a UTF-16 code unit, not a byte — for ASCII
@@ -183,6 +198,31 @@ pub fn project_id_for(dir: &Path) -> String {
         h = h.wrapping_mul(16777619);
     }
     to_base36(h)
+}
+
+/// Lexical path normalization matching Node's `path.resolve()` semantics:
+/// collapses `.` segments and pops the preceding component on `..` (when
+/// there is one to pop), WITHOUT touching the filesystem — no symlink
+/// resolution, no existence check (`std::fs::canonicalize` does both, which
+/// would make this disagree with the JS side the moment a path traverses a
+/// symlink; `path.resolve` never does either). Trailing separators are
+/// dropped as a side effect of rebuilding from `Path::components()`.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !matches!(out.components().next_back(), None | Some(std::path::Component::RootDir)) {
+                    out.pop();
+                } else if out.components().next_back().is_none() {
+                    out.push("..");
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn to_base36(mut n: u32) -> String {
@@ -376,12 +416,18 @@ pub async fn ensure_running() -> Result<ViewerInfo, DesignViewerError> {
     let mut guard = sup.slot.lock().await;
 
     if let Some(s) = guard.as_ref() {
-        if wait_state_ok(s.port, Duration::from_millis(500)).await {
+        if wait_state_ok(s.port, REUSE_HEALTH_BUDGET).await {
             return Ok(ViewerInfo { port: s.port });
         }
-        // Stale entry (crashed between calls, or never came up) — fall
-        // through and respawn. The monitor task for that generation (if
-        // still alive) will find its epoch superseded below and back off.
+        // Review finding F3 (Mellow): a merely-slow-but-alive sidecar that
+        // outlasts the budget above must not become an orphan. The stale
+        // slot's monitor task (if still running) will find its epoch
+        // superseded once we overwrite the slot below and back off WITHOUT
+        // killing its child (that's the epoch guard's whole point — an old
+        // generation must never kill a NEW one it raced against). So if we
+        // are about to supersede it, we — not the monitor — must be the one
+        // to kill it, unconditionally, before spawning a replacement.
+        kill_pid(s.pid);
     }
 
     let node = resolve_node().await?;
@@ -504,11 +550,18 @@ pub fn kill_on_exit() {
     let Some(sup) = SUPERVISOR.get() else { return };
     let Ok(guard) = sup.slot.try_lock() else { return };
     let Some(slot) = guard.as_ref() else { return };
+    kill_pid(slot.pid);
+}
+
+/// Best-effort `kill -9` by pid — shared by [`kill_on_exit`] and
+/// [`ensure_running`]'s stale-slot fallthrough (F3). A plain external `kill`
+/// (not `Child::start_kill`) because callers here only ever have the pid,
+/// never the owning `Child` handle (that's owned by a `monitor` task that
+/// may already consider itself superseded and never touch it again).
+fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &slot.pid.to_string()])
-            .status();
+        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
     }
 }
 
@@ -530,5 +583,35 @@ mod tests {
         assert_eq!(project_id_for(Path::new("/Users/dev/app")), "1p4sq9m");
         assert_eq!(project_id_for(Path::new("/tmp/scratch-project")), "1fxfqiy");
         assert_eq!(project_id_for(Path::new("/")), "bo0mse");
+    }
+
+    /// Review finding F2 (Mellow): `workspace.link` stores `folder_path`
+    /// verbatim (no normalization) — an unnormalized path must still hash to
+    /// the SAME id as its clean form, matching `path.resolve`'s lexical
+    /// normalization on the JS side. Expected value verified via
+    /// `node -e 'console.log(path.resolve("/Users/dev/app/"))'` (and the
+    /// `..`/`.` variants) → all three resolve to `/Users/dev/app`, i.e. the
+    /// SAME id as `project_id_matches_js_idfor`'s first case.
+    #[test]
+    fn project_id_normalizes_before_hashing() {
+        let clean = project_id_for(Path::new("/Users/dev/app"));
+        assert_eq!(project_id_for(Path::new("/Users/dev/app/")), clean, "trailing slash");
+        assert_eq!(
+            project_id_for(Path::new("/Users/dev/other/../app")),
+            clean,
+            ".. segment"
+        );
+        assert_eq!(project_id_for(Path::new("/Users/dev/./app")), clean, ". segment");
+    }
+
+    #[test]
+    fn lexical_normalize_matches_path_resolve_semantics() {
+        assert_eq!(lexical_normalize(Path::new("/a/b/")), PathBuf::from("/a/b"));
+        assert_eq!(lexical_normalize(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
+        assert_eq!(lexical_normalize(Path::new("/a/./b")), PathBuf::from("/a/b"));
+        assert_eq!(lexical_normalize(Path::new("/a/b/..")), PathBuf::from("/a"));
+        // `..` past root is a no-op (matches `path.resolve`'s clamping — it
+        // never escapes above the filesystem root).
+        assert_eq!(lexical_normalize(Path::new("/../a")), PathBuf::from("/a"));
     }
 }

@@ -49,9 +49,20 @@ export default defineConfig({
       // anywhere on disk, never under this package's own root — Vite's
       // default allow-list (this root only) 403s every /@fs/ screen import
       // for a real project (proven empirically: a scratch project's
-      // proto/screens/home.tsx 403'd until this was added). Safe to disable
-      // here: this server is loopback-only and every served path still comes
-      // from the registry.json THIS engine writes, not arbitrary user input.
+      // proto/screens/home.tsx 403'd until this was added).
+      //
+      // SECURITY POSTURE (corrected per review — the prior comment here was
+      // wrong): `fs.strict: false` makes Vite serve ANY absolute path via
+      // `GET /@fs/<abspath>`, completely independent of registry.json —
+      // the registry only gates the project SWITCHER list, not this route.
+      // Safety rests SOLELY on the `host: "127.0.0.1"` binding above, which
+      // blocks LAN access but NOT a same-machine attacker (any other local
+      // process, or a webpage the user's browser opens — the classic
+      // dev-server localhost-file-read / DNS-rebind vector: while this
+      // sidecar runs, an untrusted page could fetch
+      // `http://127.0.0.1:<port>/@fs/Users/<you>/.ssh/id_rsa`). Accepted for
+      // Phase 1 as a dev-mode posture (see VENDORING.md); a Host/Origin guard
+      // is tracked as a follow-up, not implemented here.
       strict: false,
     },
   },

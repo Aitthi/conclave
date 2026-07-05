@@ -86,8 +86,33 @@ later must re-apply every deviation below.
 - `theme.css` Thai-font fallback (`injectThaiFallback`, `proto-app.ts`).
 - The curated-dependency dedupe/alias in `vite.config.ts` (two React copies in
   one page crashes hooks — ADR-0002).
-- `server.fs.allow` needs verifying against a real registered project dir
-  outside this package root during the smoke check (risk ledger item).
+
+## Security posture deviation from the risk ledger (`server.fs.allow` → `fs.strict: false`)
+
+The plan's risk ledger called for a SCOPED `server.fs.allow` admitting only
+registered project dirs. Upstream Arta has no such scoping (checked
+`vite.config.ts` and `mcp/server.mjs` — no `fs.allow` logic exists anywhere),
+so the smoke check hit Vite's DEFAULT allow-list (this package's own root
+only): every `/@fs/` screen import from a real registered project 403'd.
+
+Implemented instead (`vite.config.ts`): `server.fs.strict: false`, which
+disables the check entirely rather than scoping it. **This is broader than
+the plan intended and carries a real Phase-1 risk**, flagged in review
+(Mellow, challenge `4d81be26`): with `fs.strict: false`, this loopback Vite
+server will serve ANY absolute path via `GET /@fs/<abspath>` to ANY same-machine
+requester — not just this engine's own registry.json contents. Binding to
+`127.0.0.1` blocks LAN access but not another local process, nor a webpage
+the user's browser has open (the classic Vite dev-server localhost-file-read
+/ DNS-rebind vector — e.g. a malicious page could attempt to fetch
+`http://127.0.0.1:7343/@fs/Users/<you>/.ssh/id_rsa` while the sidecar runs).
+
+Accepted for Phase 1 as an explicit dev-mode threat-model call (loopback-only
+sidecar, developer's own machine) rather than implemented as a real
+`fs.allow` scope — a correctly scoped allow-list would need to grow dynamically
+as workspaces register (unlike upstream's single fixed project dir), which is
+a small enough follow-up to track rather than block this lane on. A
+Host/Origin-header guard (and/or `server.fs.deny` for secret-like globs) is
+the candidate hardening; tracked as a follow-up, not implemented here.
 
 ## Smoke check
 
