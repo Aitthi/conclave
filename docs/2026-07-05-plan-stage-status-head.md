@@ -21,6 +21,13 @@ Replace the porcelain/index path in `stage status` with (Mellow's shape,
 endorsed on the stage-v1 ledger):
 - tracked changes: `git diff --name-status HEAD -- <boundary paths>`
 - untracked: `git ls-files --others --exclude-standard -- <boundary paths>`
+- **BOTH commands run under a private `GIT_INDEX_FILE` seeded with
+  `git read-tree HEAD`** (reuse `git_with_index`) — amended at LAND review:
+  both consult the index for tracked-set membership, so against the stale
+  shared index a newly stage-committed file reads as `D` + `??`
+  simultaneously (Mellow's B1, empirically verified along with the fix).
+  Without this line the commands are only index-independent for files that
+  were already tracked.
 Keep the IN-BOUNDARY / OUT-OF-BOUNDARY partition output format unchanged
 (out-of-boundary section = same two commands with no pathspec, minus the
 in-boundary set — implementer's judgment on the cleanest set arithmetic,
