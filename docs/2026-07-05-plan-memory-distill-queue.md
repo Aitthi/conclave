@@ -2,7 +2,7 @@
 
 Date: 2026-07-05 · Owner: Detoro bfb737ff · authority: in-loop
 Task: `memory-distill-queue` · Implementer: Tiësto fd0dec79 · Reviewer: Mellow (LAND, blocking)
-Status: DRAFT — awaiting human approval before task creation.
+Status: APPROVED by human 2026-07-05 (review-queue design confirmed; trigger v1 on-demand).
 
 ## Why
 
@@ -116,6 +116,11 @@ the running agent to:
 4. For each candidate: `conclave memory search` first (hybrid ranker, live);
    only propose if no existing chunk covers it. Then
    `conclave memory propose <ws> <text> --source-note <file+date>`.
+   Where a candidate shares a concept with an existing chunk, embed a
+   `[[token]]` wiki-link in the text (same convention the store already
+   uses) — the knowledge-graph view (ADR 0007, `memory.graph`) derives
+   `wiki` edges from shared tokens, so linked facts cluster instead of
+   floating on similarity alone.
 5. Update `note:distill-hwm` to the run's start time; post a one-line summary
    (N candidates, M proposed, K deduped) to the requester.
 
