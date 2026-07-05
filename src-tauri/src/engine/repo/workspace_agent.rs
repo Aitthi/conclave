@@ -17,7 +17,7 @@ use super::cb_err;
 use chain_builder::{Order, QueryBuilder, Sqlite, Value as Bind};
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -238,6 +238,180 @@ pub async fn set_position(
         .await
         .map_err(cb_err)?;
     Ok(())
+}
+
+/// Tri-state intent for one position field on [`set_position_validated`]:
+/// `Keep` leaves the stored value, `Clear` sets it NULL, `Set` writes a value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PositionField {
+    Keep,
+    Clear,
+    Set(String),
+}
+
+/// A validated-position write failed for a business reason. The command layer
+/// maps these to the wire-facing `AppError`; `Db` carries a raw sqlx error.
+#[derive(Debug)]
+pub enum SetPositionError {
+    AgentNotFound,
+    WorkspaceMismatch,
+    LevelInvalid,
+    SupervisorSelf,
+    SupervisorNotFound,
+    SupervisorCrossWorkspace,
+    Cycle,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for SetPositionError {
+    fn from(e: sqlx::Error) -> Self {
+        SetPositionError::Db(e)
+    }
+}
+
+/// Atomic read-validate-write of an instance's position (spec position-system
+/// §3.5; escalation ruling ef969027 / 5c9df684). The whole operation runs in a
+/// single `BEGIN IMMEDIATE` transaction on ONE connection, so concurrent
+/// `setPosition` calls SERIALIZE on the write lock — closing the TOCTOU where
+/// two racing writes each validate against the pre-write forest (a cycle could
+/// land, or a partial update clobber the other's field). This is the same
+/// one-transaction shape as the F1 memory-approve fix (@ 6d87530).
+///
+/// Validation, all inside the tx: the agent exists and is in `workspace_id`
+/// (646ec73a scope check, ruling 71a00512); a `Set` level is in the enum; a
+/// `Set` supervisor is not self, exists, is in the same workspace, and does not
+/// close a cycle (walked against the in-tx forest). `Keep` resolves against the
+/// row read inside the tx, so a concurrent partial update cannot be lost.
+pub async fn set_position_validated(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    agent_id: &str,
+    level: PositionField,
+    supervisor: PositionField,
+) -> Result<(), SetPositionError> {
+    let mut conn = pool.acquire().await.map_err(SetPositionError::Db)?;
+    // BEGIN IMMEDIATE takes the write lock up front, so a second setPosition
+    // blocks here until this one commits (avoids the DEFERRED upgrade deadlock).
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn)
+        .await
+        .map_err(SetPositionError::Db)?;
+
+    match position_txn(&mut conn, workspace_id, agent_id, level, supervisor).await {
+        Ok(()) => {
+            sqlx::query("COMMIT")
+                .execute(&mut *conn)
+                .await
+                .map_err(SetPositionError::Db)?;
+            Ok(())
+        }
+        Err(e) => {
+            // Best-effort rollback; return the original business error.
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+/// The validated read-then-write body, executed on the already-opened
+/// transaction connection. Kept separate so [`set_position_validated`] can
+/// COMMIT/ROLLBACK around it uniformly.
+async fn position_txn(
+    conn: &mut SqliteConnection,
+    workspace_id: &str,
+    agent_id: &str,
+    level: PositionField,
+    supervisor: PositionField,
+) -> Result<(), SetPositionError> {
+    // Read the current row inside the tx (existence + workspace + current values).
+    let current: Option<(Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT level, supervisor_agent_id, workspace_id FROM workspace_agent WHERE id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let (cur_level, cur_supervisor, agent_ws) = current.ok_or(SetPositionError::AgentNotFound)?;
+    if agent_ws != workspace_id {
+        return Err(SetPositionError::WorkspaceMismatch);
+    }
+
+    // Resolve tri-state against the in-tx current values (Keep can't be lost).
+    let new_level = match level {
+        PositionField::Keep => cur_level,
+        PositionField::Clear => None,
+        PositionField::Set(v) => Some(v),
+    };
+    let new_supervisor = match supervisor {
+        PositionField::Keep => cur_supervisor,
+        PositionField::Clear => None,
+        PositionField::Set(v) => Some(v),
+    };
+
+    if let Some(l) = new_level.as_deref() {
+        if level_rank(l) == 0 {
+            return Err(SetPositionError::LevelInvalid);
+        }
+    }
+
+    if let Some(s) = new_supervisor.as_deref() {
+        if s == agent_id {
+            return Err(SetPositionError::SupervisorSelf);
+        }
+        let sup_ws: Option<String> =
+            sqlx::query_scalar("SELECT workspace_id FROM workspace_agent WHERE id = ?")
+                .bind(s)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let sup_ws = sup_ws.ok_or(SetPositionError::SupervisorNotFound)?;
+        if sup_ws != workspace_id {
+            return Err(SetPositionError::SupervisorCrossWorkspace);
+        }
+        if chain_hits_in_tx(conn, workspace_id, s, agent_id).await? {
+            return Err(SetPositionError::Cycle);
+        }
+    }
+
+    sqlx::query("UPDATE workspace_agent SET level = ?, supervisor_agent_id = ? WHERE id = ?")
+        .bind(&new_level)
+        .bind(&new_supervisor)
+        .bind(agent_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// In-transaction supervisor-chain walk: starting at `start`, follow
+/// `supervisor_agent_id` upward and return whether `target` is reached. The
+/// tx-scoped analogue of [`would_create_cycle`]/[`supervisor_chain`] (depth-
+/// bounded by the workspace's agent count, so even a pre-existing corrupt cycle
+/// terminates).
+async fn chain_hits_in_tx(
+    conn: &mut SqliteConnection,
+    workspace_id: &str,
+    start: &str,
+    target: &str,
+) -> Result<bool, sqlx::Error> {
+    let depth: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent WHERE workspace_id = ?")
+            .bind(workspace_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let mut current = start.to_owned();
+    for _ in 0..depth {
+        if current == target {
+            return Ok(true);
+        }
+        let next: Option<Option<String>> =
+            sqlx::query_scalar("SELECT supervisor_agent_id FROM workspace_agent WHERE id = ?")
+                .bind(&current)
+                .fetch_optional(&mut *conn)
+                .await?;
+        match next.flatten() {
+            Some(s) => current = s,
+            None => break,
+        }
+    }
+    Ok(false)
 }
 
 /// A self-describing roster entry (ADR 0005): a `workspace_agent` annotated
@@ -1624,5 +1798,173 @@ mod tests {
             roster[0].role_description.is_none(),
             "the legacy free-text label carries no description"
         );
+    }
+
+    // ── set_position_validated: atomic validated write (ruling ef969027) ──
+
+    async fn level_of(pool: &SqlitePool, id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT level FROM workspace_agent WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read level")
+    }
+
+    #[tokio::test]
+    async fn set_position_validated_happy_path_and_tri_state() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let a = instance_named(&pool, &ws.id, "A").await;
+        let sup = instance_named(&pool, &ws.id, "Sup").await;
+
+        // Set both.
+        set_position_validated(
+            &pool, &ws.id, &a.id,
+            PositionField::Set("senior".into()),
+            PositionField::Set(sup.id.clone()),
+        )
+        .await
+        .expect("set both");
+        assert_eq!(level_of(&pool, &a.id).await.as_deref(), Some("senior"));
+        assert_eq!(supervisor_of(&pool, &a.id).await.unwrap(), Some(sup.id.clone()));
+
+        // Keep level, clear supervisor.
+        set_position_validated(&pool, &ws.id, &a.id, PositionField::Keep, PositionField::Clear)
+            .await
+            .expect("keep level, clear supervisor");
+        assert_eq!(level_of(&pool, &a.id).await.as_deref(), Some("senior"), "level kept");
+        assert_eq!(supervisor_of(&pool, &a.id).await.unwrap(), None, "supervisor cleared");
+    }
+
+    #[tokio::test]
+    async fn set_position_validated_rejects_every_invalid_case() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let ws2 = workspace::create(&pool, "WS2", "/tmp/ws2", None).await.expect("ws2");
+        let a = instance_named(&pool, &ws.id, "A").await;
+        let b = instance_named(&pool, &ws.id, "B").await;
+        let foreign = instance_named(&pool, &ws2.id, "Foreign").await;
+
+        let set = |agent: &str, level: PositionField, sup: PositionField, wsid: &str| {
+            let (pool, agent, wsid) = (pool.clone(), agent.to_owned(), wsid.to_owned());
+            async move { set_position_validated(&pool, &wsid, &agent, level, sup).await }
+        };
+        macro_rules! err {
+            ($e:expr, $pat:pat) => {
+                assert!(matches!($e.await, Err($pat)), "expected {}", stringify!($pat))
+            };
+        }
+        err!(set("ghost", PositionField::Keep, PositionField::Keep, &ws.id), SetPositionError::AgentNotFound);
+        err!(set(&a.id, PositionField::Keep, PositionField::Keep, &ws2.id), SetPositionError::WorkspaceMismatch);
+        err!(set(&a.id, PositionField::Set("wizard".into()), PositionField::Keep, &ws.id), SetPositionError::LevelInvalid);
+        err!(set(&a.id, PositionField::Keep, PositionField::Set(a.id.clone()), &ws.id), SetPositionError::SupervisorSelf);
+        err!(set(&a.id, PositionField::Keep, PositionField::Set("ghost".into()), &ws.id), SetPositionError::SupervisorNotFound);
+        err!(set(&a.id, PositionField::Keep, PositionField::Set(foreign.id.clone()), &ws.id), SetPositionError::SupervisorCrossWorkspace);
+        // Cycle: a -> b, then b -> a.
+        set_position_validated(&pool, &ws.id, &a.id, PositionField::Keep, PositionField::Set(b.id.clone()))
+            .await
+            .expect("a -> b");
+        err!(set(&b.id, PositionField::Keep, PositionField::Set(a.id.clone()), &ws.id), SetPositionError::Cycle);
+    }
+
+    /// A MULTI-CONNECTION, file-backed WAL pool + its cleanup path (the temp
+    /// file gets `-wal`/`-shm` siblings). `connect_in_memory` is
+    /// max_connections(1) and would serialise concurrent calls on the single
+    /// connection regardless of the fix — so the atomicity regression tests need
+    /// a real pool where `BEGIN IMMEDIATE` is the ONLY thing serialising two
+    /// racing writes on separate connections (mirrors the prod config,
+    /// db.rs:42-49). Unique UUID path so concurrent `cargo test` runs never
+    /// collide (see the flaky fixed-temp-path lesson).
+    async fn connect_file_multi() -> (SqlitePool, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("conclave-pos-race-{}.db", Uuid::new_v4()));
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(opts)
+            .await
+            .expect("open file-backed pool");
+        crate::engine::db::migrate(&pool).await.expect("migrate file pool");
+        (pool, path)
+    }
+
+    fn cleanup_file(pool: SqlitePool, path: std::path::PathBuf) {
+        drop(pool);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// Concurrent A->B and B->A on SEPARATE connections must yield EXACTLY ONE
+    /// success + one cycle rejection — `BEGIN IMMEDIATE` serialises them so the
+    /// loser validates against the committed forest (ruling ef969027). Without
+    /// it, both observe the pre-write forest on their own WAL snapshot and both
+    /// commit → a cycle lands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reciprocal_supervisor_writes_cannot_both_win() {
+        let (pool, path) = connect_file_multi().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let a = instance_named(&pool, &ws.id, "A").await;
+        let b = instance_named(&pool, &ws.id, "B").await;
+
+        let (p1, p2) = (pool.clone(), pool.clone());
+        let (ws1, ws2) = (ws.id.clone(), ws.id.clone());
+        let (a1, b1) = (a.id.clone(), b.id.clone());
+        let (a2, b2) = (a.id.clone(), b.id.clone());
+        let (r1, r2) = tokio::join!(
+            async move {
+                set_position_validated(&p1, &ws1, &a1, PositionField::Keep, PositionField::Set(b1)).await
+            },
+            async move {
+                set_position_validated(&p2, &ws2, &b2, PositionField::Keep, PositionField::Set(a2)).await
+            },
+        );
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        let cycles = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r, Err(SetPositionError::Cycle)))
+            .count();
+        assert_eq!(oks, 1, "exactly one write may win: {r1:?} {r2:?}");
+        assert_eq!(cycles, 1, "the loser must be a cycle rejection: {r1:?} {r2:?}");
+        cleanup_file(pool, path);
+    }
+
+    /// A level-only write racing a supervisor-only write on the same agent
+    /// (separate connections) must preserve BOTH fields — the serialised tx
+    /// reads each `Keep` against the other's committed value, so neither clobbers
+    /// the other (ruling ef969027). Without atomicity both resolve `Keep` against
+    /// the same pre-write row → the last writer wipes the other's field.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_partial_updates_preserve_both_fields() {
+        let (pool, path) = connect_file_multi().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let a = instance_named(&pool, &ws.id, "A").await;
+        let sup = instance_named(&pool, &ws.id, "Sup").await;
+
+        let (p1, p2) = (pool.clone(), pool.clone());
+        let (ws1, ws2) = (ws.id.clone(), ws.id.clone());
+        let (a1, a2) = (a.id.clone(), a.id.clone());
+        let sup1 = sup.id.clone();
+        let (r1, r2) = tokio::join!(
+            async move {
+                set_position_validated(&p1, &ws1, &a1, PositionField::Set("senior".into()), PositionField::Keep).await
+            },
+            async move {
+                set_position_validated(&p2, &ws2, &a2, PositionField::Keep, PositionField::Set(sup1)).await
+            },
+        );
+        r1.expect("level-only write");
+        r2.expect("supervisor-only write");
+        assert_eq!(level_of(&pool, &a.id).await.as_deref(), Some("senior"), "level survived");
+        assert_eq!(
+            supervisor_of(&pool, &a.id).await.unwrap(),
+            Some(sup.id.clone()),
+            "supervisor survived"
+        );
+        cleanup_file(pool, path);
     }
 }
