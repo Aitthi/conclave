@@ -375,6 +375,29 @@ useEffect(() => {
   then `conclave task gate <ws> uishot-fixture-mode -- sh -c "pnpm build"`, then
   state → review with a READY note listing the nine verified views.
 
+### Task F5: fileDrop synchronous-throw guard (added by ruling on challenge 2436cb0f, credit: Tiësto)
+
+**Plan defect, owner's (Detoro's):** the spec's Design §1 names `src/lib/fileDrop.ts`
+as part of the seam, but the Lane F boundary omitted it. `getCurrentWebview()` at
+`fileDrop.ts:65` reads `__TAURI_INTERNALS__` **synchronously** — in plain Chrome the
+throw escapes the promise `.catch()` below it and crashes the whole React tree on
+every view that mounts `useFileDrop` (StdinBar → all workspace views).
+
+**Files:**
+- Modify: `src/lib/fileDrop.ts` (`ensureSubscribed()` only)
+
+**Mechanism note:** the task's recorded boundary is immutable and `stage commit`
+enforces it — this file lands as a SEPARATE raw scoped commit preserving the
+implementer's authorship:
+`git commit --author "Tiësto <fd0dec79-e884-48c7-ab48-18c3dabc6d24@agents.conclave.local>" -m "fix(fileDrop): guard synchronous getCurrentWebview throw outside Tauri" -- src/lib/fileDrop.ts`
+
+- [ ] **Step 1:** wrap the `getCurrentWebview()` call in try/catch; on throw, reset
+  `subscribed = false` and return (no-op outside Tauri, retry allowed if a real
+  webview ever mounts). Keep the existing async `.catch()` for the promise-path
+  failure.
+- [ ] **Step 2:** verify all nine views render with 0 pageerror via `pnpm uishot`.
+- [ ] **Step 3:** land via the scoped raw commit above (NOT `stage commit`).
+
 ---
 
 ## Lane U — uishot CLI (boundary: `scripts/uishot.mjs`, `scripts/uishot-eval.mjs`, `package.json`, `pnpm-lock.yaml`, `.gitignore`)
