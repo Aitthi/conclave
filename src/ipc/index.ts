@@ -27,6 +27,7 @@ export type {
   TaskListRow,
   TaskEventKind,
   TaskEvent,
+  DesignInfo,
 } from "./types";
 
 export type { Commands } from "./commands";
