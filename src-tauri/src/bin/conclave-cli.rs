@@ -111,6 +111,8 @@ Subcommands:
   artifact add  <workspaceId> --title <t> --kind <k> (--file <path> | --content <text>)  (kinds: markdown|code|html|svg|mermaid|react|text)
   artifact list <workspaceId>
   artifact get  <id>
+  position set  <workspaceId> <agentId> [--level <junior|mid|senior|principal>|none] [--supervisor <agentId>|none]  (at least one flag; \"none\" clears)
+  org           <workspaceId>          (indented supervisor tree)
   run <orchestratorId> <prompt...>
   help
 
@@ -1725,8 +1727,88 @@ enum OutMode {
     ArtifactList,
     /// One artifact's metadata header + full content (`artifact get`).
     ArtifactGet,
+    /// The updated position row (`position set`) — one line: name · track · level · reports-to.
+    PositionRow,
+    /// The workspace supervisor forest (`org`) as an indented tree.
+    OrgTree,
     /// Pretty-printed JSON (everything else).
     Json,
+}
+
+/// Render `position set`'s updated row as one line: name · track · level ·
+/// reports-to. Absent fields show `-`; a cleared/absent supervisor shows
+/// `(human)`.
+fn render_position_row(row: &Value) -> String {
+    let f = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or("-");
+    let reports_to = row
+        .get("supervisorName")
+        .and_then(Value::as_str)
+        .unwrap_or("(human)");
+    format!(
+        "{} · {} · {} · reports to {}",
+        f("name"),
+        f("roleName"),
+        f("level"),
+        reports_to
+    )
+}
+
+/// Depth-first print of one parent's reports (spec §5.3 / Q5: the tree is
+/// derived client-side from the flat roster). `visited` breaks any corrupt
+/// cycle; each bucket is pre-sorted by (name, id) for a stable rendering.
+fn org_walk(
+    parent_id: &str,
+    depth: usize,
+    children: &std::collections::HashMap<String, Vec<&Value>>,
+    visited: &mut std::collections::HashSet<String>,
+    out: &mut String,
+) {
+    let Some(kids) = children.get(parent_id) else {
+        return;
+    };
+    for r in kids {
+        let id = r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        if !visited.insert(id.clone()) {
+            continue; // cycle guard — never recurse into an already-seen node
+        }
+        let name = r.get("name").and_then(Value::as_str).unwrap_or("(unnamed)");
+        let track = r.get("roleName").and_then(Value::as_str).unwrap_or("-");
+        let level = r.get("level").and_then(Value::as_str).unwrap_or("-");
+        let working = if r.get("working").and_then(Value::as_bool) == Some(true) {
+            "working"
+        } else {
+            "idle"
+        };
+        let indent = "  ".repeat(depth + 1);
+        out.push_str(&format!("{indent}{name} · {track} · {level} · {working}\n"));
+        org_walk(&id, depth + 1, children, visited, out);
+    }
+}
+
+/// Render the workspace supervisor forest as an indented tree from the flat
+/// roster. Roots = agents whose `supervisorAgentId` is absent, under an
+/// implicit `(human)` top line; each node shows name · track · level ·
+/// working|idle.
+fn render_org_tree(rows: &[Value]) -> String {
+    let mut children: std::collections::HashMap<String, Vec<&Value>> = std::collections::HashMap::new();
+    for r in rows {
+        let parent = r
+            .get("supervisorAgentId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        children.entry(parent).or_default().push(r);
+    }
+    let name_of = |r: &Value| r.get("name").and_then(Value::as_str).unwrap_or("(unnamed)").to_string();
+    let id_of = |r: &Value| r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    for bucket in children.values_mut() {
+        bucket.sort_by(|a, b| name_of(a).cmp(&name_of(b)).then_with(|| id_of(a).cmp(&id_of(b))));
+    }
+
+    let mut out = String::from("(human)\n");
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    org_walk("", 0, &children, &mut visited, &mut out);
+    out
 }
 
 /// Return the workspace for public CLI task exits that should print the
@@ -1858,6 +1940,10 @@ async fn main() -> ExitCode {
             Some("get") => OutMode::ArtifactGet,
             _ => OutMode::Json,
         }
+    } else if argv.first().map(String::as_str) == Some("position") && sub == Some("set") {
+        OutMode::PositionRow
+    } else if argv.first().map(String::as_str) == Some("org") {
+        OutMode::OrgTree
     } else {
         OutMode::Json
     };
@@ -2019,6 +2105,16 @@ async fn main() -> ExitCode {
                 println!("created:  {}", field("createdAt"));
                 println!();
                 println!("{}", result.get("content").and_then(Value::as_str).unwrap_or(""));
+            }
+            // `position set` → one line describing the updated agent.
+            OutMode::PositionRow => {
+                println!("{}", render_position_row(result));
+            }
+            // `org` → the workspace supervisor forest as an indented tree.
+            OutMode::OrgTree => {
+                let empty: Vec<Value> = Vec::new();
+                let rows = result.as_array().unwrap_or(&empty);
+                print!("{}", render_org_tree(rows));
             }
             OutMode::Json => {
                 let pretty =
@@ -2615,6 +2711,54 @@ mod tests {
     fn resolve_artifact_add_file_missing_file_errors() {
         let argv = v(&["artifact", "add", "ws1", "--file", "/no/such/file/xyz.md"]);
         assert!(super::resolve_artifact_add_file(argv).is_err());
+    }
+
+    // ── position / org rendering (spec position-system §5.3) ──────────────
+
+    #[test]
+    fn render_position_row_shows_fields_and_human_default() {
+        let row = serde_json::json!({
+            "id": "a1", "name": "Vega", "roleName": "Reviewer",
+            "level": "senior", "supervisorName": "Detoro"
+        });
+        assert_eq!(
+            super::render_position_row(&row),
+            "Vega · Reviewer · senior · reports to Detoro"
+        );
+        // No supervisor / level → dashes and the (human) default.
+        let bare = serde_json::json!({ "id": "a1", "name": "Sol" });
+        assert_eq!(super::render_position_row(&bare), "Sol · - · - · reports to (human)");
+    }
+
+    #[test]
+    fn render_org_tree_indents_a_three_level_chain_and_a_root() {
+        // Chain: Lead -> Sub -> Impl ; plus a separate NULL-supervisor root Solo.
+        let rows = vec![
+            serde_json::json!({ "id": "lead", "name": "Lead", "roleName": "Lead", "level": "principal", "working": true }),
+            serde_json::json!({ "id": "sub", "name": "Sub", "roleName": "Lead", "level": "senior", "supervisorAgentId": "lead", "working": false }),
+            serde_json::json!({ "id": "impl", "name": "Impl", "roleName": "Builder", "level": "mid", "supervisorAgentId": "sub" }),
+            serde_json::json!({ "id": "solo", "name": "Solo", "roleName": "Researcher", "level": "junior", "working": true }),
+        ];
+        let tree = super::render_org_tree(&rows);
+        let expected = "(human)\n\
+            \u{20}\u{20}Lead · Lead · principal · working\n\
+            \u{20}\u{20}\u{20}\u{20}Sub · Lead · senior · idle\n\
+            \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}Impl · Builder · mid · idle\n\
+            \u{20}\u{20}Solo · Researcher · junior · working\n";
+        assert_eq!(tree, expected);
+    }
+
+    #[test]
+    fn render_org_tree_breaks_a_corrupt_cycle() {
+        // a -> b -> a (should never happen post-validation, but must not hang).
+        let rows = vec![
+            serde_json::json!({ "id": "a", "name": "A", "supervisorAgentId": "b" }),
+            serde_json::json!({ "id": "b", "name": "B", "supervisorAgentId": "a" }),
+        ];
+        // Neither is a root (both have a supervisor), so the tree is just the
+        // human line — the point is it TERMINATES.
+        let tree = super::render_org_tree(&rows);
+        assert!(tree.starts_with("(human)\n"), "{tree}");
     }
 
     // ── stage: private-index commit + attribution + snapshot op log ───────

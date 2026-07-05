@@ -97,6 +97,114 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// The fixed level vocabulary (spec position-system §2.2). Also enforced by the
+/// DB CHECK, but validated here first so a bad value is a clean `Invalid` naming
+/// the allowed set rather than a raw constraint error.
+const ALLOWED_LEVELS: [&str; 4] = ["junior", "mid", "senior", "principal"];
+
+/// Look up one agent's enriched roster row in its workspace, or `NotFound`.
+/// Reused by [`set_position`] both to read the pre-write position (for the
+/// tri-state merge) and to return the post-write row.
+async fn roster_row(
+    state: &AppState,
+    workspace_id: &str,
+    workspace_agent_id: &str,
+) -> Result<repo::workspace_agent::WorkspaceAgentWithSkills, AppError> {
+    repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, workspace_id)
+        .await?
+        .into_iter()
+        .find(|r| r.id == workspace_agent_id)
+        .ok_or_else(|| AppError::NotFound(format!("workspace agent id={workspace_agent_id} not found")))
+}
+
+/// `instance.setPosition` (spec position-system §5.1) — set an instance's
+/// `level` and/or `supervisor`. Each of `level`/`supervisorAgentId` is
+/// TRI-STATE: absent = leave unchanged, `null` = clear, a string = set (see the
+/// task's design note — the CLI's `--x none`-to-clear + at-least-one-flag
+/// grammar makes absent-means-keep the only consistent reading). Validates
+/// level ∈ the enum and the supervisor link (self / scope / cycle, §3.5) BEFORE
+/// writing, then emits `roster:changed` and returns the updated roster row.
+pub async fn set_position(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let obj = payload
+        .as_object()
+        .ok_or_else(|| AppError::Invalid("instance.setPosition: expected an object payload".into()))?;
+    let workspace_agent_id = obj
+        .get("workspaceAgentId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::Invalid("instance.setPosition: workspaceAgentId is required".into()))?;
+
+    // Existence + the workspace the agent lives in (needed to fetch its roster
+    // row and to scope-check a supervisor).
+    let agent = repo::workspace_agent::get(&state.db, workspace_agent_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace agent id={workspace_agent_id} not found")))?;
+
+    // Current position, for the tri-state merge (absent field = keep current).
+    let current = roster_row(state, &agent.workspace_id, workspace_agent_id).await?;
+
+    // Resolve each field: absent (key missing) = keep, null = clear, string = set.
+    let resolve = |key: &str, current: Option<String>| -> Result<Option<String>, AppError> {
+        match obj.get(key) {
+            None => Ok(current),
+            Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(AppError::Invalid(format!(
+                "instance.setPosition: {key} must be a string or null"
+            ))),
+        }
+    };
+    let resolved_level = resolve("level", current.level.clone())?;
+    let resolved_supervisor = resolve("supervisorAgentId", current.supervisor_agent_id.clone())?;
+
+    // Validate level ∈ the enum (name the allowed set).
+    if let Some(level) = resolved_level.as_deref() {
+        if !ALLOWED_LEVELS.contains(&level) {
+            return Err(AppError::Invalid(format!(
+                "level must be one of: {}",
+                ALLOWED_LEVELS.join(", ")
+            )));
+        }
+    }
+
+    // Validate the supervisor link BEFORE writing (spec §3.5): self, scope, cycle.
+    if let Some(supervisor) = resolved_supervisor.as_deref() {
+        if supervisor == workspace_agent_id {
+            return Err(AppError::Invalid("an agent cannot supervise itself".into()));
+        }
+        // Scope: the supervisor must exist AND be in the same workspace
+        // (enforce_scope is a private per-module helper; replicate the pattern).
+        let supervisor_row = repo::workspace_agent::get(&state.db, supervisor)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("supervisor id={supervisor} not found")))?;
+        if supervisor_row.workspace_id != agent.workspace_id {
+            return Err(AppError::Invalid(
+                "supervisor must be in the same workspace as the agent".into(),
+            ));
+        }
+        if repo::workspace_agent::would_create_cycle(&state.db, workspace_agent_id, supervisor).await? {
+            return Err(AppError::Invalid("supervisor link would create a cycle".into()));
+        }
+    }
+
+    repo::workspace_agent::set_position(
+        &state.db,
+        workspace_agent_id,
+        resolved_level.as_deref(),
+        resolved_supervisor.as_deref(),
+    )
+    .await?;
+
+    state.emit(
+        bus::ROSTER_CHANGED,
+        bus::RosterChanged {
+            workspace_id: agent.workspace_id.clone(),
+        },
+    );
+
+    let updated = roster_row(state, &agent.workspace_id, workspace_agent_id).await?;
+    serde_json::to_value(updated).map_err(|e| AppError::Internal(e.to_string()))
+}
+
 /// Placeholder sidecar body for an instance with no builtin/custom skills
 /// attached. The sidecar + pointer are unconditional (ADR 0004: the sidecar
 /// is the LIVE source of truth for the instance's whole lifetime) — an
@@ -372,6 +480,18 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 .or_else(|| def.role.clone());
             let role_description = resolved_role.as_ref().map(|r| r.description.clone());
 
+            // The agent's position (spec position-system §5.4): its own level +
+            // supervisor NAME, resolved by the roster query (same resolution the
+            // roster shows), so a fresh/restarted agent knows where it sits
+            // before its first roster query. Absent → the preamble omits the
+            // position clause (byte-identical to a pre-position-system launch).
+            let position = repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, &ws.id)
+                .await?
+                .into_iter()
+                .find(|r| r.id == id);
+            let level = position.as_ref().and_then(|r| r.level.clone());
+            let supervisor_name = position.as_ref().and_then(|r| r.supervisor_name.clone());
+
             // Awareness briefing — injected via each harness's system-prompt layer
             // (NOT a chat turn), so it survives `/clear`. See engine::agentctx.
             let preamble = crate::engine::agentctx::bootstrap_preamble(
@@ -381,6 +501,8 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 &ws.name,
                 &ws.id,
                 &id,
+                level.as_deref(),
+                supervisor_name.as_deref(),
             );
 
             let (preamble, skill_ids) =

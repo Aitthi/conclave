@@ -135,6 +135,15 @@ export interface WorkspaceAgent {
    *  maps a `session:output` event (which carries only `sessionId`) back to
    *  this roster row. */
   sessionId?: string;
+  /** Position System (spec §5.2): ordered seniority within the agent's track —
+   *  one of junior|mid|senior|principal, absent when unset. */
+  level?: string;
+  /** Position System: the supervising workspace-agent instance id; absent
+   *  reports to the human/top. */
+  supervisorAgentId?: string;
+  /** Position System: resolved display name of `supervisorAgentId`, absent when
+   *  no supervisor is set. */
+  supervisorName?: string;
 }
 
 export interface Session {

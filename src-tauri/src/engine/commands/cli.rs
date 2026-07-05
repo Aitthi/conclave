@@ -563,6 +563,80 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── position / org (spec position-system §5) ─────────────────────
+        // `position set <ws> <agentId> [--level v|none] [--supervisor v|none]`
+        // → instance.setPosition. Strict sequential flag parse (0b744976
+        // precedent): each flag at most once, unknown/dangling rejected, at
+        // least one flag required. `<ws>` is a positional for grammar
+        // consistency but is NOT forwarded — the spec §5.1 payload keys on the
+        // globally-unique workspaceAgentId. A flag value of "none" clears
+        // (JSON null); an absent flag omits the key entirely (tri-state
+        // absent=keep). `org <ws>` reuses instance.list (Q5: the tree is
+        // derived client-side; no new read command).
+        "position" => match argv.get(1).map(String::as_str) {
+            Some("set") => {
+                let usage = || {
+                    AppError::Invalid(
+                        "cli: position set <ws> <agentId> [--level <l>|none] [--supervisor <agentId>|none]".into(),
+                    )
+                };
+                let _ws = argv.get(2).ok_or_else(usage)?; // positional, not forwarded
+                let agent_id = argv.get(3).ok_or_else(usage)?;
+                let mut level: Option<&str> = None;
+                let mut supervisor: Option<&str> = None;
+                let flags = argv.get(4..).unwrap_or(&[]);
+                let mut i = 0;
+                while i < flags.len() {
+                    let name = flags[i].as_str();
+                    let slot: &mut Option<&str> = match name {
+                        "--level" => &mut level,
+                        "--supervisor" => &mut supervisor,
+                        other => {
+                            return Err(AppError::Invalid(format!(
+                                "cli: position set: unknown flag '{other}'"
+                            )))
+                        }
+                    };
+                    if slot.is_some() {
+                        return Err(AppError::Invalid(format!(
+                            "cli: position set: duplicate flag '{name}'"
+                        )));
+                    }
+                    let value = flags.get(i + 1).ok_or_else(|| {
+                        AppError::Invalid(format!("cli: position set: flag '{name}' expects a value"))
+                    })?;
+                    *slot = Some(value.as_str());
+                    i += 2;
+                }
+                if level.is_none() && supervisor.is_none() {
+                    return Err(AppError::Invalid(
+                        "cli: position set requires at least one of --level or --supervisor".into(),
+                    ));
+                }
+                let mut params = json!({ "workspaceAgentId": agent_id });
+                if let Some(l) = level {
+                    params["level"] = if l == "none" { Value::Null } else { json!(l) };
+                }
+                if let Some(s) = supervisor {
+                    params["supervisorAgentId"] = if s == "none" { Value::Null } else { json!(s) };
+                }
+                Ok(("instance.setPosition", params))
+            }
+            _ => Err(AppError::Invalid(
+                "cli: position <set> — unknown position subcommand".into(),
+            )),
+        },
+
+        "org" => {
+            let workspace_id = argv
+                .get(1)
+                .ok_or_else(|| AppError::Invalid("cli: org <workspaceId>".into()))?;
+            if argv.len() != 2 {
+                return Err(AppError::Invalid("cli: org <workspaceId>".into()));
+            }
+            Ok(("instance.list", json!({ "workspaceId": workspace_id })))
+        }
+
         // ── task (ADR 0008) ──────────────────────────────────────────────
         // Every self-keyed verb (all but `list`/`get`/`create`) arrives here
         // ALREADY expanded by `conclave-cli`'s `expand_self_args` — the
@@ -1932,6 +2006,62 @@ mod tests {
         ]));
     }
 
+    // ── position / org (spec position-system §5) ──────────────────────────
+
+    #[test]
+    fn position_set_maps_value_flags() {
+        // <ws> positional is present but NOT forwarded (spec §5.1 payload).
+        assert_eq!(
+            ok_method(&["position", "set", "ws1", "a1", "--level", "senior", "--supervisor", "sup1"]),
+            "instance.setPosition"
+        );
+        assert_eq!(
+            ok_params(&["position", "set", "ws1", "a1", "--level", "senior", "--supervisor", "sup1"]),
+            json!({ "workspaceAgentId": "a1", "level": "senior", "supervisorAgentId": "sup1" })
+        );
+    }
+
+    #[test]
+    fn position_set_none_becomes_json_null_and_absent_key_is_omitted() {
+        // --supervisor none clears (null); --level absent → key omitted (keep).
+        assert_eq!(
+            ok_params(&["position", "set", "ws1", "a1", "--supervisor", "none"]),
+            json!({ "workspaceAgentId": "a1", "supervisorAgentId": null })
+        );
+        // --level none clears; no --supervisor → that key omitted.
+        assert_eq!(
+            ok_params(&["position", "set", "ws1", "a1", "--level", "none"]),
+            json!({ "workspaceAgentId": "a1", "level": null })
+        );
+    }
+
+    #[test]
+    fn position_set_requires_at_least_one_flag() {
+        assert!(is_invalid(&["position", "set", "ws1", "a1"]));
+    }
+
+    #[test]
+    fn position_set_rejects_unknown_duplicate_and_dangling_flags() {
+        assert!(is_invalid(&["position", "set", "ws1", "a1", "--bogus", "x"]));
+        assert!(is_invalid(&[
+            "position", "set", "ws1", "a1", "--level", "senior", "--level", "mid"
+        ]));
+        assert!(is_invalid(&["position", "set", "ws1", "a1", "--level"]));
+    }
+
+    #[test]
+    fn position_unknown_sub_is_invalid() {
+        assert!(is_invalid(&["position", "bogus", "ws1"]));
+    }
+
+    #[test]
+    fn org_maps_to_instance_list() {
+        assert_eq!(ok_method(&["org", "ws1"]), "instance.list");
+        assert_eq!(ok_params(&["org", "ws1"]), json!({ "workspaceId": "ws1" }));
+        assert!(is_invalid(&["org"]));
+        assert!(is_invalid(&["org", "ws1", "extra"]));
+    }
+
     // ── security tests ────────────────────────────────────────────────────
 
     /// Callers must NOT be able to reach `provider.upsert` via cli.exec.
@@ -2013,5 +2143,92 @@ mod tests {
             .expect("artifact get should succeed");
         assert_eq!(got["title"], json!("Design Notes"));
         assert_eq!(got["content"], json!("# Notes"));
+    }
+
+    /// Create a workspace agent instance and return its id (for the position
+    /// exec test's supervisor chain).
+    async fn mk_instance(state: &AppState, ws_id: &str, name: &str) -> String {
+        use crate::engine::repo::agent_definition::{self, AgentDefinitionInput};
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: name.into(),
+                agent_type: "chat".into(),
+                model: Some("m".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def");
+        crate::engine::repo::workspace_agent::instantiate(&state.db, ws_id, &def.id)
+            .await
+            .expect("instantiate")
+            .id
+    }
+
+    /// End-to-end functional proof for `position set` through the full
+    /// `exec → map_argv → router → instance::set_position → DB` pipeline: builds
+    /// a 3-level chain, exercises tri-state keep/clear, and asserts every §3.5
+    /// rejection (bad level, self-link, cross-workspace, cycle).
+    #[tokio::test]
+    async fn exec_position_set_validates_and_builds_a_chain() {
+        let state = AppState::for_tests().await;
+        let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
+            .await
+            .expect("ws");
+        let ws2 = crate::engine::repo::workspace::create(&state.db, "WS2", "/tmp/ws2", None)
+            .await
+            .expect("ws2");
+        let lead = mk_instance(&state, &ws.id, "Lead").await;
+        let sub = mk_instance(&state, &ws.id, "Sub").await;
+        let imp = mk_instance(&state, &ws.id, "Impl").await;
+        let foreign = mk_instance(&state, &ws2.id, "Foreign").await;
+
+        // Happy: sub reports to lead, level senior — supervisorName resolves.
+        let r = exec(&state, json!({ "argv":
+            ["position","set",&ws.id,&sub,"--supervisor",&lead,"--level","senior"] }))
+            .await
+            .expect("set sub");
+        assert_eq!(r["level"], json!("senior"));
+        assert_eq!(r["supervisorAgentId"], json!(lead));
+        assert_eq!(r["supervisorName"], json!("Lead"));
+
+        // Extend to a 3-level chain: impl -> sub -> lead.
+        exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&sub] }))
+            .await
+            .expect("set impl");
+
+        // Rejections (§3.5), while the full chain is in place:
+        // cycle — lead reporting to impl closes impl->sub->lead->impl.
+        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&lead,"--supervisor",&imp] }))
+            .await
+            .is_err(), "cycle must be rejected");
+        // self-link.
+        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&imp] }))
+            .await
+            .is_err(), "self-link must be rejected");
+        // cross-workspace supervisor.
+        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&foreign] }))
+            .await
+            .is_err(), "cross-workspace supervisor must be rejected");
+        // bad level.
+        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--level","wizard"] }))
+            .await
+            .is_err(), "unknown level must be rejected");
+
+        // Tri-state KEEP: setting only --level leaves the supervisor intact.
+        let r2 = exec(&state, json!({ "argv": ["position","set",&ws.id,&sub,"--level","principal"] }))
+            .await
+            .expect("level only");
+        assert_eq!(r2["level"], json!("principal"));
+        assert_eq!(r2["supervisorAgentId"], json!(lead), "supervisor kept when --supervisor absent");
+
+        // Tri-state CLEAR: --supervisor none clears it, keeping the level.
+        let r3 = exec(&state, json!({ "argv": ["position","set",&ws.id,&sub,"--supervisor","none"] }))
+            .await
+            .expect("clear supervisor");
+        assert!(r3.get("supervisorAgentId").is_none(), "supervisor cleared → key omitted");
+        assert_eq!(r3["level"], json!("principal"), "level kept when supervisor cleared");
     }
 }
