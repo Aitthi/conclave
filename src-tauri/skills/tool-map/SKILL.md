@@ -17,15 +17,15 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Work items | `conclave task claim <workspaceId> <slug>` | take it |
 | Work items | `conclave task state <workspaceId> <slug> <state>` | move state (implementers: review\|abandoned; merged = integrator) |
 | Work items | `conclave task note <workspaceId> <slug> <text...>` | log progress, decisions, outcomes |
-| Work items | `conclave task gate <workspaceId> <slug> -- <cmd...>` | run a verification, proof recorded on the ledger — words after `--` pass verbatim (not shell-reparsed); wrap shell syntax in `sh -c "…"` |
+| Work items | `conclave task gate <workspaceId> <slug> -- <cmd...>` | run a verification, proof recorded on the ledger — commit first, then gate — the gate pins `git rev-parse HEAD` at run time; words after `--` pass verbatim (not shell-reparsed); wrap shell syntax in `sh -c "…"` |
 | Work items | `conclave task challenge <workspaceId> <slug> --claim t --evidence t --proposal t --default t [--deadline-min N]` | dispute a plan/decision with a stated default |
 | Work items | `conclave task rule <workspaceId> <slug> <challengeEventId> <text...>` | settle a challenge (lead) |
 | Work items | `conclave task close <workspaceId> <slug>` | live state → merged shortcut + memory-save reminder |
-| Work items | `conclave task watch <workspaceId> <slug>` / `task unwatch <workspaceId> <slug>` | follow / stop following a lane's notifications |
+| Work items | `conclave task watch <workspaceId> <slug>` / `task unwatch <workspaceId> <slug>` | follow / stop following a lane; notes prefixed `READY`/`BLOCKED`/`ESCALATION` wake watchers, while unmarked notes and passing gates are ledger-only |
 | Lanes | `conclave lane start <workspaceId> <slug>` | claim + worktree in one step |
 | Lanes | `conclave lane finish <workspaceId> <slug>` | integrator teardown after merge (remove worktree + delete branch) |
 | Lanes | `conclave lane guard install` | install the shared-checkout commit-scope guard |
-| Stage | `conclave stage status <workspaceId> <slug>` | git status, partitioned into in/out of the task's boundary |
+| Stage | `conclave stage status <workspaceId> <slug>` | HEAD-vs-worktree tracked and untracked changes, partitioned into in/out of the task's boundary |
 | Stage | `conclave stage diff <workspaceId> <slug>` | git diff HEAD, scoped to the boundary |
 | Stage | `conclave stage commit <workspaceId> <slug> -m <msg>` | private-index commit of ONLY the boundary paths — the shared `.git/index` is never touched, attribution is native git authorship, ledger note posted automatically |
 | Stage | `conclave stage snap <workspaceId> <slug> [-m <label>]` | explicit snapshot of the boundary onto a local op-log ref |
