@@ -203,6 +203,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 16 {
+        sqlx::raw_sql(include_str!("migrations/0016_agent_default_level.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 16;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -265,7 +274,10 @@ mod tests {
             include_str!("migrations/0012_task_system.sql"),
             include_str!("migrations/0013_memory_proposal.sql"),
         ] {
-            sqlx::raw_sql(sql).execute(&mut *tx).await.expect("apply pre-0014 migration");
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .expect("apply pre-0014 migration");
         }
         sqlx::raw_sql("PRAGMA user_version = 13;")
             .execute(&mut *tx)
@@ -284,46 +296,55 @@ mod tests {
     /// shape and could not catch a lossy rebuild (Armin, challenge 2a190c1a).
     #[tokio::test]
     async fn migrate_0014_preserves_legacy_artifact_rows() {
-        use crate::engine::repo::{
-            agent_definition::{self, AgentDefinitionInput},
-            session, workspace, workspace_agent,
-        };
+        use crate::engine::repo::workspace;
 
         let pool = connect_at_v13().await;
 
         // Build a real message to own the legacy artifact (message_id was NOT
-        // NULL pre-0014). These repo helpers write only columns present at v13
-        // (0014 touches nothing but `artifact`), so they work against the old
-        // schema. `instantiate` creates the workspace_agent + its session.
+        // NULL pre-0014). Seed the pre-0014 schema directly: modern repo
+        // helpers now assume later additive columns like
+        // `agent_definition.default_level`, which do not exist at v13.
         let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
             .await
             .expect("create workspace");
-        let def = agent_definition::create(
-            &pool,
-            &AgentDefinitionInput {
-                name: "A".into(),
-                agent_type: "chat".into(),
-                model: Some("m".into()),
-                harness_mode: "own".into(),
-                ..Default::default()
-            },
+        let def_id = "def-v13";
+        sqlx::query(
+            "INSERT INTO agent_definition (id, name, type, model, harness_mode, created_at) \
+             VALUES (?1, 'A', 'chat', 'm', 'own', '2020-01-01T00:00:00+00:00')",
         )
+        .bind(def_id)
+        .execute(&pool)
         .await
-        .expect("create agent_def");
-        let wa = workspace_agent::instantiate(&pool, &ws.id, &def.id)
-            .await
-            .expect("instantiate");
-        let sid = session::get_by_instance(&pool, &wa.id)
-            .await
-            .expect("get_by_instance")
-            .expect("session exists")
-            .id;
+        .expect("seed agent_def");
+        let wa_id = "wa-v13";
+        sqlx::query(
+            "INSERT INTO workspace_agent (id, workspace_id, agent_def_id, status, added_at) \
+             VALUES (?1, ?2, ?3, 'idle', '2020-01-01T00:00:00+00:00')",
+        )
+        .bind(wa_id)
+        .bind(&ws.id)
+        .bind(def_id)
+        .execute(&pool)
+        .await
+        .expect("seed workspace_agent");
+        let sid = "session-v13";
+        sqlx::query(
+            "INSERT INTO session \
+             (id, workspace_agent_id, context_tokens, context_limit, started_at, last_active_at) \
+             VALUES (?1, ?2, 0, ?3, '2020-01-01T00:00:00+00:00', NULL)",
+        )
+        .bind(sid)
+        .bind(wa_id)
+        .bind(crate::engine::repo::session::DEFAULT_CONTEXT_LIMIT)
+        .execute(&pool)
+        .await
+        .expect("seed session");
 
         sqlx::query(
             "INSERT INTO message (id, session_id, role, text, created_at) \
                  VALUES ('msg-1', ?1, 'agent', 'hello', '2020-01-01T00:00:00+00:00')",
         )
-        .bind(&sid)
+        .bind(sid)
         .execute(&pool)
         .await
         .expect("seed message");
@@ -345,19 +366,38 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 15, "migrate() from v13 must reach schema v15");
+        assert_eq!(version, 16, "migrate() from v13 must reach schema v16");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
             .await
             .expect("get failed")
             .expect("legacy artifact must survive the rebuild");
-        assert_eq!(row.message_id.as_deref(), Some("msg-1"), "message_id preserved");
-        assert_eq!(row.filename.as_deref(), Some("page.html"), "filename preserved");
-        assert_eq!(row.content.as_deref(), Some("<h1>hi</h1>"), "html folded into content");
-        assert_eq!(row.kind.as_deref(), Some("html"), "legacy rows tagged kind='html'");
+        assert_eq!(
+            row.message_id.as_deref(),
+            Some("msg-1"),
+            "message_id preserved"
+        );
+        assert_eq!(
+            row.filename.as_deref(),
+            Some("page.html"),
+            "filename preserved"
+        );
+        assert_eq!(
+            row.content.as_deref(),
+            Some("<h1>hi</h1>"),
+            "html folded into content"
+        );
+        assert_eq!(
+            row.kind.as_deref(),
+            Some("html"),
+            "legacy rows tagged kind='html'"
+        );
         assert_eq!(row.sandboxed, Some(true), "sandboxed 1 preserved (as bool)");
-        assert!(row.workspace_id.is_none(), "legacy rows were never workspace-scoped");
+        assert!(
+            row.workspace_id.is_none(),
+            "legacy rows were never workspace-scoped"
+        );
 
         // Wire shape of the migrated legacy row (Armin, challenge d66edb10):
         // sandboxed is a JSON bool, messageId is present, the null
@@ -368,9 +408,15 @@ mod tests {
             Some(&serde_json::Value::Bool(true)),
             "sandboxed must serialise as a JSON bool, not the integer 1"
         );
-        assert_eq!(json.get("messageId").and_then(|v| v.as_str()), Some("msg-1"));
+        assert_eq!(
+            json.get("messageId").and_then(|v| v.as_str()),
+            Some("msg-1")
+        );
         assert_eq!(json.get("kind").and_then(|v| v.as_str()), Some("html"));
-        assert!(json.get("workspaceId").is_none(), "null workspaceId omitted");
+        assert!(
+            json.get("workspaceId").is_none(),
+            "null workspaceId omitted"
+        );
         assert!(json.get("agentId").is_none(), "null agentId omitted");
 
         // No foreign key left dangling by the rebuild.
@@ -379,7 +425,10 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("foreign_key_check query failed");
-        assert!(fk_violations.is_empty(), "0014 left dangling FKs: {fk_violations:?}");
+        assert!(
+            fk_violations.is_empty(),
+            "0014 left dangling FKs: {fk_violations:?}"
+        );
     }
 
     /// All entity tables must exist after migration.
@@ -396,7 +445,7 @@ mod tests {
         assert_eq!(count, 26, "expected 26 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 15.
+    /// Running migrate twice must not error and must leave user_version == 16.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -429,7 +478,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 15, "user_version should be 15");
+        assert_eq!(version, 16, "user_version should be 16");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -455,7 +504,13 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/migrations");
         let mut numbers: Vec<u32> = std::fs::read_dir(&dir)
             .expect("read migrations dir")
-            .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .filter_map(|name| name.get(0..4).and_then(|prefix| prefix.parse::<u32>().ok()))
             .collect();
         numbers.sort_unstable();
@@ -481,7 +536,8 @@ mod tests {
             .await
             .expect("user_version query failed");
         assert_eq!(
-            version, i64::from(max_number),
+            version,
+            i64::from(max_number),
             "a fresh migrate() must land user_version at the highest migration file number"
         );
     }
@@ -625,7 +681,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -716,7 +772,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -734,11 +790,10 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert role should succeed");
-        let skill_ids: String =
-            sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
-                .fetch_one(&pool)
-                .await
-                .expect("select failed");
+        let skill_ids: String = sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
+            .fetch_one(&pool)
+            .await
+            .expect("select failed");
         assert_eq!(skill_ids, "[]");
 
         // agent_definition.role_id exists and defaults to NULL.
@@ -808,16 +863,18 @@ mod tests {
             .execute(&pool)
             .await
             .expect("delete workspace");
-        let remaining_index: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'")
-                .fetch_one(&pool)
-                .await
-                .expect("count memory index");
-        let remaining_chunks: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'")
-                .fetch_one(&pool)
-                .await
-                .expect("count memory chunks");
+        let remaining_index: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count memory index");
+        let remaining_chunks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count memory chunks");
         assert_eq!(remaining_index, 0, "memory index must cascade");
         assert_eq!(remaining_chunks, 0, "memory chunks must cascade");
 
@@ -825,7 +882,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
@@ -861,9 +918,7 @@ mod tests {
             "query must use the composite index: {details:?}"
         );
         assert!(
-            details
-                .iter()
-                .all(|detail| !detail.contains("TEMP B-TREE")),
+            details.iter().all(|detail| !detail.contains("TEMP B-TREE")),
             "query must not sort each page into a temp B-tree: {details:?}"
         );
     }
