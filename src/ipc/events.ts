@@ -165,25 +165,44 @@ export function useEvent<T>(
     let active = true;
     let unlistenFn: UnlistenFn | undefined;
 
-    listen<T>(event, (e) => {
-      if (active) handlerRef.current(e.payload);
-    })
-      .then((unlisten) => {
-        if (active) {
-          unlistenFn = unlisten;
-        } else {
-          // Component unmounted before listen resolved — tear down immediately.
-          unlisten();
-        }
-      })
-      .catch((err) => {
-        // Subscribe failures are expected in non-Tauri contexts (e.g. tests,
-        // plain `vite` without the shell). In dev, surface them — a silent
-        // failure here makes the component permanently deaf to events.
-        if (import.meta.env.DEV) {
-          console.error(`useEvent: failed to subscribe to "${event}"`, err);
-        }
+    // Fixture mode (DEV-only): subscribe to the local bus instead of the Tauri
+    // host. Checked synchronously (not via the fixtures/mode dynamic import) so
+    // this branch is exclusive with the listen() branch below — a dynamic-import
+    // check would race listen() and double-subscribe. Mirrors fixtureScenario()
+    // semantics (a truthy `?fixture=` value); prod short-circuits on DEV so the
+    // whole branch dead-code-eliminates.
+    const inFixture =
+      import.meta.env.DEV &&
+      !!new URLSearchParams(window.location.search).get("fixture");
+
+    if (inFixture) {
+      void import("../fixtures/events").then(({ fixtureListen }) => {
+        if (!active) return;
+        unlistenFn = fixtureListen<T>(event, (p) => {
+          if (active) handlerRef.current(p);
+        });
       });
+    } else {
+      listen<T>(event, (e) => {
+        if (active) handlerRef.current(e.payload);
+      })
+        .then((unlisten) => {
+          if (active) {
+            unlistenFn = unlisten;
+          } else {
+            // Component unmounted before listen resolved — tear down immediately.
+            unlisten();
+          }
+        })
+        .catch((err) => {
+          // Subscribe failures are expected in non-Tauri contexts (e.g. tests,
+          // plain `vite` without the shell). In dev, surface them — a silent
+          // failure here makes the component permanently deaf to events.
+          if (import.meta.env.DEV) {
+            console.error(`useEvent: failed to subscribe to "${event}"`, err);
+          }
+        });
+    }
 
     return () => {
       active = false;
