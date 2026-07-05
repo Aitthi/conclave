@@ -312,7 +312,13 @@ fn bundled_design_host_dir() -> Option<PathBuf> {
 /// spawn node or to parse the report is.
 pub async fn review(design_dir: &Path) -> Result<serde_json::Value, DesignHostError> {
     let node = resolve_node().await?;
-    let script = design_host_dir().join("review").join("review.mjs");
+    let host_dir = design_host_dir();
+    // `review.mjs` imports esbuild (A4) + ./slop-detect.mjs from the host package's
+    // node_modules; a fresh checkout that has never started the host sidecar has none
+    // yet. Mirror `ensure_running`'s first-run `pnpm install` (F2) so
+    // `conclave design review` works standalone, not only after the viewer booted.
+    ensure_deps_installed(&host_dir).await?;
+    let script = host_dir.join("review").join("review.mjs");
     let output = Command::new(&node)
         .arg(&script)
         .arg(design_dir)
