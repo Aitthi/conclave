@@ -2326,7 +2326,11 @@ mod tests {
         // Regression test for the live bug: a path with a space (like the
         // conclave binary's own install path under "Application Support")
         // must reach `sh` as ONE word, not be split back apart.
-        let dir = std::env::temp_dir().join("conclave cli test dir");
+        // Keep the space in the dir name — the space IS the regression under
+        // test — but suffix a UUID so concurrent `cargo test` runs on the same
+        // machine don't race create/remove on a shared fixed path (matches the
+        // stage-test idiom above).
+        let dir = std::env::temp_dir().join(format!("conclave cli test dir {}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mkdir fixture failed");
         let script = dir.join("tool.sh");
         std::fs::write(&script, "#!/bin/sh\necho ran-ok\n").expect("write fixture failed");
