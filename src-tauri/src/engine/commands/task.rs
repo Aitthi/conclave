@@ -1719,25 +1719,38 @@ mod tests {
         assert!(!owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"), "live actor send, no AUTO");
     }
 
-    /// §3.1 all-NULL invariant: owner set but NO supervisor links and NOT
-    /// watching → watchers-only, byte-for-byte today (the LCA is None).
+    /// §3.1 all-NULL invariant, byte-for-byte: with NO supervisor links the
+    /// challenge notification set is EXACTLY today's — the watcher receives the
+    /// unchanged `(from=challenger, to=watcher, text)` line, and a non-watching
+    /// owner receives NOTHING (the LCA is None). Pins the full stable tuple, not
+    /// just a count, so a suppressed or altered watcher line fails here.
     #[tokio::test]
-    async fn challenge_all_null_owner_not_notified() {
+    async fn challenge_all_null_is_byte_for_byte_today() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
         create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
             .await
             .expect("create");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher })).await.expect("watch");
         challenge(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
-                    "claim": "X", "evidence": "e", "proposal": "p", "default": "d" }),
+                    "claim": "X broken", "evidence": "e", "proposal": "p", "default": "d" }),
         )
         .await
         .expect("challenge");
-        assert_eq!(received(&state, &owner).await.len(), 0, "all-NULL: watchers only, no owner ping");
+
+        // The watcher gets exactly today's line (fromInstanceId/toInstanceId/text).
+        let w = received(&state, &watcher).await;
+        assert_eq!(w.len(), 1, "watcher gets exactly one line");
+        assert_eq!(w[0]["fromInstanceId"], json!(challenger));
+        assert_eq!(w[0]["toInstanceId"], json!(watcher));
+        assert_eq!(w[0]["text"], json!("[task t1] Challenger: challenge — X broken"));
+        // The non-watching owner is not the ruler at all-NULL → nothing.
+        assert_eq!(received(&state, &owner).await.len(), 0, "no owner ping at all-NULL");
     }
 
     /// §4 cross-chain: challenger and owner under different sub-leads → the
@@ -1818,17 +1831,21 @@ mod tests {
         assert!(!owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"), "live actor send, no AUTO");
     }
 
-    /// §3.4 all-NULL invariant: owner set, NO supervisor links, NOT watching →
-    /// review-ready is watchers-only, byte-for-byte today.
+    /// §3.4 all-NULL invariant, byte-for-byte: with NO supervisor links the
+    /// review-ready notification set is EXACTLY today's — the watcher receives
+    /// the unchanged `(from=implementer, to=watcher, text)` line, and a
+    /// non-watching owner receives NOTHING. Pins the full stable tuple.
     #[tokio::test]
-    async fn review_ready_all_null_owner_not_notified() {
+    async fn review_ready_all_null_is_byte_for_byte_today() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let implementer = fixture_instance(&state, &ws, "Implementer").await;
+        let watcher = fixture_instance(&state, &ws, "Watcher").await;
         create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
             .await
             .expect("create");
+        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher })).await.expect("watch");
         claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer })).await.expect("claim");
         set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": implementer }))
             .await
@@ -1836,7 +1853,14 @@ mod tests {
         set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }))
             .await
             .expect("review");
-        assert_eq!(received(&state, &owner).await.len(), 0, "all-NULL: watchers only");
+
+        // claimed/in_progress are ledger-only; the watcher's only line is review.
+        let w = received(&state, &watcher).await;
+        assert_eq!(w.len(), 1, "watcher gets exactly one line (the review transition)");
+        assert_eq!(w[0]["fromInstanceId"], json!(implementer));
+        assert_eq!(w[0]["toInstanceId"], json!(watcher));
+        assert_eq!(w[0]["text"], json!("[task t1] Implementer: state — -> review"));
+        assert_eq!(received(&state, &owner).await.len(), 0, "no owner ping at all-NULL");
     }
 
     #[tokio::test]

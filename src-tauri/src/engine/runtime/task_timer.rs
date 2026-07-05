@@ -484,15 +484,20 @@ mod tests {
             .expect("list failed");
         let arr = inbox.as_array().unwrap();
         assert_eq!(arr.len(), 1, "must fire once past the threshold");
-        let text = arr[0]["text"].as_str().unwrap();
-        assert!(
-            text.contains("AUTO"),
-            "line must carry the machine-generated marker (RULED 2026-07-04): {text}"
-        );
-        assert!(text.contains("stall"), "line must say it's a stall alert: {text}");
-        assert!(text.contains("t1"), "line must name the task: {text}");
+        // All-NULL byte-for-byte: exact stable tuple — from=implementer, to=owner
+        // (today's target), and the exact text bar the timestamp-derived minute
+        // count (the ONLY nondeterministic field, excluded per the tuple carve-out).
         assert_eq!(arr[0]["fromInstanceId"], json!(implementer));
         assert_eq!(arr[0]["toInstanceId"], json!(owner));
+        let text = arr[0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("[task t1] AUTO stall alert — no activity for "),
+            "exact stable prefix (AUTO marker + task + phrasing): {text}"
+        );
+        assert!(
+            text.ends_with("+ min (state=claimed)"),
+            "exact stable suffix (state), minute excluded: {text}"
+        );
     }
 
     /// Position routing (spec §3.3): with the implementer reporting to a
@@ -812,11 +817,15 @@ mod tests {
             .iter()
             .filter(|m| m["toInstanceId"] == json!(owner))
             .collect();
+        // All-NULL byte-for-byte: exact stable tuple — the default-ruling text is
+        // deterministic (no timestamp), so pin from/to/text fully. Owner receives
+        // the line attributed to the challenger (the swapped real sender).
         assert_eq!(owner_received.len(), 1, "owner must receive exactly one notification");
-        assert!(
-            owner_received[0]["text"].as_str().unwrap().contains("AUTO"),
-            "line must carry the machine-generated marker (RULED 2026-07-04): {}",
-            owner_received[0]["text"]
+        assert_eq!(owner_received[0]["fromInstanceId"], json!(challenger));
+        assert_eq!(owner_received[0]["toInstanceId"], json!(owner));
+        assert_eq!(
+            owner_received[0]["text"],
+            json!("[task t1] AUTO default ruling — escalate to lead")
         );
 
         let challenger_inbox =
@@ -830,7 +839,12 @@ mod tests {
             .filter(|m| m["toInstanceId"] == json!(challenger))
             .collect();
         assert_eq!(challenger_received.len(), 1, "challenger must receive exactly one notification");
-        assert!(challenger_received[0]["text"].as_str().unwrap().contains("AUTO"));
+        assert_eq!(challenger_received[0]["fromInstanceId"], json!(owner));
+        assert_eq!(challenger_received[0]["toInstanceId"], json!(challenger));
+        assert_eq!(
+            challenger_received[0]["text"],
+            json!("[task t1] AUTO default ruling — escalate to lead")
+        );
     }
 
     #[tokio::test]
