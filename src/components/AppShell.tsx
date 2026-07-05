@@ -472,6 +472,8 @@ export function AppShell() {
           // stale if a different agent is edited while the Builder is open.
           key={builderInitialDef?.id ?? "new"}
           initialDef={builderInitialDef}
+          workspaceId={activeWorkspaceId ?? undefined}
+          workspaceAgentId={selectedId ?? undefined}
           onClose={() => {
             setShowBuilder(false);
             setBuilderInitialDef(undefined);
