@@ -75,6 +75,11 @@ export interface AgentDefinition {
    *  reflects the full effective set (mandatory + this list + custom) — the
    *  Builder's checkboxes read `skillIds`, not this field, directly. */
   selectedBuiltinSkillIds?: string[];
+  /** Position System seed (spec: default-level-supervisor-picker plan, D1): the
+   *  level a new instance is created with. A SEED, not a live link — once an
+   *  instance exists, `WorkspaceAgent.level` is the only value the engine
+   *  reads; changing this never retro-writes existing instances (D2). */
+  defaultLevel?: "junior" | "mid" | "senior" | "principal" | null;
   createdAt: string;
   /** Annotated by list views: how many workspaces this agent belongs to. */
   inWorkspaces?: number;
