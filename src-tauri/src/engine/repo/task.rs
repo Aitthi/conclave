@@ -631,6 +631,26 @@ pub async fn ruling_payloads(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
+/// Whether `workspace_id` has any `task_event` newer than `since_rfc3339`
+/// (the distill-auto-nudge activity signal — an idle workspace is never
+/// nudged). `None` means "any event at all" (the absent-hwm case: a
+/// first-ever run has nothing to compare against, so any activity counts).
+pub async fn has_task_event_since(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    since_rfc3339: Option<&str>,
+) -> sqlx::Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM task_event e JOIN task t ON t.id = e.task_id \
+         WHERE t.workspace_id = ?1 AND (?2 IS NULL OR e.created_at > ?2) LIMIT 1",
+    )
+    .bind(workspace_id)
+    .bind(since_rfc3339)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
