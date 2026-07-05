@@ -14,7 +14,11 @@ import {
   UserPen,
 } from "lucide-react";
 import { ipc } from "../ipc";
-import type { AgentDefinition, Skill, Role } from "../ipc";
+import type { AgentDefinition, Skill, Role, WorkspaceAgent } from "../ipc";
+import { EVENT_NAMES, useEvent } from "../ipc";
+import type { RosterChangedEvent } from "../ipc/events";
+import { LEVELS, chainUp, levelOf, wouldCycle } from "../lib/positions";
+import { HumanChip, PositionLine } from "./Position";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,6 +27,8 @@ export interface BuilderProps {
   onSaved?: (def: AgentDefinition) => void;
   /** Pre-fill the form for editing an existing definition. */
   initialDef?: AgentDefinition;
+  workspaceId?: string;
+  workspaceAgentId?: string;
 }
 
 type AgentType = "cli" | "chat" | "orchestrator";
@@ -155,7 +161,13 @@ function Toggle({ on, onChange, label }: ToggleProps) {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
+export function Builder({
+  onClose,
+  onSaved,
+  initialDef,
+  workspaceId,
+  workspaceAgentId,
+}: BuilderProps) {
   const isEditing = Boolean(initialDef);
 
   // ── Form state (lazy-initialised from initialDef when editing) ─────────────
@@ -198,6 +210,10 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const [customRoleDesc, setCustomRoleDesc] = useState("");
   const [customRoleSkillIds, setCustomRoleSkillIds] = useState<string[]>([]);
   const [savingRole, setSavingRole] = useState(false);
+  const [positionRoster, setPositionRoster] = useState<WorkspaceAgent[]>([]);
+  const [scopedAgent, setScopedAgent] = useState<WorkspaceAgent | null>(null);
+  const [levelDraft, setLevelDraft] = useState<string | null>(null);
+  const [supervisorDraft, setSupervisorDraft] = useState<string | null>(null);
 
   useEffect(() => {
     ipc.skill
@@ -213,6 +229,57 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         if (import.meta.env.DEV) console.error("Builder: role.list failed", err);
       });
   }, []);
+
+  const positionScopeRequested = Boolean(initialDef?.id && workspaceId && workspaceAgentId);
+
+  useEffect(() => {
+    if (!positionScopeRequested || !workspaceId || !workspaceAgentId || !initialDef?.id) {
+      setPositionRoster([]);
+      setScopedAgent(null);
+      setLevelDraft(null);
+      setSupervisorDraft(null);
+      return;
+    }
+
+    let active = true;
+    ipc.instance
+      .list({ workspaceId })
+      .then((instances) => {
+        if (!active) return;
+        setPositionRoster(instances);
+        const scoped =
+          instances.find(
+            (agent) => agent.id === workspaceAgentId && agent.agentDefId === initialDef.id,
+          ) ?? null;
+        setScopedAgent(scoped);
+        setLevelDraft(scoped?.level ?? null);
+        setSupervisorDraft(scoped?.supervisorAgentId ?? null);
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) console.error("Builder: instance.list failed", err);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [initialDef?.id, positionScopeRequested, workspaceAgentId, workspaceId]);
+
+  useEvent<RosterChangedEvent>(EVENT_NAMES.rosterChanged, (payload) => {
+    if (!positionScopeRequested || !workspaceId || payload.workspaceId !== workspaceId) return;
+    ipc.instance
+      .list({ workspaceId })
+      .then((instances) => {
+        setPositionRoster(instances);
+        const scoped =
+          instances.find(
+            (agent) => agent.id === workspaceAgentId && agent.agentDefId === initialDef?.id,
+          ) ?? null;
+        setScopedAgent(scoped);
+      })
+      .catch(() => {
+        // The open editor keeps its current draft if the refresh fails.
+      });
+  });
 
   // Keep only skill ids that still resolve to an existing skill (mirror the
   // engine's copy filter — ADR 0005 review obligation): a role naming a since-
@@ -297,6 +364,30 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
   const isCodex = agentType === "cli" && cliKind === "codex";
   const showCliConfig = isClaudeCode || isCodex;
   const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
+  const positionEnabled = Boolean(
+    scopedAgent && workspaceId && workspaceAgentId && initialDef?.id,
+  );
+  const trackLabel = selectedRoleName ?? scopedAgent?.roleName ?? "No role";
+  const supervisorOptions = positionEnabled
+    ? positionRoster
+        .filter((agent) => agent.id !== scopedAgent!.id)
+        .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id))
+    : [];
+  const previewRoster = positionEnabled
+    ? positionRoster.map((agent) =>
+        agent.id === scopedAgent!.id
+          ? {
+              ...agent,
+              level: levelDraft ?? undefined,
+              supervisorAgentId: supervisorDraft ?? undefined,
+            }
+          : agent,
+      )
+    : [];
+  const previewChainIds = positionEnabled ? chainUp(scopedAgent!.id, previewRoster) : [];
+  const levelChanged = positionEnabled && (scopedAgent?.level ?? null) !== levelDraft;
+  const supervisorChanged =
+    positionEnabled && (scopedAgent?.supervisorAgentId ?? null) !== supervisorDraft;
 
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave() {
@@ -353,6 +444,20 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
         // save never sends a stale list.
         skillIds: agentType === "cli" ? skillIds : undefined,
       });
+      if (positionEnabled && (levelChanged || supervisorChanged)) {
+        const req: {
+          workspaceId: string;
+          workspaceAgentId: string;
+          level?: string | null;
+          supervisorAgentId?: string | null;
+        } = {
+          workspaceId: workspaceId!,
+          workspaceAgentId: workspaceAgentId!,
+        };
+        if (levelChanged) req.level = levelDraft;
+        if (supervisorChanged) req.supervisorAgentId = supervisorDraft;
+        await ipc.instance.setPosition(req);
+      }
       onSaved?.(def);
       onClose();
     } catch (e) {
@@ -671,6 +776,167 @@ export function Builder({ onClose, onSaved, initialDef }: BuilderProps) {
               </div>
             )}
           </section>
+
+          {positionEnabled && (
+            <section>
+              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
+                Position
+              </div>
+
+              <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface p-3 space-y-3">
+                <div>
+                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
+                    Track
+                  </div>
+                  <div className="rounded-lg bg-overlay/[0.04] px-3 py-2">
+                    <PositionLine
+                      levelId={levelDraft}
+                      track={trackLabel}
+                      compact={false}
+                      supervisor={
+                        supervisorDraft
+                          ? (() => {
+                              const next = positionRoster.find(
+                                (agent) => agent.id === supervisorDraft,
+                              );
+                              return next
+                                ? { name: next.name ?? next.id }
+                                : null;
+                            })()
+                          : null
+                      }
+                      showReportsTo
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+                      Level
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setLevelDraft(null)}
+                      className={`text-[11px] font-medium ${
+                        levelDraft == null
+                          ? "text-accent"
+                          : "text-text-tertiary hover:text-text-secondary"
+                      }`}
+                    >
+                      Clear to Unranked
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {LEVELS.map((level) => {
+                      const active = levelDraft === level.id;
+                      return (
+                        <button
+                          key={level.id}
+                          type="button"
+                          onClick={() => setLevelDraft(level.id)}
+                          className={`rounded-xl px-2.5 py-2 text-left transition-all ring-1 ${
+                            active
+                              ? "ring-accent/40 bg-accent/[0.06]"
+                              : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
+                          }`}
+                        >
+                          <div className="text-[11.5px] font-semibold leading-tight">{level.name}</div>
+                          <div className="mt-1 text-[11px] text-text-tertiary">
+                            rung {level.rung}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
+                    Supervisor
+                  </div>
+                  <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                    <button
+                      type="button"
+                      onClick={() => setSupervisorDraft(null)}
+                      className={`w-full rounded-lg px-2.5 py-2 text-left transition-all ring-1 ${
+                        supervisorDraft == null
+                          ? "ring-accent/40 bg-accent/[0.06]"
+                          : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <HumanChip />
+                        <span className="text-[11px] text-text-tertiary">Top of the chain</span>
+                      </div>
+                    </button>
+                    {supervisorOptions.map((agent) => {
+                      const disabled = wouldCycle(scopedAgent!.id, agent.id, positionRoster);
+                      const active = supervisorDraft === agent.id;
+                      return (
+                        <button
+                          key={agent.id}
+                          type="button"
+                          onClick={() => !disabled && setSupervisorDraft(agent.id)}
+                          disabled={disabled}
+                          className={`w-full rounded-lg px-2.5 py-2 text-left transition-all ring-1 ${
+                            active
+                              ? "ring-accent/40 bg-accent/[0.06]"
+                              : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
+                          } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
+                        >
+                          <div className="text-[12px] font-semibold leading-tight">
+                            {agent.name ?? agent.id}
+                          </div>
+                          <PositionLine
+                            levelId={agent.level}
+                            track={agent.roleName ?? "Agent"}
+                            compact
+                            className="mt-1"
+                          />
+                          {disabled && (
+                            <div className="mt-1 text-[10.5px] text-text-tertiary">
+                              Self and descendants cannot supervise this member
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
+                    Escalation chain
+                  </div>
+                  <div className="rounded-lg bg-overlay/[0.04] px-3 py-2">
+                    <div className="flex items-center gap-1.5 flex-wrap text-[11.5px] text-text-secondary">
+                      {previewChainIds.map((id, index) => {
+                        const agent = previewRoster.find((item) => item.id === id);
+                        return (
+                          <span key={id} className="inline-flex items-center gap-1.5">
+                            {index > 0 && <span className="text-text-tertiary">→</span>}
+                            <span className="font-medium text-text-primary">
+                              {agent?.name ?? id}
+                            </span>
+                            <span className="text-text-tertiary">
+                              ({agent?.level ? levelOf(agent.level).short : "Unranked"})
+                            </span>
+                          </span>
+                        );
+                      })}
+                      {previewChainIds.length > 0 && (
+                        <>
+                          <span className="text-text-tertiary">→</span>
+                          <HumanChip label />
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Type */}
           <section>

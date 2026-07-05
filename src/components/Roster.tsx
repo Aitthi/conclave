@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Waypoints,
   Terminal,
@@ -20,7 +20,9 @@ import type {
   SessionStatusEvent,
   SessionOutputEvent,
 } from "../ipc";
+import type { RosterChangedEvent } from "../ipc/events";
 import { computeSkillsStale } from "../lib/skills";
+import { type PositionPerson, PositionLine } from "./Position";
 
 // A live instance reads as "working" while its backend emitted output within
 // this window (R-act-1) — mirrors commands::instance::WORKING_WINDOW (Rust).
@@ -59,6 +61,8 @@ interface RosterEntry {
    *  event (which carries only `sessionId`) back to this row. `undefined` for
    *  a non-live instance. */
   sessionId?: string;
+  level?: string;
+  supervisor?: PositionPerson | null;
 }
 
 // Status dot colors mapped from WorkspaceAgent.status (mirrors WorkspacePane).
@@ -171,12 +175,15 @@ function AgentRow({ entry, isSelected, onSelect, onRemove, removing }: AgentRowP
           {entry.name}
           {isCli && <Terminal className="w-3 h-3 text-text-muted shrink-0" />}
         </div>
-        <div
-          className="text-[10.5px] text-text-muted truncate"
-          title={entry.roleDescription}
-        >
-          {entry.meta}
-        </div>
+        <PositionLine
+          levelId={entry.level}
+          track={entry.meta}
+          compact
+          supervisor={entry.supervisor}
+          showReportsTo
+          trackTitle={entry.roleDescription}
+          className="mt-0.5"
+        />
         <WorkLine working={entry.working} />
       </div>
 
@@ -294,6 +301,7 @@ export function Roster({
   const [showPicker, setShowPicker] = useState(false);
   // Instance id currently being removed (disables its confirm button).
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const loadSeq = useRef(0);
 
   async function handleRemove(instanceId: string) {
     setRemovingId(instanceId);
@@ -307,33 +315,45 @@ export function Roster({
     }
   }
 
-  // Fetch + join instances with their definitions whenever the workspace changes.
-  // StrictMode-safe: `active` flag prevents a stale resolve from updating state
-  // after a cleanup (same pattern as WorkspacePane).
-  useEffect(() => {
-    if (workspaceId === null) {
-      setEntries([]);
-      setLoading(false);
+  const loadEntries = useCallback(
+    async (withLoading: boolean) => {
+      const mine = ++loadSeq.current;
+      if (workspaceId === null) {
+        setEntries([]);
+        setLoading(false);
+        setLoadError(false);
+        return;
+      }
+
+      if (withLoading) {
+        setEntries([]);
+        setLoading(true);
+      }
       setLoadError(false);
-      return;
-    }
 
-    let active = true;
-    setEntries([]);
-    setLoading(true);
-    setLoadError(false);
+      try {
+        const [instances, defs] = await Promise.all([
+          ipc.instance.list({ workspaceId }),
+          ipc.agentDef.list(),
+        ]);
+        if (mine !== loadSeq.current) return;
 
-    Promise.all([ipc.instance.list({ workspaceId }), ipc.agentDef.list()])
-      .then(([instances, defs]) => {
-        if (!active) return;
-        const byId = new Map<string, AgentDefinition>(defs.map((d) => [d.id, d]));
+        const byId = new Map<string, AgentDefinition>(defs.map((def) => [def.id, def]));
+        const identityByInstanceId = new Map<string, PositionPerson>();
+        for (const inst of instances) {
+          const def = byId.get(inst.agentDefId);
+          identityByInstanceId.set(inst.id, {
+            name: inst.name ?? def?.name ?? inst.id,
+            color: def?.color ?? "#6e6e73",
+          });
+        }
         const rosterEntries: RosterEntry[] = [];
         for (const inst of instances) {
           const def = byId.get(inst.agentDefId);
           if (!def) continue;
           rosterEntries.push({
             instanceId: inst.id,
-            name: def.name,
+            name: inst.name ?? def.name,
             color: def.color ?? "#6e6e73",
             type: def.type,
             status: inst.status,
@@ -344,25 +364,41 @@ export function Roster({
             skillsStale: computeSkillsStale(def, inst.launchedSkillIds),
             working: inst.working ?? false,
             sessionId: inst.sessionId,
+            level: inst.level,
+            supervisor:
+              inst.supervisorAgentId != null
+                ? (identityByInstanceId.get(inst.supervisorAgentId) ?? {
+                    name: inst.supervisorName ?? inst.supervisorAgentId,
+                  })
+                : null,
           });
         }
         setEntries(rosterEntries);
         setLoading(false);
-      })
-      .catch((err: unknown) => {
-        if (!active) return;
+      } catch (err: unknown) {
+        if (mine !== loadSeq.current) return;
         if (import.meta.env.DEV) {
           console.error("Roster: instance.list / agentDef.list failed", err);
         }
-        setEntries([]);
+        if (withLoading) setEntries([]);
         setLoading(false);
         setLoadError(true);
-      });
+      }
+    },
+    [workspaceId],
+  );
 
-    return () => {
-      active = false;
-    };
-  }, [workspaceId, agentsVersion]);
+  // Fetch + join instances with their definitions whenever the workspace changes.
+  useEffect(() => {
+    void loadEntries(true);
+  }, [loadEntries, agentsVersion]);
+
+  // Position writes emit `roster:changed { workspaceId }`; refetch the full
+  // roster so level/supervisor chains stay fresh across every surface.
+  useEvent<RosterChangedEvent>(EVENT_NAMES.rosterChanged, (payload) => {
+    if (payload.workspaceId !== workspaceId) return;
+    void loadEntries(false);
+  });
 
   // Live status dots. A newly-added agent is "idle" until the WorkspacePane
   // lazily spawns its session, which flips the workspace_agent to "running" and

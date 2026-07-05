@@ -9,21 +9,37 @@ import {
   Palette,
   FileCode2,
   ArrowRight,
+  ArrowUp,
+  Clock,
+  Crown,
   Filter,
   LoaderCircle,
   Columns3,
+  Network,
+  Scale,
+  ShieldQuestion,
 } from "lucide-react";
 import { ipc, useTaskChanged, useEvent } from "../ipc";
 import type {
+  Task,
   TaskListRow,
   TaskLastGate,
   TaskChallengeBadge,
   TaskState,
+  TaskEvent,
   WorkspaceAgent,
   SessionContextEvent,
 } from "../ipc";
+import type { RosterChangedEvent } from "../ipc/events";
 import { timeHint } from "../lib/timeHint";
-import { mockTaskList } from "./laneBoardMock";
+import {
+  chainUp,
+  lowestCommonSupervisor,
+  reportsOf,
+  rootMembers,
+} from "../lib/positions";
+import { PositionLine } from "./Position";
+import { mockTaskGet, mockTaskList } from "./laneBoardMock";
 
 /* Lane board + workspace telemetry strip (ADR 0008 · Lane D).
    Fidelity target: .arta/proto/screens/lane-board.tsx @ fa4929b (Arta canon).
@@ -59,6 +75,10 @@ const COLUMNS: { state: TaskState; label: string; accent: string }[] = [
 ];
 const ABANDONED_COLUMN = { state: "abandoned" as TaskState, label: "Abandoned", accent: FAINT };
 
+function columnAccent(state: TaskState): string {
+  return [...COLUMNS, ABANDONED_COLUMN].find((column) => column.state === state)?.accent ?? FAINT;
+}
+
 // Context pressure → meter colour. Honest graded signal for a whole swarm: amber
 // warns, rose = compact imminent (per-session ContextBars is always accent).
 function meterColor(pct: number): string {
@@ -83,6 +103,25 @@ function minutesUntil(iso: string): number {
   return Math.max(0, Math.round((new Date(iso).getTime() - Date.now()) / 60_000));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function challengePayloadOf(event: TaskEvent | undefined): ChallengePayload | null {
+  if (!event || event.kind !== "challenge" || !isRecord(event.payload)) return null;
+  return {
+    claim: readString(event.payload, "claim"),
+    evidence: readString(event.payload, "evidence"),
+    proposal: readString(event.payload, "proposal"),
+    default: readString(event.payload, "default"),
+  };
+}
+
 // ── agent identity (roster join) ────────────────────────────────────────────
 interface Identity {
   name: string;
@@ -91,6 +130,18 @@ interface Identity {
 }
 function initialsOf(name: string): string {
   return name.trim().slice(0, 1).toUpperCase() || "?";
+}
+
+interface TaskDetailState {
+  task: Task;
+  events: TaskEvent[];
+}
+
+interface ChallengePayload {
+  claim?: string;
+  evidence?: string;
+  proposal?: string;
+  default?: string;
 }
 
 // ── telemetry view model ────────────────────────────────────────────────────
@@ -119,6 +170,10 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
 
   // ── tasks — the real `task.list` over the UDS wire (Lane A) ────────────────
   const [tasks, setTasks] = useState<TaskListRow[]>([]);
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [taskDetail, setTaskDetail] = useState<TaskDetailState | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [viewMode, setViewMode] = useState<"board" | "org">("board");
   const load = useCallback(() => {
     ipc.task
       .list({ workspaceId })
@@ -137,8 +192,46 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
       });
   }, [workspaceId]);
   useEffect(load, [load]);
+  const loadTaskDetail = useCallback(
+    (slug: string) => {
+      setDetailLoading(true);
+      ipc.task
+        .get({ workspaceId, slug })
+        .then((detail) => {
+          if (mounted.current) setTaskDetail(detail);
+        })
+        .catch((err: unknown) => {
+          if (import.meta.env.DEV) {
+            console.error("LaneBoard: task.get failed", err);
+            try {
+              if (mounted.current) setTaskDetail(mockTaskGet(slug));
+            } catch (mockErr) {
+              console.error("LaneBoard: mock task.get failed", mockErr);
+              if (mounted.current) setTaskDetail(null);
+            }
+          } else if (mounted.current) {
+            setTaskDetail(null);
+          }
+        })
+        .finally(() => {
+          if (mounted.current) setDetailLoading(false);
+        });
+    },
+    [workspaceId],
+  );
+  useEffect(() => {
+    if (!selectedSlug) {
+      setTaskDetail(null);
+      setDetailLoading(false);
+      return;
+    }
+    loadTaskDetail(selectedSlug);
+  }, [loadTaskDetail, selectedSlug]);
   // Live refresh: every mutating `task.*` handler emits `task:changed` (Lane A).
-  useTaskChanged(workspaceId, load);
+  useTaskChanged(workspaceId, () => {
+    load();
+    if (selectedSlug) loadTaskDetail(selectedSlug);
+  });
 
   // ── agent identity map (instance.list + agentDef.list, like MemoryGraph) ───
   const [instances, setInstances] = useState<WorkspaceAgent[]>([]);
@@ -175,6 +268,9 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
     const t = setInterval(loadRoster, 4_000);
     return () => clearInterval(t);
   }, [loadRoster]);
+  useEvent<RosterChangedEvent>("roster:changed", (payload) => {
+    if (payload.workspaceId === workspaceId) loadRoster();
+  });
 
   const resolve = useCallback(
     (id: string | undefined): Identity | null =>
@@ -225,6 +321,16 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
       ),
     [tasks],
   );
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.slug === selectedSlug) ?? null,
+    [tasks, selectedSlug],
+  );
+
+  useEffect(() => {
+    if (selectedSlug && !tasks.some((task) => task.slug === selectedSlug)) {
+      setSelectedSlug(null);
+    }
+  }, [selectedSlug, tasks]);
 
   return (
     <main
@@ -251,6 +357,14 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
             {workspaceName ? `${workspaceName} · agent work system` : "agent work system"}
           </div>
         </div>
+        <HeaderSegment
+          value={viewMode}
+          onChange={setViewMode}
+          options={[
+            { value: "board", label: "Board", icon: <Columns3 size={12} /> },
+            { value: "org", label: "Org", icon: <Network size={12} /> },
+          ]}
+        />
         <HeaderPill>
           <Columns3 size={11} style={{ color: "var(--color-accent)" }} />
           {total} {total === 1 ? "task" : "tasks"}
@@ -310,15 +424,38 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
       {/* content sits below the floating header */}
       <div className="absolute inset-0 pt-12 flex flex-col min-h-0">
         <TelemetryStrip telemetry={telemetry} />
-
-        {/* kanban board */}
-        <div className="flex-1 min-h-0 overflow-x-auto scroll-thin">
-          <div className="h-full flex gap-4 px-5 pt-3">
-            {columns.map((c) => (
-              <Column key={c.state} col={c} tasks={visibleTasks} resolve={resolve} />
-            ))}
+        {viewMode === "board" ? (
+          <div className="flex-1 min-h-0 flex">
+            <div className="flex-1 min-h-0 overflow-x-auto scroll-thin">
+              <div className="h-full flex gap-4 px-5 pt-3">
+                {columns.map((c) => (
+                  <Column
+                    key={c.state}
+                    col={c}
+                    tasks={visibleTasks}
+                    resolve={resolve}
+                    selectedSlug={selectedSlug}
+                    onOpenTask={setSelectedSlug}
+                  />
+                ))}
+              </div>
+            </div>
+            <TaskDetailPane
+              row={selectedTask}
+              detail={taskDetail}
+              loading={detailLoading}
+              roster={instances}
+              resolve={resolve}
+              onClose={() => setSelectedSlug(null)}
+            />
           </div>
-        </div>
+        ) : (
+          <OrgChartPane
+            roster={instances}
+            resolve={resolve}
+            query={q}
+          />
+        )}
       </div>
     </main>
   );
@@ -401,6 +538,593 @@ function TelemetryStrip({ telemetry }: { telemetry: AgentTelemetry[] }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function HeaderSegment<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (value: T) => void;
+  options: Array<{ value: T; label: string; icon: ReactNode }>;
+}) {
+  return (
+    <div className="ml-1 flex gap-1 rounded-lg p-1 bg-bg-canvas" style={{ border: `1px solid ${BORDER}` }}>
+      {options.map((option) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-[0.72rem] font-medium transition-colors ${
+              active ? "text-text-primary" : "text-text-secondary hover:text-text-primary"
+            }`}
+            style={
+              active
+                ? {
+                    background: "var(--color-surface-raised)",
+                    boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--color-overlay) 10%, transparent)",
+                  }
+                : undefined
+            }
+          >
+            <span style={{ color: active ? "var(--color-accent)" : FAINT }}>{option.icon}</span>
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function trackLabelOf(agent: WorkspaceAgent): string {
+  if (agent.roleName) return agent.roleName;
+  if (agent.cliKind === "claude-code") return "CLI";
+  if (agent.cliKind === "codex") return "Codex";
+  if (agent.cliKind === "custom") return "Custom";
+  return "Agent";
+}
+
+function activityLabel(agent: WorkspaceAgent): string {
+  if (agent.working) return "working";
+  if (agent.lastActivityAt) return timeHint(agent.lastActivityAt);
+  return agent.status;
+}
+
+const STATUS_DOT: Record<WorkspaceAgent["status"], string> = {
+  running: LIVE,
+  waiting: WORKING,
+  idle: FAINT,
+};
+
+type Guide = "line" | "space";
+
+interface OrgRow {
+  id: string;
+  guides: Guide[];
+  elbow: "tee" | "ell";
+}
+
+function OrgChartPane({
+  roster,
+  resolve,
+  query,
+}: {
+  roster: WorkspaceAgent[];
+  resolve: (id: string | undefined) => Identity | null;
+  query: string;
+}) {
+  const instanceById = useMemo(() => new Map(roster.map((agent) => [agent.id, agent])), [roster]);
+  const includeSet = useMemo(() => {
+    if (!query) return null;
+    const next = new Set<string>();
+    for (const agent of roster) {
+      const ident = resolve(agent.id);
+      const haystack = `${ident?.name ?? agent.id} ${trackLabelOf(agent)}`.toLowerCase();
+      if (!haystack.includes(query)) continue;
+      for (const id of chainUp(agent.id, roster)) next.add(id);
+    }
+    return next;
+  }, [query, resolve, roster]);
+  const childrenOf = useCallback(
+    (id: string) =>
+      reportsOf(id, roster)
+        .filter((childId) => includeSet == null || includeSet.has(childId))
+        .sort((left, right) => {
+          const leftName = resolve(left)?.name ?? left;
+          const rightName = resolve(right)?.name ?? right;
+          return leftName.localeCompare(rightName);
+        }),
+    [includeSet, resolve, roster],
+  );
+  const rootIds = useMemo(
+    () =>
+      rootMembers(roster)
+        .filter((id) => includeSet == null || includeSet.has(id))
+        .sort((left, right) => {
+          const leftName = resolve(left)?.name ?? left;
+          const rightName = resolve(right)?.name ?? right;
+          return leftName.localeCompare(rightName);
+        }),
+    [includeSet, resolve, roster],
+  );
+  const rows = useMemo(() => {
+    const next: OrgRow[] = [];
+    const visit = (ids: string[], guides: Guide[]) => {
+      ids.forEach((id, index) => {
+        const isLast = index === ids.length - 1;
+        next.push({ id, guides, elbow: isLast ? "ell" : "tee" });
+        visit(childrenOf(id), [...guides, isLast ? "space" : "line"]);
+      });
+    };
+    visit(rootIds, []);
+    return next;
+  }, [childrenOf, rootIds]);
+  const visibleCount = includeSet?.size ?? roster.length;
+
+  if (roster.length === 0) {
+    return (
+      <div className="flex-1 overflow-y-auto scroll-thin px-6 py-6">
+        <div
+          className="max-w-[560px] mx-auto rounded-xl px-4 py-5 text-[0.74rem] text-text-tertiary"
+          style={{ border: `1px dashed ${BORDER}` }}
+        >
+          Org view appears once this workspace has roster data.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto scroll-thin px-6 py-6">
+      <div className="max-w-[720px] mx-auto">
+        <p className="text-[0.72rem] text-text-tertiary leading-relaxed mb-4">
+          The supervisor chain of this workspace. The rails show the path that challenges, escalations, and stall alerts climb.
+        </p>
+
+        <div
+          className="rounded-lg px-3 py-2.5 flex items-center gap-2.5 bg-surface-raised border border-overlay/[0.08]"
+          style={{ borderColor: "color-mix(in srgb, var(--color-accent) 26%, var(--color-overlay) 8%)" }}
+        >
+          <span
+            className="w-8 h-8 rounded-[8px] grid place-items-center shrink-0"
+            style={{
+              color: "var(--color-accent)",
+              background: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
+              border: "1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)",
+            }}
+          >
+            <Crown size={14} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[0.82rem] font-semibold text-text-primary">Human</div>
+            <div className="text-[0.66rem] text-text-secondary">Top of the chain · final tiebreaker</div>
+          </div>
+          <span className="text-[0.62rem] font-mono" style={{ color: FAINT }}>
+            {visibleCount} shown
+          </span>
+        </div>
+
+        <div className="mt-2 flex flex-col gap-1.5">
+          {rows.length === 0 ? (
+            <div
+              className="rounded-lg px-3 py-4 text-[0.72rem] text-text-tertiary"
+              style={{ border: `1px dashed ${BORDER}` }}
+            >
+              No members match this filter.
+            </div>
+          ) : (
+            rows.map((row) => {
+              const agent = instanceById.get(row.id);
+              if (!agent) return null;
+              return (
+                <div key={row.id} className="flex items-stretch">
+                  <GuideColumns guides={row.guides} elbow={row.elbow} />
+                  <div className="flex-1 min-w-0">
+                    <OrgNodeRow
+                      agent={agent}
+                      ident={resolve(row.id)}
+                      reportCount={reportsOf(row.id, roster).length}
+                    />
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GuideColumns({
+  guides,
+  elbow,
+}: {
+  guides: Guide[];
+  elbow: "tee" | "ell";
+}) {
+  return (
+    <>
+      {guides.map((guide, index) => (
+        <span key={index} className="w-6 shrink-0 relative self-stretch" aria-hidden>
+          {guide === "line" && (
+            <span
+              className="absolute top-0 bottom-0 w-px"
+              style={{ left: "50%", background: "color-mix(in srgb, var(--color-text-tertiary) 55%, transparent)" }}
+            />
+          )}
+        </span>
+      ))}
+      <span className="w-6 shrink-0 relative self-stretch" aria-hidden>
+        <span
+          className="absolute top-0 w-px"
+          style={{ left: "50%", height: "50%", background: "color-mix(in srgb, var(--color-text-tertiary) 55%, transparent)" }}
+        />
+        {elbow === "tee" && (
+          <span
+            className="absolute bottom-0 w-px"
+            style={{ left: "50%", height: "50%", background: "color-mix(in srgb, var(--color-text-tertiary) 55%, transparent)" }}
+          />
+        )}
+        <span
+          className="absolute h-px"
+          style={{ left: "50%", right: 0, top: "50%", background: "color-mix(in srgb, var(--color-text-tertiary) 55%, transparent)" }}
+        />
+      </span>
+    </>
+  );
+}
+
+function OrgNodeRow({
+  agent,
+  ident,
+  reportCount,
+}: {
+  agent: WorkspaceAgent;
+  ident: Identity | null;
+  reportCount: number;
+}) {
+  return (
+    <div className="rounded-lg px-3 py-2.5 flex items-center gap-2.5 bg-surface-raised border border-overlay/[0.08] min-w-0">
+      <Avatar ident={ident ?? undefined} dashed={!ident} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-[0.8rem] font-semibold text-text-primary truncate">
+            {ident?.name ?? agent.id}
+          </span>
+          {agent.working && (
+            <LoaderCircle size={11} className="shrink-0 animate-spin" style={{ color: WORKING }} />
+          )}
+        </div>
+        <PositionLine
+          levelId={agent.level}
+          track={trackLabelOf(agent)}
+          compact
+          className="mt-0.5"
+        />
+      </div>
+      <div className="flex flex-col items-end gap-0.5 shrink-0">
+        {reportCount > 0 && (
+          <span className="text-[0.6rem] font-mono" style={{ color: FAINT }}>
+            {reportCount} report{reportCount === 1 ? "" : "s"}
+          </span>
+        )}
+        <span className="inline-flex items-center gap-1 text-[0.62rem]" style={{ color: FAINT }}>
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: STATUS_DOT[agent.status] }} />
+          {activityLabel(agent)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function TaskDetailPane({
+  row,
+  detail,
+  loading,
+  roster,
+  resolve,
+  onClose,
+}: {
+  row: TaskListRow | null;
+  detail: TaskDetailState | null;
+  loading: boolean;
+  roster: WorkspaceAgent[];
+  resolve: (id: string | undefined) => Identity | null;
+  onClose: () => void;
+}) {
+  if (!row && !loading) return null;
+
+  const openChallenge = row?.challenges.find((challenge) => challenge.status === "open") ?? null;
+  const challengeEvent =
+    openChallenge != null ? detail?.events.find((event) => event.id === openChallenge.id) : undefined;
+  const payload = challengePayloadOf(challengeEvent);
+  const filerId = challengeEvent?.actorAgentId ?? row?.implementerAgentId;
+  const ownerId = row?.ownerAgentId;
+  const expectedRulerId =
+    filerId && ownerId ? lowestCommonSupervisor(filerId, ownerId, roster) : ownerId ?? null;
+  const route =
+    filerId != null
+      ? (() => {
+          const fullChain = chainUp(filerId, roster);
+          if (expectedRulerId == null) return fullChain;
+          const index = fullChain.indexOf(expectedRulerId);
+          return index >= 0 ? fullChain.slice(0, index + 1) : fullChain;
+        })()
+      : [];
+  const owner = resolve(row?.ownerAgentId);
+  const implementer = resolve(row?.implementerAgentId);
+
+  return (
+    <aside
+      className="w-[392px] shrink-0 border-l bg-sidebar overflow-y-auto scroll-thin"
+      style={{ borderColor: BORDER }}
+    >
+      <div className="sticky top-0 z-10 px-4 py-3 bg-sidebar border-b" style={{ borderColor: BORDER }}>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[0.66rem]" style={{ color: FAINT }}>
+            {row?.slug ?? "task"}
+          </span>
+          <span
+            className="inline-flex items-center gap-1 h-5 px-1.5 rounded-md text-[0.62rem] font-medium"
+            style={{
+              color: row ? columnAccent(row.state) : FAINT,
+              background: row
+                ? `color-mix(in srgb, ${columnAccent(row.state)} 12%, transparent)`
+                : "transparent",
+              border: row
+                ? `1px solid color-mix(in srgb, ${columnAccent(row.state)} 28%, transparent)`
+                : `1px solid ${BORDER}`,
+            }}
+          >
+            {row?.state.replace("_", " ") ?? "detail"}
+          </span>
+          <button
+            onClick={onClose}
+            className="ml-auto w-7 h-7 grid place-items-center rounded-md text-text-muted hover:bg-overlay/[0.06] hover:text-text-primary"
+            aria-label="Close task detail"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className="mt-2 text-[0.86rem] font-semibold leading-snug text-text-primary">
+          {row?.title ?? "Task detail"}
+        </div>
+        {row && (
+          <div className="mt-2 flex items-center gap-2.5">
+            <AgentPips t={row} resolve={resolve} />
+            <span className="text-[0.62rem]" style={{ color: FAINT }}>
+              owner {owner?.name ?? "—"} · implementer {implementer?.name ?? "—"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="px-4 py-4 space-y-4">
+        {loading && (
+          <div className="flex items-center gap-2 text-[0.72rem]" style={{ color: FAINT }}>
+            <LoaderCircle size={13} className="animate-spin" />
+            Loading task detail…
+          </div>
+        )}
+
+        {!loading && openChallenge == null && (
+          <div
+            className="rounded-xl px-3.5 py-4 text-[0.72rem] text-text-tertiary"
+            style={{ border: `1px dashed ${BORDER}` }}
+          >
+            No open challenges on this task.
+          </div>
+        )}
+
+        {!loading && openChallenge != null && row && (
+          <>
+            <div
+              className="rounded-xl p-3.5"
+              style={{
+                background: "var(--color-surface-raised)",
+                border: `1px solid color-mix(in srgb, ${WORKING} 24%, transparent)`,
+              }}
+            >
+              <div className="flex items-center gap-2 mb-2.5">
+                <Swords size={14} style={{ color: WORKING }} />
+                <span className="text-[0.8rem] font-semibold text-text-primary">Open challenge</span>
+                {openChallenge.deadlineAt && (
+                  <span className="ml-auto inline-flex items-center gap-1 text-[0.66rem] font-mono" style={{ color: WORKING }}>
+                    <Clock size={11} /> {minutesUntil(openChallenge.deadlineAt)}m
+                  </span>
+                )}
+              </div>
+              <p className="text-[0.8rem] leading-snug text-text-primary">
+                {payload?.claim ?? openChallenge.claim}
+              </p>
+              <div className="mt-3 grid gap-2">
+                {payload?.evidence && (
+                  <DetailField icon={<FileCode2 size={12} />} label="Evidence" value={payload.evidence} mono />
+                )}
+                {payload?.proposal && (
+                  <DetailField icon={<ShieldQuestion size={12} />} label="Proposal" value={payload.proposal} />
+                )}
+                {payload?.default && (
+                  <DetailField icon={<Gavel size={12} />} label="Default if unruled" value={payload.default} />
+                )}
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-[0.64rem] font-semibold tracking-[0.08em] uppercase" style={{ color: FAINT }}>
+                  Escalation trace
+                </span>
+                <span className="text-[0.66rem]" style={{ color: FAINT }}>
+                  routes up the supervisor chain
+                </span>
+              </div>
+              {route.length === 0 && !expectedRulerId ? (
+                <div
+                  className="rounded-xl px-3.5 py-4 text-[0.72rem] text-text-tertiary"
+                  style={{ border: `1px dashed ${BORDER}` }}
+                >
+                  Challenge routing appears once the roster chain and task owner are both present.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {route.map((id, index) => (
+                    <EscalationStep
+                      key={id}
+                      connectorAbove={index > 0}
+                      ident={resolve(id)}
+                      agent={roster.find((candidate) => candidate.id === id)}
+                      kind={
+                        index === 0
+                          ? "filed"
+                          : id === expectedRulerId
+                            ? "ruling"
+                            : "through"
+                      }
+                    />
+                  ))}
+                  {expectedRulerId == null && (
+                    <EscalationStep
+                      connectorAbove={route.length > 0}
+                      human
+                      kind="ruling"
+                    />
+                  )}
+                  {expectedRulerId != null && (
+                    <EscalationStep
+                      connectorAbove
+                      human
+                      kind="tiebreaker"
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function EscalationStep({
+  kind,
+  ident,
+  agent,
+  human,
+  connectorAbove,
+}: {
+  kind: "filed" | "through" | "ruling" | "tiebreaker";
+  ident?: Identity | null;
+  agent?: WorkspaceAgent;
+  human?: boolean;
+  connectorAbove: boolean;
+}) {
+  const stepMeta = {
+    filed: { label: "Filed", icon: <Swords size={11} />, color: WORKING },
+    through: { label: "Routes through", icon: <ArrowUp size={11} />, color: FAINT },
+    ruling: { label: "Expected to rule", icon: <Gavel size={11} />, color: "var(--color-accent)" },
+    tiebreaker: { label: "Tiebreaker", icon: <Scale size={11} />, color: FAINT },
+  }[kind];
+
+  return (
+    <div className="relative pl-7">
+      {connectorAbove && (
+        <>
+          <span
+            className="absolute left-[13px] -top-2 h-2 w-px"
+            style={{ background: "color-mix(in srgb, var(--color-text-tertiary) 55%, transparent)" }}
+          />
+          <span className="absolute left-[7px] -top-[1px] grid place-items-center">
+            <ArrowUp size={13} style={{ color: FAINT }} />
+          </span>
+        </>
+      )}
+      <div
+        className="rounded-lg px-3 py-2.5 flex items-center gap-2.5 bg-surface-raised border border-overlay/[0.08]"
+        style={
+          kind === "ruling"
+            ? {
+                borderColor: "color-mix(in srgb, var(--color-accent) 42%, transparent)",
+                background: "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-raised))",
+              }
+            : undefined
+        }
+      >
+        {human ? (
+          <span
+            className="w-[18px] h-[18px] rounded-[5px] grid place-items-center shrink-0"
+            style={{
+              color: "var(--color-accent)",
+              background: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
+              border: "1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)",
+            }}
+          >
+            <Scale size={11} />
+          </span>
+        ) : (
+          <Avatar ident={ident ?? undefined} dashed={!ident} />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="text-[0.8rem] font-semibold text-text-primary">
+            {human ? "Human" : ident?.name ?? agent?.id ?? "Unknown"}
+          </div>
+          {human ? (
+            <div className="text-[0.66rem] text-text-secondary">Top of the chain · final tiebreaker</div>
+          ) : (
+            <PositionLine
+              levelId={agent?.level}
+              track={agent ? trackLabelOf(agent) : "Agent"}
+              compact
+              className="mt-0.5"
+            />
+          )}
+        </div>
+        <span
+          className="inline-flex items-center gap-1 h-[19px] px-1.5 rounded-md text-[0.64rem] font-semibold shrink-0"
+          style={{
+            color: stepMeta.color,
+            background: `color-mix(in srgb, ${stepMeta.color} 12%, transparent)`,
+            border: `1px solid color-mix(in srgb, ${stepMeta.color} 28%, transparent)`,
+          }}
+        >
+          {stepMeta.icon}
+          {stepMeta.label}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function DetailField({
+  icon,
+  label,
+  value,
+  mono,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <span className="w-4 grid place-items-center pt-0.5 shrink-0" style={{ color: FAINT }}>
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <div className="text-[0.6rem] font-semibold tracking-[0.08em] uppercase" style={{ color: FAINT }}>
+          {label}
+        </div>
+        <div className={`text-[0.74rem] leading-snug text-text-secondary ${mono ? "font-mono" : ""}`}>
+          {value}
+        </div>
+      </div>
     </div>
   );
 }
@@ -495,10 +1219,29 @@ const clamp2: React.CSSProperties = {
   overflow: "hidden",
 };
 
-function Card({ t, resolve }: { t: TaskListRow; resolve: (id: string | undefined) => Identity | null }) {
+function Card({
+  t,
+  resolve,
+  selected,
+  onOpenTask,
+}: {
+  t: TaskListRow;
+  resolve: (id: string | undefined) => Identity | null;
+  selected: boolean;
+  onOpenTask: (slug: string) => void;
+}) {
   return (
     <div
-      className="rounded-lg p-2.5 cursor-pointer bg-surface-raised border border-overlay/[0.08] transition-colors hover:bg-fill-soft hover:border-accent/30"
+      onClick={() => onOpenTask(t.slug)}
+      className="rounded-lg p-2.5 cursor-pointer bg-surface-raised border transition-colors hover:bg-fill-soft"
+      style={{
+        borderColor: selected
+          ? "color-mix(in srgb, var(--color-accent) 38%, transparent)"
+          : "color-mix(in srgb, var(--color-overlay) 8%, transparent)",
+        background: selected
+          ? "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-raised))"
+          : "var(--color-surface-raised)",
+      }}
     >
       <div className="flex items-center gap-2 mb-1">
         <span className="font-mono text-[0.64rem] truncate" style={{ color: FAINT }}>
@@ -553,10 +1296,14 @@ function Column({
   col,
   tasks,
   resolve,
+  selectedSlug,
+  onOpenTask,
 }: {
   col: { state: TaskState; label: string; accent: string };
   tasks: TaskListRow[];
   resolve: (id: string | undefined) => Identity | null;
+  selectedSlug: string | null;
+  onOpenTask: (slug: string) => void;
 }) {
   const items = tasks.filter((t) => t.state === col.state);
   return (
@@ -577,7 +1324,15 @@ function Column({
             none
           </div>
         ) : (
-          items.map((t) => <Card key={t.id} t={t} resolve={resolve} />)
+          items.map((t) => (
+            <Card
+              key={t.id}
+              t={t}
+              resolve={resolve}
+              selected={selectedSlug === t.slug}
+              onOpenTask={onOpenTask}
+            />
+          ))
         )}
       </div>
     </section>
