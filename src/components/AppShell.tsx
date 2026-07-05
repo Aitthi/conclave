@@ -180,6 +180,23 @@ export function AppShell() {
     ? (workspaces.find((w) => w.id === activeWorkspaceId) ?? null)
     : null;
 
+  // Full-window Design mode (human ruling D3): while the Design view is OPEN and
+  // actually on screen, hide the Rail + Roster columns so the window becomes
+  // canvas-left + agent-terminal-right. `showDesign` alone is not enough — it is
+  // a latent flag that stays true behind a center-pane screen (Chat/Blackboard/
+  // Memory/LaneBoard/Artifacts), where DesignView is NOT rendered (it lives
+  // inside the WorkspacePane branch). Hiding the sidebars then would strand the
+  // user in a full-screen center view with no navigation, so gate on the exact
+  // condition under which the WorkspacePane branch (and thus DesignView) renders.
+  const designFullWindow =
+    showDesign &&
+    !!activeWorkspaceId &&
+    !showChat &&
+    !showBlackboard &&
+    !showMemory &&
+    !showLaneBoard &&
+    !showArtifacts;
+
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
       {/*
@@ -199,48 +216,69 @@ export function AppShell() {
         aria-hidden="true"
       >
         {/* One continuous toolbar tint across all columns (macOS unified
-            titlebar). The column dividers carry through from the panes below. */}
+            titlebar). The column dividers carry through from the panes below.
+            In full-window Design mode the Rail + Roster column bgs collapse to
+            0 width (their dividers gone with them), leaving a single seamless
+            strip over the canvas + terminal below. */}
         {/* Rail column bg */}
-        <div className="w-[56px] bg-sidebar border-r border-overlay/[0.06] pointer-events-none" />
+        <div
+          className={`${designFullWindow ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+        />
         {/* Roster column bg */}
-        <div className="w-[266px] bg-sidebar border-r border-overlay/[0.06] pointer-events-none" />
+        <div
+          className={`${designFullWindow ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+        />
         {/* Main content bg */}
         <div className="flex-1 bg-sidebar pointer-events-none" />
       </div>
 
       {/* ── 3-pane layout ────────────────────────────────────────────── */}
       <div className="flex-1 flex overflow-hidden min-h-0">
-        <Rail
-          workspaces={workspaces}
-          activeWorkspaceId={activeWorkspaceId}
-          artifactsOpen={showArtifacts}
-          designOpen={showDesign}
-          onSelectWorkspace={handleSelectWorkspace}
-          onOpenDesign={() => {
-            if (!activeWorkspaceId) return;
-            setShowArtifacts(false);
-            setShowDesign((v) => !v);
-          }}
-          onOpenArtifacts={() => {
-            if (!activeWorkspaceId) return;
-            setShowBlackboard(false);
-            setShowChat(false);
-            setShowMemory(false);
-            setShowLaneBoard(false);
-            setShowArtifacts((v) => !v);
-          }}
-          onOpenLibrary={() => {
-            setShowBlackboard(false);
-            setShowLibrary(true);
-          }}
-          onOpenSkillLibrary={() => setShowSkillLibrary(true)}
-          onOpenLinkFolder={() => setShowLinkFolder(true)}
-          onOpenSettings={() => setShowSettings(true)}
-        />
+        {/* Rail — collapsed to 0 width in full-window Design mode (D3), never
+            unmounted: `contents` makes the wrapper transparent to flex so the
+            Rail's own w-[56px] applies normally; collapsing swaps to a 0-width
+            clip. Keeping it mounted preserves its state and — with Roster below
+            — keeps WorkspacePane's position in the tree unchanged, so the
+            terminal never remounts. */}
+        <div className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}>
+          <Rail
+            workspaces={workspaces}
+            activeWorkspaceId={activeWorkspaceId}
+            artifactsOpen={showArtifacts}
+            designOpen={showDesign}
+            onSelectWorkspace={handleSelectWorkspace}
+            onOpenDesign={() => {
+              if (!activeWorkspaceId) return;
+              setShowArtifacts(false);
+              setShowDesign((v) => !v);
+            }}
+            onOpenArtifacts={() => {
+              if (!activeWorkspaceId) return;
+              setShowBlackboard(false);
+              setShowChat(false);
+              setShowMemory(false);
+              setShowLaneBoard(false);
+              setShowArtifacts((v) => !v);
+            }}
+            onOpenLibrary={() => {
+              setShowBlackboard(false);
+              setShowLibrary(true);
+            }}
+            onOpenSkillLibrary={() => setShowSkillLibrary(true)}
+            onOpenLinkFolder={() => setShowLinkFolder(true)}
+            onOpenSettings={() => setShowSettings(true)}
+          />
+        </div>
 
         {/* Roster + main stay mounted; the Library opens as an overlay sheet
             on top so the workspace refreshes live underneath a delete. */}
         <>
+            {/* Roster — collapsed to 0 width in full-window Design mode (D3),
+                never unmounted (same `contents`/clip pattern as the Rail above).
+                It must NOT be conditionally removed: keeping it in the tree holds
+                the center-content branch (WorkspacePane) at a stable position, so
+                toggling Design never remounts the terminal. */}
+            <div className={designFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}>
             <Roster
               workspaceId={activeWorkspaceId}
               workspaceName={activeWorkspace?.name}
@@ -320,6 +358,7 @@ export function AppShell() {
                 activeWorkspaceId ? () => setShowEditWorkspace(true) : undefined
               }
             />
+            </div>
 
             {/* ── Main content: Chat Hub / Blackboard screen, else the live agent pane ─── */}
             {showChat && activeWorkspaceId ? (
