@@ -31,6 +31,9 @@ interface WorkspacePaneProps {
   /** Opens the workspace Chat Hub (threaded down to the Context drawer's
    *  "Open chat" affordance). */
   onOpenChat?: () => void;
+  /** Shell-plumbed placeholder for the Design view. Lane D renders inside the
+   *  mounted workspace pane so terminals stay alive; this lane does not use it. */
+  showDesign?: boolean;
 }
 
 // View-model for one agent tab (any type). Carries the full `AgentDefinition`
@@ -76,7 +79,12 @@ function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
  * tab lazily spawns its session (idempotent server-side; we also memoize the
  * instance→session mapping so re-selecting never re-spawns).
  */
-export function WorkspacePane({ workspaceId, focusInstanceId, onOpenChat }: WorkspacePaneProps) {
+export function WorkspacePane({
+  workspaceId,
+  focusInstanceId,
+  onOpenChat,
+  showDesign: _showDesign,
+}: WorkspacePaneProps) {
   const [tabs, setTabs] = useState<AgentTab[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);

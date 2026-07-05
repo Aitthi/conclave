@@ -94,7 +94,7 @@ export function splitMessageArtifacts(text: string): ArtifactSegment[] {
  * from a CDN won't load remote resources — the secure default for rendering
  * semi-trusted model output inside a desktop app.
  */
-function withSandboxCsp(html: string): string {
+export function withSandboxCsp(html: string): string {
   const meta =
     `<meta http-equiv="Content-Security-Policy" content="` +
     `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; ` +
@@ -108,7 +108,7 @@ function withSandboxCsp(html: string): string {
   return `${meta}${html}`;
 }
 
-function ArtifactFrame({ html, title }: { html: string; title: string }) {
+export function ArtifactFrame({ html, title }: { html: string; title: string }) {
   return (
     <iframe
       title={title}
