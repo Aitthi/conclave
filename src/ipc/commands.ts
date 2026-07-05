@@ -151,6 +151,19 @@ export interface Commands {
     req: { workspaceAgentId: string };
     res: void;
   };
+  // Position System (spec §5.1, amended by ruling 71a00512: workspaceId is
+  // REQUIRED — the command rejects a mismatch against the agent's real
+  // workspace). `level`/`supervisorAgentId` are tri-state: omit the key to keep
+  // the current value, `null` to clear, a string to set.
+  "instance.setPosition": {
+    req: {
+      workspaceId: string;
+      workspaceAgentId: string;
+      level?: string | null;
+      supervisorAgentId?: string | null;
+    };
+    res: WorkspaceAgent;
+  };
   "session.resize": {
     req: { sessionId: string; cols: number; rows: number };
     res: void;
@@ -381,6 +394,8 @@ export const ipc = {
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
     restart: (req: Commands["instance.restart"]["req"]) => call("instance.restart", req),
     remove: (req: Commands["instance.remove"]["req"]) => call("instance.remove", req),
+    setPosition: (req: Commands["instance.setPosition"]["req"]) =>
+      call("instance.setPosition", req),
   },
   session: {
     resize: (req: Commands["session.resize"]["req"]) => call("session.resize", req),

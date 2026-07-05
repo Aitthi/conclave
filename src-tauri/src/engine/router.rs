@@ -43,6 +43,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "instance.spawn" => instance::spawn(state, payload).await,
         "instance.restart" => instance::restart(state, payload).await,
         "instance.remove" => instance::remove(state, payload).await,
+        "instance.setPosition" => instance::set_position(state, payload).await,
         "session.resize" => instance::resize(state, payload).await,
 
         // ── message ───────────────────────────────────────────────────────

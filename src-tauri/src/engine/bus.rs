@@ -24,6 +24,7 @@ pub const SNAPSHOT_CREATED: &str = "snapshot:created";
 pub const TASK_CHANGED: &str = "task:changed";
 pub const MEMORY_CHANGED: &str = "memory:changed";
 pub const ARTIFACT_CHANGED: &str = "artifact:changed";
+pub const ROSTER_CHANGED: &str = "roster:changed";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -176,6 +177,19 @@ pub struct ArtifactChanged {
     pub workspace_id: String,
 }
 
+/// Payload for `roster:changed` (spec position-system §5.1) — a workspace's
+/// roster membership/position changed (e.g. `instance.setPosition` wrote a
+/// level or supervisor link), so an open Roster/org view should refetch.
+/// Carries only the workspace id; mirrors [`MemoryChanged`].
+///
+/// Serialises to `{ "workspaceId" }` (camelCase) to match
+/// `RosterChangedEvent` in `src/ipc/events.ts`.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterChanged {
+    pub workspace_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Generic emit helper
 // ---------------------------------------------------------------------------
@@ -235,6 +249,12 @@ pub fn memory_changed(app: &AppHandle, payload: MemoryChanged) -> tauri::Result<
 /// store just gained a row.
 pub fn artifact_changed(app: &AppHandle, payload: ArtifactChanged) -> tauri::Result<()> {
     emit(app, ARTIFACT_CHANGED, payload)
+}
+
+/// Emit a `roster:changed` event carrying the workspace whose roster
+/// membership/position just changed.
+pub fn roster_changed(app: &AppHandle, payload: RosterChanged) -> tauri::Result<()> {
+    emit(app, ROSTER_CHANGED, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +466,15 @@ mod tests {
     #[test]
     fn artifact_changed_camel_case() {
         let val = serde_json::to_value(ArtifactChanged {
+            workspace_id: "ws1".into(),
+        })
+        .unwrap();
+        assert_eq!(val, json!({ "workspaceId": "ws1" }));
+    }
+
+    #[test]
+    fn roster_changed_camel_case() {
+        let val = serde_json::to_value(RosterChanged {
             workspace_id: "ws1".into(),
         })
         .unwrap();

@@ -15,6 +15,7 @@ export const EVENT_NAMES = {
   taskChanged: "task:changed",
   memoryChanged: "memory:changed",
   artifactChanged: "artifact:changed",
+  rosterChanged: "roster:changed",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -115,6 +116,17 @@ export interface MemoryChangedEvent {
  * in sync with `engine/bus.rs` `ArtifactChanged` (serialisation tests enforce).
  */
 export interface ArtifactChangedEvent {
+  workspaceId: string;
+}
+
+/**
+ * A workspace's roster membership/position changed — emitted after
+ * `instance.setPosition` writes a level or supervisor link (spec position-system
+ * §5.1). Carries only `workspaceId`; an open Roster/org view refetches rather
+ * than patching state from the payload. camelCase serde, kept in sync with
+ * `engine/bus.rs` `RosterChanged` (serialisation tests enforce).
+ */
+export interface RosterChangedEvent {
   workspaceId: string;
 }
 
@@ -323,6 +335,21 @@ export function useArtifactChanged(
   cb: (event: ArtifactChangedEvent) => void,
 ): void {
   useEvent<ArtifactChangedEvent>(EVENT_NAMES.artifactChanged, (payload) => {
+    if (payload.workspaceId === workspaceId) cb(payload);
+  });
+}
+
+/**
+ * Subscribe to roster-changed events for a specific workspace — the Roster/org
+ * view's live-refresh trigger (mirrors `useArtifactChanged`). Fires for each
+ * `RosterChangedEvent` whose `workspaceId` matches, so a `conclave position set`
+ * from any agent refreshes an open roster without reopening it.
+ */
+export function useRosterChanged(
+  workspaceId: string,
+  cb: (event: RosterChangedEvent) => void,
+): void {
+  useEvent<RosterChangedEvent>(EVENT_NAMES.rosterChanged, (payload) => {
     if (payload.workspaceId === workspaceId) cb(payload);
   });
 }

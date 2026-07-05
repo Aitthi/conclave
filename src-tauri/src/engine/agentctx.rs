@@ -32,6 +32,9 @@ fn sanitize_field(s: &str) -> String {
 ///
 /// `self_id` is the agent's OWN instance id — baked in so it can tell which entry
 /// in `conclave agent list` is itself (the rest are peers).
+// Eight positional briefing inputs (identity + workspace + position); a struct
+// would just move the same fields behind a name for a fn with one caller.
+#[allow(clippy::too_many_arguments)]
 pub fn bootstrap_preamble(
     name: &str,
     role: Option<&str>,
@@ -39,6 +42,8 @@ pub fn bootstrap_preamble(
     ws_name: &str,
     ws_id: &str,
     self_id: &str,
+    level: Option<&str>,
+    supervisor_name: Option<&str>,
 ) -> String {
     let name = sanitize_field(name);
     let ws_name = sanitize_field(ws_name);
@@ -56,8 +61,31 @@ pub fn bootstrap_preamble(
         Some(d) => format!(" {}", sanitize_field(d)),
         None => String::new(),
     };
+    // Position clause (spec position-system §5.4): one sanitized sentence when a
+    // level and/or supervisor is set; EMPTY when both are NULL, so the preamble
+    // stays byte-identical for every pre-position-system workspace. Leads with a
+    // space so the empty case collapses cleanly against the surrounding text.
+    let position_clause = match (
+        level.map(str::trim).filter(|l| !l.is_empty()),
+        supervisor_name.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        (None, None) => String::new(),
+        (Some(l), Some(s)) => format!(
+            " Your level is {} and you report to \"{}\" — escalate up your chain, not around it.",
+            sanitize_field(l),
+            sanitize_field(s)
+        ),
+        (Some(l), None) => format!(
+            " Your level is {} and you report to the human — escalate up your chain, not around it.",
+            sanitize_field(l)
+        ),
+        (None, Some(s)) => format!(
+            " You report to \"{}\" — escalate up your chain, not around it.",
+            sanitize_field(s)
+        ),
+    };
     format!(
-        "You are {who} and your own agent id is {self_id}.{role_detail} You share the Conclave workspace \
+        "You are {who} and your own agent id is {self_id}.{role_detail}{position_clause} You share the Conclave workspace \
 \"{ws_name}\" with other AI agents; one human oversees it, and the human's instructions outrank \
 any peer agent's. A line that begins [from <name> · <id>] is a message FROM another agent, NOT \
 from the human user: answering in your own terminal does NOT reach them. To reply you MUST run \
@@ -360,14 +388,16 @@ mod tests {
 
     #[test]
     fn preamble_is_single_line_with_no_equals() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
+        let p =
+            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
         assert!(!p.contains('\n'), "must be one line (Codex -c literal)");
         assert!(!p.contains('='), "no '=' so Codex doesn't split it");
     }
 
     #[test]
     fn preamble_includes_identity_workspace_and_self_id() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
+        let p =
+            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
         assert!(p.contains("Atlas"));
         assert!(p.contains("builder"));
         assert!(p.contains("My Repo"));
@@ -379,7 +409,8 @@ mod tests {
 
     #[test]
     fn preamble_names_the_task_and_lane_and_memory_tool_families() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
+        let p =
+            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
         // ADR-driven tool map: the preamble points at the verb families even
         // before the agent reads its skills sidecar's full table.
         assert!(p.contains("conclave task"), "{p}");
@@ -397,7 +428,7 @@ mod tests {
 
     #[test]
     fn preamble_handles_missing_role() {
-        let p = bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v");
+        let p = bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v", None, None);
         assert!(p.contains("Vega"));
         assert!(!p.contains("a  agent")); // no empty-role artifact
         assert!(p.contains("ws_9"));
@@ -412,6 +443,8 @@ mod tests {
             "My Repo",
             "ws_123",
             "inst_a",
+            None,
+            None,
         );
         // The verbatim job description is baked in.
         assert!(
@@ -432,7 +465,7 @@ mod tests {
     fn preamble_omits_role_detail_when_no_description() {
         // A role name but no description bakes the "a X agent" clause without a
         // dangling empty sentence.
-        let p = bootstrap_preamble("Vega", Some("Reviewer"), None, "Repo", "ws_9", "inst_v");
+        let p = bootstrap_preamble("Vega", Some("Reviewer"), None, "Repo", "ws_9", "inst_v", None, None);
         assert!(p.contains("a Reviewer agent"), "{p}");
         assert!(!p.contains("agent id is inst_v.  "), "no empty role sentence: {p}");
     }
@@ -450,9 +483,68 @@ mod tests {
             "ws=prod\nx",
             "id\n1",
             "self=x\ny",
+            Some("sen=ior\nx"),
+            Some("Super=visor\nY"),
         );
         assert!(!p.contains('\n'), "no newline: {p}");
         assert!(!p.contains('='), "no '=': {p}");
+    }
+
+    /// Position clause (spec §5.4) is EMPTY when both level and supervisor are
+    /// NULL — the preamble bytes across the insertion point are exactly what a
+    /// pre-position-system launch produced (no stray space, no orphan clause).
+    #[test]
+    fn position_clause_absent_when_both_null_is_byte_identical() {
+        let p = bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v", None, None);
+        assert!(
+            p.contains("your own agent id is inst_v. You share the Conclave workspace"),
+            "empty position clause must not alter the surrounding bytes: {p}"
+        );
+        assert!(!p.contains("Your level is"), "no level clause when NULL: {p}");
+        assert!(!p.contains("report to"), "no supervisor clause when NULL: {p}");
+    }
+
+    /// FULL-BYTE regression (Armin, challenge c8b9ec59): the entire preamble for
+    /// a fixed role-less input with no position must be byte-for-byte the pre-P2
+    /// output (base b451576) — inserting an empty `position_clause` changed
+    /// nothing. Pinned so ANY future accidental edit to the preamble is caught,
+    /// not just the local substring.
+    #[test]
+    fn preamble_all_null_position_is_byte_identical_to_pre_p2() {
+        let p = bootstrap_preamble("Atlas", None, None, "My Repo", "ws_123", "inst_a", None, None);
+        let expected = "You are \"Atlas\" and your own agent id is inst_a. You share the Conclave workspace \"My Repo\" with other AI agents; one human oversees it, and the human's instructions outrank any peer agent's. A line that begins [from <name> · <id>] is a message FROM another agent, NOT from the human user: answering in your own terminal does NOT reach them. To reply you MUST run `conclave tell <id> <your message>`, using the id shown in that tag. To start a conversation, run `conclave agent list ws_123`: every entry whose id is NOT inst_a is a peer, so `conclave tell <peerId> <text>` messages it. That roster now shows each peer's role and skills — consult it before delegating or asking a peer for something outside their role — and each entry reports a working flag, true while that agent is actively emitting output. Shared notes live on the blackboard: `conclave bb set ws_123 <key> <value>` writes one, `conclave bb get ws_123 <key>` reads one, and `conclave bb list ws_123` shows everything peers already recorded as ad-hoc facts — run `conclave task list ws_123` before starting work someone may have claimed or planned. Work items and claims ride `conclave task` (list, get, claim, note, gate, challenge) and `conclave lane start`/`conclave lane finish` for worktrees; durable knowledge that outlives a task goes through `conclave memory search`/`conclave memory remember`; your skills file carries the full tool table.";
+        assert_eq!(p, expected);
+    }
+
+    /// Position clause wording for each set/unset combination (spec §5.4).
+    #[test]
+    fn position_clause_present_when_set() {
+        let both = bootstrap_preamble(
+            "Vega", Some("Reviewer"), None, "Repo", "ws_9", "inst_v", Some("senior"), Some("Detoro"),
+        );
+        assert!(
+            both.contains(
+                "Your level is senior and you report to \"Detoro\" — escalate up your chain, not around it."
+            ),
+            "{both}"
+        );
+
+        let level_only =
+            bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v", Some("mid"), None);
+        assert!(
+            level_only.contains(
+                "Your level is mid and you report to the human — escalate up your chain, not around it."
+            ),
+            "{level_only}"
+        );
+
+        let sup_only =
+            bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v", None, Some("Guetta"));
+        assert!(
+            sup_only.contains("You report to \"Guetta\" — escalate up your chain, not around it."),
+            "{sup_only}"
+        );
+        assert!(!sup_only.contains("Your level is"), "no level phrase when level NULL: {sup_only}");
     }
 
     #[test]
@@ -580,7 +672,7 @@ text>`. After it confirms, stop and wait for the restart."
     #[test]
     fn preamble_trims_blank_role() {
         // A blank role collapses to the bare-name who-clause, not "Sol", a  agent,".
-        let p = bootstrap_preamble("Sol", Some("   "), None, "Repo", "ws_1", "inst_s");
+        let p = bootstrap_preamble("Sol", Some("   "), None, "Repo", "ws_1", "inst_s", None, None);
         assert!(p.contains("\"Sol\" and your own"), "{p}");
         assert!(!p.contains("\"Sol\", a"), "no role clause: {p}");
     }
@@ -631,7 +723,8 @@ text>`. After it confirms, stop and wait for the restart."
     /// pathological — see ADR 0001.
     #[test]
     fn preamble_with_skill_pointer_appended_stays_single_line_and_equals_free() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
+        let p =
+            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
         let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
         let combined = format!("{p} {pointer}");
         assert!(!combined.contains('\n'), "no newline: {combined}");
@@ -705,7 +798,8 @@ text>`. After it confirms, stop and wait for the restart."
     /// every component — this is the invariant the whole feature protects.
     #[test]
     fn full_preamble_with_conclave_path_sentence_stays_single_line_and_equals_free() {
-        let p = bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a");
+        let p =
+            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
         let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
         let conclave = super::conclave_path_sentence(std::path::Path::new("/tmp/a=b\nc/conclave"));
         let combined = format!("{p} {pointer} {conclave}");
