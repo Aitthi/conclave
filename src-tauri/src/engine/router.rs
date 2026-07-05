@@ -1,5 +1,6 @@
 use crate::engine::commands::{
-    agent, artifact, blackboard, cli, fusion, instance, memory, message, provider, role, skill,
+    agent, artifact, blackboard, cli, design, fusion, instance, memory, message, provider, role,
+    skill,
     skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
@@ -111,6 +112,10 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
 
         // ── cli ───────────────────────────────────────────────────────────
         "cli.exec" => cli::exec(state, payload).await,
+
+        // ── design (Phase 1 Lane B) ───────────────────────────────────────
+        "design.ensure" => design::ensure(state, payload).await,
+        "design.status" => design::status(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

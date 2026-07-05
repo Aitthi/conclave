@@ -367,3 +367,14 @@ export interface TaskEvent {
   payload: unknown;
   createdAt: string;
 }
+
+/** Result of `design.ensure`/`design.status` — the design-canvas viewer
+ *  sidecar's state for one workspace. `url`/`port` are present only when
+ *  `running` is true; the frontend must never hardcode the port (the sidecar
+ *  can bump to the next free one). */
+export interface DesignInfo {
+  projectId: string;
+  running: boolean;
+  url?: string;
+  port?: number;
+}

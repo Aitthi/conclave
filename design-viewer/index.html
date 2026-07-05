@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arta</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- All five prototype font families, injected by protoApp()'s transformIndexHtml
+         hook (vite/proto-app.ts) from the single FONT_LINK constant
+         (src/lib/prototype.ts) — not hand-copied here. The viewer shell needs them too
+         so device-frame SNAPSHOTS embed the right fonts: modern-screenshot embeds
+         @font-face from the PARENT document's stylesheets, so a prototype using
+         Fraunces / Instrument Serif / Space Grotesk would otherwise snapshot with a
+         fallback. -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

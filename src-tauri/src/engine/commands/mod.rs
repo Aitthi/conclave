@@ -2,6 +2,7 @@ pub mod agent;
 pub mod artifact;
 pub mod blackboard;
 pub mod cli;
+pub mod design;
 pub mod fusion;
 pub mod instance;
 pub mod memory;
