@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 .playwright-mcp
+
+# uishot capture output
+.shots/
