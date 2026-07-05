@@ -711,13 +711,14 @@ pub async fn instantiate(
 
     sqlx::query(
         "INSERT INTO workspace_agent \
-         (id, workspace_id, agent_def_id, status, added_at) \
-         VALUES (?, ?, ?, 'idle', ?)",
+         (id, workspace_id, agent_def_id, status, added_at, level) \
+         SELECT ?, ?, id, 'idle', ?, default_level \
+         FROM agent_definition WHERE id = ?",
     )
     .bind(&wa_id)
     .bind(workspace_id)
-    .bind(agent_def_id)
     .bind(&added_at)
+    .bind(agent_def_id)
     .execute(&mut *tx)
     .await?;
 
@@ -1455,6 +1456,137 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn instantiate_seeds_level_from_agent_definition_default() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let def = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "Senior Seed".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                default_level: Some("senior".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def");
+
+        let row = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+
+        assert_eq!(level_of(&pool, &row.id).await.as_deref(), Some("senior"));
+    }
+
+    #[tokio::test]
+    async fn instantiate_reuse_keeps_manual_instance_level() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let def = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "Seeded".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                default_level: Some("senior".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def");
+
+        let first = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("first instantiate");
+        set_position(&pool, &first.id, Some("mid"), None)
+            .await
+            .expect("manual level change");
+
+        let second = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("second instantiate");
+
+        assert_eq!(first.id, second.id, "reuse path must return the same row");
+        assert_eq!(level_of(&pool, &second.id).await.as_deref(), Some("mid"));
+    }
+
+    #[tokio::test]
+    async fn instantiate_after_remove_reseeds_from_definition_default() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let def = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "ReSeed".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                default_level: Some("senior".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def");
+
+        let first = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("first instantiate");
+        set_position(&pool, &first.id, Some("mid"), None)
+            .await
+            .expect("manual level change");
+        remove(&pool, &first.id).await.expect("remove failed");
+
+        let second = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("second instantiate");
+
+        assert_ne!(
+            first.id, second.id,
+            "remove + instantiate must create a new row"
+        );
+        assert_eq!(level_of(&pool, &second.id).await.as_deref(), Some("senior"));
+    }
+
+    #[tokio::test]
+    async fn updating_definition_default_level_does_not_touch_existing_instance() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace");
+        let def = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "Pinned".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                default_level: Some("senior".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def");
+
+        let row = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+        assert_eq!(level_of(&pool, &row.id).await.as_deref(), Some("senior"));
+
+        sqlx::query("UPDATE agent_definition SET default_level = 'principal' WHERE id = ?")
+            .bind(&def.id)
+            .execute(&pool)
+            .await
+            .expect("update default_level");
+
+        assert_eq!(level_of(&pool, &row.id).await.as_deref(), Some("senior"));
+    }
+
     /// set_status() persists a new status that survives a re-fetch.
     #[tokio::test]
     async fn set_status_updates_row() {
@@ -1813,34 +1945,59 @@ mod tests {
     #[tokio::test]
     async fn set_position_validated_happy_path_and_tri_state() {
         let pool = connect_in_memory().await;
-        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("ws");
         let a = instance_named(&pool, &ws.id, "A").await;
         let sup = instance_named(&pool, &ws.id, "Sup").await;
 
         // Set both.
         set_position_validated(
-            &pool, &ws.id, &a.id,
+            &pool,
+            &ws.id,
+            &a.id,
             PositionField::Set("senior".into()),
             PositionField::Set(sup.id.clone()),
         )
         .await
         .expect("set both");
         assert_eq!(level_of(&pool, &a.id).await.as_deref(), Some("senior"));
-        assert_eq!(supervisor_of(&pool, &a.id).await.unwrap(), Some(sup.id.clone()));
+        assert_eq!(
+            supervisor_of(&pool, &a.id).await.unwrap(),
+            Some(sup.id.clone())
+        );
 
         // Keep level, clear supervisor.
-        set_position_validated(&pool, &ws.id, &a.id, PositionField::Keep, PositionField::Clear)
-            .await
-            .expect("keep level, clear supervisor");
-        assert_eq!(level_of(&pool, &a.id).await.as_deref(), Some("senior"), "level kept");
-        assert_eq!(supervisor_of(&pool, &a.id).await.unwrap(), None, "supervisor cleared");
+        set_position_validated(
+            &pool,
+            &ws.id,
+            &a.id,
+            PositionField::Keep,
+            PositionField::Clear,
+        )
+        .await
+        .expect("keep level, clear supervisor");
+        assert_eq!(
+            level_of(&pool, &a.id).await.as_deref(),
+            Some("senior"),
+            "level kept"
+        );
+        assert_eq!(
+            supervisor_of(&pool, &a.id).await.unwrap(),
+            None,
+            "supervisor cleared"
+        );
     }
 
     #[tokio::test]
     async fn set_position_validated_rejects_every_invalid_case() {
         let pool = connect_in_memory().await;
-        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
-        let ws2 = workspace::create(&pool, "WS2", "/tmp/ws2", None).await.expect("ws2");
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("ws");
+        let ws2 = workspace::create(&pool, "WS2", "/tmp/ws2", None)
+            .await
+            .expect("ws2");
         let a = instance_named(&pool, &ws.id, "A").await;
         let b = instance_named(&pool, &ws.id, "B").await;
         let foreign = instance_named(&pool, &ws2.id, "Foreign").await;
@@ -1851,20 +2008,76 @@ mod tests {
         };
         macro_rules! err {
             ($e:expr, $pat:pat) => {
-                assert!(matches!($e.await, Err($pat)), "expected {}", stringify!($pat))
+                assert!(
+                    matches!($e.await, Err($pat)),
+                    "expected {}",
+                    stringify!($pat)
+                )
             };
         }
-        err!(set("ghost", PositionField::Keep, PositionField::Keep, &ws.id), SetPositionError::AgentNotFound);
-        err!(set(&a.id, PositionField::Keep, PositionField::Keep, &ws2.id), SetPositionError::WorkspaceMismatch);
-        err!(set(&a.id, PositionField::Set("wizard".into()), PositionField::Keep, &ws.id), SetPositionError::LevelInvalid);
-        err!(set(&a.id, PositionField::Keep, PositionField::Set(a.id.clone()), &ws.id), SetPositionError::SupervisorSelf);
-        err!(set(&a.id, PositionField::Keep, PositionField::Set("ghost".into()), &ws.id), SetPositionError::SupervisorNotFound);
-        err!(set(&a.id, PositionField::Keep, PositionField::Set(foreign.id.clone()), &ws.id), SetPositionError::SupervisorCrossWorkspace);
+        err!(
+            set("ghost", PositionField::Keep, PositionField::Keep, &ws.id),
+            SetPositionError::AgentNotFound
+        );
+        err!(
+            set(&a.id, PositionField::Keep, PositionField::Keep, &ws2.id),
+            SetPositionError::WorkspaceMismatch
+        );
+        err!(
+            set(
+                &a.id,
+                PositionField::Set("wizard".into()),
+                PositionField::Keep,
+                &ws.id
+            ),
+            SetPositionError::LevelInvalid
+        );
+        err!(
+            set(
+                &a.id,
+                PositionField::Keep,
+                PositionField::Set(a.id.clone()),
+                &ws.id
+            ),
+            SetPositionError::SupervisorSelf
+        );
+        err!(
+            set(
+                &a.id,
+                PositionField::Keep,
+                PositionField::Set("ghost".into()),
+                &ws.id
+            ),
+            SetPositionError::SupervisorNotFound
+        );
+        err!(
+            set(
+                &a.id,
+                PositionField::Keep,
+                PositionField::Set(foreign.id.clone()),
+                &ws.id
+            ),
+            SetPositionError::SupervisorCrossWorkspace
+        );
         // Cycle: a -> b, then b -> a.
-        set_position_validated(&pool, &ws.id, &a.id, PositionField::Keep, PositionField::Set(b.id.clone()))
-            .await
-            .expect("a -> b");
-        err!(set(&b.id, PositionField::Keep, PositionField::Set(a.id.clone()), &ws.id), SetPositionError::Cycle);
+        set_position_validated(
+            &pool,
+            &ws.id,
+            &a.id,
+            PositionField::Keep,
+            PositionField::Set(b.id.clone()),
+        )
+        .await
+        .expect("a -> b");
+        err!(
+            set(
+                &b.id,
+                PositionField::Keep,
+                PositionField::Set(a.id.clone()),
+                &ws.id
+            ),
+            SetPositionError::Cycle
+        );
     }
 
     /// A MULTI-CONNECTION, file-backed WAL pool + its cleanup path (the temp
@@ -1888,7 +2101,9 @@ mod tests {
             .connect_with(opts)
             .await
             .expect("open file-backed pool");
-        crate::engine::db::migrate(&pool).await.expect("migrate file pool");
+        crate::engine::db::migrate(&pool)
+            .await
+            .expect("migrate file pool");
         (pool, path)
     }
 
@@ -1913,13 +2128,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn forced_race_reciprocal_supervisor_rejects_the_cycle() {
         let (pool, path) = connect_file_multi().await;
-        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("ws");
         let a = instance_named(&pool, &ws.id, "A").await;
         let b = instance_named(&pool, &ws.id, "B").await;
 
         // Writer A: BEGIN IMMEDIATE, write a->b, HOLD (post-validate pre-commit).
         let mut conn_a = pool.acquire().await.expect("acquire A");
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn_a).await.expect("begin A");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn_a)
+            .await
+            .expect("begin A");
         sqlx::query("UPDATE workspace_agent SET supervisor_agent_id = ? WHERE id = ?")
             .bind(&b.id)
             .bind(&a.id)
@@ -1930,21 +2150,44 @@ mod tests {
         // Writer B: the conflicting b->a on a different connection.
         let (pb, wsb, aid, bid) = (pool.clone(), ws.id.clone(), a.id.clone(), b.id.clone());
         let mut b_task = tokio::spawn(async move {
-            set_position_validated(&pb, &wsb, &bid, PositionField::Keep, PositionField::Set(aid)).await
+            set_position_validated(
+                &pb,
+                &wsb,
+                &bid,
+                PositionField::Keep,
+                PositionField::Set(aid),
+            )
+            .await
         });
 
         // PROBE: B must still be blocked after a bounded wait (not sleep-hope).
         let probe = tokio::time::timeout(std::time::Duration::from_millis(400), &mut b_task).await;
-        assert!(probe.is_err(), "B must BLOCK on A's write lock, not complete");
+        assert!(
+            probe.is_err(),
+            "B must BLOCK on A's write lock, not complete"
+        );
 
         // Release A → B unblocks, sees a->b, rejects the cycle.
-        sqlx::query("COMMIT").execute(&mut *conn_a).await.expect("commit A");
+        sqlx::query("COMMIT")
+            .execute(&mut *conn_a)
+            .await
+            .expect("commit A");
         drop(conn_a);
 
         let b_result = b_task.await.expect("join B");
-        assert!(matches!(b_result, Err(SetPositionError::Cycle)), "B must reject: {b_result:?}");
-        assert_eq!(supervisor_of(&pool, &b.id).await.unwrap(), None, "no cycle landed");
-        assert_eq!(supervisor_of(&pool, &a.id).await.unwrap(), Some(b.id.clone()));
+        assert!(
+            matches!(b_result, Err(SetPositionError::Cycle)),
+            "B must reject: {b_result:?}"
+        );
+        assert_eq!(
+            supervisor_of(&pool, &b.id).await.unwrap(),
+            None,
+            "no cycle landed"
+        );
+        assert_eq!(
+            supervisor_of(&pool, &a.id).await.unwrap(),
+            Some(b.id.clone())
+        );
         cleanup_file(pool, path);
     }
 
@@ -1957,13 +2200,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn forced_race_partial_updates_preserve_both_fields() {
         let (pool, path) = connect_file_multi().await;
-        let ws = workspace::create(&pool, "WS", "/tmp/ws", None).await.expect("ws");
+        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("ws");
         let x = instance_named(&pool, &ws.id, "X").await;
         let sup = instance_named(&pool, &ws.id, "Sup").await;
 
         // Writer A: BEGIN IMMEDIATE, set X.level='senior', HOLD.
         let mut conn_a = pool.acquire().await.expect("acquire A");
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn_a).await.expect("begin A");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn_a)
+            .await
+            .expect("begin A");
         sqlx::query("UPDATE workspace_agent SET level = 'senior' WHERE id = ?")
             .bind(&x.id)
             .execute(&mut *conn_a)
@@ -1973,18 +2221,42 @@ mod tests {
         // Writer B: supervisor-only (level Keep).
         let (pb, wsb, xid, sid) = (pool.clone(), ws.id.clone(), x.id.clone(), sup.id.clone());
         let mut b_task = tokio::spawn(async move {
-            set_position_validated(&pb, &wsb, &xid, PositionField::Keep, PositionField::Set(sid)).await
+            set_position_validated(
+                &pb,
+                &wsb,
+                &xid,
+                PositionField::Keep,
+                PositionField::Set(sid),
+            )
+            .await
         });
 
         let probe = tokio::time::timeout(std::time::Duration::from_millis(400), &mut b_task).await;
-        assert!(probe.is_err(), "B must BLOCK on A's write lock, not complete");
+        assert!(
+            probe.is_err(),
+            "B must BLOCK on A's write lock, not complete"
+        );
 
-        sqlx::query("COMMIT").execute(&mut *conn_a).await.expect("commit A");
+        sqlx::query("COMMIT")
+            .execute(&mut *conn_a)
+            .await
+            .expect("commit A");
         drop(conn_a);
 
-        b_task.await.expect("join B").expect("supervisor-only write");
-        assert_eq!(level_of(&pool, &x.id).await.as_deref(), Some("senior"), "level survived");
-        assert_eq!(supervisor_of(&pool, &x.id).await.unwrap(), Some(sup.id.clone()), "supervisor survived");
+        b_task
+            .await
+            .expect("join B")
+            .expect("supervisor-only write");
+        assert_eq!(
+            level_of(&pool, &x.id).await.as_deref(),
+            Some("senior"),
+            "level survived"
+        );
+        assert_eq!(
+            supervisor_of(&pool, &x.id).await.unwrap(),
+            Some(sup.id.clone()),
+            "supervisor survived"
+        );
         cleanup_file(pool, path);
     }
 }

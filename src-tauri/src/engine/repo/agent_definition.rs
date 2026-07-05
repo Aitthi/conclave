@@ -74,6 +74,8 @@ pub struct AgentDefRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -134,6 +136,8 @@ pub struct AgentDefListItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -173,7 +177,7 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 20] = [
+const COLS: [&str; 21] = [
     "id",
     "name",
     "role",
@@ -181,6 +185,7 @@ const COLS: [&str; 20] = [
     "type",
     "cli_kind",
     "color",
+    "default_level",
     "provider_id",
     "model",
     "harness_mode",
@@ -213,6 +218,7 @@ pub struct AgentDefinitionInput {
     pub agent_type: String,
     pub cli_kind: Option<String>,
     pub color: Option<String>,
+    pub default_level: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub harness_mode: String,
@@ -260,7 +266,8 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
     // NOTE: this hardcoded column list must stay in sync with `COLS` (plus the
     // appended `in_workspaces` count) if the table's columns ever change.
     sqlx::query_as::<_, AgentDefListItem>(
-        "SELECT d.id, d.name, d.role, d.role_id, d.type, d.cli_kind, d.color, d.provider_id, d.model, \
+        "SELECT d.id, d.name, d.role, d.role_id, d.type, d.cli_kind, d.color, d.default_level, \
+         d.provider_id, d.model, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
          d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
          d.selected_builtin_skill_ids, \
@@ -322,6 +329,14 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
             (
                 "color",
                 input.color.clone().map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "default_level",
+                input
+                    .default_level
+                    .clone()
+                    .map(Bind::Text)
+                    .unwrap_or(Bind::Null),
             ),
             (
                 "provider_id",
@@ -417,6 +432,7 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         r#type: input.agent_type,
         cli_kind: input.cli_kind,
         color: input.color,
+        default_level: input.default_level,
         provider_id: input.provider_id,
         model: input.model,
         harness_mode: input.harness_mode,
@@ -458,6 +474,10 @@ pub async fn update(
                 input.cli_kind.map(Bind::Text).unwrap_or(Bind::Null),
             ),
             ("color", input.color.map(Bind::Text).unwrap_or(Bind::Null)),
+            (
+                "default_level",
+                input.default_level.map(Bind::Text).unwrap_or(Bind::Null),
+            ),
             (
                 "provider_id",
                 input.provider_id.map(Bind::Text).unwrap_or(Bind::Null),
@@ -546,6 +566,7 @@ mod tests {
             agent_type: agent_type.to_owned(),
             cli_kind: None,
             color: None,
+            default_level: None,
             provider_id: None,
             model: None,
             harness_mode: harness_mode.to_owned(),
@@ -577,6 +598,7 @@ mod tests {
                 agent_type: "cli".into(),
                 cli_kind: Some("claude-code".into()),
                 color: Some("#ff7a45".into()),
+                default_level: Some("senior".into()),
                 provider_id: None,
                 model: Some("claude-opus-4-8".into()),
                 harness_mode: "own".into(),
@@ -611,6 +633,7 @@ mod tests {
         assert_eq!(row.role.as_deref(), Some("Code runner"));
         assert_eq!(row.cli_kind.as_deref(), Some("claude-code"));
         assert_eq!(row.color.as_deref(), Some("#ff7a45"));
+        assert_eq!(row.default_level.as_deref(), Some("senior"));
         assert!(row.provider_id.is_none());
         assert_eq!(row.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(row.share_blackboard, Some(true));
@@ -668,6 +691,7 @@ mod tests {
                 agent_type: "orchestrator".into(),
                 cli_kind: None,
                 color: Some("#5e5ce6".into()),
+                default_level: Some("principal".into()),
                 provider_id: None,
                 model: Some("claude-opus-4-8".into()),
                 harness_mode: "central".into(),
@@ -697,6 +721,7 @@ mod tests {
         assert_eq!(updated.harness_mode, "central");
         assert_eq!(updated.role.as_deref(), Some("Planner"));
         assert_eq!(updated.color.as_deref(), Some("#5e5ce6"));
+        assert_eq!(updated.default_level.as_deref(), Some("principal"));
         assert_eq!(updated.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(updated.share_blackboard, Some(true));
         assert_eq!(updated.auto_submit_injected, Some(true));
@@ -764,6 +789,7 @@ mod tests {
                 agent_type: "cli".into(),
                 cli_kind: Some("claude-code".into()),
                 color: None,
+                default_level: Some("mid".into()),
                 provider_id: None,
                 model: None,
                 harness_mode: "own".into(),
@@ -822,6 +848,10 @@ mod tests {
             json.get("shareBlackboard").is_some(),
             "must have shareBlackboard"
         );
+        assert_eq!(
+            json.get("defaultLevel").and_then(|v| v.as_str()),
+            Some("mid")
+        );
         assert!(
             json.get("allowedSenders").is_some(),
             "must have allowedSenders"
@@ -841,6 +871,10 @@ mod tests {
         assert!(
             json.get("share_blackboard").is_none(),
             "must NOT have share_blackboard"
+        );
+        assert!(
+            json.get("default_level").is_none(),
+            "must NOT have default_level"
         );
         assert!(
             json.get("allowed_senders").is_none(),
