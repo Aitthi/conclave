@@ -322,6 +322,38 @@ async fn require_workspace(state: &AppState, workspace_id: &str) -> Result<(), A
     Ok(())
 }
 
+/// Emit `memory:changed` after a workspace's `memory_chunk` table actually
+/// changed — mirrors `commands::task::emit_changed` (non-fatal; a UI refresh
+/// miss is not a request failure, same as every other `bus::*` emit call).
+///
+/// Callers MUST gate this on an actual write: never call it for a no-op (a
+/// deduped `remember`/`approve`, a `delete` that found nothing, an empty
+/// `clear`) — the graph only needs to refetch when there's something new,
+/// and emitting on origin (UDS CLI vs UI) must never differ (risk ledger).
+fn emit_changed(state: &AppState, workspace_id: &str) {
+    #[cfg(test)]
+    emit_probe().lock().unwrap().push(workspace_id.to_string());
+    state.emit(
+        crate::engine::bus::MEMORY_CHANGED,
+        crate::engine::bus::MemoryChanged {
+            workspace_id: workspace_id.to_string(),
+        },
+    );
+}
+
+/// Test-only probe: records every workspace id [`emit_changed`] was called
+/// with, so tests can assert "emitted on success, not on a no-op" without an
+/// `AppHandle` — `AppState::for_tests` intentionally omits one (see
+/// `state.rs`, out of this task's boundary), so `state.emit` alone is
+/// unobservable from here. Safe under parallel test execution: each test
+/// uses its own freshly-created (unique) `fixture_workspace` id and only
+/// ever filters this global log for entries matching ITS id.
+#[cfg(test)]
+fn emit_probe() -> &'static Mutex<Vec<String>> {
+    static PROBE: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    PROBE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 fn parse_remember(payload: Value) -> Result<RememberReq, AppError> {
     let req: RememberReq =
         serde_json::from_value(payload).map_err(|error| AppError::Invalid(error.to_string()))?;
@@ -511,6 +543,9 @@ async fn remember_with_embedding(
         },
     )
     .await?;
+    if !result.deduped {
+        emit_changed(state, &req.workspace_id);
+    }
     Ok(json!({ "id": result.row.id, "deduped": result.deduped }))
 }
 
@@ -902,6 +937,7 @@ pub async fn delete_with_cache(
     let deleted = repo::memory::delete_chunk(&state.db, &req.workspace_id, &req.id).await?;
     if deleted {
         cache.invalidate(&req.workspace_id);
+        emit_changed(state, &req.workspace_id);
     }
     Ok(json!({ "deleted": deleted }))
 }
@@ -922,6 +958,9 @@ pub async fn clear_with_cache(
     require_workspace(state, &req.workspace_id).await?;
     let deleted = repo::memory::clear_workspace(&state.db, &req.workspace_id).await?;
     cache.invalidate(&req.workspace_id);
+    if deleted > 0 {
+        emit_changed(state, &req.workspace_id);
+    }
     Ok(json!({ "deleted": deleted }))
 }
 
@@ -1241,6 +1280,9 @@ pub async fn approve_with_embedder(
         ))
     })?;
     cache.invalidate(&req.workspace_id);
+    if !upsert.deduped {
+        emit_changed(state, &req.workspace_id);
+    }
     Ok(json!({
         "id": reviewed.id,
         "chunkId": upsert.row.id,
@@ -1385,6 +1427,144 @@ mod tests {
         assert_eq!(first["id"], second["id"]);
         assert_eq!(first["deduped"], false);
         assert_eq!(second["deduped"], true);
+    }
+
+    #[tokio::test]
+    async fn remember_emits_memory_changed_on_a_real_insert_not_on_a_dedup() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "emit-remember").await;
+
+        remember_text(&state, Arc::clone(&cache), &ws, "first")
+            .await
+            .expect("remember");
+        let after_insert = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(after_insert, 1, "a real insert must emit memory:changed once");
+
+        // Re-remembering the SAME text dedupes (no row written) — must NOT
+        // emit again (decision 2).
+        remember_text(&state, Arc::clone(&cache), &ws, "first")
+            .await
+            .expect("deduped remember");
+        let after_dedup = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(after_dedup, 1, "a deduped remember must not emit again");
+    }
+
+    #[tokio::test]
+    async fn delete_emits_only_when_a_row_was_actually_deleted() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "emit-delete").await;
+        let remembered = remember_text(&state, Arc::clone(&cache), &ws, "one")
+            .await
+            .expect("remember");
+        let count = || emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let after_remember = count(); // the remember above already emitted once
+
+        delete_with_cache(
+            &state,
+            json!({ "workspaceId": ws, "id": remembered["id"] }),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("delete");
+        assert_eq!(
+            count(),
+            after_remember + 1,
+            "an actual delete must emit memory:changed"
+        );
+
+        // Deleting the SAME (now-gone) id again finds nothing — must NOT
+        // emit again.
+        delete_with_cache(
+            &state,
+            json!({ "workspaceId": ws, "id": remembered["id"] }),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("delete of an already-deleted id");
+        assert_eq!(
+            count(),
+            after_remember + 1,
+            "deleting nothing must not emit again"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_emits_only_when_rows_were_actually_cleared() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "emit-clear").await;
+
+        // Clearing an already-empty workspace must not emit.
+        clear_with_cache(&state, json!({ "workspaceId": ws }), Arc::clone(&cache))
+            .await
+            .expect("clear empty");
+        let after_empty = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(after_empty, 0, "clearing nothing must not emit");
+
+        remember_text(&state, Arc::clone(&cache), &ws, "one")
+            .await
+            .expect("remember");
+        clear_with_cache(&state, json!({ "workspaceId": ws }), Arc::clone(&cache))
+            .await
+            .expect("clear populated");
+        // remember (1) + clear (1) = 2 emits total for this workspace.
+        let after_populated = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(after_populated, 2, "clearing an actual row must emit");
+    }
+
+    #[tokio::test]
+    async fn approve_emits_on_a_real_chunk_write_propose_and_reject_never_emit() {
+        let state = AppState::for_tests().await;
+        let cache = Arc::new(MemorySearchCache::new());
+        let ws = fixture_workspace(&state, "emit-approve").await;
+        let proposer = fixture_agent(&state, &ws, "Proposer").await;
+        let reviewer = fixture_agent(&state, &ws, "Reviewer").await;
+
+        let proposed = propose(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "proposerId": proposer,
+                "text": "a distilled fact",
+            }),
+        )
+        .await
+        .expect("propose");
+        let emits_after_propose = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(emits_after_propose, 0, "propose never touches memory_chunk — must not emit");
+
+        approve_with_embedder(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposed["id"] }),
+            Arc::new(FakeEmbedder::new(DIMENSION)),
+            Arc::clone(&cache),
+        )
+        .await
+        .expect("approve");
+        let emits_after_approve = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(emits_after_approve, 1, "approve writes a chunk — must emit");
+
+        // A second proposal that gets REJECTED must never emit either.
+        let proposed2 = propose(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "proposerId": proposer,
+                "text": "a different distilled fact",
+            }),
+        )
+        .await
+        .expect("propose 2");
+        reject(
+            &state,
+            json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposed2["id"] }),
+        )
+        .await
+        .expect("reject");
+        let emits_after_reject = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        assert_eq!(emits_after_reject, 1, "reject never touches memory_chunk — must not emit");
     }
 
     #[tokio::test]

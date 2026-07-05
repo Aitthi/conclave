@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react";
 import { ipc } from "../ipc";
 import type { MemoryGraphNode, MemoryGraphEdge } from "../ipc";
+import { useMemoryChanged } from "../ipc/events";
 import { timeHint } from "../lib/timeHint";
 
 /* Memory view — an Obsidian-style Graph View over the workspace's durable
@@ -164,55 +166,78 @@ export function MemoryGraph({ workspaceId, workspaceName, onClose }: MemoryGraph
   const [loadError, setLoadError] = useState(false);
 
   const seq = useRef(0);
-  useEffect(() => {
-    const mine = ++seq.current;
-    setLoading(true);
-    setLoadError(false);
-    Promise.all([
-      ipc.memory.graph({ workspaceId }),
-      ipc.instance.list({ workspaceId }),
-      ipc.agentDef.list(),
-    ])
-      .then(([graph, instances, defs]) => {
-        if (mine !== seq.current) return; // a newer load supersedes this one
-        // instanceId → { name, colour } — the same join the Roster/Blackboard use.
-        const defById = new Map(defs.map((d) => [d.id, d]));
-        const identity = new Map<string, { name: string; color: string }>();
-        for (const inst of instances) {
-          const def = defById.get(inst.agentDefId);
-          if (!def) continue;
-          identity.set(inst.id, { name: def.name, color: def.color ?? "#6e6e73" });
-        }
-        const view: ViewNode[] = graph.nodes.map((n: MemoryGraphNode) => {
-          const who = n.sourceId ? identity.get(n.sourceId) : undefined;
-          return {
-            id: n.id,
-            label: firstSentence(n.text),
-            body: n.text,
-            color: who?.color ?? SHARED_COLOR,
-            authorName: who?.name ?? SHARED_NAME,
-            age: timeHint(n.createdAt),
-            sourceId: n.sourceId,
-          };
+  // `isInitial` distinguishes the workspace-mount load (shows the "Loading…"
+  // state, replaces everything on failure) from a live `memory:changed`
+  // refetch (must be SEAMLESS — flashing the whole graph to a loading/error
+  // screen every time any agent saves a memory would defeat the point of a
+  // live view). A background refetch failure just logs; the already-shown
+  // graph is left exactly as it was.
+  const load = useCallback(
+    (isInitial: boolean) => {
+      const mine = ++seq.current;
+      if (isInitial) {
+        setLoading(true);
+        setLoadError(false);
+      }
+      Promise.all([
+        ipc.memory.graph({ workspaceId }),
+        ipc.instance.list({ workspaceId }),
+        ipc.agentDef.list(),
+      ])
+        .then(([graph, instances, defs]) => {
+          if (mine !== seq.current) return; // a newer load supersedes this one
+          // instanceId → { name, colour } — the same join the Roster/Blackboard use.
+          const defById = new Map(defs.map((d) => [d.id, d]));
+          const identity = new Map<string, { name: string; color: string }>();
+          for (const inst of instances) {
+            const def = defById.get(inst.agentDefId);
+            if (!def) continue;
+            identity.set(inst.id, { name: def.name, color: def.color ?? "#6e6e73" });
+          }
+          const view: ViewNode[] = graph.nodes.map((n: MemoryGraphNode) => {
+            const who = n.sourceId ? identity.get(n.sourceId) : undefined;
+            return {
+              id: n.id,
+              label: firstSentence(n.text),
+              body: n.text,
+              color: who?.color ?? SHARED_COLOR,
+              authorName: who?.name ?? SHARED_NAME,
+              age: timeHint(n.createdAt),
+              sourceId: n.sourceId,
+            };
+          });
+          // Guard against an edge referencing a chunk that isn't in the node set
+          // (shouldn't happen from the backend, but a dangling id would crash the
+          // renderer's `pos(...)!`).
+          const ids = new Set(view.map((n) => n.id));
+          const safeEdges = graph.edges.filter((e) => ids.has(e.a) && ids.has(e.b));
+          setNodes(view);
+          setEdges(safeEdges);
+          if (isInitial) setLoading(false);
+        })
+        .catch((err: unknown) => {
+          if (mine !== seq.current) return;
+          if (import.meta.env.DEV) console.error("MemoryGraph: load failed", err);
+          if (isInitial) {
+            setNodes([]);
+            setEdges([]);
+            setLoading(false);
+            setLoadError(true);
+          }
         });
-        // Guard against an edge referencing a chunk that isn't in the node set
-        // (shouldn't happen from the backend, but a dangling id would crash the
-        // renderer's `pos(...)!`).
-        const ids = new Set(view.map((n) => n.id));
-        const safeEdges = graph.edges.filter((e) => ids.has(e.a) && ids.has(e.b));
-        setNodes(view);
-        setEdges(safeEdges);
-        setLoading(false);
-      })
-      .catch((err: unknown) => {
-        if (mine !== seq.current) return;
-        if (import.meta.env.DEV) console.error("MemoryGraph: load failed", err);
-        setNodes([]);
-        setEdges([]);
-        setLoading(false);
-        setLoadError(true);
-      });
-  }, [workspaceId]);
+    },
+    [workspaceId],
+  );
+
+  useEffect(() => {
+    load(true);
+  }, [load]);
+
+  // Live refresh (decision 3): `remember`/`delete`/`clear`/`approve` all emit
+  // `memory:changed` on an actual write — refetch so a chunk saved while this
+  // view is open appears without reopening it. `useMemoryChanged` already
+  // filters by workspaceId, so no extra guard is needed here.
+  useMemoryChanged(workspaceId, () => load(false));
 
   // ── derived structure ──
   const nodeById = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
@@ -384,16 +409,35 @@ export function MemoryGraph({ workspaceId, workspaceName, onClose }: MemoryGraph
   const fitRef = useRef(fit);
   fitRef.current = fit;
 
-  // (Re)build the sim whenever the node set changes: seeded scatter, pre-warm
-  // synchronously before first paint, then frame it. `nodes` identity only
-  // changes on a fresh load, so this doesn't churn every render.
+  // (Re)build the sim whenever the node set changes: seeded scatter for NEW
+  // node ids, pre-warm synchronously before first paint, then frame it.
+  //
+  // Decision 4 (graph-live-refresh): a live `memory:changed` refetch must not
+  // re-explode the whole graph — carry over the simulation position of every
+  // node id that already existed (found via `prevById`) and only scatter-seed
+  // genuinely NEW ids. `fit()` (re-center/rescale the viewport) only runs when
+  // the sim was empty right before this run — the initial load, or the first
+  // batch after a workspace switch — never on a background live refetch that
+  // merely adds/removes a node from an already-visible graph (that would
+  // yank the user's current pan/zoom out from under them on every save).
+  const prevWorkspaceIdRef = useRef(workspaceId);
   useLayoutEffect(() => {
+    if (prevWorkspaceIdRef.current !== workspaceId) {
+      // Switching workspaces: the previous sim state belongs to a DIFFERENT
+      // workspace's chunks and must never be carried over or suppress fit().
+      prevWorkspaceIdRef.current = workspaceId;
+      nodesRef.current = [];
+    }
+    const wasEmpty = nodesRef.current.length === 0;
     if (nodes.length === 0) {
       nodesRef.current = [];
       return;
     }
+    const prevById = new Map(nodesRef.current.map((n) => [n.id, n]));
     const rnd = seeded(42);
     nodesRef.current = nodes.map((n) => {
+      const prev = prevById.get(n.id);
+      if (prev) return prev;
       const a = rnd() * Math.PI * 2;
       const r = 90 + rnd() * 150;
       return { id: n.id, x: Math.cos(a) * r, y: Math.sin(a) * r, vx: 0, vy: 0 };
@@ -405,8 +449,8 @@ export function MemoryGraph({ workspaceId, workspaceName, onClose }: MemoryGraph
       a *= 0.99;
     }
     alphaRef.current = 0.05; // settled but gently alive for interaction
-    fitRef.current();
-  }, [nodes]);
+    if (wasEmpty) fitRef.current();
+  }, [nodes, workspaceId]);
 
   // ── derived highlight sets ──
   const focus = hover ?? selected;
