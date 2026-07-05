@@ -113,6 +113,19 @@ Acceptance: in a 420px terminal column the composer is a single-line-height
 box with a non-wrapping placeholder; wide mode is pixel-identical to today
 except nothing else; no new props on StdinBar; drop-target highlight intact.
 
+AMENDED at implementation (HUMAN ruling, given live to Dew): in-browser
+measurement showed a real 420px column leaves ~97px for the textarea while
+even the SHORT placeholder renders at ~157px — D1's placeholder swap alone
+cannot stop the wrap. The human, watching live, ruled: "พื้นที่มันน้อย
+ก็เปลี่ยน Layout ไปเลย" (space is tight — change the layout). Implemented
+accordingly: below 560px the composer becomes TWO rows (routing + attach +
+send on row 1, full-width input on row 2); wide mode unchanged. Narrow-mode
+acceptance is therefore the 2-row layout, not the single-row short
+placeholder. RoutingPicker's "· self"/hint suffix also gained
+shrink-0 + whitespace-nowrap (long-name squeeze). All within Lane 1's
+boundary; the width-measurement mechanism (D1, ResizeObserver, no props)
+stands unchanged.
+
 Gate (run in this order, commit first):
 `conclave stage commit … -m "…"` then
 `conclave task gate <ws> stdin-narrow-composer -- sh -c "pnpm exec tsc --noEmit"`
