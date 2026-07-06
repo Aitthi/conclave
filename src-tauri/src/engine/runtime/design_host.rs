@@ -78,6 +78,13 @@ const MAX_RESTART_ATTEMPTS: u32 = 5;
 /// not a safety one.
 const REUSE_HEALTH_BUDGET: Duration = Duration::from_secs(2);
 
+/// Minimum Node major version the `design-host` dependency tree requires at
+/// RUNTIME — `react-router-dom`'s `engines` field pins `>=20.0.0` (verified
+/// in `design-host/node_modules` 2026-07-06); Vite itself tolerates `^18`,
+/// but the dep tree does not, so gate on this rather than Vite's floor.
+/// Bump this (and its comment) if the dep tree's floor ever moves.
+const MIN_NODE_MAJOR: u32 = 20;
+
 /// What [`ensure_running`] hands back to `commands::design` — everything it
 /// needs to build the iframe URL (the project id / query string is the
 /// caller's concern, not the sidecar's).
@@ -95,6 +102,11 @@ pub struct HostInfo {
 pub enum DesignHostError {
     /// `node` could not be resolved on the user's login-shell PATH.
     NodeNotFound,
+    /// `node` was resolved but its major version is below [`MIN_NODE_MAJOR`]
+    /// — `design-host`'s dependency tree cannot run on it. `found` is the
+    /// raw `node --version` output (e.g. `"v18.20.8"`); `path` is the
+    /// resolved node binary so the message can point at exactly which node.
+    NodeTooOld { found: String, path: PathBuf },
     /// Spawning the resolver shell, `pnpm install`, or the host itself
     /// failed at the OS level (distinct from a plain non-zero exit, which is
     /// folded into the message too).
@@ -110,6 +122,11 @@ impl std::fmt::Display for DesignHostError {
             DesignHostError::NodeNotFound => write!(
                 f,
                 "node was not found on PATH — install Node.js to use the Design view"
+            ),
+            DesignHostError::NodeTooOld { found, path } => write!(
+                f,
+                "design view requires Node.js {MIN_NODE_MAJOR} or newer; found {found} at {} — install a newer node (e.g. `nvm install {MIN_NODE_MAJOR}` or `brew install node`) and relaunch",
+                path.display()
             ),
             DesignHostError::Spawn(msg) => write!(f, "design host sidecar failed to start: {msg}"),
             DesignHostError::HealthTimeout => {
@@ -253,7 +270,10 @@ fn login_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
 }
 
-/// Resolve `node`'s absolute path via the user's real login-shell PATH.
+/// Resolve `node`'s absolute path via the user's real login-shell PATH, and
+/// enforce [`MIN_NODE_MAJOR`] (G2 — a corepack-shimmed `pnpm` crashing under
+/// an old node, or the design-host dep tree itself, both fail more
+/// confusingly further down; fail fast here with a clear remedy instead).
 ///
 /// Returns the resolved path (spawned DIRECTLY, no shell wrapper) rather than
 /// just confirming existence: the long-lived host child is spawned without
@@ -269,12 +289,52 @@ async fn resolve_node() -> Result<PathBuf, DesignHostError> {
         .output()
         .await
         .map_err(|e| DesignHostError::Spawn(format!("resolving node via {shell}: {e}")))?;
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if output.status.success() && !path.is_empty() {
-        Ok(PathBuf::from(path))
-    } else {
-        Err(DesignHostError::NodeNotFound)
+    let path_str = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || path_str.is_empty() {
+        return Err(DesignHostError::NodeNotFound);
     }
+    let path = PathBuf::from(&path_str);
+
+    let version_output = Command::new(&path)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| DesignHostError::Spawn(format!("checking `{path_str} --version`: {e}")))?;
+    let version_stdout = String::from_utf8_lossy(&version_output.stdout);
+    let raw_version = version_stdout.trim().to_owned();
+    if !version_output.status.success() {
+        return Err(DesignHostError::Spawn(format!(
+            "`{path_str} --version` exited {:?}: stdout={raw_version:?} stderr={:?}",
+            version_output.status.code(),
+            String::from_utf8_lossy(&version_output.stderr).trim()
+        )));
+    }
+    let major = last_version_major(&version_stdout).ok_or_else(|| {
+        DesignHostError::Spawn(format!(
+            "could not parse a version from `{path_str} --version` output: {raw_version:?}"
+        ))
+    })?;
+    if major < MIN_NODE_MAJOR {
+        return Err(DesignHostError::NodeTooOld { found: raw_version, path });
+    }
+    Ok(path)
+}
+
+/// Parse the major version number out of a single `vMAJOR.MINOR.PATCH` (or
+/// plain `MAJOR.MINOR.PATCH`) line — tolerant of a leading `v`, nothing
+/// else. Returns `None` for anything that doesn't start with `<digits>.`.
+fn parse_version_major(line: &str) -> Option<u32> {
+    let core = line.trim().strip_prefix('v').unwrap_or_else(|| line.trim());
+    core.split('.').next()?.parse::<u32>().ok()
+}
+
+/// Scan `output` (raw multi-line stdout) for the LAST line that parses as a
+/// version per [`parse_version_major`], tolerant of login-shell rc noise
+/// (nvm/asdf/etc. hooks routinely print banners to stdout before the real
+/// command output — the risk ledger for both `node --version` and `pnpm
+/// --version` call sites).
+fn last_version_major(output: &str) -> Option<u32> {
+    output.lines().rev().find_map(parse_version_major)
 }
 
 /// Resolve the vendored host package's directory to spawn/install from. In a
@@ -433,29 +493,41 @@ pub async fn review(design_dir: &Path) -> Result<serde_json::Value, DesignHostEr
 }
 
 /// First-run install inside `dir` if `node_modules` is missing — dev-mode
-/// behavior, accepted by the plan's risk ledger. Prefers `pnpm` (resolved via
-/// the login shell, same pattern as [`resolve_node`]); falls back to `npm
-/// install --no-audit --no-fund` when `pnpm` is absent from PATH (D4 — npm
-/// ships with node, so this only trades away `pnpm-lock.yaml` version
-/// pinning on pnpm-less machines, an accepted tradeoff). Logs progress to
-/// stderr (this crate has no structured logger yet; mirrors `bus.rs`'s plain
-/// `eprintln!` convention) since an install can take real wall-clock time
-/// and a silent multi-second hang would look like a stuck spawn.
+/// behavior, accepted by the plan's risk ledger. Prefers `pnpm`, but only
+/// when it is actually WORKABLE (G1 — a `command -v pnpm` hit is not enough:
+/// a corepack shim can exist on PATH and still crash outright under an old
+/// node, e.g. `TypeError: Invalid host defined options` under Node 18), so
+/// this runs `pnpm --version` through the login shell and only trusts it on
+/// a successful exit with a parseable version on stdout. Falls back to `npm
+/// install --no-audit --no-fund` otherwise (D4 — npm ships with node, so
+/// this only trades away `pnpm-lock.yaml` version pinning on pnpm-less
+/// machines, an accepted tradeoff). Logs progress to stderr (this crate has
+/// no structured logger yet; mirrors `bus.rs`'s plain `eprintln!`
+/// convention) since an install can take real wall-clock time and a silent
+/// multi-second hang would look like a stuck spawn.
 async fn ensure_deps_installed(dir: &Path) -> Result<(), DesignHostError> {
     if dir.join("node_modules").is_dir() {
         return Ok(());
     }
     let shell = login_shell();
-    let has_pnpm = Command::new(&shell)
-        .args(["-l", "-i", "-c", "command -v pnpm"])
-        .output()
-        .await
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false);
-    let (manager, install_cmd) = if has_pnpm {
-        ("pnpm", "pnpm install --frozen-lockfile=false")
-    } else {
-        ("npm", "npm install --no-audit --no-fund")
+    let pnpm_check = Command::new(&shell).args(["-l", "-i", "-c", "pnpm --version"]).output().await;
+    let (manager, install_cmd) = match &pnpm_check {
+        Ok(out) if out.status.success() && last_version_major(&String::from_utf8_lossy(&out.stdout)).is_some() => {
+            ("pnpm", "pnpm install --frozen-lockfile=false")
+        }
+        other => {
+            let reason = match other {
+                Ok(out) => format!(
+                    "exit {:?}, stdout={:?}, stderr={:?}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stdout).trim(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => format!("failed to run: {e}"),
+            };
+            eprintln!("[design-host] pnpm not workable ({reason}) — falling back to npm");
+            ("npm", "npm install --no-audit --no-fund")
+        }
     };
 
     eprintln!("[design-host] installing dependencies via {manager} (first run)…");
@@ -722,6 +794,49 @@ fn kill_pid(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_version_major_handles_v_prefix_and_plain_form() {
+        assert_eq!(parse_version_major("v18.20.8"), Some(18));
+        assert_eq!(parse_version_major("v22.23.1"), Some(22));
+        assert_eq!(parse_version_major("9.1.4"), Some(9)); // pnpm's plain form, no `v`
+        assert_eq!(parse_version_major("  v20.0.0  "), Some(20)); // surrounding whitespace
+        assert_eq!(parse_version_major("garbage"), None);
+        assert_eq!(parse_version_major(""), None);
+        assert_eq!(parse_version_major("vX.Y.Z"), None);
+    }
+
+    #[test]
+    fn last_version_major_skips_login_shell_banner_noise() {
+        // nvm/asdf-style shell hooks print banners to stdout before the real
+        // `node --version`/`pnpm --version` output — the real line is last.
+        let noisy = "Now using node v20.11.0\nnvm: cache updated\nv18.20.8";
+        assert_eq!(last_version_major(noisy), Some(18));
+
+        let clean = "v22.23.1";
+        assert_eq!(last_version_major(clean), Some(22));
+
+        assert_eq!(last_version_major("no version here\nnope"), None);
+    }
+
+    #[test]
+    fn node_too_old_display_names_version_path_and_remedy() {
+        let err = DesignHostError::NodeTooOld {
+            found: "v18.20.8".to_string(),
+            path: PathBuf::from("/Users/tharadon/.nvm/versions/node/v18.20.8/bin/node"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("v18.20.8"), "must name the found version: {msg}");
+        assert!(
+            msg.contains("/Users/tharadon/.nvm/versions/node/v18.20.8/bin/node"),
+            "must name the node path: {msg}"
+        );
+        assert!(msg.contains("20"), "must name the minimum required major: {msg}");
+        assert!(
+            msg.to_lowercase().contains("install") || msg.to_lowercase().contains("nvm"),
+            "must suggest a remedy: {msg}"
+        );
+    }
 
     /// Cross-language guard: these ids MUST match
     /// `design-host/vite/projects.ts`'s `idFor()` byte-for-byte for the
