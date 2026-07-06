@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
@@ -276,26 +277,122 @@ async fn resolve_node() -> Result<PathBuf, DesignHostError> {
     }
 }
 
-/// Resolve the vendored host package's directory: the bundled
-/// `Resources/design-host` sibling of the running executable inside a
-/// packaged `.app`, falling back to the repo-relative source tree
-/// (`CARGO_MANIFEST_DIR/../design-host`) for `cargo run`/`tauri dev`.
-/// Mirrors `repo::skill::skills_dir()` exactly. Packaged-app resource
-/// bundling for `design-host/` itself (node_modules et al.) is OUT OF
-/// SCOPE for Phase 1 (risk ledger) — this fn only makes dev mode and a
-/// future packaged build resolve consistently once that bundling exists.
-fn design_host_dir() -> PathBuf {
+/// Resolve the vendored host package's directory to spawn/install from. In a
+/// packaged `.app`, the bundled `Resources/design-host` tree (SOURCE only,
+/// no `node_modules` — see D1/`tauri.conf.json`'s `bundle.resources`) is
+/// read-only (App Translocation / DMG mounts, and writing into
+/// `Contents/Resources` breaks the code signature), so it is synced to a
+/// writable copy under `design_home_dir()?/runtime` (D2) via
+/// [`sync_bundled_to_runtime`] and THAT path is returned — giving
+/// `ensure_deps_installed`'s `pnpm install` somewhere writable to install
+/// into. Falls back to the repo-relative source tree
+/// (`CARGO_MANIFEST_DIR/../design-host`) for `cargo run`/`tauri dev` (D6: no
+/// bundled dir exists there, so this fallback is byte-identical to
+/// pre-packaging behavior).
+fn design_host_dir() -> Result<PathBuf, DesignHostError> {
     if let Some(bundled) = bundled_design_host_dir() {
         if bundled.is_dir() {
-            return bundled;
+            return sync_bundled_to_runtime(&bundled).map_err(|e| {
+                DesignHostError::Spawn(format!(
+                    "syncing bundled design-host ({}) to runtime dir: {e}",
+                    bundled.display()
+                ))
+            });
         }
     }
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../design-host"))
+    Ok(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../design-host")))
 }
 
 fn bundled_design_host_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.parent()?.join("Resources").join("design-host"))
+}
+
+/// Sync the bundled (read-only) design-host tree to a writable copy at
+/// `design_home_dir()?/runtime`, per D2/D3. Thin wrapper resolving the real
+/// app-data runtime path around [`sync_to_runtime`], which does the actual
+/// work against an arbitrary `runtime` dir so it can be exercised against a
+/// tempdir in tests without touching the real app-data directory.
+fn sync_bundled_to_runtime(bundled: &Path) -> std::io::Result<PathBuf> {
+    let runtime = design_home_dir()?.join("runtime");
+    sync_to_runtime(bundled, &runtime)?;
+    Ok(runtime)
+}
+
+/// Returns immediately WITHOUT copying when [`fingerprint_tree`] proves
+/// `runtime` already matches `bundled` — this runs on every `design.ensure`
+/// call (via [`design_host_dir`]), not just first boot, so the common case
+/// must be a cheap hash-and-compare, not a tree walk + copy.
+fn sync_to_runtime(bundled: &Path, runtime: &Path) -> std::io::Result<()> {
+    let fingerprint_path = runtime.join(".bundle-fingerprint");
+    let current = fingerprint_tree(bundled)?;
+
+    if runtime.is_dir() {
+        if std::fs::read_to_string(&fingerprint_path).ok().as_deref() == Some(current.as_str()) {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(runtime)?;
+    }
+
+    copy_tree(bundled, runtime)?;
+    // Written LAST: an interrupted copy (process killed mid-sync) leaves the
+    // runtime dir populated but WITHOUT a fingerprint file, so the read above
+    // finds no match on the next call and re-syncs from scratch rather than
+    // trusting a half-copied tree.
+    std::fs::write(&fingerprint_path, &current)?;
+    Ok(())
+}
+
+/// SHA-256 over `dir`'s tree per plan D3: walk files sorted by relative
+/// path, hashing `relpath bytes + 0x00 + file contents` for each. Sorted
+/// order makes the result independent of filesystem iteration order; the
+/// NUL separator between path and contents prevents two different trees
+/// from hashing equal via boundary-shifted concatenation (e.g. a file named
+/// "ab" with contents "c" vs. a file named "a" with contents "bc").
+fn fingerprint_tree(dir: &Path) -> std::io::Result<String> {
+    let mut files = Vec::new();
+    collect_files(dir, dir, &mut files)?;
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    for rel in &files {
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update([0u8]);
+        hasher.update(std::fs::read(dir.join(rel))?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, out)?;
+        } else {
+            out.push(
+                path.strip_prefix(root)
+                    .expect("walked entry is a descendant of root")
+                    .to_path_buf(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &dest_path)?;
+        } else {
+            std::fs::copy(&path, &dest_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Run the deterministic design-review grader (`review/review.mjs`) against a
@@ -312,7 +409,7 @@ fn bundled_design_host_dir() -> Option<PathBuf> {
 /// spawn node or to parse the report is.
 pub async fn review(design_dir: &Path) -> Result<serde_json::Value, DesignHostError> {
     let node = resolve_node().await?;
-    let host_dir = design_host_dir();
+    let host_dir = design_host_dir()?;
     // `review.mjs` imports esbuild (A4) + ./slop-detect.mjs from the host package's
     // node_modules; a fresh checkout that has never started the host sidecar has none
     // yet. Mirror `ensure_running`'s first-run `pnpm install` (F2) so
@@ -335,30 +432,46 @@ pub async fn review(design_dir: &Path) -> Result<serde_json::Value, DesignHostEr
     })
 }
 
-/// First-run `pnpm install` inside `dir` if `node_modules` is missing —
-/// dev-mode behavior, accepted by the plan's risk ledger. Logs progress to
-/// stderr (this crate has no structured logger yet; mirrors `bus.rs`'s
-/// plain `eprintln!` convention) since an install can take real wall-clock
-/// time and a silent multi-second hang would look like a stuck spawn.
+/// First-run install inside `dir` if `node_modules` is missing — dev-mode
+/// behavior, accepted by the plan's risk ledger. Prefers `pnpm` (resolved via
+/// the login shell, same pattern as [`resolve_node`]); falls back to `npm
+/// install --no-audit --no-fund` when `pnpm` is absent from PATH (D4 — npm
+/// ships with node, so this only trades away `pnpm-lock.yaml` version
+/// pinning on pnpm-less machines, an accepted tradeoff). Logs progress to
+/// stderr (this crate has no structured logger yet; mirrors `bus.rs`'s plain
+/// `eprintln!` convention) since an install can take real wall-clock time
+/// and a silent multi-second hang would look like a stuck spawn.
 async fn ensure_deps_installed(dir: &Path) -> Result<(), DesignHostError> {
     if dir.join("node_modules").is_dir() {
         return Ok(());
     }
-    eprintln!("[design-host] installing dependencies (first run)…");
     let shell = login_shell();
-    let cmd = format!("cd {} && pnpm install --frozen-lockfile=false", shell_quote(dir));
+    let has_pnpm = Command::new(&shell)
+        .args(["-l", "-i", "-c", "command -v pnpm"])
+        .output()
+        .await
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false);
+    let (manager, install_cmd) = if has_pnpm {
+        ("pnpm", "pnpm install --frozen-lockfile=false")
+    } else {
+        ("npm", "npm install --no-audit --no-fund")
+    };
+
+    eprintln!("[design-host] installing dependencies via {manager} (first run)…");
+    let cmd = format!("cd {} && {install_cmd}", shell_quote(dir));
     let output = Command::new(&shell)
         .args(["-l", "-i", "-c", &cmd])
         .output()
         .await
-        .map_err(|e| DesignHostError::Spawn(format!("pnpm install: {e}")))?;
+        .map_err(|e| DesignHostError::Spawn(format!("{manager} install: {e}")))?;
     if !output.status.success() {
         return Err(DesignHostError::Spawn(format!(
-            "pnpm install failed: {}",
+            "{manager} install failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    eprintln!("[design-host] dependencies installed");
+    eprintln!("[design-host] dependencies installed via {manager}");
     Ok(())
 }
 
@@ -472,7 +585,7 @@ pub async fn ensure_running() -> Result<HostInfo, DesignHostError> {
     }
 
     let node = resolve_node().await?;
-    let dir = design_host_dir();
+    let dir = design_host_dir()?;
     ensure_deps_installed(&dir).await?;
     let design_home = design_home_dir()
         .map_err(|e| DesignHostError::Spawn(format!("resolving app-data dir: {e}")))?;
@@ -654,5 +767,90 @@ mod tests {
         // `..` past root is a no-op (matches `path.resolve`'s clamping — it
         // never escapes above the filesystem root).
         assert_eq!(lexical_normalize(Path::new("/../a")), PathBuf::from("/a"));
+    }
+
+    /// Unique scratch dir under `std::env::temp_dir()`, this crate's existing
+    /// convention (see e.g. `repo::skill`'s tests) for filesystem-backed unit
+    /// tests — no external tempdir crate is a dependency here.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("conclave-design-host-test-{tag}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_stable_across_two_walks() {
+        let dir = scratch_dir("fp-stable");
+        write_file(&dir.join("bin/host.mjs"), "console.log(1)");
+        write_file(&dir.join("package.json"), "{}");
+
+        let a = fingerprint_tree(&dir).unwrap();
+        let b = fingerprint_tree(&dir).unwrap();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fingerprint_changes_when_a_file_changes() {
+        let dir = scratch_dir("fp-changes");
+        write_file(&dir.join("bin/host.mjs"), "console.log(1)");
+
+        let before = fingerprint_tree(&dir).unwrap();
+        write_file(&dir.join("bin/host.mjs"), "console.log(2)");
+        let after = fingerprint_tree(&dir).unwrap();
+
+        assert_ne!(before, after);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sync_copies_tree_and_skips_recopy_when_fingerprint_matches() {
+        let bundled = scratch_dir("sync-bundled");
+        let runtime = scratch_dir("sync-runtime");
+        write_file(&bundled.join("bin/host.mjs"), "console.log(1)");
+        write_file(&bundled.join("package.json"), "{}");
+
+        sync_to_runtime(&bundled, &runtime).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("bin/host.mjs")).unwrap(),
+            "console.log(1)"
+        );
+        assert!(runtime.join(".bundle-fingerprint").is_file());
+
+        // Drop a marker file into the runtime copy that is NOT in `bundled`.
+        // If a second sync with a matching fingerprint were to delete+recopy
+        // (rather than skip), this marker would disappear.
+        write_file(&runtime.join("marker.txt"), "still here");
+        sync_to_runtime(&bundled, &runtime).unwrap();
+        assert!(runtime.join("marker.txt").is_file(), "matching fingerprint must skip recopy");
+
+        std::fs::remove_dir_all(&bundled).ok();
+        std::fs::remove_dir_all(&runtime).ok();
+    }
+
+    #[test]
+    fn sync_resyncs_when_fingerprint_file_is_missing() {
+        let bundled = scratch_dir("sync-interrupted-bundled");
+        let runtime = scratch_dir("sync-interrupted-runtime");
+        write_file(&bundled.join("bin/host.mjs"), "console.log(1)");
+
+        // Simulate an interrupted prior copy: the runtime dir exists with
+        // some (possibly stale/partial) content but no `.bundle-fingerprint`.
+        write_file(&runtime.join("bin/host.mjs"), "stale partial content");
+
+        sync_to_runtime(&bundled, &runtime).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("bin/host.mjs")).unwrap(),
+            "console.log(1)",
+            "missing fingerprint must force a full re-sync from bundled"
+        );
+        assert!(runtime.join(".bundle-fingerprint").is_file());
+
+        std::fs::remove_dir_all(&bundled).ok();
+        std::fs::remove_dir_all(&runtime).ok();
     }
 }
