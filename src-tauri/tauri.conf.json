@@ -39,7 +39,18 @@
     "resources": {
       "skills": "skills",
       "roles": "roles",
-      "THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md"
+      "THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+      "../design-host/bin": "design-host/bin",
+      "../design-host/src": "design-host/src",
+      "../design-host/vite": "design-host/vite",
+      "../design-host/review": "design-host/review",
+      "../design-host/index.html": "design-host/index.html",
+      "../design-host/package.json": "design-host/package.json",
+      "../design-host/pnpm-lock.yaml": "design-host/pnpm-lock.yaml",
+      "../design-host/vite.config.ts": "design-host/vite.config.ts",
+      "../design-host/tsconfig.json": "design-host/tsconfig.json",
+      "../design-host/tsconfig.app.json": "design-host/tsconfig.app.json",
+      "../design-host/tsconfig.node.json": "design-host/tsconfig.node.json"
     }
   }
 }
