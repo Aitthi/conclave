@@ -39,11 +39,20 @@ in these files — the anti-slop rules and the critique rubric — load the
   production codebase unmodified later. Navigation is ordinary `react-router-dom`
   (`<Link to="/checkout">`, `useNavigate`); state is ordinary React under
   `design/lib/`.
-- Imports come from the curated set ONLY: `react`, `react-router-dom`, `motion`,
-  `lucide-react`, `recharts`, `clsx`, `tailwind-merge`. Anything else will not
-  resolve — the host aliases exactly these to its own single copy so two React
-  instances never load into one page. Never use emoji as icons; use a
-  `lucide-react` glyph.
+- The curated 8 — `react`, `react-dom`, `react-router-dom`, `motion`,
+  `lucide-react`, `recharts`, `clsx`, `tailwind-merge` — are always aliased to
+  the host's own single copy; never install these yourself (a workspace copy
+  is ignored, and two React instances would crash hooks). Never use emoji as
+  icons; use a `lucide-react` glyph.
+- **Anything else is importable too** — add it to `design/package.json` and
+  the host auto-installs it (pnpm if workable, else npm) and reloads the
+  canvas. ESM packages are the supported target; a missing dependency fails
+  with a named overlay error telling you which `package.json` to edit.
+- **Assets:** images/fonts under `design/assets/` import relatively
+  (`import logo from "../assets/logo.png"`); files under `design/public/` are
+  served at `window.__DESIGN_PUBLIC_BASE__ + "/<path>"` (wrap it in a tiny
+  `asset()` helper in `design/lib/`). See `design-host/README.md` for the full
+  contract.
 
 ## components/ and lib/ — shared parts
 

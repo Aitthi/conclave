@@ -1,7 +1,11 @@
 import path from "node:path";
 import type { Plugin, ViteDevServer } from "vite";
-import { idFor, resolveProjectDir } from "./projects";
+import { idFor, resolveProjectDir, readRegistry } from "./projects";
 import { manifestCode } from "./screens";
+import { isCurated } from "./curated";
+import { isBareImport, projectDirFor, missingDepMessage } from "./workspace-deps";
+import { needsInstall, ensureInstalled } from "./workspace-install";
+import { publicAssets } from "./public-assets";
 
 const VIRT = "virtual:design-host-manifest/";
 const RESOLVED = "\0" + VIRT;
@@ -45,12 +49,24 @@ export function designApp(): Plugin {
         next();
       });
 
+      srv.middlewares.use(publicAssets(resolveProjectDir));
+
       // A screen file appearing/disappearing reshapes the manifest for whichever
       // project's screens/ dir it lives under — content-only edits to an EXISTING
       // screen are left to Vite's ordinary module HMR (no manifest shape change).
       srv.watcher.on("all", (event, file) => {
-        if (event !== "add" && event !== "unlink") return;
         const r = path.resolve(file);
+        for (const dir of watchedDirs) {
+          if (r === path.join(dir, "package.json")) {
+            if (event === "add" || event === "change") {
+              void ensureInstalled(dir).then((ok) => {
+                if (ok) srv.ws.send({ type: "full-reload", path: "/index.html" });
+              });
+            }
+            return;
+          }
+        }
+        if (event !== "add" && event !== "unlink") return;
         if (!r.endsWith(".tsx")) return;
         for (const dir of watchedDirs) {
           const screensDir = path.join(dir, "screens");
@@ -62,9 +78,22 @@ export function designApp(): Plugin {
       });
     },
 
-    resolveId(id) {
+    async resolveId(id, importer) {
       if (id.startsWith(VIRT)) return "\0" + id;
       if (id.startsWith("/@id/" + VIRT)) return "\0" + id.slice("/@id/".length);
+      // Spec D1: a non-curated bare import from inside a registered workspace
+      // resolves via Vite's own condition-aware pipeline (which walks up from
+      // the importer and finds design/node_modules) — we gate it so a miss
+      // becomes an actionable error, not a cryptic overlay. Curated specifiers
+      // never reach here meaningfully: resolve.alias rewrites them first.
+      if (isBareImport(id) && !isCurated(id)) {
+        const dir = projectDirFor(importer, readRegistry());
+        if (dir) {
+          const r = await this.resolve(id, importer, { skipSelf: true });
+          if (r) return r;
+          throw new Error(missingDepMessage(id, dir));
+        }
+      }
       return undefined;
     },
 
@@ -76,6 +105,12 @@ export function designApp(): Plugin {
       if (!watchedDirs.has(dir)) {
         watchedDirs.add(dir);
         server?.watcher.add(path.join(dir, "screens"));
+        server?.watcher.add(path.join(dir, "package.json"));
+        if (needsInstall(dir)) {
+          void ensureInstalled(dir).then((ok) => {
+            if (ok) server?.ws.send({ type: "full-reload", path: "/index.html" });
+          });
+        }
       }
       return manifestCode(dir);
     },
