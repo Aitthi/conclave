@@ -1,7 +1,9 @@
 import path from "node:path";
 import type { Plugin, ViteDevServer } from "vite";
-import { idFor, resolveProjectDir } from "./projects";
+import { idFor, resolveProjectDir, readRegistry } from "./projects";
 import { manifestCode } from "./screens";
+import { isCurated } from "./curated";
+import { isBareImport, projectDirFor, missingDepMessage } from "./workspace-deps";
 
 const VIRT = "virtual:design-host-manifest/";
 const RESOLVED = "\0" + VIRT;
@@ -62,9 +64,22 @@ export function designApp(): Plugin {
       });
     },
 
-    resolveId(id) {
+    async resolveId(id, importer) {
       if (id.startsWith(VIRT)) return "\0" + id;
       if (id.startsWith("/@id/" + VIRT)) return "\0" + id.slice("/@id/".length);
+      // Spec D1: a non-curated bare import from inside a registered workspace
+      // resolves via Vite's own condition-aware pipeline (which walks up from
+      // the importer and finds design/node_modules) — we gate it so a miss
+      // becomes an actionable error, not a cryptic overlay. Curated specifiers
+      // never reach here meaningfully: resolve.alias rewrites them first.
+      if (isBareImport(id) && !isCurated(id)) {
+        const dir = projectDirFor(importer, readRegistry());
+        if (dir) {
+          const r = await this.resolve(id, importer, { skipSelf: true });
+          if (r) return r;
+          throw new Error(missingDepMessage(id, dir));
+        }
+      }
       return undefined;
     },
 
