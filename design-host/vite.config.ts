@@ -3,23 +3,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { designApp } from "./vite/host-app";
+import { CURATED } from "./vite/curated";
 
 const dep = (name: string) => fileURLToPath(new URL(`./node_modules/${name}`, import.meta.url));
-// The curated authoring set (R6 — Arta authoring parity). Screens live in workspace
-// `design/` folders, never in this package; every bare import a screen writes must
-// resolve to THIS package's single copy — two Reacts (or two routers) crash hooks at
-// runtime. This is exactly Arta's curated set, so the `design-craft` skills can teach
-// one import contract that both hosts honour. Keep in lockstep with the skills' list.
-const CURATED = [
-  "react",
-  "react-dom",
-  "react-router-dom",
-  "motion",
-  "lucide-react",
-  "recharts",
-  "clsx",
-  "tailwind-merge",
-];
 
 // Conclave design-canvas host — spawned and supervised by the engine
 // (`runtime/design_host.rs`), one process serving every workspace via the shared
