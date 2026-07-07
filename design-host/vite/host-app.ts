@@ -4,6 +4,7 @@ import { idFor, resolveProjectDir, readRegistry } from "./projects";
 import { manifestCode } from "./screens";
 import { isCurated } from "./curated";
 import { isBareImport, projectDirFor, missingDepMessage } from "./workspace-deps";
+import { needsInstall, ensureInstalled } from "./workspace-install";
 
 const VIRT = "virtual:design-host-manifest/";
 const RESOLVED = "\0" + VIRT;
@@ -51,8 +52,18 @@ export function designApp(): Plugin {
       // project's screens/ dir it lives under — content-only edits to an EXISTING
       // screen are left to Vite's ordinary module HMR (no manifest shape change).
       srv.watcher.on("all", (event, file) => {
-        if (event !== "add" && event !== "unlink") return;
         const r = path.resolve(file);
+        for (const dir of watchedDirs) {
+          if (r === path.join(dir, "package.json")) {
+            if (event === "add" || event === "change") {
+              void ensureInstalled(dir).then((ok) => {
+                if (ok) srv.ws.send({ type: "full-reload", path: "/index.html" });
+              });
+            }
+            return;
+          }
+        }
+        if (event !== "add" && event !== "unlink") return;
         if (!r.endsWith(".tsx")) return;
         for (const dir of watchedDirs) {
           const screensDir = path.join(dir, "screens");
@@ -91,6 +102,12 @@ export function designApp(): Plugin {
       if (!watchedDirs.has(dir)) {
         watchedDirs.add(dir);
         server?.watcher.add(path.join(dir, "screens"));
+        server?.watcher.add(path.join(dir, "package.json"));
+        if (needsInstall(dir)) {
+          void ensureInstalled(dir).then((ok) => {
+            if (ok) server?.ws.send({ type: "full-reload", path: "/index.html" });
+          });
+        }
       }
       return manifestCode(dir);
     },
