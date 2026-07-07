@@ -5,6 +5,7 @@ import { manifestCode } from "./screens";
 import { isCurated } from "./curated";
 import { isBareImport, projectDirFor, missingDepMessage } from "./workspace-deps";
 import { needsInstall, ensureInstalled } from "./workspace-install";
+import { publicAssets } from "./public-assets";
 
 const VIRT = "virtual:design-host-manifest/";
 const RESOLVED = "\0" + VIRT;
@@ -47,6 +48,8 @@ export function designApp(): Plugin {
         }
         next();
       });
+
+      srv.middlewares.use(publicAssets(resolveProjectDir));
 
       // A screen file appearing/disappearing reshapes the manifest for whichever
       // project's screens/ dir it lives under — content-only edits to an EXISTING
