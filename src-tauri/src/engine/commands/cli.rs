@@ -136,6 +136,56 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             ))
         }
 
+        // ── msg (read inter-agent message history) ────────────────────────
+        // `list` reads the CALLER's own inbox+outbox — the client's
+        // `expand_self_args` fills the instance id at argv[2] from
+        // CONCLAVE_INSTANCE_ID (same idiom as `snapshot last`), so the server
+        // reads it as a plain positional. `all` takes an explicit workspace id
+        // and needs no self context. Both always request `withNames: true` so
+        // the transcript renderer has names to show. `--limit N` is optional and
+        // parsed order-independently from the tail.
+        "msg" => match argv.get(1).map(String::as_str) {
+            Some("list") => {
+                let usage = "cli: msg list [--limit N]";
+                let instance_id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid(usage.into()))?;
+                let (limit, rest) = take_flag(argv.get(3..).unwrap_or(&[]), "--limit");
+                if !rest.is_empty() {
+                    return Err(AppError::Invalid(usage.into()));
+                }
+                let mut params = json!({ "instanceId": instance_id, "withNames": true });
+                if let Some(raw) = limit {
+                    let n: i64 = raw.parse().map_err(|_| {
+                        AppError::Invalid(format!("cli: msg list: --limit expects an integer, got '{raw}'"))
+                    })?;
+                    params["limit"] = json!(n);
+                }
+                Ok(("message.list", params))
+            }
+            Some("all") => {
+                let usage = "cli: msg all <workspaceId> [--limit N]";
+                let workspace_id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid(usage.into()))?;
+                let (limit, rest) = take_flag(argv.get(3..).unwrap_or(&[]), "--limit");
+                if !rest.is_empty() {
+                    return Err(AppError::Invalid(usage.into()));
+                }
+                let mut params = json!({ "workspaceId": workspace_id, "withNames": true });
+                if let Some(raw) = limit {
+                    let n: i64 = raw.parse().map_err(|_| {
+                        AppError::Invalid(format!("cli: msg all: --limit expects an integer, got '{raw}'"))
+                    })?;
+                    params["limit"] = json!(n);
+                }
+                Ok(("message.listForWorkspace", params))
+            }
+            _ => Err(AppError::Invalid(
+                "cli: msg <list|all> — unknown msg subcommand".into(),
+            )),
+        },
+
         // ── bb ────────────────────────────────────────────────────────────
         "bb" => match argv.get(1).map(String::as_str) {
             Some("list") => {
@@ -712,7 +762,7 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
 
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, bb, snapshot, memory, task, run, restart)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart)"
         ))),
     }
 }
@@ -1143,6 +1193,56 @@ mod tests {
     #[test]
     fn tell_missing_target_is_invalid() {
         assert!(is_invalid(&["tell", "from1"]));
+    }
+
+    // ── msg (read inter-agent history) ─────────────────────────────────────
+    // `msg list` arrives ALREADY expanded by the client with the caller's own
+    // instance id at argv[2]; `msg all` passes through with an explicit ws id.
+
+    #[test]
+    fn msg_list_maps_to_message_list_with_names() {
+        assert_eq!(ok_method(&["msg", "list", "self1"]), "message.list");
+        assert_eq!(
+            ok_params(&["msg", "list", "self1"]),
+            json!({ "instanceId": "self1", "withNames": true })
+        );
+    }
+
+    #[test]
+    fn msg_list_with_limit() {
+        let p = ok_params(&["msg", "list", "self1", "--limit", "5"]);
+        assert_eq!(p["instanceId"], json!("self1"));
+        assert_eq!(p["withNames"], json!(true));
+        assert_eq!(p["limit"], json!(5));
+    }
+
+    #[test]
+    fn msg_all_maps_to_list_for_workspace_with_names() {
+        assert_eq!(ok_method(&["msg", "all", "ws1"]), "message.listForWorkspace");
+        assert_eq!(
+            ok_params(&["msg", "all", "ws1"]),
+            json!({ "workspaceId": "ws1", "withNames": true })
+        );
+    }
+
+    #[test]
+    fn msg_all_with_limit() {
+        let p = ok_params(&["msg", "all", "ws1", "--limit", "10"]);
+        assert_eq!(p["workspaceId"], json!("ws1"));
+        assert_eq!(p["withNames"], json!(true));
+        assert_eq!(p["limit"], json!(10));
+    }
+
+    #[test]
+    fn msg_missing_or_bad_args_are_invalid() {
+        assert!(is_invalid(&["msg"]));
+        assert!(is_invalid(&["msg", "list"])); // no instance id (client injects self)
+        assert!(is_invalid(&["msg", "all"])); // no workspace id
+        assert!(is_invalid(&["msg", "bogus", "x"])); // unknown sub
+        assert!(is_invalid(&["msg", "list", "self1", "--limit"])); // dangling --limit
+        assert!(is_invalid(&["msg", "list", "self1", "--limit", "x"])); // non-integer
+        assert!(is_invalid(&["msg", "list", "self1", "extra"])); // trailing junk
+        assert!(is_invalid(&["msg", "all", "ws1", "extra"])); // trailing junk
     }
 
     // ── bb ────────────────────────────────────────────────────────────────

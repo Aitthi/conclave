@@ -39,6 +39,8 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Stage | (discouraged in the shared checkout) | raw `git add`/`git commit` risk sweeping a peer's staged work (b9ab709) and land under the shared human identity (c3d8fcb) — prefer `stage commit` |
 | Peers | `conclave agent list <workspaceId>` | roster: ids, roles, skills, working flag |
 | Peers | `conclave tell <agentId> <text...>` | message a peer — the ONLY channel that reaches one |
+| Peers | `conclave msg list [--limit N]` | read YOUR own inter-agent inbox+outbox, newest-first (re-read `tell` history after a context clear) |
+| Peers | `conclave msg all <workspaceId> [--limit N]` | read the whole workspace's inter-agent traffic, newest-first |
 | Peers | `conclave send <sessionId> <text...>` | inject into a session by session id (orchestration plumbing; prefer `tell`) |
 | Peers | `conclave run <orchestratorId> <prompt...>` | hand a prompt to an orchestrator agent |
 | Workspaces | `conclave ws list` | all workspaces |
