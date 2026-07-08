@@ -196,6 +196,11 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
 struct ListReq {
     instance_id: String,
     limit: Option<i64>,
+    /// When `Some(true)`, attach `fromName`/`toName` (instance-id → agent
+    /// definition name) to each emitted object. Absent/false = the plain row
+    /// serialization the UI's typed feed depends on, byte-for-byte.
+    #[serde(default)]
+    with_names: Option<bool>,
 }
 
 /// Default + max number of messages returned by `message.list`.
@@ -213,8 +218,11 @@ const MAX_LIST_LIMIT: i64 = 200;
 /// - malformed payload → [`AppError::Invalid`]
 /// - unknown instance → [`AppError::NotFound`]
 pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let ListReq { instance_id, limit } =
-        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let ListReq {
+        instance_id,
+        limit,
+        with_names,
+    } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
     if !repo::workspace_agent::exists(&state.db, &instance_id).await? {
         return Err(AppError::NotFound(format!(
@@ -224,7 +232,54 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
 
     let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
     let rows = repo::inter_agent_message::list_for_instance(&state.db, &instance_id, limit).await?;
-    serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
+    rows_to_value(state, rows, with_names == Some(true)).await
+}
+
+/// Serialize list rows to a JSON array. When `with_names` is true, attach
+/// `fromName`/`toName` (resolved once per distinct instance id); otherwise emit
+/// the plain row serialization UNCHANGED so the UI's typed feed is untouched.
+async fn rows_to_value(
+    state: &AppState,
+    rows: Vec<repo::inter_agent_message::InterAgentMessageRow>,
+    with_names: bool,
+) -> Result<Value, AppError> {
+    if !with_names {
+        return serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()));
+    }
+
+    // Resolve every DISTINCT id once (up to 2×MAX rows would otherwise re-query
+    // the same senders): id → workspace_agent → agent_definition.name, the same
+    // chain the `inject` handler uses for the `[from …]` tag.
+    let ids: std::collections::HashSet<&str> = rows
+        .iter()
+        .flat_map(|r| [r.from_instance_id.as_str(), r.to_instance_id.as_str()])
+        .collect();
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for id in ids {
+        if let Some(inst) = repo::workspace_agent::get(&state.db, id).await? {
+            if let Some(def) = repo::agent_definition::get(&state.db, &inst.agent_def_id).await? {
+                names.insert(id.to_string(), def.name);
+            }
+        }
+    }
+
+    // Enrich additively: start from the exact row JSON, then insert the two name
+    // keys when resolvable (absent otherwise — the renderer falls back to a
+    // short id).
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut v = serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))?;
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(name) = names.get(&row.from_instance_id) {
+                obj.insert("fromName".into(), Value::String(name.clone()));
+            }
+            if let Some(name) = names.get(&row.to_instance_id) {
+                obj.insert("toName".into(), Value::String(name.clone()));
+            }
+        }
+        out.push(v);
+    }
+    Ok(Value::Array(out))
 }
 
 /// Payload for `message.listForWorkspace` — the Chat Hub's workspace-wide query.
@@ -233,6 +288,10 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
 struct ListForWorkspaceReq {
     workspace_id: String,
     limit: Option<i64>,
+    /// See [`ListReq::with_names`] — same opt-in enrichment for the Chat Hub
+    /// feed. The UI never sends it, so its output stays unchanged.
+    #[serde(default)]
+    with_names: Option<bool>,
 }
 
 /// `message.listForWorkspace` — the whole workspace's inter-agent traffic,
@@ -240,8 +299,11 @@ struct ListForWorkspaceReq {
 /// wants the full recent window) and is clamped to `1..=MAX_LIST_LIMIT`,
 /// same rationale as [`list`].
 pub async fn list_for_workspace(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let ListForWorkspaceReq { workspace_id, limit } =
-        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let ListForWorkspaceReq {
+        workspace_id,
+        limit,
+        with_names,
+    } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
     if !repo::workspace::exists(&state.db, &workspace_id).await? {
         return Err(AppError::NotFound(format!(
@@ -252,7 +314,7 @@ pub async fn list_for_workspace(state: &AppState, payload: Value) -> Result<Valu
     let limit = limit.unwrap_or(MAX_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
     let rows =
         repo::inter_agent_message::list_for_workspace(&state.db, &workspace_id, limit).await?;
-    serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
+    rows_to_value(state, rows, with_names == Some(true)).await
 }
 
 #[cfg(test)]
@@ -407,6 +469,86 @@ mod tests {
             arr[0].get("fromInstanceId").and_then(Value::as_str),
             Some(a.as_str())
         );
+    }
+
+    /// `withNames: true` attaches `fromName`/`toName` resolved through the
+    /// instance-id → agent_definition.name chain.
+    #[tokio::test]
+    async fn list_with_names_attaches_resolved_names() {
+        let state = AppState::for_tests().await;
+        let (_ws, a, b) = fixture_workspace_pair(&state).await; // Alpha, Bravo
+        repo::inter_agent_message::create(&state.db, &a, &b, "hi", "delivered", true)
+            .await
+            .expect("persist row");
+
+        let val = list(&state, json!({ "instanceId": a, "withNames": true }))
+            .await
+            .expect("list failed");
+        let arr = val.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].get("fromName").and_then(Value::as_str),
+            Some("Alpha")
+        );
+        assert_eq!(arr[0].get("toName").and_then(Value::as_str), Some("Bravo"));
+        // Raw ids still present — enrichment is additive.
+        assert!(arr[0].get("fromInstanceId").is_some());
+    }
+
+    /// UI-path guard: WITHOUT `withNames`, `list` output is byte-for-byte the
+    /// plain row serialization — no `fromName`/`toName` keys leak in.
+    #[tokio::test]
+    async fn list_without_names_has_no_name_keys() {
+        let state = AppState::for_tests().await;
+        let (_ws, a, b) = fixture_workspace_pair(&state).await;
+        repo::inter_agent_message::create(&state.db, &a, &b, "hi", "delivered", true)
+            .await
+            .expect("persist row");
+
+        let val = list(&state, json!({ "instanceId": a }))
+            .await
+            .expect("list failed");
+        let arr = val.as_array().expect("array");
+        assert!(arr[0].get("fromName").is_none(), "no fromName without flag");
+        assert!(arr[0].get("toName").is_none(), "no toName without flag");
+    }
+
+    /// Same enrichment for the workspace-wide feed.
+    #[tokio::test]
+    async fn list_for_workspace_with_names_attaches_resolved_names() {
+        let state = AppState::for_tests().await;
+        let (ws_id, a, b) = fixture_workspace_pair(&state).await; // Alpha, Bravo
+        repo::inter_agent_message::create(&state.db, &a, &b, "hi", "delivered", true)
+            .await
+            .expect("persist row");
+
+        let val = list_for_workspace(&state, json!({ "workspaceId": ws_id, "withNames": true }))
+            .await
+            .expect("list failed");
+        let arr = val.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].get("fromName").and_then(Value::as_str),
+            Some("Alpha")
+        );
+        assert_eq!(arr[0].get("toName").and_then(Value::as_str), Some("Bravo"));
+    }
+
+    /// UI-path guard for the Chat Hub feed: WITHOUT `withNames`, no name keys.
+    #[tokio::test]
+    async fn list_for_workspace_without_names_has_no_name_keys() {
+        let state = AppState::for_tests().await;
+        let (ws_id, a, b) = fixture_workspace_pair(&state).await;
+        repo::inter_agent_message::create(&state.db, &a, &b, "hi", "delivered", true)
+            .await
+            .expect("persist row");
+
+        let val = list_for_workspace(&state, json!({ "workspaceId": ws_id }))
+            .await
+            .expect("list failed");
+        let arr = val.as_array().expect("array");
+        assert!(arr[0].get("fromName").is_none(), "no fromName without flag");
+        assert!(arr[0].get("toName").is_none(), "no toName without flag");
     }
 
     #[tokio::test]
