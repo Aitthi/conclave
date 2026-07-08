@@ -99,8 +99,9 @@ Subcommands:
   stage restore <workspaceId> <slug> <snapSha>           (restore boundary paths from a snapshot; auto-snaps first; inside a spawned agent)
   stage clear   <workspaceId> <slug>                    (delete the snapshot ref)
   task create   <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]
-  task list     <workspaceId> [--state s]
+  task list     <workspaceId> [--state s] [--full]
   task get      <workspaceId> <slug>
+  task brief    <workspaceId> <slug> [--limit N]
   task claim    <workspaceId> <slug>          (inside a spawned agent)
   task state    <workspaceId> <slug> <state>  (inside a spawned agent)
   task note     <workspaceId> <slug> <text...>          (inside a spawned agent)
@@ -232,7 +233,16 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
         Some("task")
             if matches!(
                 argv.get(1).map(String::as_str),
-                Some("claim" | "state" | "note" | "challenge" | "rule" | "close" | "watch" | "unwatch")
+                Some(
+                    "claim"
+                        | "state"
+                        | "note"
+                        | "challenge"
+                        | "rule"
+                        | "close"
+                        | "watch"
+                        | "unwatch"
+                )
             ) =>
         {
             let verb = argv[1].clone();
@@ -554,9 +564,7 @@ fn lane_finish(_ws: &str, slug: &str) -> ExitCode {
             if !o.stdout.is_empty() {
                 eprintln!("conclave: refusing to finish — {worktree} has uncommitted changes:");
                 eprint!("{}", String::from_utf8_lossy(&o.stdout));
-                eprintln!(
-                    "The lead merges before finish; commit or discard these, then retry."
-                );
+                eprintln!("The lead merges before finish; commit or discard these, then retry.");
                 return ExitCode::FAILURE;
             }
         }
@@ -803,7 +811,11 @@ fn parse_task_boundary(result: &Value, slug: &str) -> Result<Vec<String>, String
 /// Read a task's `fileBoundary` over the existing `task get` client path (no
 /// new engine route — the plan's boundary is the CLI-only feature's only
 /// server dependency).
-async fn stage_boundary(ws: &str, slug: &str, self_instance: Option<&str>) -> Result<Vec<String>, String> {
+async fn stage_boundary(
+    ws: &str,
+    slug: &str,
+    self_instance: Option<&str>,
+) -> Result<Vec<String>, String> {
     let argv = vec![
         "task".to_string(),
         "get".to_string(),
@@ -833,7 +845,9 @@ async fn agent_identity(ws: &str, self_instance: &str) -> Result<(String, String
                 .to_string();
             (name, self_instance.to_string())
         })
-        .ok_or_else(|| format!("conclave: agent id '{self_instance}' not found in workspace roster"))
+        .ok_or_else(|| {
+            format!("conclave: agent id '{self_instance}' not found in workspace roster")
+        })
 }
 
 /// Resolve the caller's own instance id for a `stage` verb that mutates
@@ -1103,7 +1117,14 @@ fn snapshot(
     let now = chrono::Utc::now().to_rfc3339();
     let message = format!("snap({slug}): {reason} @ {now}");
     let parent_refs: Vec<&str> = prev.iter().map(String::as_str).collect();
-    let new_commit = commit_tree(repo, &new_tree, &parent_refs, &message, author_name, author_email)?;
+    let new_commit = commit_tree(
+        repo,
+        &new_tree,
+        &parent_refs,
+        &message,
+        author_name,
+        author_email,
+    )?;
 
     let expected = prev.unwrap_or_else(|| "0".repeat(40));
     update_ref_cas(repo, &snap_ref, &new_commit, &expected)?;
@@ -1225,7 +1246,12 @@ async fn stage_diff(ws: &str, slug: &str, self_instance: Option<&str>) -> ExitCo
 /// [`stage_commit_core`] and, on success, posts the ledger stamp (decision
 /// 8) over the existing `task note` client path. A ledger-note failure
 /// (engine down) warns but does not roll back the already-landed commit.
-async fn stage_commit(ws: &str, slug: &str, message: &str, self_instance: Option<&str>) -> ExitCode {
+async fn stage_commit(
+    ws: &str,
+    slug: &str,
+    message: &str,
+    self_instance: Option<&str>,
+) -> ExitCode {
     let me = match require_stage_self("commit", self_instance) {
         Ok(v) => v,
         Err(e) => {
@@ -1263,12 +1289,27 @@ async fn stage_commit(ws: &str, slug: &str, message: &str, self_instance: Option
     };
 
     let author_email = format!("{author_id}@agents.conclave.local");
-    if let Err(e) = snapshot(&repo, slug, &boundary, "auto-pre-commit", &author_name, &author_email) {
+    if let Err(e) = snapshot(
+        &repo,
+        slug,
+        &boundary,
+        "auto-pre-commit",
+        &author_name,
+        &author_email,
+    ) {
         eprintln!("conclave: stage commit: auto-snapshot failed: {e}");
         return ExitCode::FAILURE;
     }
 
-    match stage_commit_core(&repo, &branch, slug, &boundary, message, &author_name, &author_id) {
+    match stage_commit_core(
+        &repo,
+        &branch,
+        slug,
+        &boundary,
+        message,
+        &author_name,
+        &author_id,
+    ) {
         Ok((sha, n_files)) => {
             let short = &sha[..12.min(sha.len())];
             println!("stage commit: {short} — {message} ({n_files} files)");
@@ -1294,7 +1335,12 @@ async fn stage_commit(ws: &str, slug: &str, message: &str, self_instance: Option
 
 /// `stage snap <ws> <slug> [-m <label>]`: an explicit snapshot (default
 /// label "manual" when `-m` is omitted).
-async fn stage_snap(ws: &str, slug: &str, label: Option<&str>, self_instance: Option<&str>) -> ExitCode {
+async fn stage_snap(
+    ws: &str,
+    slug: &str,
+    label: Option<&str>,
+    self_instance: Option<&str>,
+) -> ExitCode {
     let me = match require_stage_self("snap", self_instance) {
         Ok(v) => v,
         Err(e) => {
@@ -1346,7 +1392,15 @@ async fn stage_snap(ws: &str, slug: &str, label: Option<&str>, self_instance: Op
 fn stage_log(slug: &str) -> ExitCode {
     let repo = std::path::Path::new(".");
     let snap_ref = stage_snapshot_ref(slug);
-    match git_output(repo, &["log", "--format=%h  %ad  %s", "--date=iso-strict", &snap_ref]) {
+    match git_output(
+        repo,
+        &[
+            "log",
+            "--format=%h  %ad  %s",
+            "--date=iso-strict",
+            &snap_ref,
+        ],
+    ) {
         Ok(out) if !out.is_empty() => {
             println!("{out}");
             ExitCode::SUCCESS
@@ -1397,7 +1451,12 @@ fn validate_stage_restore_source(
 /// `stage restore <ws> <slug> <snapSha>`: auto-snaps the current state first
 /// (decision 6 — so the restore itself is undoable), then `git restore
 /// --worktree` from `snapSha`. Never touches the index (no `--staged`).
-async fn stage_restore(ws: &str, slug: &str, snap_sha: &str, self_instance: Option<&str>) -> ExitCode {
+async fn stage_restore(
+    ws: &str,
+    slug: &str,
+    snap_sha: &str,
+    self_instance: Option<&str>,
+) -> ExitCode {
     let me = match require_stage_self("restore", self_instance) {
         Ok(v) => v,
         Err(e) => {
@@ -1431,7 +1490,14 @@ async fn stage_restore(ws: &str, slug: &str, snap_sha: &str, self_instance: Opti
         return ExitCode::FAILURE;
     }
     let author_email = format!("{author_id}@agents.conclave.local");
-    match snapshot(&repo, slug, &boundary, "auto-pre-restore", &author_name, &author_email) {
+    match snapshot(
+        &repo,
+        slug,
+        &boundary,
+        "auto-pre-restore",
+        &author_name,
+        &author_email,
+    ) {
         Ok(Some(sha)) => println!(
             "stage restore: auto-snapshotted current state as {}",
             &sha[..12.min(sha.len())]
@@ -1443,7 +1509,10 @@ async fn stage_restore(ws: &str, slug: &str, snap_sha: &str, self_instance: Opti
         }
     }
 
-    println!("stage restore: restoring {} path(s) from {snap_sha}:", boundary.len());
+    println!(
+        "stage restore: restoring {} path(s) from {snap_sha}:",
+        boundary.len()
+    );
     for p in &boundary {
         println!("  {p}");
     }
@@ -1456,7 +1525,10 @@ async fn stage_restore(ws: &str, slug: &str, snap_sha: &str, self_instance: Opti
             ExitCode::SUCCESS
         }
         Ok(s) => {
-            eprintln!("conclave: git restore failed (exit {})", s.code().unwrap_or(-1));
+            eprintln!(
+                "conclave: git restore failed (exit {})",
+                s.code().unwrap_or(-1)
+            );
             ExitCode::FAILURE
         }
         Err(e) => {
@@ -1514,7 +1586,9 @@ async fn run_stage(argv: &[String], self_instance: Option<&str>) -> ExitCode {
             let m_pos = argv.iter().position(|w| w == "-m");
             let message = m_pos.and_then(|p| argv.get(p + 1));
             match (argv.get(2), argv.get(3), message) {
-                (Some(ws), Some(slug), Some(msg)) => stage_commit(ws, slug, msg, self_instance).await,
+                (Some(ws), Some(slug), Some(msg)) => {
+                    stage_commit(ws, slug, msg, self_instance).await
+                }
                 _ => {
                     eprintln!("conclave: stage commit <workspaceId> <slug> -m <msg>");
                     ExitCode::from(2)
@@ -1605,7 +1679,8 @@ fn shell_join(words: &[String]) -> String {
 fn word_needs_quoting(word: &str) -> bool {
     word.is_empty()
         || word.chars().any(|c| {
-            !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | ','))
+            !(c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | ','))
         })
 }
 
@@ -1954,6 +2029,8 @@ enum OutMode {
     OrgTree,
     /// A chronological inter-agent transcript (`msg list` / `msg all`).
     MsgList,
+    /// A human-readable task resume packet (`task brief`).
+    TaskBrief,
     /// Pretty-printed JSON (everything else).
     Json,
 }
@@ -2002,6 +2079,251 @@ fn render_msg_transcript(rows: &[Value]) -> String {
     out
 }
 
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+fn render_task_brief_event(row: &Value) -> String {
+    let id = row.get("id").and_then(Value::as_str).unwrap_or("-");
+    let kind = row.get("kind").and_then(Value::as_str).unwrap_or("-");
+    let created = row.get("createdAt").and_then(Value::as_str).unwrap_or("-");
+    let short = short_id(id);
+    let payload = row.get("payload").and_then(Value::as_object);
+    match kind {
+        "note" => format!(
+            "{short}  note  {created}  {}",
+            payload
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        "gate" => format!(
+            "{short}  gate  {created}  {}  exit={}  sha={}",
+            payload
+                .and_then(|p| p.get("cmd"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            payload
+                .and_then(|p| p.get("exit"))
+                .and_then(Value::as_i64)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            payload
+                .and_then(|p| p.get("sha"))
+                .and_then(Value::as_str)
+                .map(short_id)
+                .unwrap_or("-")
+        ),
+        "challenge" => format!(
+            "{short}  challenge  {created}  {}",
+            payload
+                .and_then(|p| p.get("claim"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        "ruling" => format!(
+            "{short}  ruling  {created}  {}",
+            payload
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        "state" => format!(
+            "{short}  state  {created}  {} -> {}",
+            payload
+                .and_then(|p| p.get("from"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            payload
+                .and_then(|p| p.get("to"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        _ => format!("{short}  {kind}  {created}"),
+    }
+}
+
+fn render_task_brief(result: &Value) -> String {
+    let empty_task = serde_json::Map::new();
+    let task = result
+        .get("task")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_task);
+    let field = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or("-");
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "Task brief: {}  {}\n",
+        field("slug"),
+        field("title")
+    ));
+    out.push_str(&format!("state: {}\n", field("state")));
+    if let Some(owner) = task.get("ownerAgentId").and_then(Value::as_str) {
+        out.push_str(&format!("owner: {owner}\n"));
+    }
+    if let Some(implementer) = task.get("implementerAgentId").and_then(Value::as_str) {
+        out.push_str(&format!("implementer: {implementer}\n"));
+    }
+    if let Some(canon) = task.get("designCanon").and_then(Value::as_str) {
+        out.push_str(&format!("design canon: {canon}\n"));
+    }
+    if let Some(limit) = result.get("limit").and_then(Value::as_u64) {
+        out.push_str(&format!("limit: {limit}\n"));
+    }
+
+    out.push_str("file boundary:\n");
+    let empty_boundary: Vec<Value> = Vec::new();
+    for entry in task
+        .get("fileBoundary")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_boundary)
+    {
+        out.push_str("  - ");
+        out.push_str(entry.as_str().unwrap_or("-"));
+        out.push('\n');
+    }
+
+    out.push_str("plan excerpt:\n");
+    match task.get("planExcerpt").and_then(Value::as_str) {
+        Some(plan) if !plan.is_empty() => {
+            for line in plan.lines() {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            if task.get("planTruncated").and_then(Value::as_bool) == Some(true) {
+                out.push_str("  … truncated\n");
+            }
+        }
+        _ => out.push_str("  (empty)\n"),
+    }
+
+    out.push_str(&format!(
+        "open challenges ({}):\n",
+        result
+            .get("openChallenges")
+            .and_then(Value::as_array)
+            .map(|rows| rows.len())
+            .unwrap_or(0)
+    ));
+    let empty_challenges: Vec<Value> = Vec::new();
+    for challenge in result
+        .get("openChallenges")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_challenges)
+    {
+        let id = challenge.get("id").and_then(Value::as_str).unwrap_or("-");
+        let claim = challenge
+            .get("claim")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let deadline = challenge
+            .get("deadlineAt")
+            .and_then(Value::as_str)
+            .map(|d| format!("  deadline {d}"))
+            .unwrap_or_default();
+        out.push_str(&format!("  - {}  {}{}\n", short_id(id), claim, deadline));
+    }
+
+    out.push_str(&format!(
+        "latest gates ({}):\n",
+        result
+            .get("latestGates")
+            .and_then(Value::as_array)
+            .map(|rows| rows.len())
+            .unwrap_or(0)
+    ));
+    let empty_gates: Vec<Value> = Vec::new();
+    for gate in result
+        .get("latestGates")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_gates)
+    {
+        let id = gate.get("id").and_then(Value::as_str).unwrap_or("-");
+        let cmd = gate.get("cmd").and_then(Value::as_str).unwrap_or("-");
+        let exit = gate
+            .get("exit")
+            .and_then(Value::as_i64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let sha = gate
+            .get("sha")
+            .and_then(Value::as_str)
+            .map(short_id)
+            .unwrap_or("-");
+        out.push_str(&format!(
+            "  - {}  {}  exit={}  sha={}\n",
+            short_id(id),
+            cmd,
+            exit,
+            sha
+        ));
+    }
+
+    out.push_str(&format!(
+        "last events ({}):\n",
+        result
+            .get("lastEvents")
+            .and_then(Value::as_array)
+            .map(|rows| rows.len())
+            .unwrap_or(0)
+    ));
+    let empty_events: Vec<Value> = Vec::new();
+    for event in result
+        .get("lastEvents")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_events)
+    {
+        out.push_str("  - ");
+        out.push_str(&render_task_brief_event(event));
+        out.push('\n');
+    }
+
+    match result.get("memoryError").and_then(Value::as_str) {
+        Some(err) => {
+            out.push_str(&format!("memory: unavailable ({err})\n"));
+        }
+        None => {
+            out.push_str(&format!(
+                "memory hits ({}):\n",
+                result
+                    .get("memoryHits")
+                    .and_then(Value::as_array)
+                    .map(|rows| rows.len())
+                    .unwrap_or(0)
+            ));
+            let empty_hits: Vec<Value> = Vec::new();
+            for hit in result
+                .get("memoryHits")
+                .and_then(Value::as_array)
+                .unwrap_or(&empty_hits)
+            {
+                let id = hit.get("id").and_then(Value::as_str).unwrap_or("-");
+                let text = hit.get("text").and_then(Value::as_str).unwrap_or("-");
+                let score = hit
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "-".to_string());
+                let source_kind = hit.get("sourceKind").and_then(Value::as_str).unwrap_or("-");
+                let source_id = hit
+                    .get("sourceId")
+                    .and_then(Value::as_str)
+                    .map(short_id)
+                    .unwrap_or("-");
+                out.push_str(&format!(
+                    "  - {}  score={}  {}  ({source_kind}:{source_id})\n",
+                    short_id(id),
+                    score,
+                    text
+                ));
+            }
+        }
+    }
+
+    out
+}
+
 /// Render `position set`'s updated row as one line: name · track · level ·
 /// reports-to. Absent fields show `-`; a cleared/absent supervisor shows
 /// `(human)`.
@@ -2034,7 +2356,11 @@ fn org_walk(
         return;
     };
     for r in kids {
-        let id = r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let id = r
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if !visited.insert(id.clone()) {
             continue; // cycle guard — never recurse into an already-seen node
         }
@@ -2057,7 +2383,8 @@ fn org_walk(
 /// implicit `(human)` top line; each node shows name · track · level ·
 /// working|idle.
 fn render_org_tree(rows: &[Value]) -> String {
-    let mut children: std::collections::HashMap<String, Vec<&Value>> = std::collections::HashMap::new();
+    let mut children: std::collections::HashMap<String, Vec<&Value>> =
+        std::collections::HashMap::new();
     for r in rows {
         let parent = r
             .get("supervisorAgentId")
@@ -2066,10 +2393,24 @@ fn render_org_tree(rows: &[Value]) -> String {
             .to_string();
         children.entry(parent).or_default().push(r);
     }
-    let name_of = |r: &Value| r.get("name").and_then(Value::as_str).unwrap_or("(unnamed)").to_string();
-    let id_of = |r: &Value| r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let name_of = |r: &Value| {
+        r.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("(unnamed)")
+            .to_string()
+    };
+    let id_of = |r: &Value| {
+        r.get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     for bucket in children.values_mut() {
-        bucket.sort_by(|a, b| name_of(a).cmp(&name_of(b)).then_with(|| id_of(a).cmp(&id_of(b))));
+        bucket.sort_by(|a, b| {
+            name_of(a)
+                .cmp(&name_of(b))
+                .then_with(|| id_of(a).cmp(&id_of(b)))
+        });
     }
 
     let mut out = String::from("(human)\n");
@@ -2234,6 +2575,8 @@ async fn main() -> ExitCode {
         OutMode::OrgTree
     } else if argv.first().map(String::as_str) == Some("msg") {
         OutMode::MsgList
+    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("brief") {
+        OutMode::TaskBrief
     } else {
         OutMode::Json
     };
@@ -2394,7 +2737,10 @@ async fn main() -> ExitCode {
                 }
                 println!("created:  {}", field("createdAt"));
                 println!();
-                println!("{}", result.get("content").and_then(Value::as_str).unwrap_or(""));
+                println!(
+                    "{}",
+                    result.get("content").and_then(Value::as_str).unwrap_or("")
+                );
             }
             // `position set` → one line describing the updated agent.
             OutMode::PositionRow => {
@@ -2412,6 +2758,9 @@ async fn main() -> ExitCode {
                 let empty: Vec<Value> = Vec::new();
                 let rows = result.as_array().unwrap_or(&empty);
                 print!("{}", render_msg_transcript(rows));
+            }
+            OutMode::TaskBrief => {
+                print!("{}", render_task_brief(result));
             }
             OutMode::Json => {
                 let pretty =
@@ -2490,7 +2839,9 @@ mod tests {
 
     #[test]
     fn uishot_has_script_detects_string_entry_only() {
-        assert!(super::has_uishot_script(r#"{"scripts":{"uishot":"node x.mjs"}}"#));
+        assert!(super::has_uishot_script(
+            r#"{"scripts":{"uishot":"node x.mjs"}}"#
+        ));
         assert!(!super::has_uishot_script(r#"{"scripts":{"build":"x"}}"#));
         assert!(!super::has_uishot_script(r#"{"scripts":{}}"#));
         assert!(!super::has_uishot_script(r#"{}"#));
@@ -2535,7 +2886,10 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         match super::prepare_uishot(&v(&["--task", "t1", "home"]), &cwd, Some("ws-env")) {
             Ok(super::UishotPlan::Gate(argv)) => {
-                assert_eq!(argv, super::compose_uishot_gate("ws-env", "t1", &v(&["home"])));
+                assert_eq!(
+                    argv,
+                    super::compose_uishot_gate("ws-env", "t1", &v(&["home"]))
+                );
             }
             _ => panic!("expected a Gate plan"),
         }
@@ -2604,10 +2958,7 @@ mod tests {
         for (argv, expected) in [
             (v(&["task", "close", "ws1", "t1"]), Some("ws1")),
             (v(&["task", "state", "ws1", "t1", "review"]), Some("ws1")),
-            (
-                v(&["task", "state", "ws1", "t1", "abandoned"]),
-                Some("ws1"),
-            ),
+            (v(&["task", "state", "ws1", "t1", "abandoned"]), Some("ws1")),
             (v(&["task", "state", "ws1", "t1", "in_progress"]), None),
             (v(&["task", "state", "ws1", "t1", "merged"]), None),
             (v(&["task", "note", "ws1", "t1", "review"]), None),
@@ -2708,8 +3059,11 @@ mod tests {
 
     #[test]
     fn memory_remember_injects_instance_from_env() {
-        let out = expand_self_args(v(&["memory", "remember", "ws1", "hi", "there"]), Some("self1"))
-            .unwrap();
+        let out = expand_self_args(
+            v(&["memory", "remember", "ws1", "hi", "there"]),
+            Some("self1"),
+        )
+        .unwrap();
         assert_eq!(
             out,
             v(&["memory", "remember", "self1", "ws1", "hi", "there"])
@@ -2750,7 +3104,10 @@ mod tests {
     fn memory_propose_approve_reject_inject_self_agent_id() {
         let propose =
             expand_self_args(v(&["memory", "propose", "ws1", "a", "fact"]), Some("self1")).unwrap();
-        assert_eq!(propose, v(&["memory", "propose", "self1", "ws1", "a", "fact"]));
+        assert_eq!(
+            propose,
+            v(&["memory", "propose", "self1", "ws1", "a", "fact"])
+        );
         let approve =
             expand_self_args(v(&["memory", "approve", "ws1", "p1"]), Some("self1")).unwrap();
         assert_eq!(approve, v(&["memory", "approve", "self1", "ws1", "p1"]));
@@ -2771,7 +3128,10 @@ mod tests {
     #[test]
     fn memory_queue_passes_through_untouched() {
         let queue = v(&["memory", "queue", "ws1", "--state", "pending"]);
-        assert_eq!(expand_self_args(queue.clone(), Some("self1")).unwrap(), queue);
+        assert_eq!(
+            expand_self_args(queue.clone(), Some("self1")).unwrap(),
+            queue
+        );
         assert_eq!(expand_self_args(queue.clone(), None).unwrap(), queue);
     }
 
@@ -2795,7 +3155,9 @@ mod tests {
     #[test]
     fn validate_slug_rejects_path_and_flag_escapes() {
         // empty, path separators, traversal, leading dash/dot, whitespace.
-        for bad in ["", "a/b", "..", "../x", "-x", ".hidden", "a b", "a.b", "a\tb"] {
+        for bad in [
+            "", "a/b", "..", "../x", "-x", ".hidden", "a b", "a.b", "a\tb",
+        ] {
             assert!(
                 validate_slug(bad).is_err(),
                 "expected '{bad}' to be rejected"
@@ -2824,13 +3186,22 @@ mod tests {
             Some("self1"),
         )
         .unwrap();
-        assert_eq!(out, v(&["task", "note", "self1", "ws1", "t1", "hello", "world"]));
+        assert_eq!(
+            out,
+            v(&["task", "note", "self1", "ws1", "t1", "hello", "world"])
+        );
     }
 
     #[test]
     fn task_state_note_gate_challenge_rule_close_watch_unwatch_all_require_self() {
         for verb in [
-            "state", "note", "challenge", "rule", "close", "watch", "unwatch",
+            "state",
+            "note",
+            "challenge",
+            "rule",
+            "close",
+            "watch",
+            "unwatch",
         ] {
             assert!(
                 expand_self_args(v(&["task", verb, "ws1", "t1"]), None).is_err(),
@@ -2861,9 +3232,12 @@ mod tests {
 
     #[test]
     fn task_create_defaults_owner_to_self_when_absent() {
-        let out = expand_self_args(v(&["task", "create", "ws1", "t1", "Title"]), Some("self1"))
-            .unwrap();
-        assert_eq!(out, v(&["task", "create", "ws1", "t1", "Title", "--owner", "self1"]));
+        let out =
+            expand_self_args(v(&["task", "create", "ws1", "t1", "Title"]), Some("self1")).unwrap();
+        assert_eq!(
+            out,
+            v(&["task", "create", "ws1", "t1", "Title", "--owner", "self1"])
+        );
     }
 
     #[test]
@@ -2885,7 +3259,9 @@ mod tests {
         // run_task_gate (called earlier in main(), before expand_self_args) is
         // what actually resolves self for `gate` — by the time it reaches
         // expand_self_args the actorId slot is already filled.
-        let argv = v(&["task", "gate", "self1", "ws1", "t1", "cmd", "0", "sha", "/cwd", "tail"]);
+        let argv = v(&[
+            "task", "gate", "self1", "ws1", "t1", "cmd", "0", "sha", "/cwd", "tail",
+        ]);
         assert_eq!(expand_self_args(argv.clone(), None).unwrap(), argv);
     }
 
@@ -2931,10 +3307,7 @@ mod tests {
 
     #[test]
     fn shell_join_quotes_every_word() {
-        assert_eq!(
-            super::shell_join(&v(&["cargo", "test"])),
-            "'cargo' 'test'"
-        );
+        assert_eq!(super::shell_join(&v(&["cargo", "test"])), "'cargo' 'test'");
     }
 
     #[test]
@@ -2942,10 +3315,7 @@ mod tests {
         // Regression shape of the original bug: the conclave binary itself
         // lives under "Application Support" — joining must not produce a
         // string `sh` would split at the "Application"/"Support" boundary.
-        let joined = super::shell_join(&v(&[
-            "/tmp/dir with space/tool",
-            "status",
-        ]));
+        let joined = super::shell_join(&v(&["/tmp/dir with space/tool", "status"]));
         assert_eq!(joined, "'/tmp/dir with space/tool' 'status'");
         // A naive unquoted join (the pre-fix behavior) would NOT contain the
         // path as one intact quoted token.
@@ -2983,10 +3353,19 @@ mod tests {
         assert_eq!(out[4], "t1");
         assert_eq!(out[5], "echo hi");
         assert_eq!(out[6], "0", "echo hi exits 0");
-        assert!(out[7] == "unknown" || !out[7].is_empty(), "sha field present");
+        assert!(
+            out[7] == "unknown" || !out[7].is_empty(),
+            "sha field present"
+        );
         assert!(!out[8].is_empty(), "cwd field present");
-        assert!(out[9].contains("hi"), "tail must contain the command's output");
-        assert_eq!(exit_code, 0, "returned exit code must match the recorded one");
+        assert!(
+            out[9].contains("hi"),
+            "tail must contain the command's output"
+        );
+        assert_eq!(
+            exit_code, 0,
+            "returned exit code must match the recorded one"
+        );
     }
 
     #[test]
@@ -2995,7 +3374,10 @@ mod tests {
         let (out, exit_code) =
             super::run_task_gate(&argv, Some("self1")).expect("gate run must not error");
         assert_eq!(out[6], "1", "false exits 1");
-        assert_eq!(exit_code, 1, "returned exit code must propagate the red gate");
+        assert_eq!(
+            exit_code, 1,
+            "returned exit code must propagate the red gate"
+        );
     }
 
     #[test]
@@ -3007,7 +3389,8 @@ mod tests {
         // test — but suffix a UUID so concurrent `cargo test` runs on the same
         // machine don't race create/remove on a shared fixed path (matches the
         // stage-test idiom above).
-        let dir = std::env::temp_dir().join(format!("conclave cli test dir {}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("conclave cli test dir {}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mkdir fixture failed");
         let script = dir.join("tool.sh");
         std::fs::write(&script, "#!/bin/sh\necho ran-ok\n").expect("write fixture failed");
@@ -3024,9 +3407,11 @@ mod tests {
             script.to_str().unwrap(),
             "status",
         ]);
-        let (out, exit_code) =
-            super::run_task_gate(&argv, Some("self1")).expect("gate run failed");
-        assert_eq!(exit_code, 0, "the space-containing path must resolve, not 127");
+        let (out, exit_code) = super::run_task_gate(&argv, Some("self1")).expect("gate run failed");
+        assert_eq!(
+            exit_code, 0,
+            "the space-containing path must resolve, not 127"
+        );
         assert_eq!(out[6], "0");
         assert!(
             out[9].contains("ran-ok"),
@@ -3058,13 +3443,13 @@ mod tests {
     fn resolve_task_create_plan_file_reads_the_file_and_rewrites_the_flag() {
         // Unique per run — a fixed temp path races create/remove with a
         // concurrent `cargo test` and dies with NotFound (see :2333).
-        let path = std::env::temp_dir()
-            .join(format!("conclave plan-file test {}.txt", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "conclave plan-file test {}.txt",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&path, "the plan body").expect("write fixture failed");
 
-        let argv = v(&[
-            "task", "create", "ws1", "t1", "Title", "--plan-file",
-        ]);
+        let argv = v(&["task", "create", "ws1", "t1", "Title", "--plan-file"]);
         let mut argv = argv;
         argv.push(path.to_string_lossy().into_owned());
 
@@ -3078,7 +3463,13 @@ mod tests {
     #[test]
     fn resolve_task_create_plan_file_missing_file_errors() {
         let argv = v(&[
-            "task", "create", "ws1", "t1", "Title", "--plan-file", "/no/such/file/xyz",
+            "task",
+            "create",
+            "ws1",
+            "t1",
+            "Title",
+            "--plan-file",
+            "/no/such/file/xyz",
         ]);
         assert!(super::resolve_task_create_plan_file(argv).is_err());
     }
@@ -3088,7 +3479,17 @@ mod tests {
     #[test]
     fn artifact_add_injects_instance_from_env() {
         let out = expand_self_args(
-            v(&["artifact", "add", "ws1", "--title", "T", "--kind", "text", "--content", "x"]),
+            v(&[
+                "artifact",
+                "add",
+                "ws1",
+                "--title",
+                "T",
+                "--kind",
+                "text",
+                "--content",
+                "x",
+            ]),
             Some("self1"),
         )
         .unwrap();
@@ -3102,7 +3503,17 @@ mod tests {
     #[test]
     fn artifact_add_injects_sentinel_without_instance_id() {
         let out = expand_self_args(
-            v(&["artifact", "add", "ws1", "--title", "T", "--kind", "text", "--content", "x"]),
+            v(&[
+                "artifact",
+                "add",
+                "ws1",
+                "--title",
+                "T",
+                "--kind",
+                "text",
+                "--content",
+                "x",
+            ]),
             None,
         )
         .unwrap();
@@ -3129,19 +3540,29 @@ mod tests {
     #[test]
     fn resolve_artifact_add_file_reads_the_file_and_derives_filename() {
         // Unique per run — a fixed temp path races a concurrent `cargo test`.
-        let path = std::env::temp_dir()
-            .join(format!("conclave artifact test {}.md", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "conclave artifact test {}.md",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&path, "# the body").expect("write fixture failed");
 
-        let mut argv = v(&["artifact", "add", "ws1", "--title", "T", "--kind", "markdown", "--file"]);
+        let mut argv = v(&[
+            "artifact", "add", "ws1", "--title", "T", "--kind", "markdown", "--file",
+        ]);
         argv.push(path.to_string_lossy().into_owned());
 
         let out = super::resolve_artifact_add_file(argv).expect("resolve failed");
         // --file <path> became --content <body>; --filename <basename> appended.
-        let cpos = out.iter().position(|w| w == "--content").expect("has --content");
+        let cpos = out
+            .iter()
+            .position(|w| w == "--content")
+            .expect("has --content");
         assert_eq!(out[cpos + 1], "# the body");
         assert!(!out.iter().any(|w| w == "--file"), "--file rewritten away");
-        let fpos = out.iter().position(|w| w == "--filename").expect("has --filename");
+        let fpos = out
+            .iter()
+            .position(|w| w == "--filename")
+            .expect("has --filename");
         assert_eq!(out[fpos + 1], path.file_name().unwrap().to_string_lossy());
 
         std::fs::remove_file(&path).expect("cleanup failed");
@@ -3150,7 +3571,13 @@ mod tests {
     #[test]
     fn resolve_artifact_add_file_rejects_both_file_and_content() {
         let argv = v(&[
-            "artifact", "add", "ws1", "--content", "x", "--file", "/tmp/whatever",
+            "artifact",
+            "add",
+            "ws1",
+            "--content",
+            "x",
+            "--file",
+            "/tmp/whatever",
         ]);
         assert!(super::resolve_artifact_add_file(argv).is_err());
     }
@@ -3175,7 +3602,10 @@ mod tests {
         );
         // No supervisor / level → dashes and the (human) default.
         let bare = serde_json::json!({ "id": "a1", "name": "Sol" });
-        assert_eq!(super::render_position_row(&bare), "Sol · - · - · reports to (human)");
+        assert_eq!(
+            super::render_position_row(&bare),
+            "Sol · - · - · reports to (human)"
+        );
     }
 
     #[test]
@@ -3267,6 +3697,49 @@ mod tests {
         assert_eq!(super::render_msg_transcript(&[]), "(no messages)\n");
     }
 
+    #[test]
+    fn render_task_brief_is_human_readable_and_pointers_are_visible() {
+        let brief = serde_json::json!({
+            "limit": 3,
+            "task": {
+                "slug": "t1",
+                "title": "Task One",
+                "state": "claimed",
+                "designCanon": "canon-x",
+                "fileBoundary": ["src/a.rs", "src/b.rs"],
+                "planExcerpt": "line 1\nline 2\nline 3",
+                "planTruncated": true
+            },
+            "openChallenges": [
+                { "id": "challenge-12345678", "claim": "fix it", "status": "open" }
+            ],
+            "latestGates": [
+                { "id": "gate-12345678", "cmd": "cargo test", "exit": 0, "sha": "sha-abcdef12", "createdAt": "2026-07-08T00:00:00Z" }
+            ],
+            "lastEvents": [
+                { "id": "event-12345678", "kind": "note", "createdAt": "2026-07-08T00:00:00Z", "payload": { "text": "note body" } }
+            ],
+            "memoryHits": [
+                { "id": "mem-12345678", "text": "memory text", "score": 0.75, "sourceKind": "manual", "sourceId": "src-12345678", "createdAt": "2026-07-08T00:00:00Z" }
+            ],
+            "memoryError": null
+        });
+
+        let rendered = super::render_task_brief(&brief);
+        assert!(rendered.contains("Task brief: t1  Task One"), "{rendered}");
+        assert!(rendered.contains("file boundary:"), "{rendered}");
+        assert!(rendered.contains("plan excerpt:"), "{rendered}");
+        assert!(rendered.contains("open challenges (1):"), "{rendered}");
+        assert!(rendered.contains("latest gates (1):"), "{rendered}");
+        assert!(rendered.contains("last events (1):"), "{rendered}");
+        assert!(rendered.contains("memory hits (1):"), "{rendered}");
+        assert!(rendered.contains("challeng"), "{rendered}");
+        assert!(rendered.contains("gate-123"), "{rendered}");
+        assert!(rendered.contains("event-12"), "{rendered}");
+        assert!(rendered.contains("mem-1234"), "{rendered}");
+        assert!(rendered.contains("… truncated"), "{rendered}");
+    }
+
     // ── stage: private-index commit + attribution + snapshot op log ───────
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -3281,7 +3754,8 @@ mod tests {
     /// A throwaway repo with one committed file inside the (test) boundary
     /// ("in-scope.txt") and one outside it ("out-of-scope.txt").
     fn init_repo() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("conclave-stage-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("conclave-stage-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mkdir fixture failed");
         run_git(&dir, &["init", "-q", "-b", "main"]);
         run_git(&dir, &["config", "user.name", "Test Human"]);
@@ -3357,9 +3831,11 @@ mod tests {
         )
         .expect("stage commit must succeed");
 
-        let head_diff =
-            super::git_output(&dir, &["diff", "--name-status", "HEAD", "--", "in-scope.txt"])
-                .unwrap();
+        let head_diff = super::git_output(
+            &dir,
+            &["diff", "--name-status", "HEAD", "--", "in-scope.txt"],
+        )
+        .unwrap();
         assert!(
             head_diff.is_empty(),
             "worktree must already match the new HEAD: {head_diff}"
@@ -3414,10 +3890,7 @@ mod tests {
         let dir = init_repo();
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
         std::fs::write(dir.join("new-in-scope.txt"), "new\n").unwrap();
-        let boundary = vec![
-            "in-scope.txt".to_string(),
-            "new-in-scope.txt".to_string(),
-        ];
+        let boundary = vec!["in-scope.txt".to_string(), "new-in-scope.txt".to_string()];
 
         let (in_boundary, out_of_boundary) =
             super::stage_status_entries(&dir, &boundary).expect("stage status must succeed");
@@ -3458,7 +3931,10 @@ mod tests {
         );
         let after = super::stage_status_entries(&dir, &boundary)
             .expect("HEAD-based status must ignore shared-index staging");
-        assert_eq!(after, before, "shared index state must not affect stage status");
+        assert_eq!(
+            after, before,
+            "shared index state must not affect stage status"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3473,9 +3949,16 @@ mod tests {
         let index_before = std::fs::read(&index_path).expect("read shared index");
 
         let boundary = vec!["in-scope.txt".to_string()];
-        let (sha, n_files) =
-            super::stage_commit_core(&dir, "main", "t1", &boundary, "msg", "Test Agent", "agent-1")
-                .expect("commit must succeed");
+        let (sha, n_files) = super::stage_commit_core(
+            &dir,
+            "main",
+            "t1",
+            &boundary,
+            "msg",
+            "Test Agent",
+            "agent-1",
+        )
+        .expect("commit must succeed");
         assert_eq!(n_files, 1);
 
         let index_after = std::fs::read(&index_path).expect("read shared index");
@@ -3491,13 +3974,20 @@ mod tests {
         // still has its OLD content (moving the branch never touches the
         // shared index, so `git status` afterward compares against a now-
         // stale index; that's the tree-content check that actually matters).
-        let out_of_scope = super::git_output(&dir, &["show", &format!("{sha}:out-of-scope.txt")]).unwrap();
-        assert_eq!(out_of_scope, "v1", "out-of-boundary edit must not be committed");
+        let out_of_scope =
+            super::git_output(&dir, &["show", &format!("{sha}:out-of-scope.txt")]).unwrap();
+        assert_eq!(
+            out_of_scope, "v1",
+            "out-of-boundary edit must not be committed"
+        );
 
         // The out-of-boundary edit remains an uncommitted diff against the
         // new HEAD — "stays dirty and uncommitted" (test 1).
         let diff = super::git_output(&dir, &["diff", &sha, "--", "out-of-scope.txt"]).unwrap();
-        assert!(!diff.is_empty(), "out-of-boundary edit must remain dirty/uncommitted");
+        assert!(
+            !diff.is_empty(),
+            "out-of-boundary edit must remain dirty/uncommitted"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3508,14 +3998,22 @@ mod tests {
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
         let boundary = vec!["in-scope.txt".to_string()];
 
-        let (sha, _) =
-            super::stage_commit_core(&dir, "main", "t1", &boundary, "did a thing", "Dew", "dew-agent-id")
-                .unwrap();
+        let (sha, _) = super::stage_commit_core(
+            &dir,
+            "main",
+            "t1",
+            &boundary,
+            "did a thing",
+            "Dew",
+            "dew-agent-id",
+        )
+        .unwrap();
 
         let author = super::git_output(&dir, &["show", "-s", "--format=%an <%ae>", &sha]).unwrap();
         assert_eq!(author, "Dew <dew-agent-id@agents.conclave.local>");
 
-        let committer = super::git_output(&dir, &["show", "-s", "--format=%cn <%ce>", &sha]).unwrap();
+        let committer =
+            super::git_output(&dir, &["show", "-s", "--format=%cn <%ce>", &sha]).unwrap();
         assert_eq!(
             committer, "Test Human <human@example.com>",
             "committer stays the repo default"
@@ -3548,15 +4046,21 @@ mod tests {
                     // HEAD read and its update-ref — deterministic (no
                     // timing race), exercising the CAS-failure-then-
                     // refresh-and-retry path.
-                    super::git_output(repo, &["commit", "--allow-empty", "-q", "-m", "peer commit"])
-                        .unwrap();
+                    super::git_output(
+                        repo,
+                        &["commit", "--allow-empty", "-q", "-m", "peer commit"],
+                    )
+                    .unwrap();
                 }
             },
         )
         .expect("must succeed via CAS retry after the simulated peer commit");
 
         let head_now = super::git_output(&dir, &["rev-parse", "main"]).unwrap();
-        assert_eq!(head_now, sha, "our commit must land as the final branch tip");
+        assert_eq!(
+            head_now, sha,
+            "our commit must land as the final branch tip"
+        );
         let log = super::git_output(&dir, &["log", "--format=%s", "main"]).unwrap();
         assert!(
             log.contains("peer commit"),
@@ -3572,8 +4076,8 @@ mod tests {
         let boundary = vec!["in-scope.txt".to_string()];
         let head_before = super::head_sha(&dir).unwrap();
 
-        let err =
-            super::stage_commit_core(&dir, "main", "t1", &boundary, "msg", "Dew", "dew").unwrap_err();
+        let err = super::stage_commit_core(&dir, "main", "t1", &boundary, "msg", "Dew", "dew")
+            .unwrap_err();
         assert!(err.contains("nothing to commit"), "{err}");
         assert_eq!(
             super::head_sha(&dir).unwrap(),
@@ -3591,7 +4095,8 @@ mod tests {
         let boundary = vec!["in-scope.txt".to_string()];
 
         let (sha, n_files) =
-            super::stage_commit_core(&dir, "main", "t1", &boundary, "delete it", "Dew", "dew").unwrap();
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "delete it", "Dew", "dew")
+                .unwrap();
         assert_eq!(n_files, 1);
 
         let ls = super::git_output(&dir, &["ls-tree", "--name-only", &sha]).unwrap();
@@ -3599,7 +4104,10 @@ mod tests {
             !ls.contains("in-scope.txt"),
             "deleted file must not be in the commit tree: {ls}"
         );
-        assert!(ls.contains("out-of-scope.txt"), "untouched file must survive: {ls}");
+        assert!(
+            ls.contains("out-of-scope.txt"),
+            "untouched file must survive: {ls}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3609,15 +4117,27 @@ mod tests {
         let dir = init_repo();
         let boundary = vec!["in-scope.txt".to_string()];
         let outside_sha = super::head_sha(&dir).unwrap();
-        let snapshot_sha =
-            super::snapshot(&dir, "t1", &boundary, "manual", "Dabin", "dabin@agents.conclave.local")
-                .unwrap()
-                .expect("snapshot must be created");
+        let snapshot_sha = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "manual",
+            "Dabin",
+            "dabin@agents.conclave.local",
+        )
+        .unwrap()
+        .expect("snapshot must be created");
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
-        let snapshot_tip =
-            super::snapshot(&dir, "t1", &boundary, "second", "Dabin", "dabin@agents.conclave.local")
-                .unwrap()
-                .expect("second snapshot must be created");
+        let snapshot_tip = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "second",
+            "Dabin",
+            "dabin@agents.conclave.local",
+        )
+        .unwrap()
+        .expect("second snapshot must be created");
 
         let err = super::validate_stage_restore_source(&dir, "ws-1", "t1", &outside_sha)
             .expect_err("normal branch commit must not be accepted as a task snapshot");
@@ -3650,9 +4170,16 @@ mod tests {
         let dir = init_repo();
         let boundary = vec!["in-scope.txt".to_string()];
 
-        let snap1 = super::snapshot(&dir, "t1", &boundary, "manual", "Dew", "dew@agents.conclave.local")
-            .unwrap()
-            .expect("first snapshot must be created");
+        let snap1 = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "manual",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap()
+        .expect("first snapshot must be created");
 
         std::fs::write(dir.join("in-scope.txt"), "modified\n").unwrap();
 
@@ -3668,7 +4195,17 @@ mod tests {
         .expect("auto-snap of modified state must be created");
         assert_ne!(auto_snap, snap1);
 
-        run_git(&dir, &["restore", "--worktree", "--source", &snap1, "--", "in-scope.txt"]);
+        run_git(
+            &dir,
+            &[
+                "restore",
+                "--worktree",
+                "--source",
+                &snap1,
+                "--",
+                "in-scope.txt",
+            ],
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
             "v1\n"
@@ -3677,7 +4214,14 @@ mod tests {
         // The modified state is still recoverable via the auto-snap.
         run_git(
             &dir,
-            &["restore", "--worktree", "--source", &auto_snap, "--", "in-scope.txt"],
+            &[
+                "restore",
+                "--worktree",
+                "--source",
+                &auto_snap,
+                "--",
+                "in-scope.txt",
+            ],
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
@@ -3691,12 +4235,31 @@ mod tests {
     fn stage_log_lists_snapshots_newest_first_with_labels() {
         let dir = init_repo();
         let boundary = vec!["in-scope.txt".to_string()];
-        super::snapshot(&dir, "t1", &boundary, "first", "Dew", "dew@agents.conclave.local").unwrap();
+        super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "first",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap();
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
-        super::snapshot(&dir, "t1", &boundary, "second", "Dew", "dew@agents.conclave.local").unwrap();
+        super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "second",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap();
 
-        let log =
-            super::git_output(&dir, &["log", "--format=%s", &super::stage_snapshot_ref("t1")]).unwrap();
+        let log = super::git_output(
+            &dir,
+            &["log", "--format=%s", &super::stage_snapshot_ref("t1")],
+        )
+        .unwrap();
         let lines: Vec<&str> = log.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("second"), "newest first: {lines:?}");
@@ -3709,15 +4272,30 @@ mod tests {
     fn stage_snap_skips_the_ref_update_when_tree_is_unchanged() {
         let dir = init_repo();
         let boundary = vec!["in-scope.txt".to_string()];
-        let first = super::snapshot(&dir, "t1", &boundary, "first", "Dew", "dew@agents.conclave.local")
-            .unwrap()
-            .expect("first snapshot created");
+        let first = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "first",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap()
+        .expect("first snapshot created");
 
-        let second = super::snapshot(&dir, "t1", &boundary, "second", "Dew", "dew@agents.conclave.local")
-            .unwrap();
+        let second = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "second",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap();
         assert!(second.is_none(), "identical tree must skip the ref update");
 
-        let tip = super::git_output(&dir, &["rev-parse", &super::stage_snapshot_ref("t1")]).unwrap();
+        let tip =
+            super::git_output(&dir, &["rev-parse", &super::stage_snapshot_ref("t1")]).unwrap();
         assert_eq!(tip, first, "ref must still point at the first snapshot");
 
         std::fs::remove_dir_all(&dir).ok();

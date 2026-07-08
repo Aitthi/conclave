@@ -97,6 +97,52 @@ fn parse_object(text: &str) -> Value {
     }
 }
 
+const DEFAULT_BRIEF_LIMIT: usize = 10;
+const MAX_BRIEF_LIMIT: usize = 20;
+
+fn excerpt_lines(text: &str, limit: usize) -> (String, bool) {
+    let lines: Vec<&str> = text.lines().collect();
+    let truncated = lines.len() > limit;
+    let excerpt = lines.into_iter().take(limit).collect::<Vec<_>>().join("\n");
+    (excerpt, truncated)
+}
+
+fn parse_json_array_strings(text: &str) -> Vec<String> {
+    parse_array(text)
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn brief_memory_query(row: &TaskRow) -> String {
+    let mut parts = vec![row.slug.clone(), row.title.clone()];
+    if let Some(canon) = &row.design_canon {
+        parts.push(canon.clone());
+    }
+    parts.extend(
+        parse_json_array_strings(&row.file_boundary)
+            .into_iter()
+            .take(3),
+    );
+    parts.join(" ")
+}
+
+fn task_brief_to_json(row: &TaskRow, plan_excerpt: String, plan_truncated: bool) -> Value {
+    let mut task = match task_to_json(row) {
+        Value::Object(map) => map,
+        _ => unreachable!("task_to_json always returns an object"),
+    };
+    task.remove("plan");
+    task.insert("planExcerpt".into(), json!(plan_excerpt));
+    task.insert("planTruncated".into(), json!(plan_truncated));
+    Value::Object(task)
+}
+
 /// Build the frozen `Task` wire shape from a [`TaskRow`].
 fn task_to_json(row: &TaskRow) -> Value {
     let mut obj = serde_json::Map::new();
@@ -140,6 +186,11 @@ struct PendingChallenge {
     deadline_at: Option<String>,
 }
 
+struct BriefBoardSections {
+    latest_gates: Vec<Value>,
+    open_challenges: Vec<Value>,
+}
+
 /// Cap on distinct `cmd`s tracked per task in `lastGates` (RULED 2026-07-04,
 /// Arta fidelity F1) — full gate history stays available via `task.get`.
 const MAX_LAST_GATES: usize = 6;
@@ -167,15 +218,18 @@ fn derive_board_extras(events: &[TaskEventRow]) -> BoardExtras {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                gate_by_task_cmd.entry(e.task_id.clone()).or_default().insert(
-                    cmd,
-                    json!({
-                        "cmd": payload.get("cmd").cloned().unwrap_or(Value::Null),
-                        "exit": payload.get("exit").cloned().unwrap_or(Value::Null),
-                        "sha": payload.get("sha").cloned().unwrap_or(Value::Null),
-                        "createdAt": e.created_at,
-                    }),
-                );
+                gate_by_task_cmd
+                    .entry(e.task_id.clone())
+                    .or_default()
+                    .insert(
+                        cmd,
+                        json!({
+                            "cmd": payload.get("cmd").cloned().unwrap_or(Value::Null),
+                            "exit": payload.get("exit").cloned().unwrap_or(Value::Null),
+                            "sha": payload.get("sha").cloned().unwrap_or(Value::Null),
+                            "createdAt": e.created_at,
+                        }),
+                    );
             }
             "challenge" => {
                 let claim = payload
@@ -253,6 +307,88 @@ fn derive_board_extras(events: &[TaskEventRow]) -> BoardExtras {
     BoardExtras {
         last_gates,
         challenges,
+    }
+}
+
+fn derive_brief_board_sections(events: &[TaskEventRow], task_id: &str) -> BriefBoardSections {
+    let mut gate_by_cmd: HashMap<String, Value> = HashMap::new();
+    let mut challenge_rows: Vec<PendingChallenge> = Vec::new();
+    let mut ruled_challenge_ids: HashSet<String> = HashSet::new();
+
+    for e in events.iter().filter(|event| event.task_id == task_id) {
+        let payload = parse_object(&e.payload);
+        match e.kind.as_str() {
+            "gate" => {
+                let cmd = payload
+                    .get("cmd")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                gate_by_cmd.insert(
+                    cmd,
+                    json!({
+                        "id": e.id,
+                        "cmd": payload.get("cmd").cloned().unwrap_or(Value::Null),
+                        "exit": payload.get("exit").cloned().unwrap_or(Value::Null),
+                        "sha": payload.get("sha").cloned().unwrap_or(Value::Null),
+                        "createdAt": e.created_at,
+                    }),
+                );
+            }
+            "challenge" => {
+                let claim = payload
+                    .get("claim")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let deadline_at = payload
+                    .get("deadlineAt")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                challenge_rows.push(PendingChallenge {
+                    id: e.id.clone(),
+                    claim,
+                    deadline_at,
+                });
+            }
+            "ruling" => {
+                if let Some(challenge_id) = payload.get("challengeId").and_then(Value::as_str) {
+                    ruled_challenge_ids.insert(challenge_id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut latest_gates: Vec<Value> = gate_by_cmd.into_values().collect();
+    latest_gates.sort_by(|a, b| {
+        let parse = |v: &Value| {
+            v.get("createdAt")
+                .and_then(Value::as_str)
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        };
+        parse(b).cmp(&parse(a))
+    });
+
+    let open_challenges = challenge_rows
+        .into_iter()
+        .filter(|challenge| !ruled_challenge_ids.contains(&challenge.id))
+        .map(|challenge| {
+            let mut obj = json!({
+                "id": challenge.id,
+                "claim": challenge.claim,
+                "status": "open",
+            });
+            if let Some(deadline_at) = challenge.deadline_at {
+                obj["deadlineAt"] = json!(deadline_at);
+            }
+            obj
+        })
+        .collect();
+
+    BriefBoardSections {
+        latest_gates,
+        open_challenges,
     }
 }
 
@@ -336,7 +472,8 @@ struct CreateReq {
 /// Create a task. `ownerAgentId`, when supplied, must belong to `workspaceId`.
 /// Rejects a duplicate `(workspaceId, slug)` with [`AppError::Invalid`].
 pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: CreateReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: CreateReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if let Some(owner) = &req.owner_agent_id {
         enforce_scope(state, &req.workspace_id, owner, "owner").await?;
@@ -378,6 +515,7 @@ pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError>
 struct ListReq {
     workspace_id: String,
     state: Option<String>,
+    include_plan: Option<bool>,
 }
 
 /// List a workspace's tasks (optionally filtered by `state`), each row
@@ -385,10 +523,17 @@ struct ListReq {
 /// `lastGates` and `challenges` (both `[]` when none) — RULED 2026-07-04 #2
 /// (amended same day, Arta fidelity F1), see [`BoardExtras`].
 pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: ListReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: ListReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
 
-    let rows = repo::task::list(&state.db, &req.workspace_id, req.state.as_deref()).await?;
+    let rows = repo::task::list(
+        &state.db,
+        &req.workspace_id,
+        req.state.as_deref(),
+        req.include_plan.unwrap_or(true),
+    )
+    .await?;
     let events = repo::task::board_events_for_workspace(&state.db, &req.workspace_id).await?;
     let extras = derive_board_extras(&events);
     Ok(Value::Array(
@@ -396,6 +541,82 @@ pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
             .map(|row| task_list_item_to_json(row, &extras))
             .collect(),
     ))
+}
+
+// ── task.brief ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BriefReq {
+    workspace_id: String,
+    slug: String,
+    limit: Option<usize>,
+}
+
+/// Fetch one task's low-context resume packet: compact task metadata, the
+/// bounded plan excerpt, open challenges, latest gates, recent events, and
+/// memory hits that point back to the existing workspace-memory record.
+pub async fn brief(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: BriefReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    require_workspace(state, &req.workspace_id).await?;
+
+    let row = repo::task::get(&state.db, &req.workspace_id, &req.slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", req.slug)))?;
+    let limit = req
+        .limit
+        .unwrap_or(DEFAULT_BRIEF_LIMIT)
+        .clamp(1, MAX_BRIEF_LIMIT);
+    let (plan_excerpt, plan_truncated) = excerpt_lines(&row.plan, limit);
+
+    let events = repo::task::board_events_for_workspace(&state.db, &req.workspace_id).await?;
+    let board = derive_brief_board_sections(&events, &row.id);
+    let open_challenges = board
+        .open_challenges
+        .into_iter()
+        .take(limit)
+        .collect::<Vec<_>>();
+    let latest_gates = board
+        .latest_gates
+        .into_iter()
+        .take(limit)
+        .collect::<Vec<_>>();
+    let last_events = repo::task::events_for(&state.db, &row.id, limit as i64).await?;
+
+    let memory_limit = limit.min(5);
+    let memory_query = brief_memory_query(&row);
+    let (memory_hits, memory_error) = if state.memory_embedder.is_ready() {
+        let result = super::memory::search(
+            state,
+            json!({
+                "workspaceId": req.workspace_id,
+                "query": memory_query,
+                "limit": memory_limit,
+            }),
+        )
+        .await?;
+        (
+            result
+                .get("hits")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            None,
+        )
+    } else {
+        (Vec::new(), Some("memory embedder not ready".to_string()))
+    };
+
+    Ok(json!({
+        "task": task_brief_to_json(&row, plan_excerpt, plan_truncated),
+        "limit": limit,
+        "openChallenges": open_challenges,
+        "latestGates": latest_gates,
+        "lastEvents": last_events.iter().map(task_event_to_json).collect::<Vec<_>>(),
+        "memoryHits": memory_hits,
+        "memoryError": memory_error,
+    }))
 }
 
 // ── task.get ──────────────────────────────────────────────────────────────
@@ -412,7 +633,8 @@ struct GetReq {
 /// Fetch one task plus its last 20 events (newest-first). Returns
 /// [`AppError::NotFound`] when the task does not exist.
 pub async fn get(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: GetReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: GetReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
 
     let row = repo::task::get(&state.db, &req.workspace_id, &req.slug)
@@ -440,7 +662,8 @@ struct ClaimReq {
 /// Rejects a non-`planned` task with [`AppError::Invalid`] (already claimed,
 /// merged, …).
 pub async fn claim(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: ClaimReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: ClaimReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
@@ -472,7 +695,8 @@ struct SetStateReq {
 /// Transition a task's state. Invalid moves (e.g. `merged -> claimed`) return
 /// [`AppError::Invalid`] — see `repo::task::valid_transition`.
 pub async fn set_state(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: SetStateReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: SetStateReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if let Some(actor) = &req.actor_id {
         enforce_scope(state, &req.workspace_id, actor, "actor").await?;
@@ -489,7 +713,15 @@ pub async fn set_state(state: &AppState, payload: Value) -> Result<Value, AppErr
     emit_changed(state, &row);
     if let Some(actor) = &req.actor_id {
         let summary = format!("-> {}", req.state);
-        notify_watchers(state, &row, actor, "state", &summary, &json!({ "state": req.state })).await;
+        notify_watchers(
+            state,
+            &row,
+            actor,
+            "state",
+            &summary,
+            &json!({ "state": req.state }),
+        )
+        .await;
 
         // Position routing (spec §3.4): review-ready routes to the integrator =
         // the task owner — notify the owner even if not on the watch list
@@ -523,7 +755,8 @@ struct NoteReq {
 
 /// Append a free-text `note` event (replaces the old bb `progress:` convention).
 pub async fn note(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: NoteReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: NoteReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if let Some(actor) = &req.actor_id {
         enforce_scope(state, &req.workspace_id, actor, "actor").await?;
@@ -571,7 +804,8 @@ struct GateReq {
 /// this just records the evidence. A non-zero `exit` is recorded exactly like
 /// a zero one — a red gate is evidence, not a request failure.
 pub async fn gate(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: GateReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: GateReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if let Some(actor) = &req.actor_id {
         enforce_scope(state, &req.workspace_id, actor, "actor").await?;
@@ -630,7 +864,8 @@ struct ChallengeReq {
 /// from relative minutes, which would drift with read time). Absent
 /// `deadlineMin` means advisory (no stall/default timer — Lane B).
 pub async fn challenge(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: ChallengeReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: ChallengeReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if let Some(actor) = &req.actor_id {
         enforce_scope(state, &req.workspace_id, actor, "actor").await?;
@@ -673,7 +908,8 @@ pub async fn challenge(state: &AppState, payload: Value) -> Result<Value, AppErr
     if let Some(challenger) = req.actor_id.as_deref() {
         if let Ok(Some(task)) = repo::task::get(&state.db, &req.workspace_id, &req.slug).await {
             if let Some(ruler) = challenge_expected_ruler(state, &task, challenger).await {
-                notify_expected_ruler(state, &task, challenger, "challenge", &req.claim, &ruler).await;
+                notify_expected_ruler(state, &task, challenger, "challenge", &req.claim, &ruler)
+                    .await;
             }
         }
     }
@@ -695,7 +931,8 @@ struct RuleReq {
 /// Append a `ruling` event resolving a prior `challenge`. `payload.by` is
 /// always the ruling actor (frozen: `{"challengeId","text","by"}`).
 pub async fn rule(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: RuleReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: RuleReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
@@ -742,13 +979,20 @@ struct CloseReq {
 
 /// Close a task: `{claimed,in_progress,review} -> merged`.
 pub async fn close(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: CloseReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: CloseReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if let Some(actor) = &req.actor_id {
         enforce_scope(state, &req.workspace_id, actor, "actor").await?;
     }
 
-    let row = repo::task::close(&state.db, &req.workspace_id, &req.slug, req.actor_id.as_deref()).await?;
+    let row = repo::task::close(
+        &state.db,
+        &req.workspace_id,
+        &req.slug,
+        req.actor_id.as_deref(),
+    )
+    .await?;
     emit_changed(state, &row);
     if let Some(actor) = &req.actor_id {
         notify_watchers(
@@ -776,7 +1020,8 @@ struct WatchReq {
 
 /// Subscribe `actorId` to a task's `task_event` changes (Lane B notify hook).
 pub async fn watch(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: WatchReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: WatchReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
@@ -796,7 +1041,8 @@ pub async fn watch(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
 /// Unsubscribe `actorId` from a task. Idempotent.
 pub async fn unwatch(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: WatchReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: WatchReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
@@ -1027,6 +1273,8 @@ mod tests {
         agent_definition::{self, AgentDefinitionInput},
         workspace, workspace_agent,
     };
+    use crate::engine::runtime::embedder::{EmbedError, Embedder};
+    use std::sync::Arc;
 
     async fn fixture_workspace(state: &AppState) -> String {
         workspace::create(&state.db, "WS", "/tmp/ws", None)
@@ -1053,6 +1301,26 @@ mod tests {
             .id
     }
 
+    struct NotReadyEmbedder;
+
+    impl Embedder for NotReadyEmbedder {
+        fn model_id(&self) -> &'static str {
+            "not-ready"
+        }
+
+        fn dimension(&self) -> usize {
+            384
+        }
+
+        fn is_ready(&self) -> bool {
+            false
+        }
+
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            Err(EmbedError::ModelUnavailable("not ready".into()))
+        }
+    }
+
     // ── task.create ───────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1072,7 +1340,10 @@ mod tests {
         assert_eq!(created["state"], json!("planned"));
         assert_eq!(created["fileBoundary"], json!([]));
         assert_eq!(created["plan"], json!(""));
-        assert!(created.get("ownerAgentId").is_none(), "must omit when absent");
+        assert!(
+            created.get("ownerAgentId").is_none(),
+            "must omit when absent"
+        );
         assert!(created.get("implementerAgentId").is_none());
         assert!(created.get("designCanon").is_none());
         assert!(created.get("id").is_some());
@@ -1106,13 +1377,19 @@ mod tests {
     async fn create_duplicate_slug_is_invalid() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
-        create(&state, json!({ "workspaceId": ws, "slug": "dup", "title": "A" }))
-            .await
-            .expect("first create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "dup", "title": "A" }),
+        )
+        .await
+        .expect("first create failed");
 
-        let err = create(&state, json!({ "workspaceId": ws, "slug": "dup", "title": "B" }))
-            .await
-            .expect_err("duplicate slug must fail");
+        let err = create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "dup", "title": "B" }),
+        )
+        .await
+        .expect_err("duplicate slug must fail");
         assert!(matches!(err, AppError::Invalid(_)));
     }
 
@@ -1144,16 +1421,51 @@ mod tests {
     // ── task.list ─────────────────────────────────────────────────────────
 
     #[tokio::test]
+    async fn list_defaults_to_full_and_can_blank_plan_when_slim() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        create(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "slug": "t1",
+                "title": "T1",
+                "plan": "line one\nline two"
+            }),
+        )
+        .await
+        .expect("create failed");
+
+        let full = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("full list failed");
+        let full_row = full.as_array().expect("array")[0].clone();
+        assert_eq!(full_row["plan"], json!("line one\nline two"));
+
+        let slim = list(&state, json!({ "workspaceId": ws, "includePlan": false }))
+            .await
+            .expect("slim list failed");
+        let slim_row = slim.as_array().expect("array")[0].clone();
+        assert_eq!(slim_row["plan"], json!(""));
+    }
+
+    #[tokio::test]
     async fn list_includes_event_count_and_filters_by_state() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create t1");
-        create(&state, json!({ "workspaceId": ws, "slug": "t2", "title": "T2" }))
-            .await
-            .expect("create t2");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create t1");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t2", "title": "T2" }),
+        )
+        .await
+        .expect("create t2");
         note(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": "hi" }),
@@ -1161,7 +1473,9 @@ mod tests {
         .await
         .expect("note failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let arr = listed.as_array().expect("array");
         assert_eq!(arr.len(), 2);
         let t1 = arr.iter().find(|t| t["slug"] == "t1").expect("t1 present");
@@ -1169,9 +1483,12 @@ mod tests {
         let t2 = arr.iter().find(|t| t["slug"] == "t2").expect("t2 present");
         assert_eq!(t2["eventCount"], json!(0));
 
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         let filtered = list(&state, json!({ "workspaceId": ws, "state": "claimed" }))
             .await
             .expect("filtered list failed");
@@ -1184,14 +1501,27 @@ mod tests {
     async fn list_last_gates_is_empty_array_when_no_gate_events() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
-        assert_eq!(t1["lastGates"], json!([]), "no gates -> empty array, always present");
-        assert_eq!(t1["challenges"], json!([]), "no challenges -> empty array, always present");
+        assert_eq!(
+            t1["lastGates"],
+            json!([]),
+            "no gates -> empty array, always present"
+        );
+        assert_eq!(
+            t1["challenges"],
+            json!([]),
+            "no challenges -> empty array, always present"
+        );
     }
 
     #[tokio::test]
@@ -1199,9 +1529,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         gate(
             &state,
@@ -1222,18 +1555,37 @@ mod tests {
         .await
         .expect("gate 2 failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
         let last_gates = t1["lastGates"].as_array().expect("lastGates present");
-        assert_eq!(last_gates.len(), 1, "same cmd re-run must collapse to one entry");
+        assert_eq!(
+            last_gates.len(),
+            1,
+            "same cmd re-run must collapse to one entry"
+        );
         let entry = &last_gates[0];
         assert_eq!(entry["cmd"], json!("cargo test"));
-        assert_eq!(entry["exit"], json!(0), "must be the NEWEST run of this cmd");
+        assert_eq!(
+            entry["exit"],
+            json!(0),
+            "must be the NEWEST run of this cmd"
+        );
         assert_eq!(entry["sha"], json!("sha2"));
         assert!(entry.get("createdAt").is_some());
-        let mut keys: Vec<&str> = entry.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["cmd", "createdAt", "exit", "sha"], "no extra fields beyond the frozen shape");
+        assert_eq!(
+            keys,
+            ["cmd", "createdAt", "exit", "sha"],
+            "no extra fields beyond the frozen shape"
+        );
     }
 
     #[tokio::test]
@@ -1241,9 +1593,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         gate(
             &state,
@@ -1264,11 +1619,21 @@ mod tests {
         .await
         .expect("gate 2 failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
         let last_gates = t1["lastGates"].as_array().expect("lastGates present");
-        assert_eq!(last_gates.len(), 2, "distinct cmds must BOTH appear (test green + clippy red)");
-        assert_eq!(last_gates[0]["cmd"], json!("cargo clippy"), "most-recent-first");
+        assert_eq!(
+            last_gates.len(),
+            2,
+            "distinct cmds must BOTH appear (test green + clippy red)"
+        );
+        assert_eq!(
+            last_gates[0]["cmd"],
+            json!("cargo clippy"),
+            "most-recent-first"
+        );
         assert_eq!(last_gates[0]["exit"], json!(101));
         assert_eq!(last_gates[1]["cmd"], json!("cargo test"));
         assert_eq!(last_gates[1]["exit"], json!(0));
@@ -1279,9 +1644,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         for i in 0..8 {
             gate(
@@ -1296,13 +1664,18 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
         let last_gates = t1["lastGates"].as_array().expect("lastGates present");
         assert_eq!(last_gates.len(), 6, "capped at 6 distinct cmds");
         // Most-recent-first: the 6 KEPT must be cmd-7 down to cmd-2 (the two
         // oldest, cmd-0 and cmd-1, are evicted).
-        let kept: Vec<&str> = last_gates.iter().map(|g| g["cmd"].as_str().unwrap()).collect();
+        let kept: Vec<&str> = last_gates
+            .iter()
+            .map(|g| g["cmd"].as_str().unwrap())
+            .collect();
         assert_eq!(
             kept,
             vec!["cmd-7", "cmd-6", "cmd-5", "cmd-4", "cmd-3", "cmd-2"]
@@ -1315,9 +1688,12 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
         let lead = fixture_instance(&state, &ws, "Lead").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let challenge_event = challenge(
             &state,
@@ -1337,7 +1713,9 @@ mod tests {
             .expect("payload must carry deadlineAt")
             .to_string();
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
         let challenges = t1["challenges"].as_array().expect("challenges array");
         assert_eq!(challenges.len(), 1);
@@ -1357,7 +1735,9 @@ mod tests {
         .await
         .expect("rule failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
         let challenges = t1["challenges"].as_array().expect("challenges array");
         assert_eq!(challenges.len(), 1, "still one challenge, now ruled");
@@ -1369,9 +1749,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
         challenge(
             &state,
             json!({
@@ -1382,7 +1765,9 @@ mod tests {
         .await
         .expect("challenge failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let t1 = &listed.as_array().unwrap()[0];
         let challenges = t1["challenges"].as_array().unwrap();
         assert!(
@@ -1396,12 +1781,18 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create t1");
-        create(&state, json!({ "workspaceId": ws, "slug": "t2", "title": "T2" }))
-            .await
-            .expect("create t2");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create t1");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t2", "title": "T2" }),
+        )
+        .await
+        .expect("create t2");
         gate(
             &state,
             json!({
@@ -1412,12 +1803,129 @@ mod tests {
         .await
         .expect("gate on t1 failed");
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         let arr = listed.as_array().unwrap();
         let t1 = arr.iter().find(|t| t["slug"] == "t1").unwrap();
         let t2 = arr.iter().find(|t| t["slug"] == "t2").unwrap();
-        assert_eq!(t1["lastGates"].as_array().unwrap().len(), 1, "t1 has a gate");
-        assert_eq!(t2["lastGates"], json!([]), "t2's list row must not see t1's gate");
+        assert_eq!(
+            t1["lastGates"].as_array().unwrap().len(),
+            1,
+            "t1 has a gate"
+        );
+        assert_eq!(
+            t2["lastGates"],
+            json!([]),
+            "t2's list row must not see t1's gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn brief_returns_bounded_resume_packet_with_memory_hits() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "slug": "t1",
+                "title": "T1",
+                "designCanon": "canon-x",
+                "fileBoundary": ["src/a.rs", "src/b.rs"],
+                "plan": "line one\nline two\nline three\nline four\nline five"
+            }),
+        )
+        .await
+        .expect("create failed");
+        note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": "note one" }),
+        )
+        .await
+        .expect("note failed");
+        gate(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "cmd": "cargo test", "exit": 0, "sha": "sha1", "tail": "ok", "cwd": "/repo"
+            }),
+        )
+        .await
+        .expect("gate failed");
+        challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "still missing", "evidence": "log", "proposal": "fix it",
+                "default": "escalate"
+            }),
+        )
+        .await
+        .expect("challenge failed");
+        crate::engine::commands::memory::remember(
+            &state,
+            json!({
+                "workspaceId": ws,
+                "text": "t1 context-slim-task-reads-recovery resume packet"
+            }),
+        )
+        .await
+        .expect("remember failed");
+
+        let brief = brief(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "limit": 3 }),
+        )
+        .await
+        .expect("brief failed");
+        let task = brief["task"].as_object().expect("task object");
+        assert_eq!(task["slug"], json!("t1"));
+        assert_eq!(task["designCanon"], json!("canon-x"));
+        assert_eq!(task["fileBoundary"], json!(["src/a.rs", "src/b.rs"]));
+        assert_eq!(task["planExcerpt"].as_str().unwrap().lines().count(), 3);
+        assert_eq!(task["planTruncated"], json!(true));
+
+        let open_challenges = brief["openChallenges"]
+            .as_array()
+            .expect("openChallenges array");
+        assert_eq!(open_challenges.len(), 1);
+        assert_eq!(open_challenges[0]["status"], json!("open"));
+        assert_eq!(open_challenges[0]["claim"], json!("still missing"));
+
+        let latest_gates = brief["latestGates"].as_array().expect("latestGates array");
+        assert_eq!(latest_gates.len(), 1);
+        assert_eq!(latest_gates[0]["cmd"], json!("cargo test"));
+
+        let last_events = brief["lastEvents"].as_array().expect("lastEvents array");
+        assert_eq!(last_events.len(), 3);
+        assert_eq!(last_events[0]["kind"], json!("challenge"));
+        assert_eq!(last_events[1]["kind"], json!("gate"));
+        assert_eq!(last_events[2]["kind"], json!("note"));
+
+        let memory_hits = brief["memoryHits"].as_array().expect("memoryHits array");
+        assert_eq!(memory_hits.len(), 1);
+        assert!(brief["memoryError"].is_null());
+    }
+
+    #[tokio::test]
+    async fn brief_reports_memory_error_when_embedder_is_not_ready() {
+        let mut state = AppState::for_tests().await;
+        state.memory_embedder = Arc::new(NotReadyEmbedder);
+        let ws = fixture_workspace(&state).await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+
+        let brief = brief(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("brief failed");
+        assert_eq!(brief["memoryHits"], json!([]));
+        assert_eq!(brief["memoryError"], json!("memory embedder not ready"));
     }
 
     // ── task.get ──────────────────────────────────────────────────────────
@@ -1427,9 +1935,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
         note(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": actor, "text": "first" }),
@@ -1449,7 +1960,11 @@ mod tests {
         assert_eq!(got["task"]["slug"], json!("t1"));
         let events = got["events"].as_array().expect("events array");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0]["payload"]["text"], json!("second"), "newest first");
+        assert_eq!(
+            events[0]["payload"]["text"],
+            json!("second"),
+            "newest first"
+        );
         assert_eq!(events[0]["kind"], json!("note"));
         assert_eq!(events[0]["actorAgentId"], json!(actor));
     }
@@ -1471,13 +1986,19 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
-        let claimed = claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        let claimed = claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         assert_eq!(claimed["state"], json!("claimed"));
         assert_eq!(claimed["implementerAgentId"], json!(actor));
     }
@@ -1488,9 +2009,12 @@ mod tests {
         let ws1 = fixture_workspace(&state).await;
         let ws2 = fixture_workspace(&state).await;
         let foreigner = fixture_instance(&state, &ws2, "Foreign").await;
-        create(&state, json!({ "workspaceId": ws1, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws1, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let err = claim(
             &state,
@@ -1506,16 +2030,25 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("first claim failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("first claim failed");
 
-        let err = claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect_err("re-claim must fail");
+        let err = claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect_err("re-claim must fail");
         assert!(matches!(err, AppError::Invalid(_)));
     }
 
@@ -1526,15 +2059,24 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
-        close(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("close failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
+        close(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("close failed");
 
         let err = set_state(
             &state,
@@ -1552,9 +2094,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let event = gate(
             &state,
@@ -1581,9 +2126,12 @@ mod tests {
     async fn note_on_missing_task_is_not_found() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
-        let err = note(&state, json!({ "workspaceId": ws, "slug": "nope", "text": "x" }))
-            .await
-            .expect_err("missing task must fail");
+        let err = note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "nope", "text": "x" }),
+        )
+        .await
+        .expect_err("missing task must fail");
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
@@ -1595,9 +2143,12 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
         let lead = fixture_instance(&state, &ws, "Lead").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let challenge_event = challenge(
             &state,
@@ -1636,9 +2187,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let event = challenge(
             &state,
@@ -1665,9 +2219,12 @@ mod tests {
     async fn close_from_planned_is_invalid() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let err = close(&state, json!({ "workspaceId": ws, "slug": "t1" }))
             .await
@@ -1703,9 +2260,12 @@ mod tests {
         workspace_agent::set_position(&state.db, &challenger, None, Some(&owner))
             .await
             .expect("challenger reports to owner");
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
-            .await
-            .expect("create");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create");
         challenge(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
@@ -1715,8 +2275,15 @@ mod tests {
         .expect("challenge");
 
         let owner_msgs = received(&state, &owner).await;
-        assert_eq!(owner_msgs.len(), 1, "owner is the expected ruler, notified even unwatching");
-        assert!(!owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"), "live actor send, no AUTO");
+        assert_eq!(
+            owner_msgs.len(),
+            1,
+            "owner is the expected ruler, notified even unwatching"
+        );
+        assert!(
+            !owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"),
+            "live actor send, no AUTO"
+        );
     }
 
     /// §3.1 all-NULL invariant, byte-for-byte: with NO supervisor links the
@@ -1731,10 +2298,18 @@ mod tests {
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
-            .await
-            .expect("create");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher })).await.expect("watch");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch");
         challenge(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
@@ -1748,9 +2323,16 @@ mod tests {
         assert_eq!(w.len(), 1, "watcher gets exactly one line");
         assert_eq!(w[0]["fromInstanceId"], json!(challenger));
         assert_eq!(w[0]["toInstanceId"], json!(watcher));
-        assert_eq!(w[0]["text"], json!("[task t1] Challenger: challenge — X broken"));
+        assert_eq!(
+            w[0]["text"],
+            json!("[task t1] Challenger: challenge — X broken")
+        );
         // The non-watching owner is not the ruler at all-NULL → nothing.
-        assert_eq!(received(&state, &owner).await.len(), 0, "no owner ping at all-NULL");
+        assert_eq!(
+            received(&state, &owner).await.len(),
+            0,
+            "no owner ping at all-NULL"
+        );
     }
 
     /// §4 cross-chain: challenger and owner under different sub-leads → the
@@ -1764,12 +2346,22 @@ mod tests {
         let sub2 = fixture_instance(&state, &ws, "Sub2").await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
-        for (a, s) in [(&sub1, &lead), (&sub2, &lead), (&challenger, &sub1), (&owner, &sub2)] {
-            workspace_agent::set_position(&state.db, a, None, Some(s)).await.expect("link");
+        for (a, s) in [
+            (&sub1, &lead),
+            (&sub2, &lead),
+            (&challenger, &sub1),
+            (&owner, &sub2),
+        ] {
+            workspace_agent::set_position(&state.db, a, None, Some(s))
+                .await
+                .expect("link");
         }
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
-            .await
-            .expect("create");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create");
         challenge(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
@@ -1778,8 +2370,16 @@ mod tests {
         .await
         .expect("challenge");
 
-        assert_eq!(received(&state, &lead).await.len(), 1, "the LCA (lead) is the ruler");
-        assert_eq!(received(&state, &owner).await.len(), 0, "owner is cross-chain, not the ruler");
+        assert_eq!(
+            received(&state, &lead).await.len(),
+            1,
+            "the LCA (lead) is the ruler"
+        );
+        assert_eq!(
+            received(&state, &owner).await.len(),
+            0,
+            "owner is cross-chain, not the ruler"
+        );
     }
 
     /// Q2 dedupe: a watching owner who is also the expected ruler gets exactly
@@ -1790,11 +2390,21 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
-        workspace_agent::set_position(&state.db, &challenger, None, Some(&owner)).await.expect("link");
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+        workspace_agent::set_position(&state.db, &challenger, None, Some(&owner))
             .await
-            .expect("create");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": owner })).await.expect("watch");
+            .expect("link");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": owner }),
+        )
+        .await
+        .expect("watch");
         challenge(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": challenger,
@@ -1802,7 +2412,11 @@ mod tests {
         )
         .await
         .expect("challenge");
-        assert_eq!(received(&state, &owner).await.len(), 1, "watching ruler gets exactly one line");
+        assert_eq!(
+            received(&state, &owner).await.len(),
+            1,
+            "watching ruler gets exactly one line"
+        );
     }
 
     /// §3.4: review-ready routes to the owner (integrator) even when unwatching,
@@ -1814,21 +2428,37 @@ mod tests {
         let lead = fixture_instance(&state, &ws, "Lead").await;
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let implementer = fixture_instance(&state, &ws, "Implementer").await;
-        workspace_agent::set_position(&state.db, &owner, None, Some(&lead)).await.expect("owner reports to lead");
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
+        workspace_agent::set_position(&state.db, &owner, None, Some(&lead))
             .await
-            .expect("create");
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer })).await.expect("claim");
+            .expect("owner reports to lead");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim");
         set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": implementer }))
             .await
             .expect("in_progress");
-        set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }))
-            .await
-            .expect("review");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }),
+        )
+        .await
+        .expect("review");
 
         let owner_msgs = received(&state, &owner).await;
         assert_eq!(owner_msgs.len(), 1, "owner notified as integrator");
-        assert!(!owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"), "live actor send, no AUTO");
+        assert!(
+            !owner_msgs[0]["text"].as_str().unwrap().contains("AUTO"),
+            "live actor send, no AUTO"
+        );
     }
 
     /// §3.4 all-NULL invariant, byte-for-byte: with NO supervisor links the
@@ -1842,25 +2472,52 @@ mod tests {
         let owner = fixture_instance(&state, &ws, "Owner").await;
         let implementer = fixture_instance(&state, &ws, "Implementer").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }))
-            .await
-            .expect("create");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher })).await.expect("watch");
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer })).await.expect("claim");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim");
         set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": implementer }))
             .await
             .expect("in_progress");
-        set_state(&state, json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }))
-            .await
-            .expect("review");
+        set_state(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "state": "review", "actorId": implementer }),
+        )
+        .await
+        .expect("review");
 
         // claimed/in_progress are ledger-only; the watcher's only line is review.
         let w = received(&state, &watcher).await;
-        assert_eq!(w.len(), 1, "watcher gets exactly one line (the review transition)");
+        assert_eq!(
+            w.len(),
+            1,
+            "watcher gets exactly one line (the review transition)"
+        );
         assert_eq!(w[0]["fromInstanceId"], json!(implementer));
         assert_eq!(w[0]["toInstanceId"], json!(watcher));
-        assert_eq!(w[0]["text"], json!("[task t1] Implementer: state — -> review"));
-        assert_eq!(received(&state, &owner).await.len(), 0, "no owner ping at all-NULL");
+        assert_eq!(
+            w[0]["text"],
+            json!("[task t1] Implementer: state — -> review")
+        );
+        assert_eq!(
+            received(&state, &owner).await.len(),
+            0,
+            "no owner ping at all-NULL"
+        );
     }
 
     #[tokio::test]
@@ -1868,18 +2525,27 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Agent").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
-        let watched = watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("watch failed");
+        let watched = watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("watch failed");
         assert_eq!(watched["watching"], json!(true));
 
-        let unwatched = unwatch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("unwatch failed");
+        let unwatched = unwatch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("unwatch failed");
         assert_eq!(unwatched["watching"], json!(false));
     }
 
@@ -1887,13 +2553,19 @@ mod tests {
     async fn watch_unknown_actor_is_not_found() {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
-        let err = watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": "nope" }))
-            .await
-            .expect_err("unknown actor must fail");
+        let err = watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": "nope" }),
+        )
+        .await
+        .expect_err("unknown actor must fail");
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
@@ -1908,16 +2580,25 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         set_state(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": actor }),
@@ -1946,16 +2627,25 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         set_state(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "state": "in_progress", "actorId": actor }),
@@ -1973,11 +2663,25 @@ mod tests {
             .await
             .expect("list failed");
         let arr = inbox.as_array().expect("array");
-        assert_eq!(arr.len(), 1, "only the review transition wakes; the two earlier states do not");
+        assert_eq!(
+            arr.len(),
+            1,
+            "only the review transition wakes; the two earlier states do not"
+        );
         let text = arr[0]["text"].as_str().expect("text present");
-        assert!(text.contains("[task t1]"), "line must name the task: {text}");
-        assert!(text.contains("review"), "line must summarize the mutation: {text}");
-        assert_eq!(arr[0]["fromInstanceId"], json!(actor), "attributed to the real actor");
+        assert!(
+            text.contains("[task t1]"),
+            "line must name the task: {text}"
+        );
+        assert!(
+            text.contains("review"),
+            "line must summarize the mutation: {text}"
+        );
+        assert_eq!(
+            arr[0]["fromInstanceId"],
+            json!(actor),
+            "attributed to the real actor"
+        );
         assert_eq!(arr[0]["toInstanceId"], json!(watcher));
     }
 
@@ -1992,12 +2696,18 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
         let watcher_session_id = crate::engine::repo::session::get_by_instance(&state.db, &watcher)
             .await
@@ -2007,16 +2717,22 @@ mod tests {
         assert!(
             state
                 .runtime
-                .register(&watcher, crate::engine::runtime::LiveHandle::placeholder(&watcher_session_id))
+                .register(
+                    &watcher,
+                    crate::engine::runtime::LiveHandle::placeholder(&watcher_session_id)
+                )
                 .is_some(),
             "registering the watcher's live placeholder must succeed"
         );
 
         // `claim` is now silent (ledger-only); drive a WAKING transition
         // (claimed -> abandoned) so a live watcher actually receives the line.
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         set_state(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
@@ -2028,7 +2744,11 @@ mod tests {
             .await
             .expect("list failed");
         let arr = inbox.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "only the abandoned transition wakes, not the claim");
+        assert_eq!(
+            arr.len(),
+            1,
+            "only the abandoned transition wakes, not the claim"
+        );
         assert_eq!(
             arr[0]["status"],
             json!("delivered"),
@@ -2042,19 +2762,28 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
         // The actor watches their OWN task before claiming it.
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("watch failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("watch failed");
 
         // Drive a WAKING self-mutation (claimed -> abandoned): the 0-count then
         // proves self-exclusion, not merely that the event was filtered out.
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         set_state(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
@@ -2077,14 +2806,20 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         // No watch() call at all — a waking transition must not panic or error.
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         set_state(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),
@@ -2102,12 +2837,18 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
         // Unmarked note: no wake.
         note(
@@ -2142,7 +2883,10 @@ mod tests {
         assert_eq!(arr.len(), 1, "only the READY note wakes");
         let text = arr[0]["text"].as_str().unwrap();
         assert!(text.contains("note"), "kind must be in the line: {text}");
-        assert!(text.contains("READY for review"), "summary must be the note text: {text}");
+        assert!(
+            text.contains("READY for review"),
+            "summary must be the note text: {text}"
+        );
     }
 
     async fn inbox_len(state: &AppState, instance: &str) -> usize {
@@ -2160,12 +2904,18 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
         let gate_payload = |exit: i64| {
             json!({
@@ -2174,7 +2924,11 @@ mod tests {
             })
         };
         gate(&state, gate_payload(0)).await.expect("passing gate");
-        assert_eq!(inbox_len(&state, &watcher).await, 0, "a passing gate is ledger-only");
+        assert_eq!(
+            inbox_len(&state, &watcher).await,
+            0,
+            "a passing gate is ledger-only"
+        );
 
         gate(&state, gate_payload(101)).await.expect("failing gate");
         assert_eq!(inbox_len(&state, &watcher).await, 1, "a failing gate wakes");
@@ -2188,7 +2942,11 @@ mod tests {
         )
         .await
         .expect("challenge");
-        assert_eq!(inbox_len(&state, &watcher).await, 2, "every challenge wakes");
+        assert_eq!(
+            inbox_len(&state, &watcher).await,
+            2,
+            "every challenge wakes"
+        );
     }
 
     #[tokio::test]
@@ -2206,9 +2964,12 @@ mod tests {
         )
         .await
         .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
         let challenge_event = challenge(
             &state,
@@ -2267,10 +3028,25 @@ mod tests {
         );
 
         // note — exact-prefix, case-sensitive markers only.
-        for wake in ["READY at abc", "BLOCKED on x", "ESCALATION: y", "READY", "BLOCKED"] {
-            assert!(wakes_watchers("note", &json!({ "text": wake })), "{wake:?} must wake");
+        for wake in [
+            "READY at abc",
+            "BLOCKED on x",
+            "ESCALATION: y",
+            "READY",
+            "BLOCKED",
+        ] {
+            assert!(
+                wakes_watchers("note", &json!({ "text": wake })),
+                "{wake:?} must wake"
+            );
         }
-        for quiet in ["ready lower", " READY leading-space", "escalation", "just progress", "note READY mid"] {
+        for quiet in [
+            "ready lower",
+            " READY leading-space",
+            "escalation",
+            "just progress",
+            "note READY mid",
+        ] {
             assert!(
                 !wakes_watchers("note", &json!({ "text": quiet })),
                 "{quiet:?} must not wake"
@@ -2279,7 +3055,10 @@ mod tests {
 
         // everything else is ledger-only.
         for ledger_only in ["watch", "unwatch", "created"] {
-            assert!(!wakes_watchers(ledger_only, &Value::Null), "{ledger_only} must not wake");
+            assert!(
+                !wakes_watchers(ledger_only, &Value::Null),
+                "{ledger_only} must not wake"
+            );
         }
     }
 
@@ -2289,12 +3068,18 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
 
         // Marked so it wakes (a plain note is now ledger-only); still long
         // enough that the notify line must truncate its summary.
@@ -2309,13 +3094,19 @@ mod tests {
         let inbox = super::super::message::list(&state, json!({ "instanceId": watcher }))
             .await
             .expect("list failed");
-        let text = inbox.as_array().unwrap()[0]["text"].as_str().unwrap().to_string();
+        let text = inbox.as_array().unwrap()[0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(
             text.len() < 500,
             "notify line must truncate a long summary, got {} chars",
             text.len()
         );
-        assert!(text.contains('…'), "truncation marker must be present: {text}");
+        assert!(
+            text.contains('…'),
+            "truncation marker must be present: {text}"
+        );
     }
 
     #[tokio::test]
@@ -2324,21 +3115,33 @@ mod tests {
         let ws = fixture_workspace(&state).await;
         let actor = fixture_instance(&state, &ws, "Actor").await;
         let watcher = fixture_instance(&state, &ws, "Watcher").await;
-        create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
-        unwatch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("unwatch failed");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
+        unwatch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("unwatch failed");
 
         // A WAKING mutation (claimed -> abandoned) after unwatch: the 0-count
         // proves the unsubscribe, not merely that the event was filtered out.
-        claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }))
-            .await
-            .expect("claim failed");
+        claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": actor }),
+        )
+        .await
+        .expect("claim failed");
         set_state(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "state": "abandoned", "actorId": actor }),

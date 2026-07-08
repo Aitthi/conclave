@@ -782,6 +782,18 @@ fn take_flag(words: &[String], flag: &str) -> (Option<String>, Vec<String>) {
     (None, words.to_vec())
 }
 
+/// Pull a standalone `--flag` switch out of `words`, wherever it appears
+/// (order-independent like [`take_flag`]). Returns `(present, remaining
+/// words)` or `(false, words unchanged)` if the switch is absent.
+fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
+    if let Some(pos) = words.iter().position(|w| w == flag) {
+        let mut rest = words.to_vec();
+        rest.remove(pos);
+        return (true, rest);
+    }
+    (false, words.to_vec())
+}
+
 /// `task <verb> …` — the ADR 0008 allowlist. Self-keyed verbs (everything but
 /// `list`/`get`/`create`) arrive pre-expanded by `conclave-cli` with the
 /// actorId slot filled right after the verb name.
@@ -791,17 +803,21 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         Some("list") => {
             let workspace_id = argv
                 .get(2)
-                .ok_or_else(|| AppError::Invalid("cli: task list <workspaceId> [--state s]".into()))?;
+                .ok_or_else(|| {
+                    AppError::Invalid("cli: task list <workspaceId> [--state s] [--full]".into())
+                })?;
             let (state, rest) = take_flag(&argv[3..], "--state");
+            let (full, rest) = take_switch(&rest, "--full");
             if !rest.is_empty() {
                 return Err(AppError::Invalid(
-                    "cli: task list <workspaceId> [--state s]".into(),
+                    "cli: task list <workspaceId> [--state s] [--full]".into(),
                 ));
             }
             let mut params = json!({ "workspaceId": workspace_id });
             if let Some(state) = state {
                 params["state"] = json!(state);
             }
+            params["includePlan"] = json!(full);
             Ok(("task.list", params))
         }
 
@@ -819,6 +835,35 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 "task.get",
                 json!({ "workspaceId": workspace_id, "slug": slug }),
             ))
+        }
+
+        Some("brief") => {
+            let workspace_id = argv
+                .get(2)
+                .ok_or_else(|| {
+                    AppError::Invalid("cli: task brief <workspaceId> <slug> [--limit N]".into())
+                })?;
+            let slug = argv
+                .get(3)
+                .ok_or_else(|| {
+                    AppError::Invalid("cli: task brief <workspaceId> <slug> [--limit N]".into())
+                })?;
+            let (limit, rest) = take_flag(&argv[4..], "--limit");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(
+                    "cli: task brief <workspaceId> <slug> [--limit N]".into(),
+                ));
+            }
+            let mut params = json!({ "workspaceId": workspace_id, "slug": slug });
+            if let Some(raw) = limit {
+                let n: usize = raw.parse().map_err(|_| {
+                    AppError::Invalid(format!(
+                        "cli: task brief: --limit expects an integer, got '{raw}'"
+                    ))
+                })?;
+                params["limit"] = json!(n);
+            }
+            Ok(("task.brief", params))
         }
 
         // `task create <ws> <slug> <title...> [--boundary p1,p2] [--canon txt]
@@ -1046,9 +1091,15 @@ fn task_actor_ws_slug<'a>(
     usage_verb: &str,
 ) -> Result<(&'a str, &'a str, &'a str), AppError> {
     let usage = format!("cli: {usage_verb} <workspaceId> <slug>");
-    let actor_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.clone()))?;
-    let workspace_id = argv.get(3).ok_or_else(|| AppError::Invalid(usage.clone()))?;
-    let slug = argv.get(4).ok_or_else(|| AppError::Invalid(usage.clone()))?;
+    let actor_id = argv
+        .get(2)
+        .ok_or_else(|| AppError::Invalid(usage.clone()))?;
+    let workspace_id = argv
+        .get(3)
+        .ok_or_else(|| AppError::Invalid(usage.clone()))?;
+    let slug = argv
+        .get(4)
+        .ok_or_else(|| AppError::Invalid(usage.clone()))?;
     if argv.len() != 5 {
         return Err(AppError::Invalid(usage));
     }
@@ -1218,7 +1269,10 @@ mod tests {
 
     #[test]
     fn msg_all_maps_to_list_for_workspace_with_names() {
-        assert_eq!(ok_method(&["msg", "all", "ws1"]), "message.listForWorkspace");
+        assert_eq!(
+            ok_method(&["msg", "all", "ws1"]),
+            "message.listForWorkspace"
+        );
         assert_eq!(
             ok_params(&["msg", "all", "ws1"]),
             json!({ "workspaceId": "ws1", "withNames": true })
@@ -1300,7 +1354,10 @@ mod tests {
             ok_params(&["bb", "delete", "ws1", "mykey"]),
             json!({ "workspaceId": "ws1", "key": "mykey" })
         );
-        assert_eq!(ok_method(&["bb", "rm", "ws1", "mykey"]), "blackboard.delete");
+        assert_eq!(
+            ok_method(&["bb", "rm", "ws1", "mykey"]),
+            "blackboard.delete"
+        );
     }
 
     #[test]
@@ -1615,10 +1672,7 @@ mod tests {
 
     #[test]
     fn memory_status_maps_correctly() {
-        assert_eq!(
-            ok_method(&["memory", "status", "ws1"]),
-            "memory.status"
-        );
+        assert_eq!(ok_method(&["memory", "status", "ws1"]), "memory.status");
         assert_eq!(
             ok_params(&["memory", "status", "ws1"]),
             json!({ "workspaceId": "ws1" })
@@ -1652,7 +1706,14 @@ mod tests {
         );
         assert_eq!(
             ok_params(&[
-                "memory", "propose", "agent1", "ws1", "a", "fact", "--source-note", "t.jsonl",
+                "memory",
+                "propose",
+                "agent1",
+                "ws1",
+                "a",
+                "fact",
+                "--source-note",
+                "t.jsonl",
             ]),
             json!({
                 "workspaceId": "ws1",
@@ -1669,7 +1730,12 @@ mod tests {
         assert!(is_invalid(&["memory", "propose", "agent1"]));
         // a `--source-note` with no remaining text is not a valid proposal
         assert!(is_invalid(&[
-            "memory", "propose", "agent1", "ws1", "--source-note", "t.jsonl",
+            "memory",
+            "propose",
+            "agent1",
+            "ws1",
+            "--source-note",
+            "t.jsonl",
         ]));
     }
 
@@ -1723,8 +1789,12 @@ mod tests {
         assert!(is_invalid(&["memory", "approve", "rev1", "ws1"]));
         assert!(is_invalid(&["memory", "approve", "rev1"]));
         // a lone `--reason` with no text, or a stray non-flag trailing token
-        assert!(is_invalid(&["memory", "approve", "rev1", "ws1", "p1", "--reason"]));
-        assert!(is_invalid(&["memory", "reject", "rev1", "ws1", "p1", "stray"]));
+        assert!(is_invalid(&[
+            "memory", "approve", "rev1", "ws1", "p1", "--reason"
+        ]));
+        assert!(is_invalid(&[
+            "memory", "reject", "rev1", "ws1", "p1", "stray"
+        ]));
     }
 
     // ── task (ADR 0008) ─────────────────────────────────────────────────────
@@ -1732,16 +1802,28 @@ mod tests {
     #[test]
     fn task_list_maps_correctly_with_and_without_state() {
         assert_eq!(ok_method(&["task", "list", "ws1"]), "task.list");
-        assert_eq!(ok_params(&["task", "list", "ws1"]), json!({ "workspaceId": "ws1" }));
+        assert_eq!(
+            ok_params(&["task", "list", "ws1"]),
+            json!({ "workspaceId": "ws1", "includePlan": false })
+        );
         assert_eq!(
             ok_params(&["task", "list", "ws1", "--state", "claimed"]),
-            json!({ "workspaceId": "ws1", "state": "claimed" })
+            json!({ "workspaceId": "ws1", "state": "claimed", "includePlan": false })
+        );
+        assert_eq!(
+            ok_params(&["task", "list", "ws1", "--full"]),
+            json!({ "workspaceId": "ws1", "includePlan": true })
+        );
+        assert_eq!(
+            ok_params(&["task", "list", "ws1", "--state", "claimed", "--full"]),
+            json!({ "workspaceId": "ws1", "state": "claimed", "includePlan": true })
         );
     }
 
     #[test]
     fn task_list_extra_args_is_invalid() {
         assert!(is_invalid(&["task", "list", "ws1", "extra"]));
+        assert!(is_invalid(&["task", "list", "ws1", "--full", "extra"]));
     }
 
     #[test]
@@ -1759,6 +1841,28 @@ mod tests {
     }
 
     #[test]
+    fn task_brief_maps_correctly() {
+        assert_eq!(ok_method(&["task", "brief", "ws1", "t1"]), "task.brief");
+        assert_eq!(
+            ok_params(&["task", "brief", "ws1", "t1"]),
+            json!({ "workspaceId": "ws1", "slug": "t1" })
+        );
+        assert_eq!(
+            ok_params(&["task", "brief", "ws1", "t1", "--limit", "3"]),
+            json!({ "workspaceId": "ws1", "slug": "t1", "limit": 3 })
+        );
+    }
+
+    #[test]
+    fn task_brief_missing_args_or_bad_limit_is_invalid() {
+        assert!(is_invalid(&["task", "brief", "ws1"]));
+        assert!(is_invalid(&["task", "brief", "ws1", "t1", "--limit"]));
+        assert!(is_invalid(&[
+            "task", "brief", "ws1", "t1", "--limit", "abc"
+        ]));
+    }
+
+    #[test]
     fn task_create_maps_correctly_bare() {
         assert_eq!(
             ok_method(&["task", "create", "ws1", "t1", "My", "Title"]),
@@ -1773,8 +1877,20 @@ mod tests {
     #[test]
     fn task_create_flags_are_order_independent_and_dont_pollute_title() {
         let params = ok_params(&[
-            "task", "create", "ws1", "t1", "--owner", "agent-1", "Title", "Words",
-            "--boundary", "a.rs,b.rs", "--canon", "canon-x", "--plan", "do it",
+            "task",
+            "create",
+            "ws1",
+            "t1",
+            "--owner",
+            "agent-1",
+            "Title",
+            "Words",
+            "--boundary",
+            "a.rs,b.rs",
+            "--canon",
+            "canon-x",
+            "--plan",
+            "do it",
         ]);
         assert_eq!(params["title"], json!("Title Words"));
         assert_eq!(params["ownerAgentId"], json!("agent-1"));
@@ -1786,7 +1902,9 @@ mod tests {
     #[test]
     fn task_create_missing_title_is_invalid() {
         assert!(is_invalid(&["task", "create", "ws1", "t1"]));
-        assert!(is_invalid(&["task", "create", "ws1", "t1", "--owner", "a1"]));
+        assert!(is_invalid(&[
+            "task", "create", "ws1", "t1", "--owner", "a1"
+        ]));
     }
 
     #[test]
@@ -1804,7 +1922,9 @@ mod tests {
     #[test]
     fn task_claim_missing_args_is_invalid() {
         assert!(is_invalid(&["task", "claim", "actor1", "ws1"]));
-        assert!(is_invalid(&["task", "claim", "actor1", "ws1", "t1", "extra"]));
+        assert!(is_invalid(&[
+            "task", "claim", "actor1", "ws1", "t1", "extra"
+        ]));
     }
 
     #[test]
@@ -1839,12 +1959,30 @@ mod tests {
     fn task_gate_maps_correctly() {
         assert_eq!(
             ok_method(&[
-                "task", "gate", "actor1", "ws1", "t1", "cargo test", "0", "sha123", "/repo", "ok"
+                "task",
+                "gate",
+                "actor1",
+                "ws1",
+                "t1",
+                "cargo test",
+                "0",
+                "sha123",
+                "/repo",
+                "ok"
             ]),
             "task.gate"
         );
         let params = ok_params(&[
-            "task", "gate", "actor1", "ws1", "t1", "cargo test", "101", "sha123", "/repo", "FAILED",
+            "task",
+            "gate",
+            "actor1",
+            "ws1",
+            "t1",
+            "cargo test",
+            "101",
+            "sha123",
+            "/repo",
+            "FAILED",
         ]);
         assert_eq!(params["cmd"], json!("cargo test"));
         assert_eq!(params["exit"], json!(101));
@@ -1857,7 +1995,16 @@ mod tests {
     #[test]
     fn task_gate_bad_exit_code_is_invalid() {
         assert!(is_invalid(&[
-            "task", "gate", "actor1", "ws1", "t1", "cmd", "notanumber", "sha", "/repo", "tail"
+            "task",
+            "gate",
+            "actor1",
+            "ws1",
+            "t1",
+            "cmd",
+            "notanumber",
+            "sha",
+            "/repo",
+            "tail"
         ]));
     }
 
@@ -1869,9 +2016,21 @@ mod tests {
     #[test]
     fn task_challenge_maps_correctly() {
         let params = ok_params(&[
-            "task", "challenge", "actor1", "ws1", "t1",
-            "--claim", "X broken", "--evidence", "log", "--proposal", "fix Y",
-            "--default", "escalate", "--deadline-min", "30",
+            "task",
+            "challenge",
+            "actor1",
+            "ws1",
+            "t1",
+            "--claim",
+            "X broken",
+            "--evidence",
+            "log",
+            "--proposal",
+            "fix Y",
+            "--default",
+            "escalate",
+            "--deadline-min",
+            "30",
         ]);
         assert_eq!(params["claim"], json!("X broken"));
         assert_eq!(params["evidence"], json!("log"));
@@ -1884,8 +2043,19 @@ mod tests {
     #[test]
     fn task_challenge_without_deadline_omits_it() {
         let params = ok_params(&[
-            "task", "challenge", "actor1", "ws1", "t1",
-            "--claim", "c", "--evidence", "e", "--proposal", "p", "--default", "d",
+            "task",
+            "challenge",
+            "actor1",
+            "ws1",
+            "t1",
+            "--claim",
+            "c",
+            "--evidence",
+            "e",
+            "--proposal",
+            "p",
+            "--default",
+            "d",
         ]);
         assert!(params.get("deadlineMin").is_none());
     }
@@ -1893,8 +2063,17 @@ mod tests {
     #[test]
     fn task_challenge_missing_required_flag_is_invalid() {
         assert!(is_invalid(&[
-            "task", "challenge", "actor1", "ws1", "t1",
-            "--claim", "c", "--evidence", "e", "--proposal", "p"
+            "task",
+            "challenge",
+            "actor1",
+            "ws1",
+            "t1",
+            "--claim",
+            "c",
+            "--evidence",
+            "e",
+            "--proposal",
+            "p"
         ]));
     }
 
@@ -1904,7 +2083,9 @@ mod tests {
             ok_method(&["task", "rule", "actor1", "ws1", "t1", "ev1", "go", "with", "it"]),
             "task.rule"
         );
-        let params = ok_params(&["task", "rule", "actor1", "ws1", "t1", "ev1", "go", "with", "it"]);
+        let params = ok_params(&[
+            "task", "rule", "actor1", "ws1", "t1", "ev1", "go", "with", "it",
+        ]);
         assert_eq!(params["challengeEventId"], json!("ev1"));
         assert_eq!(params["text"], json!("go with it"));
         assert_eq!(params["actorId"], json!("actor1"));
@@ -2042,8 +2223,16 @@ mod tests {
     #[test]
     fn artifact_add_maps_with_agent_and_flags() {
         let words = &[
-            "artifact", "add", "self1", "ws1", "--title", "My Doc", "--kind", "markdown",
-            "--content", "# Hi",
+            "artifact",
+            "add",
+            "self1",
+            "ws1",
+            "--title",
+            "My Doc",
+            "--kind",
+            "markdown",
+            "--content",
+            "# Hi",
         ];
         assert_eq!(ok_method(words), "artifact.add");
         assert_eq!(
@@ -2061,7 +2250,16 @@ mod tests {
     #[test]
     fn artifact_add_sentinel_agent_omits_agent_id() {
         let params = ok_params(&[
-            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--title",
+            "T",
+            "--kind",
+            "text",
+            "--content",
+            "x",
         ]);
         assert!(params.get("agentId").is_none(), "'-' must not set agentId");
     }
@@ -2069,24 +2267,51 @@ mod tests {
     #[test]
     fn artifact_add_carries_optional_filename() {
         let params = ok_params(&[
-            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "code", "--content", "x",
-            "--filename", "main.rs",
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--title",
+            "T",
+            "--kind",
+            "code",
+            "--content",
+            "x",
+            "--filename",
+            "main.rs",
         ]);
         assert_eq!(params.get("filename"), Some(&json!("main.rs")));
     }
 
     #[test]
     fn artifact_add_missing_title_or_content_is_invalid() {
-        assert!(is_invalid(&["artifact", "add", "-", "ws1", "--kind", "text", "--content", "x"]));
-        assert!(is_invalid(&["artifact", "add", "-", "ws1", "--title", "T", "--kind", "text"]));
+        assert!(is_invalid(&[
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--kind",
+            "text",
+            "--content",
+            "x"
+        ]));
+        assert!(is_invalid(&[
+            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text"
+        ]));
     }
 
     #[test]
     fn artifact_list_and_get_map_correctly() {
         assert_eq!(ok_method(&["artifact", "list", "ws1"]), "artifact.list");
-        assert_eq!(ok_params(&["artifact", "list", "ws1"]), json!({ "workspaceId": "ws1" }));
+        assert_eq!(
+            ok_params(&["artifact", "list", "ws1"]),
+            json!({ "workspaceId": "ws1" })
+        );
         assert_eq!(ok_method(&["artifact", "get", "id1"]), "artifact.get");
-        assert_eq!(ok_params(&["artifact", "get", "id1"]), json!({ "id": "id1" }));
+        assert_eq!(
+            ok_params(&["artifact", "get", "id1"]),
+            json!({ "id": "id1" })
+        );
     }
 
     #[test]
@@ -2100,8 +2325,18 @@ mod tests {
         // when --content is also present (a raw cli.exec caller bypasses the
         // official client's preprocessing).
         assert!(is_invalid(&[
-            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
-            "--file", "/etc/passwd",
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--title",
+            "T",
+            "--kind",
+            "text",
+            "--content",
+            "x",
+            "--file",
+            "/etc/passwd",
         ]));
     }
 
@@ -2115,23 +2350,51 @@ mod tests {
     #[test]
     fn artifact_add_rejects_duplicate_flag() {
         assert!(is_invalid(&[
-            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "a",
-            "--content", "b",
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--title",
+            "T",
+            "--kind",
+            "text",
+            "--content",
+            "a",
+            "--content",
+            "b",
         ]));
     }
 
     #[test]
     fn artifact_add_rejects_unknown_flag() {
         assert!(is_invalid(&[
-            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content", "x",
-            "--bogus", "y",
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--title",
+            "T",
+            "--kind",
+            "text",
+            "--content",
+            "x",
+            "--bogus",
+            "y",
         ]));
     }
 
     #[test]
     fn artifact_add_rejects_dangling_flag_value() {
         assert!(is_invalid(&[
-            "artifact", "add", "-", "ws1", "--title", "T", "--kind", "text", "--content",
+            "artifact",
+            "add",
+            "-",
+            "ws1",
+            "--title",
+            "T",
+            "--kind",
+            "text",
+            "--content",
         ]));
     }
 
@@ -2141,11 +2404,29 @@ mod tests {
     fn position_set_maps_value_flags() {
         // <ws> positional is present but NOT forwarded (spec §5.1 payload).
         assert_eq!(
-            ok_method(&["position", "set", "ws1", "a1", "--level", "senior", "--supervisor", "sup1"]),
+            ok_method(&[
+                "position",
+                "set",
+                "ws1",
+                "a1",
+                "--level",
+                "senior",
+                "--supervisor",
+                "sup1"
+            ]),
             "instance.setPosition"
         );
         assert_eq!(
-            ok_params(&["position", "set", "ws1", "a1", "--level", "senior", "--supervisor", "sup1"]),
+            ok_params(&[
+                "position",
+                "set",
+                "ws1",
+                "a1",
+                "--level",
+                "senior",
+                "--supervisor",
+                "sup1"
+            ]),
             json!({ "workspaceId": "ws1", "workspaceAgentId": "a1", "level": "senior", "supervisorAgentId": "sup1" })
         );
     }
@@ -2171,7 +2452,9 @@ mod tests {
 
     #[test]
     fn position_set_rejects_unknown_duplicate_and_dangling_flags() {
-        assert!(is_invalid(&["position", "set", "ws1", "a1", "--bogus", "x"]));
+        assert!(is_invalid(&[
+            "position", "set", "ws1", "a1", "--bogus", "x"
+        ]));
         assert!(is_invalid(&[
             "position", "set", "ws1", "a1", "--level", "senior", "--level", "mid"
         ]));
@@ -2230,7 +2513,10 @@ mod tests {
 
         let result = exec(&state, json!({ "argv": ["memory", "status", &ws.id] })).await;
         let value = result.expect("exec memory status should succeed");
-        assert!(value.is_object(), "memory.status returns an object: {value}");
+        assert!(
+            value.is_object(),
+            "memory.status returns an object: {value}"
+        );
         assert_eq!(value["chunks"], json!(0));
     }
 
@@ -2315,53 +2601,106 @@ mod tests {
         let foreign = mk_instance(&state, &ws2.id, "Foreign").await;
 
         // Happy: sub reports to lead, level senior — supervisorName resolves.
-        let r = exec(&state, json!({ "argv":
-            ["position","set",&ws.id,&sub,"--supervisor",&lead,"--level","senior"] }))
-            .await
-            .expect("set sub");
+        let r = exec(
+            &state,
+            json!({ "argv":
+            ["position","set",&ws.id,&sub,"--supervisor",&lead,"--level","senior"] }),
+        )
+        .await
+        .expect("set sub");
         assert_eq!(r["level"], json!("senior"));
         assert_eq!(r["supervisorAgentId"], json!(lead));
         assert_eq!(r["supervisorName"], json!("Lead"));
 
         // Extend to a 3-level chain: impl -> sub -> lead.
-        exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&sub] }))
-            .await
-            .expect("set impl");
+        exec(
+            &state,
+            json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&sub] }),
+        )
+        .await
+        .expect("set impl");
 
         // Rejections (§3.5), while the full chain is in place:
         // cycle — lead reporting to impl closes impl->sub->lead->impl.
-        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&lead,"--supervisor",&imp] }))
+        assert!(
+            exec(
+                &state,
+                json!({ "argv": ["position","set",&ws.id,&lead,"--supervisor",&imp] })
+            )
             .await
-            .is_err(), "cycle must be rejected");
+            .is_err(),
+            "cycle must be rejected"
+        );
         // self-link.
-        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&imp] }))
+        assert!(
+            exec(
+                &state,
+                json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&imp] })
+            )
             .await
-            .is_err(), "self-link must be rejected");
+            .is_err(),
+            "self-link must be rejected"
+        );
         // cross-workspace supervisor.
-        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&foreign] }))
+        assert!(
+            exec(
+                &state,
+                json!({ "argv": ["position","set",&ws.id,&imp,"--supervisor",&foreign] })
+            )
             .await
-            .is_err(), "cross-workspace supervisor must be rejected");
+            .is_err(),
+            "cross-workspace supervisor must be rejected"
+        );
         // bad level.
-        assert!(exec(&state, json!({ "argv": ["position","set",&ws.id,&imp,"--level","wizard"] }))
+        assert!(
+            exec(
+                &state,
+                json!({ "argv": ["position","set",&ws.id,&imp,"--level","wizard"] })
+            )
             .await
-            .is_err(), "unknown level must be rejected");
+            .is_err(),
+            "unknown level must be rejected"
+        );
         // wrong-workspace target (646ec73a): naming ws2 for an agent in ws.
-        assert!(exec(&state, json!({ "argv": ["position","set",&ws2.id,&imp,"--level","senior"] }))
+        assert!(
+            exec(
+                &state,
+                json!({ "argv": ["position","set",&ws2.id,&imp,"--level","senior"] })
+            )
             .await
-            .is_err(), "wrong-workspace target must be rejected");
+            .is_err(),
+            "wrong-workspace target must be rejected"
+        );
 
         // Tri-state KEEP: setting only --level leaves the supervisor intact.
-        let r2 = exec(&state, json!({ "argv": ["position","set",&ws.id,&sub,"--level","principal"] }))
-            .await
-            .expect("level only");
+        let r2 = exec(
+            &state,
+            json!({ "argv": ["position","set",&ws.id,&sub,"--level","principal"] }),
+        )
+        .await
+        .expect("level only");
         assert_eq!(r2["level"], json!("principal"));
-        assert_eq!(r2["supervisorAgentId"], json!(lead), "supervisor kept when --supervisor absent");
+        assert_eq!(
+            r2["supervisorAgentId"],
+            json!(lead),
+            "supervisor kept when --supervisor absent"
+        );
 
         // Tri-state CLEAR: --supervisor none clears it, keeping the level.
-        let r3 = exec(&state, json!({ "argv": ["position","set",&ws.id,&sub,"--supervisor","none"] }))
-            .await
-            .expect("clear supervisor");
-        assert!(r3.get("supervisorAgentId").is_none(), "supervisor cleared → key omitted");
-        assert_eq!(r3["level"], json!("principal"), "level kept when supervisor cleared");
+        let r3 = exec(
+            &state,
+            json!({ "argv": ["position","set",&ws.id,&sub,"--supervisor","none"] }),
+        )
+        .await
+        .expect("clear supervisor");
+        assert!(
+            r3.get("supervisorAgentId").is_none(),
+            "supervisor cleared → key omitted"
+        );
+        assert_eq!(
+            r3["level"],
+            json!("principal"),
+            "level kept when supervisor cleared"
+        );
     }
 }

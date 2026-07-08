@@ -198,7 +198,11 @@ pub async fn create(pool: &SqlitePool, input: NewTask<'_>) -> sqlx::Result<TaskR
 }
 
 /// Fetch a task by `(workspace_id, slug)`, or `None` if absent.
-pub async fn get(pool: &SqlitePool, workspace_id: &str, slug: &str) -> sqlx::Result<Option<TaskRow>> {
+pub async fn get(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    slug: &str,
+) -> sqlx::Result<Option<TaskRow>> {
     QueryBuilder::<Sqlite>::table("task")
         .select(TASK_COLS)
         .where_eq("workspace_id", workspace_id)
@@ -217,38 +221,72 @@ pub async fn list(
     pool: &SqlitePool,
     workspace_id: &str,
     state: Option<&str>,
+    include_plan: bool,
 ) -> sqlx::Result<Vec<TaskListRow>> {
     if let Some(state) = state {
-        sqlx::query_as::<_, TaskListRow>(
-            "SELECT t.id, t.workspace_id, t.slug, t.title, t.state, t.owner_agent_id, \
-             t.implementer_agent_id, t.file_boundary, t.design_canon, t.plan, \
-             t.created_at, t.updated_at, COUNT(e.id) AS event_count \
-             FROM task t LEFT JOIN task_event e ON e.task_id = t.id \
-             WHERE t.workspace_id = ?1 AND t.state = ?2 \
-             GROUP BY t.id ORDER BY t.updated_at DESC",
-        )
-        .bind(workspace_id)
-        .bind(state)
-        .fetch_all(pool)
-        .await
+        if include_plan {
+            sqlx::query_as::<_, TaskListRow>(
+                "SELECT t.id, t.workspace_id, t.slug, t.title, t.state, t.owner_agent_id, \
+                 t.implementer_agent_id, t.file_boundary, t.design_canon, t.plan, \
+                 t.created_at, t.updated_at, COUNT(e.id) AS event_count \
+                 FROM task t LEFT JOIN task_event e ON e.task_id = t.id \
+                 WHERE t.workspace_id = ?1 AND t.state = ?2 \
+                 GROUP BY t.id ORDER BY t.updated_at DESC",
+            )
+            .bind(workspace_id)
+            .bind(state)
+            .fetch_all(pool)
+            .await
+        } else {
+            sqlx::query_as::<_, TaskListRow>(
+                "SELECT t.id, t.workspace_id, t.slug, t.title, t.state, t.owner_agent_id, \
+                 t.implementer_agent_id, t.file_boundary, t.design_canon, '' AS plan, \
+                 t.created_at, t.updated_at, COUNT(e.id) AS event_count \
+                 FROM task t LEFT JOIN task_event e ON e.task_id = t.id \
+                 WHERE t.workspace_id = ?1 AND t.state = ?2 \
+                 GROUP BY t.id ORDER BY t.updated_at DESC",
+            )
+            .bind(workspace_id)
+            .bind(state)
+            .fetch_all(pool)
+            .await
+        }
     } else {
-        sqlx::query_as::<_, TaskListRow>(
-            "SELECT t.id, t.workspace_id, t.slug, t.title, t.state, t.owner_agent_id, \
-             t.implementer_agent_id, t.file_boundary, t.design_canon, t.plan, \
-             t.created_at, t.updated_at, COUNT(e.id) AS event_count \
-             FROM task t LEFT JOIN task_event e ON e.task_id = t.id \
-             WHERE t.workspace_id = ?1 \
-             GROUP BY t.id ORDER BY t.updated_at DESC",
-        )
-        .bind(workspace_id)
-        .fetch_all(pool)
-        .await
+        if include_plan {
+            sqlx::query_as::<_, TaskListRow>(
+                "SELECT t.id, t.workspace_id, t.slug, t.title, t.state, t.owner_agent_id, \
+                 t.implementer_agent_id, t.file_boundary, t.design_canon, t.plan, \
+                 t.created_at, t.updated_at, COUNT(e.id) AS event_count \
+                 FROM task t LEFT JOIN task_event e ON e.task_id = t.id \
+                 WHERE t.workspace_id = ?1 \
+                 GROUP BY t.id ORDER BY t.updated_at DESC",
+            )
+            .bind(workspace_id)
+            .fetch_all(pool)
+            .await
+        } else {
+            sqlx::query_as::<_, TaskListRow>(
+                "SELECT t.id, t.workspace_id, t.slug, t.title, t.state, t.owner_agent_id, \
+                 t.implementer_agent_id, t.file_boundary, t.design_canon, '' AS plan, \
+                 t.created_at, t.updated_at, COUNT(e.id) AS event_count \
+                 FROM task t LEFT JOIN task_event e ON e.task_id = t.id \
+                 WHERE t.workspace_id = ?1 \
+                 GROUP BY t.id ORDER BY t.updated_at DESC",
+            )
+            .bind(workspace_id)
+            .fetch_all(pool)
+            .await
+        }
     }
 }
 
 /// The last `limit` events for a task, newest-first (frozen: `task.get` = "last
 /// 20 events, sorted createdAt DESC").
-pub async fn events_for(pool: &SqlitePool, task_id: &str, limit: i64) -> sqlx::Result<Vec<TaskEventRow>> {
+pub async fn events_for(
+    pool: &SqlitePool,
+    task_id: &str,
+    limit: i64,
+) -> sqlx::Result<Vec<TaskEventRow>> {
     QueryBuilder::<Sqlite>::table("task_event")
         .select([
             "id",
@@ -335,7 +373,9 @@ pub async fn add_note(
     actor_agent_id: Option<&str>,
     payload_json: &str,
 ) -> Result<TaskEventRow, TaskOpError> {
-    let task = get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)?;
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
     Ok(append_event(pool, &task.id, "note", actor_agent_id, payload_json).await?)
 }
 
@@ -348,7 +388,9 @@ pub async fn add_gate(
     actor_agent_id: Option<&str>,
     payload_json: &str,
 ) -> Result<TaskEventRow, TaskOpError> {
-    let task = get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)?;
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
     Ok(append_event(pool, &task.id, "gate", actor_agent_id, payload_json).await?)
 }
 
@@ -360,7 +402,9 @@ pub async fn add_challenge(
     actor_agent_id: Option<&str>,
     payload_json: &str,
 ) -> Result<TaskEventRow, TaskOpError> {
-    let task = get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)?;
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
     Ok(append_event(pool, &task.id, "challenge", actor_agent_id, payload_json).await?)
 }
 
@@ -372,7 +416,9 @@ pub async fn add_ruling(
     actor_agent_id: Option<&str>,
     payload_json: &str,
 ) -> Result<TaskEventRow, TaskOpError> {
-    let task = get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)?;
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
     Ok(append_event(pool, &task.id, "ruling", actor_agent_id, payload_json).await?)
 }
 
@@ -401,7 +447,9 @@ pub async fn set_state(
 
     apply_state_change(&mut tx, &current, to, actor_agent_id).await?;
     tx.commit().await?;
-    get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)
+    get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)
 }
 
 /// Claim a task: `planned -> claimed` plus `implementer_agent_id = actor`.
@@ -445,7 +493,9 @@ pub async fn claim(
     .await?;
 
     tx.commit().await?;
-    get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)
+    get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)
 }
 
 /// Close a task: `{claimed,in_progress,review} -> merged`. Unlike
@@ -472,7 +522,9 @@ pub async fn close(
 
     apply_state_change(&mut tx, &current, "merged", actor_agent_id).await?;
     tx.commit().await?;
-    get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)
+    get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)
 }
 
 /// Shared UPDATE+event-append body for [`set_state`] and [`close`] (both
@@ -528,7 +580,9 @@ pub async fn watch(
     slug: &str,
     agent_id: &str,
 ) -> Result<(), TaskOpError> {
-    let task = get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)?;
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
     sqlx::query("INSERT OR IGNORE INTO task_watch (task_id, agent_id) VALUES (?1, ?2)")
         .bind(&task.id)
         .bind(agent_id)
@@ -544,7 +598,9 @@ pub async fn unwatch(
     slug: &str,
     agent_id: &str,
 ) -> Result<(), TaskOpError> {
-    let task = get(pool, workspace_id, slug).await?.ok_or(TaskOpError::NotFound)?;
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
     sqlx::query("DELETE FROM task_watch WHERE task_id = ?1 AND agent_id = ?2")
         .bind(&task.id)
         .bind(agent_id)
@@ -625,9 +681,10 @@ pub async fn open_challenge_candidates(pool: &SqlitePool) -> sqlx::Result<Vec<Ch
 /// caller parses `payload.challengeId` out of each to build the set of
 /// already-ruled challenge event ids.
 pub async fn ruling_payloads(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as("SELECT payload FROM task_event WHERE kind = 'ruling'")
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT payload FROM task_event WHERE kind = 'ruling'")
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
@@ -786,15 +843,17 @@ mod tests {
             .await
             .expect("note failed");
 
-        let all = list(&pool, &ws, None).await.expect("list failed");
+        let all = list(&pool, &ws, None, true).await.expect("list failed");
         assert_eq!(all.len(), 2);
         let t1_row = all.iter().find(|r| r.slug == "t1").expect("t1 present");
         assert_eq!(t1_row.event_count, 1);
         let t2_row = all.iter().find(|r| r.slug == "t2").expect("t2 present");
         assert_eq!(t2_row.event_count, 0);
 
-        claim(&pool, &ws, "t1", "agent-1").await.expect("claim failed");
-        let claimed_only = list(&pool, &ws, Some("claimed"))
+        claim(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("claim failed");
+        let claimed_only = list(&pool, &ws, Some("claimed"), true)
             .await
             .expect("filtered list failed");
         assert_eq!(claimed_only.len(), 1);
@@ -809,11 +868,15 @@ mod tests {
         let ws = fixture_workspace(&pool).await;
         fixture_task(&pool, &ws, "t1").await;
 
-        let claimed = claim(&pool, &ws, "t1", "agent-1").await.expect("claim failed");
+        let claimed = claim(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("claim failed");
         assert_eq!(claimed.state, "claimed");
         assert_eq!(claimed.implementer_agent_id.as_deref(), Some("agent-1"));
 
-        let events = events_for(&pool, &claimed.id, 20).await.expect("events failed");
+        let events = events_for(&pool, &claimed.id, 20)
+            .await
+            .expect("events failed");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "state");
         assert_eq!(events[0].actor_agent_id.as_deref(), Some("agent-1"));
@@ -824,7 +887,9 @@ mod tests {
         let pool = connect_in_memory().await;
         let ws = fixture_workspace(&pool).await;
         fixture_task(&pool, &ws, "t1").await;
-        claim(&pool, &ws, "t1", "agent-1").await.expect("first claim failed");
+        claim(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("first claim failed");
 
         let err = claim(&pool, &ws, "t1", "agent-2").await;
         assert!(matches!(err, Err(TaskOpError::Invalid(_))));
@@ -835,8 +900,12 @@ mod tests {
         let pool = connect_in_memory().await;
         let ws = fixture_workspace(&pool).await;
         fixture_task(&pool, &ws, "t1").await;
-        claim(&pool, &ws, "t1", "agent-1").await.expect("claim failed");
-        close(&pool, &ws, "t1", Some("agent-1")).await.expect("close failed");
+        claim(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("claim failed");
+        close(&pool, &ws, "t1", Some("agent-1"))
+            .await
+            .expect("close failed");
 
         let err = set_state(&pool, &ws, "t1", "claimed", Some("agent-1")).await;
         assert!(
@@ -850,7 +919,9 @@ mod tests {
         let pool = connect_in_memory().await;
         let ws = fixture_workspace(&pool).await;
         fixture_task(&pool, &ws, "t1").await;
-        claim(&pool, &ws, "t1", "agent-1").await.expect("claim failed");
+        claim(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("claim failed");
 
         let in_progress = set_state(&pool, &ws, "t1", "in_progress", Some("agent-1"))
             .await
@@ -878,9 +949,13 @@ mod tests {
         let pool = connect_in_memory().await;
         let ws = fixture_workspace(&pool).await;
         fixture_task(&pool, &ws, "t1").await;
-        claim(&pool, &ws, "t1", "agent-1").await.expect("claim failed");
+        claim(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("claim failed");
 
-        let closed = close(&pool, &ws, "t1", Some("agent-1")).await.expect("close failed");
+        let closed = close(&pool, &ws, "t1", Some("agent-1"))
+            .await
+            .expect("close failed");
         assert_eq!(closed.state, "merged");
     }
 
@@ -910,7 +985,9 @@ mod tests {
             .await
             .expect("note 2 failed");
 
-        let events = events_for(&pool, &task.id, 20).await.expect("events failed");
+        let events = events_for(&pool, &task.id, 20)
+            .await
+            .expect("events failed");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload, "{\"text\":\"second\"}", "newest first");
         assert!(events.iter().all(|e| e.kind == "note"));
@@ -930,7 +1007,9 @@ mod tests {
             .await
             .expect("gate must record even on non-zero exit");
 
-        let events = events_for(&pool, &task.id, 20).await.expect("events failed");
+        let events = events_for(&pool, &task.id, 20)
+            .await
+            .expect("events failed");
         assert_eq!(events[0].kind, "gate");
     }
 
@@ -950,18 +1029,33 @@ mod tests {
         let ws = fixture_workspace(&pool).await;
         let task = fixture_task(&pool, &ws, "t1").await;
 
-        watch(&pool, &ws, "t1", "agent-1").await.expect("watch failed");
+        watch(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("watch failed");
         assert_eq!(
             watchers(&pool, &task.id).await.expect("watchers failed"),
             vec!["agent-1".to_string()]
         );
 
         // Idempotent: watching twice does not duplicate.
-        watch(&pool, &ws, "t1", "agent-1").await.expect("re-watch failed");
-        assert_eq!(watchers(&pool, &task.id).await.expect("watchers failed").len(), 1);
+        watch(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("re-watch failed");
+        assert_eq!(
+            watchers(&pool, &task.id)
+                .await
+                .expect("watchers failed")
+                .len(),
+            1
+        );
 
-        unwatch(&pool, &ws, "t1", "agent-1").await.expect("unwatch failed");
-        assert!(watchers(&pool, &task.id).await.expect("watchers failed").is_empty());
+        unwatch(&pool, &ws, "t1", "agent-1")
+            .await
+            .expect("unwatch failed");
+        assert!(watchers(&pool, &task.id)
+            .await
+            .expect("watchers failed")
+            .is_empty());
     }
 
     #[tokio::test]

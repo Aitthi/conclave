@@ -1,7 +1,6 @@
 use crate::engine::commands::{
     agent, artifact, blackboard, cli, design, fusion, instance, memory, message, provider, role,
-    skill,
-    skill_draft, snapshot, task, tool, workspace,
+    skill, skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -85,6 +84,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "task.create" => task::create(state, payload).await,
         "task.list" => task::list(state, payload).await,
         "task.get" => task::get(state, payload).await,
+        "task.brief" => task::brief(state, payload).await,
         "task.claim" => task::claim(state, payload).await,
         "task.setState" => task::set_state(state, payload).await,
         "task.note" => task::note(state, payload).await,
