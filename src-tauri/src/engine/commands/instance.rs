@@ -1,6 +1,8 @@
 use crate::engine::{bus, repo, runtime, AppError, AppState};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 
 // ── Context-estimate constants ────────────────────────────────────────────────
@@ -26,6 +28,10 @@ const FLUSH_CHARS: usize = 400;
 
 /// Auto-compact trigger as a whole percent of the context limit (≈90%).
 const AUTO_COMPACT_PCT: i64 = 90;
+
+/// Throttle transcript scans to keep CLI forwarders from walking the transcript
+/// tree on every repaint.
+const TRANSCRIPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 // ── Restart · resume constants ────────────────────────────────────────────────
 
@@ -60,6 +66,49 @@ struct InstanceReq {
     workspace_agent_id: String,
     #[serde(rename = "self", default)]
     self_triggered: bool,
+}
+
+#[derive(Debug)]
+struct TranscriptPollContext {
+    reader: runtime::transcript_context::TranscriptContextReader,
+    workspace_folder: String,
+    cli_kind: String,
+    started_at: DateTime<Utc>,
+}
+
+impl TranscriptPollContext {
+    fn new(
+        workspace_folder: &str,
+        cli_kind: &str,
+        started_at: DateTime<Utc>,
+        fallback_limit: i64,
+    ) -> Self {
+        Self {
+            reader: runtime::transcript_context::TranscriptContextReader::new(
+                runtime::transcript_context::TranscriptContextConfig::default_with_limit(
+                    fallback_limit,
+                ),
+            ),
+            workspace_folder: workspace_folder.to_owned(),
+            cli_kind: cli_kind.to_owned(),
+            started_at,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_reader(
+        reader: runtime::transcript_context::TranscriptContextReader,
+        workspace_folder: &str,
+        cli_kind: &str,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            reader,
+            workspace_folder: workspace_folder.to_owned(),
+            cli_kind: cli_kind.to_owned(),
+            started_at,
+        }
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -439,6 +488,15 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     ))
                 }
             };
+            let cli_kind = def
+                .cli_kind
+                .as_deref()
+                .ok_or_else(|| {
+                    AppError::NotImplemented(
+                        "custom CLI command is not configurable yet (M5 settings)".into(),
+                    )
+                })?
+                .to_owned();
 
             // Build the launch command with the agent's configured flags. The
             // 1M-context variant of a model is its id with a `[1m]` suffix —
@@ -679,7 +737,18 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     .map_err(|e| AppError::Internal(e.to_string()));
             };
             repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
-            Some((backend.output_rx, epoch))
+            let started_at = DateTime::parse_from_rfc3339(&session.started_at)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let transcript_ctx = TranscriptPollContext::new(
+                &ws.folder_path,
+                &cli_kind,
+                started_at,
+                session
+                    .context_limit
+                    .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
+            );
+            Some((backend.output_rx, epoch, Some(transcript_ctx)))
         }
         "chat" => {
             // Resolve the provider from the agent's `provider_id`. The API key
@@ -710,7 +779,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 return serde_json::to_value(&session)
                     .map_err(|e| AppError::Internal(e.to_string()));
             };
-            Some((backend.output_rx, epoch))
+            Some((backend.output_rx, epoch, None))
         }
         _ => {
             // orchestrator / unknown: placeholder backend (fusion arrives in M4).
@@ -740,17 +809,13 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
         },
     );
 
-    // Detached forwarder: bridge PTY output → bus, and mark the instance idle
-    // when the child self-terminates (EOF closes output_rx).
+    // Detached forwarder: bridge output → bus, and mark the instance idle when
+    // the child self-terminates (EOF closes output_rx).
     //
-    // Only `chat` backends get a live context estimate: there we own the
-    // provider loop, so streamed assistant text is a genuine (if rough) proxy
-    // for the conversation. A CLI/PTY child streams terminal redraw bytes
-    // (escape sequences, full-screen TUI repaints) that bear no relation to its
-    // real context window — and tools like Claude Code track and display their
-    // own context. Estimating from those bytes produced a meter that visibly
-    // disagreed with the child's own `/context`, so we don't fabricate one.
-    if let Some((output_rx, epoch)) = output_rx {
+    // `chat` backends still use the byte-estimate path because we own the
+    // provider loop. `cli` backends now use the transcript reader instead, so
+    // the meter follows the harness transcripts rather than terminal redraws.
+    if let Some((output_rx, epoch, transcript_ctx)) = output_rx {
         let track_context = def.r#type == "chat";
         tokio::spawn(forward_session_output(
             state.db.clone(),
@@ -760,6 +825,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             session.id.clone(),
             output_rx,
             track_context,
+            transcript_ctx,
             epoch,
         ));
     }
@@ -810,13 +876,12 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
 /// concurrent `stop` and this EOF path can't both emit `idle` — only the winner
 /// does. `app` is `None` in non-Tauri contexts (tests); emits are then skipped.
 ///
-/// `track_context` gates the live context estimate (and the auto-compact it
-/// drives). It is `true` only for `chat` backends, whose streamed assistant
-/// text is a genuine proxy for the conversation. For CLI/PTY backends it is
-/// `false`: their output is terminal redraw noise, so we forward it to the bus
-/// but never count it, persist a token estimate, or emit `session:context` —
-/// the right-hand meter then stays hidden rather than showing a fabricated
-/// figure that contradicts the child's own context display.
+/// `track_context` gates the live byte-estimate path and its auto-compact. It
+/// is `true` only for `chat` backends, whose streamed assistant text is a
+/// genuine proxy for the conversation. For CLI/PTY backends it is `false` and
+/// `transcript_ctx` carries the transcript-backed meter reader instead: PTY
+/// output still forwards as activity, but the context count comes from the
+/// harness transcripts, not the redraw bytes.
 ///
 /// `epoch` is this forwarder's registration generation (from `register`): the
 /// EOF cleanup uses `unregister_epoch` so a LATE EOF — after a programmatic
@@ -831,78 +896,175 @@ async fn forward_session_output(
     session_id: String,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
     track_context: bool,
+    transcript_ctx: Option<TranscriptPollContext>,
     epoch: u64,
 ) {
-    // Read the session's context limit once (default if unset or on error) — it
-    // drives both the live meter denominator and the auto-compact threshold.
-    // Only needed when we actually track context.
-    let limit = if track_context {
-        match repo::session::get(&db, &session_id).await {
-            Ok(Some(s)) => s
-                .context_limit
-                .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
-            _ => repo::session::DEFAULT_CONTEXT_LIMIT,
-        }
-    } else {
-        0
-    };
+    let session_row = repo::session::get(&db, &session_id).await.ok().flatten();
+    let limit = session_row
+        .as_ref()
+        .and_then(|s| s.context_limit)
+        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT);
+    let mut current_tokens = session_row
+        .as_ref()
+        .and_then(|s| s.context_tokens)
+        .unwrap_or(0);
+    let mut current_limit = limit;
 
-    // Rolling ESTIMATE of context usage in characters. `last_flush_chars` is the
-    // baseline at the previous persist, so we only write every FLUSH_CHARS.
-    let mut total_chars: usize = 0;
-    let mut last_flush_chars: usize = 0;
+    if track_context {
+        // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
+        // is the baseline at the previous persist, so we only write every
+        // FLUSH_CHARS.
+        let mut total_chars: usize = 0;
+        let mut last_flush_chars: usize = 0;
 
-    while let Some(chunk) = output_rx.recv().await {
-        // Stamp activity (R-act-1 + bb plan:working-false-positive). `chat`
-        // backends have no PTY, so there is no terminal echo to suppress —
-        // every streamed delta is genuine assistant output, stamped
-        // unconditionally. CLI/PTY backends go through the gated variant: a
-        // chunk arriving inside the echo-suppression horizon armed by our own
-        // `send_stdin`/`resize` (mount-jiggle repaint, wheel-scroll arrow-key
-        // echo, keystroke echo — proven empirically in
-        // `runtime::pty::tests::idle_claude_repaints_on_resize_jiggle`) is
-        // dropped without extending the working window.
-        let activity = if track_context {
+        while let Some(chunk) = output_rx.recv().await {
+            // Stamp activity (R-act-1 + bb plan:working-false-positive).
+            // `chat` backends have no PTY, so there is no terminal echo to
+            // suppress — every streamed delta is genuine assistant output,
+            // stamped unconditionally. CLI/PTY backends go through the gated
+            // variant: a chunk arriving inside the echo-suppression horizon
+            // armed by our own `send_stdin`/`resize` (mount-jiggle repaint,
+            // wheel-scroll arrow-key echo, keystroke echo — proven empirically
+            // in `runtime::pty::tests::idle_claude_repaints_on_resize_jiggle`)
+            // is dropped without extending the working window.
             runtime.mark_activity(&instance_id);
-            true
-        } else {
-            runtime.mark_activity_gated(&instance_id)
-        };
+            let activity = true;
 
-        // Count before moving `chunk` into the emit — avoids cloning every chunk
-        // just to measure it. `chars().count()` (not `len()`) so multi-byte UTF-8
-        // output isn't over-counted in the ≈4-chars/token estimate.
-        if track_context {
+            // Count before moving `chunk` into the emit — avoids cloning every
+            // chunk just to measure it. `chars().count()` (not `len()`) so
+            // multi-byte UTF-8 output isn't over-counted in the
+            // ≈4-chars/token estimate.
             total_chars += chunk.chars().count();
-        }
 
-        if let Some(app) = &app {
-            let _ = bus::session_output(
-                app,
-                bus::SessionOutput {
-                    session_id: session_id.clone(),
-                    chunk,
-                    activity,
-                },
-            );
-        }
+            if let Some(app) = &app {
+                let _ = bus::session_output(
+                    app,
+                    bus::SessionOutput {
+                        session_id: session_id.clone(),
+                        chunk,
+                        activity,
+                    },
+                );
+            }
 
-        // Flush the estimate roughly every ~100 tokens of new output.
-        if track_context && total_chars - last_flush_chars >= FLUSH_CHARS {
-            let compacted =
-                flush_context_estimate(&db, app.as_ref(), &session_id, total_chars, limit).await;
-            last_flush_chars = total_chars;
-            if compacted {
-                // Auto-compact boundary: model the post-compaction window by
-                // resetting the estimate baseline so the meter re-arms and won't
-                // re-fire until it fills again. This is an ESTIMATE-based
-                // compaction boundary — real summary carry-forward is deferred
-                // to M4.2 (the snapshot's carried_forward stays NULL).
-                total_chars = 0;
-                last_flush_chars = 0;
+            // Flush the estimate roughly every ~100 tokens of new output.
+            if total_chars - last_flush_chars >= FLUSH_CHARS {
+                let compacted = flush_context_estimate(
+                    &db,
+                    app.as_ref(),
+                    &session_id,
+                    total_chars,
+                    limit,
+                )
+                .await;
+                last_flush_chars = total_chars;
+                if compacted {
+                    // Auto-compact boundary: model the post-compaction window
+                    // by resetting the estimate baseline so the meter re-arms
+                    // and won't re-fire until it fills again. This is an
+                    // ESTIMATE-based compaction boundary — real summary
+                    // carry-forward is deferred to M4.2 (the snapshot's
+                    // carried_forward stays NULL).
+                    total_chars = 0;
+                    last_flush_chars = 0;
+                }
             }
         }
+    } else {
+        let Some(transcript_ctx) = transcript_ctx else {
+            // No meter path to run; just drain the output and clean up below.
+            while let Some(chunk) = output_rx.recv().await {
+                let activity = runtime.mark_activity_gated(&instance_id);
+                if let Some(app) = &app {
+                    let _ = bus::session_output(
+                        app,
+                        bus::SessionOutput {
+                            session_id: session_id.clone(),
+                            chunk,
+                            activity,
+                        },
+                    );
+                }
+            }
+            if runtime.unregister_epoch(&instance_id, epoch) {
+                let _ = repo::workspace_agent::set_status(&db, &instance_id, "idle").await;
+                if let Some(app) = &app {
+                    let _ = bus::session_status(
+                        app,
+                        bus::SessionStatus {
+                            session_id,
+                            status: "idle".into(),
+                        },
+                    );
+                }
+            }
+            return;
+        };
+
+        let mut last_transcript_poll: Option<std::time::Instant> = None;
+        let mut poll_timer = tokio::time::interval(TRANSCRIPT_POLL_INTERVAL);
+        poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        poll_timer.tick().await;
+
+        loop {
+            tokio::select! {
+                maybe_chunk = output_rx.recv() => {
+                    let Some(chunk) = maybe_chunk else { break; };
+                    let activity = runtime.mark_activity_gated(&instance_id);
+                    if let Some(app) = &app {
+                        let _ = bus::session_output(
+                            app,
+                            bus::SessionOutput {
+                                session_id: session_id.clone(),
+                                chunk,
+                                activity,
+                            },
+                        );
+                    }
+                    poll_transcript_context(
+                        &db,
+                        app.as_ref(),
+                        &instance_id,
+                        &session_id,
+                        &transcript_ctx,
+                        &mut current_tokens,
+                        &mut current_limit,
+                        &mut last_transcript_poll,
+                        false,
+                    )
+                    .await;
+                }
+                _ = poll_timer.tick() => {
+                    poll_transcript_context(
+                        &db,
+                        app.as_ref(),
+                        &instance_id,
+                        &session_id,
+                        &transcript_ctx,
+                        &mut current_tokens,
+                        &mut current_limit,
+                        &mut last_transcript_poll,
+                        false,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        poll_transcript_context(
+            &db,
+            app.as_ref(),
+            &instance_id,
+            &session_id,
+            &transcript_ctx,
+            &mut current_tokens,
+            &mut current_limit,
+            &mut last_transcript_poll,
+            true,
+        )
+        .await;
     }
+
     // Child exited / EOF. Idempotent self-termination cleanup — epoch-guarded so
     // a late EOF after a restart respawn can't kill the new generation.
     if runtime.unregister_epoch(&instance_id, epoch) {
@@ -917,6 +1079,67 @@ async fn forward_session_output(
             );
         }
     }
+}
+
+/// Poll the transcript reader for the CLI transcript-backed meter and persist
+/// any newer reading.
+async fn poll_transcript_context(
+    db: &sqlx::SqlitePool,
+    app: Option<&tauri::AppHandle>,
+    instance_id: &str,
+    session_id: &str,
+    transcript_ctx: &TranscriptPollContext,
+    current_tokens: &mut i64,
+    current_limit: &mut i64,
+    last_poll: &mut Option<std::time::Instant>,
+    force: bool,
+) {
+    if !force {
+        if let Some(last) = last_poll.as_ref() {
+            if last.elapsed() < TRANSCRIPT_POLL_INTERVAL {
+                return;
+            }
+        }
+    }
+
+    let Some(reading) = transcript_ctx.reader.poll(
+        instance_id,
+        Path::new(&transcript_ctx.workspace_folder),
+        &transcript_ctx.cli_kind,
+        transcript_ctx.started_at.clone(),
+    ) else {
+        *last_poll = Some(std::time::Instant::now());
+        return;
+    };
+
+    let changed = reading.tokens != *current_tokens || reading.limit != *current_limit;
+    *current_tokens = reading.tokens;
+    *current_limit = reading.limit;
+    if !changed {
+        *last_poll = Some(std::time::Instant::now());
+        return;
+    }
+
+    let _ = repo::session::set_context_tokens(db, session_id, reading.tokens).await;
+    if let Some(app) = app {
+        let _ = bus::session_context(
+            app,
+            bus::SessionContext {
+                session_id: session_id.to_owned(),
+                context_tokens: reading.tokens,
+                context_limit: reading.limit,
+                estimated: true,
+            },
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[transcript] {instance_id} -> {} tokens from {} at {}",
+        reading.tokens, reading.source_kind, reading.observed_at
+    );
+
+    *last_poll = Some(std::time::Instant::now());
 }
 
 /// Persist + emit the current context estimate, then run the auto-compact check.
@@ -1219,11 +1442,14 @@ pub async fn resize(state: &AppState, payload: Value) -> Result<Value, AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use crate::engine::repo::{
         agent_definition::{self, AgentDefinitionInput},
         workspace, workspace_agent,
     };
     use serde_json::json;
+    use std::path::PathBuf;
+    use uuid::Uuid;
 
     /// Create a workspace + agent_definition, instantiate an instance (idle,
     /// with a session), and return its workspace_agent id.
@@ -1269,6 +1495,23 @@ mod tests {
             .await
             .expect("instantiate failed")
             .id
+    }
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("{}-{}", prefix, Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
+        let mut body = String::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if idx > 0 {
+                body.push('\n');
+            }
+            body.push_str(&line.to_string());
+        }
+        std::fs::write(path, body).expect("write jsonl");
     }
 
     #[tokio::test]
@@ -1369,6 +1612,7 @@ mod tests {
             session.id.clone(),
             rx,
             true, // chat backend — context tracking enabled.
+            None,
             epoch,
         ));
 
@@ -1412,6 +1656,7 @@ mod tests {
             session.id.clone(),
             rx,
             true, // chat backend — context tracking enabled.
+            None,
             epoch,
         ));
 
@@ -1465,6 +1710,7 @@ mod tests {
             session.id.clone(),
             rx,
             true, // chat backend — context tracking enabled.
+            None,
             epoch,
         ));
 
@@ -1533,6 +1779,7 @@ mod tests {
             session.id.clone(),
             rx,
             false, // CLI/PTY backend — context tracking disabled.
+            None,
             epoch,
         ));
 
@@ -1560,6 +1807,116 @@ mod tests {
             snaps.is_empty(),
             "untracked forwarder must not auto-compact"
         );
+    }
+
+    /// CLI output must be able to trigger a transcript-backed context refresh
+    /// through the forwarder, without using the byte-estimate path.
+    #[tokio::test]
+    async fn forwarder_updates_context_from_transcript_reader_for_cli() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let ws = workspace_agent::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("workspace agent exists");
+        let workspace_row = workspace::get(&state.db, &ws.workspace_id)
+            .await
+            .expect("workspace get failed")
+            .expect("workspace exists");
+
+        let claude_root = temp_root("transcript-forwarder-claude");
+        let codex_root = temp_root("transcript-forwarder-codex");
+        let codex_file = codex_root.join("2026/07/08/rollout.jsonl");
+        std::fs::create_dir_all(codex_file.parent().expect("codex parent dir"))
+            .expect("create codex dir");
+        write_jsonl(
+            &codex_file,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace_row.folder_path.clone(),
+                        "id": id.clone(),
+                        "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": "2099-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": { "total_tokens": 321 },
+                            "total_token_usage": { "total_tokens": 9_999 },
+                            "model_context_window": 8_000
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let started_at = DateTime::parse_from_rfc3339(&session.started_at)
+            .expect("session started_at must parse")
+            .with_timezone(&Utc);
+        let transcript_ctx = TranscriptPollContext::with_reader(
+            runtime::transcript_context::TranscriptContextReader::new(
+                runtime::transcript_context::TranscriptContextConfig {
+                    claude_projects_root: claude_root.clone(),
+                    codex_sessions_root: codex_root.clone(),
+                    fallback_limit: session
+                        .context_limit
+                        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
+                },
+            ),
+            &workspace_row.folder_path,
+            "codex",
+            started_at,
+        );
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            rx,
+            false, // CLI/PTY backend — transcript-backed context enabled.
+            Some(transcript_ctx),
+            epoch,
+        ));
+
+        tx.send("prompt".to_string())
+            .await
+            .expect("send chunk failed");
+        drop(tx);
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_tokens,
+            Some(321),
+            "CLI transcript reading must update the session context"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
     }
 
     #[tokio::test]

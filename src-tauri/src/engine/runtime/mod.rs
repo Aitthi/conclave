@@ -26,6 +26,7 @@ pub mod design_host;
 pub mod embedder;
 pub mod provider;
 pub mod pty;
+pub mod transcript_context;
 pub mod sandbox_config;
 pub mod task_timer;
 // T2 lands the codec before the T4 exact-search consumer.

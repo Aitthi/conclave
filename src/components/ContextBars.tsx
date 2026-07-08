@@ -609,7 +609,11 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
   const meterLimit = ctx?.limit ?? session?.contextLimit ?? null;
   const meterEstimated = ctx?.estimated ?? true;
   const showMeter =
-    def.type === "chat" && session != null && meterTokens != null && meterLimit != null && meterLimit > 0;
+    (def.type === "chat" || def.type === "cli") &&
+    session != null &&
+    meterTokens != null &&
+    meterLimit != null &&
+    meterLimit > 0;
 
   // ── Popover (mutual exclusion is trivial here — only one panel exists). ───
   const [openPopover, setOpenPopover] = useState<BottomPopover>(null);
