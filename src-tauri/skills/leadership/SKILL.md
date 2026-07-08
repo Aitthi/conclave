@@ -43,7 +43,11 @@ the gap between them is where leads fail.
 - The plan becomes a TASK OBJECT, not a message: `conclave task create <ws>
   <slug> <title> --plan-file <path> [--boundary p1,p2] [--canon txt]`. The
   plan body carries `owner: <your id> · authority: <level>`; the boundary is
-  the lane's file partition; implementers read it all back with `task get`.
+  the lane's file partition. Implementers use `conclave task list <ws>` for
+  slim orientation and `conclave task brief <ws> <slug>` for routine boundary
+  and resume reads; `conclave task get <ws> <slug>` is the full/deep fallback
+  when the brief lacks enough detail, full history, or full plan text is
+  required.
 - A lane that touches anything the user sees names its DESIGN CANON on the
   task (`--canon`): the proto file under `.arta/proto/screens/`, the pinned
   commit SHA, and the designer as the design-escalation target. A UI plan

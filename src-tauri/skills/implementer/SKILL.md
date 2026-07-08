@@ -169,7 +169,10 @@ the Collaboration skill; this one only covers what implementing adds.
   phase lands: what finished, the commit SHA, what's next, anything you
   decided along the way. Routine notes are ledger-only — the lead pulls them
   with `task get`, not woken into their session — so you don't interrupt
-  them to stay visible.
+  them to stay visible. The lead should use `conclave task list <ws>` for
+  slim orientation and `conclave task brief <ws> <slug>` for routine note
+  checks; `conclave task get <ws> <slug>` is only the full/deep fallback when
+  the brief lacks enough detail or full history is required.
 - Prefix a note that needs the lead NOW with `READY`, `BLOCKED`, or
   `ESCALATION` (exact word, start of the note). Only marked notes, a failing
   gate (`exit != 0`), a challenge or its ruling, and a
