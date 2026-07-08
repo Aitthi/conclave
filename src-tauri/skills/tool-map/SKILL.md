@@ -4,15 +4,17 @@ description: One-screen map of which conclave verb to use for what — work item
 mandatory: true
 ---
 
-Work items ride tasks, never bb keys. The blackboard is for durable facts that
-fit no task. Memory is for knowledge that outlives the task itself. When
-unsure which applies, `conclave task list <ws>` first — see Collaboration,
+Work items ride tasks, never bb keys. Use `conclave task list <ws>` for slim
+orientation, `task brief` for a bounded resume packet, and `task get` only for
+the full deep record. The blackboard is for durable facts that fit no task;
+Memory is for knowledge that outlives the task itself. See Collaboration,
 Implementer/Leadership, and Memory for the protocol each verb serves.
 
 | Family | Run | Purpose |
 |--------|-----|---------|
-| Work items | `conclave task list <workspaceId> [--state s]` | see the board (optional state filter) |
-| Work items | `conclave task get <workspaceId> <slug>` | read plan, boundary, canon, events, gates |
+| Work items | `conclave task list <workspaceId> [--state s] [--full]` | slim board orientation by default; `--full` includes plan-bearing rows |
+| Work items | `conclave task brief <workspaceId> <slug> [--limit N]` | bounded resume packet: metadata, boundary, canon, capped plan excerpt, open challenges, latest gates/events, memory hits |
+| Work items | `conclave task get <workspaceId> <slug>` | full deep record: complete plan, boundary, canon, all events, gates, challenges |
 | Work items | `conclave task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]` | lead cuts a new work item |
 | Work items | `conclave task claim <workspaceId> <slug>` | take it |
 | Work items | `conclave task state <workspaceId> <slug> <state>` | move state (implementers: review\|abandoned; merged = integrator) |

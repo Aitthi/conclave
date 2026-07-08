@@ -13,8 +13,10 @@ agent, on any session, gets to know.
 ## Recall before you research
 
 - At the start of a task — and before deep-diving any question a past
-  session may have solved — search first:
-  `conclave memory search <workspaceId> <query...> [--limit N]`.
+  session may have solved — read the task's bounded packet first:
+  `conclave task brief <workspaceId> <slug> [--limit N]`. It already carries
+  relevant memory hits when available. For questions wider than one work item,
+  search directly: `conclave memory search <workspaceId> <query...> [--limit N]`.
   Re-deriving a fact that was already paid for (a failed approach, an
   environment quirk, a command incantation) is the most expensive way to
   agree with a dead agent.
@@ -41,8 +43,9 @@ agent, on any session, gets to know.
 - What the workspace already records: code structure, git history, plan
   files, ADRs, blackboard state. Memory duplicating the repo goes stale the
   day the repo moves; save the POINTER only if finding it was the hard part.
-- Chat transcripts, status updates, in-flight state — that churn belongs to
-  the task ledger and blackboard, not memory.
+- Chat transcripts, raw agent transcripts, status updates, full task-list
+  dumps, long logs, and in-flight state — that churn belongs to source files,
+  task events, gate ids, or transcript readers, not memory.
 
 ## Memory is not the coordination layer
 
@@ -50,6 +53,10 @@ agent, on any session, gets to know.
   challenges — structured, evented, read by peers coordinating NOW. The
   blackboard holds the ad-hoc facts beside them (conventions, anomalies,
   notes).
+- `conclave task list` is slim orientation, `conclave task brief` is the
+  bounded resume packet, and `conclave task get` is the full deep read. Do not
+  paste any of those full records into chat or memory; reference slugs, paths,
+  event ids, and gate ids.
 - Memory = DURABLE knowledge: unkeyed facts any future session finds by
   MEANING (semantic search), long after the task is closed and its bb notes
   are purged.

@@ -64,8 +64,9 @@ the gap between them is where leads fail.
   the implementer in the handoff. An agent who has to guess who rules on
   escalations will guess the human.
 - If YOU can't tell who leads a piece of work, read the task first —
-  `conclave task list <ws>`, then `conclave task get <ws> <slug>` (owner,
-  implementer, plan) — and only then ask.
+  `conclave task list <ws>` for slim orientation, then `conclave task brief
+  <ws> <slug>` for the bounded resume packet. Use `conclave task get <ws>
+  <slug>` only when you need the full plan/event record — and only then ask.
 
 ## Delegate and stay out
 
@@ -74,6 +75,8 @@ the gap between them is where leads fail.
 - A handoff message names: the reading order (decisions → glossary → plan),
   the task slug to claim (`conclave lane start <ws> <slug>` claims it and
   creates the lane worktree in one step), and who rules on escalations.
+  Keep the handoff compact: name paths, task slugs, event ids, and gates; do
+  not paste full task lists, long logs, or transcript text into chat.
   Then `conclave task watch <ws> <slug>` yourself — every note, gate, and
   state change reaches you without polling.
 - Split authority explicitly: design/spec conflicts escalate to you (filed
@@ -153,10 +156,10 @@ the gap between them is where leads fail.
   outranks the ones who read the code and reasoned. Reproduction is evidence;
   reading is opinion with good posture.
 - Accept a deliverable on evidence you reproduced, not evidence you were
-  shown: check the task's gate ledger (`conclave task get <ws> <slug>` —
-  exit code and the SHA each gate ran at), then rerun the gate yourself
-  before integrating. A lane whose only "green" is prose in a message has
-  not run its gates.
+  shown: check the task's gate ledger (`conclave task brief <ws> <slug>` for
+  the latest bounded evidence, `task get` if you need the full history), then
+  rerun the gate yourself before integrating. A lane whose only "green" is
+  prose in a message has not run its gates.
 
 ## Rule fast, rule in writing
 
@@ -223,6 +226,10 @@ the gap between them is where leads fail.
   before asking a peer for something outside their harness (a `codex` agent
   is not a `claude-code` agent, and models differ in what they're reliable
   at).
+- Treat context meters by source: chat agents report engine usage directly;
+  CLI agents report transcript-observed usage from their harness logs. A CLI
+  meter is not PTY scrollback and does not reset just because Conclave wrote a
+  snapshot marker.
 - Weight new lanes by AVAILABILITY, not familiarity: when independent work
   exists and a capable agent sits idle, assigning it to an already-busy
   favorite queues the workspace behind one context window. Familiarity is a

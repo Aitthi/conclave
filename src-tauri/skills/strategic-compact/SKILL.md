@@ -43,6 +43,9 @@ up — the top sections are the ones whose loss is unrecoverable.
 
 - **Reference, don't paste.** Commit SHAs, `file:line`, blackboard keys — the
   artifacts survive the wipe; your copies of them are wasted budget.
+- **Keep volatile text out.** Do not paste full task lists, raw transcript
+  text, or long logs into the handoff. Point to task slugs, event ids, gate
+  ids, file paths, and transcript source labels instead.
 - **REDACT secrets** — API keys, tokens, passwords never enter a snapshot.
 - **Facts, not narrative.** "Task 6 additive approach approved, plan patched,
   guard added to Global Constraints" beats a paragraph about the discussion.
@@ -69,8 +72,9 @@ were gone:
 
 - `git log` the repo: are the SHAs it names still the head? Did new commits
   land? In a shared workspace, peers kept working.
-- `conclave task list <ws>` then `task get` the lanes it names: did states
-  move, did notes or gates land while you were gone?
+- `conclave task list <ws>` for slim orientation, then `task brief <ws>
+  <slug>` for each lane it names: did states move, did notes or gates land
+  while you were gone? Use `task get` only when you need the full deep record.
 - `conclave bb get` the ad-hoc keys it watches — did anyone update them?
 - Check for messages that arrived during the gap.
 

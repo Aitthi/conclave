@@ -18,11 +18,12 @@ the Collaboration skill; this one only covers what implementing adds.
   worktree, `conclave task claim <ws> <slug>` alone. A claim that fails
   means someone holds it — two agents implementing one plan is worse than
   zero.
-- Read the full reading order the handoff names (decisions → glossary →
-  plan) BEFORE the first edit — the plan body, file boundary, and design
-  canon are all on the task: `conclave task get <ws> <slug>`. The
-  global-constraints section binds every task; a constraint you skipped is
-  a bug you shipped.
+- Read the handoff's named sources BEFORE the first edit. Start with
+  `conclave task list <ws>` only for slim orientation, then `conclave task
+  brief <ws> <slug>` for the bounded resume packet: metadata, boundary,
+  design canon, capped plan excerpt, open challenges, latest gates/events,
+  and memory hits. Use `conclave task get <ws> <slug>` only when you need the
+  full deep record; the global-constraints section still binds every task.
 - Work isolated (the lane worktree). The main branch stays clean until
   integration is an explicit decision, not a side effect — and in a SHARED
   checkout the commit guard (`conclave lane guard install`, scope from
@@ -55,6 +56,10 @@ the Collaboration skill; this one only covers what implementing adds.
   <message>`; text printed in your own terminal reaches nobody. The human
   delegated the loop; going around the lead re-opens decisions that are
   already closed.
+- Keep escalation messages compact: cite task slugs, event ids, gate ids,
+  file paths, and line references. Do not paste full task lists, raw
+  transcript text, or long logs into chat; put durable evidence in files or
+  task gates and point at it.
 - Subagents you dispatch report to YOU. You are their escalation target the
   same way the lead is yours — don't forward their questions upward unless
   they genuinely conflict with a recorded decision.
@@ -131,6 +136,10 @@ the Collaboration skill; this one only covers what implementing adds.
   unchanged. Commit BEFORE gating: `task gate` pins `git rev-parse HEAD` at
   run time, so gating uncommitted work records the parent commit as evidence
   — a SHA the reviewer cannot check your work out at.
+- Read context meters by their source. Chat agents use engine-reported usage;
+  CLI agents use transcript-reported usage from Claude Code or Codex logs.
+  The CLI meter is current-window transcript evidence, not terminal scrollback,
+  and Conclave snapshot markers do not reset it.
 - When the workspace defines a UI capture contract (`package.json` script
   `uishot`; details usually live on bb key `protocol:ui-pixel-gate` and the
   repo's `CLAUDE.md`/`AGENTS.md`), a lane touching UI must, BEFORE claiming
