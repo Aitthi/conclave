@@ -68,6 +68,8 @@ Subcommands:
   agent list <workspaceId>
   send <sessionId> <text...>
   tell <agentId> <text...>          (agent→agent; inside a spawned agent)
+  msg list [--limit N]              (read YOUR own inter-agent inbox+outbox, newest-first; inside a spawned agent)
+  msg all  <workspaceId> [--limit N] (read the whole workspace's inter-agent traffic, newest-first)
   bb list <workspaceId>
   bb get <workspaceId> <key>
   bb set <workspaceId> <key> <value>
@@ -297,6 +299,20 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             out.push("add".to_string());
             out.push(agent.to_string()); // creator agent (injected from env, or "-")
             out.extend_from_slice(&argv[2..]); // workspaceId + flags...
+            Ok(out)
+        }
+        // `msg list` reads the CALLER's own inbox+outbox — inject the instance
+        // id from CONCLAVE_INSTANCE_ID at argv[2], BEFORE any `--limit` tail,
+        // exactly like `snapshot last`. Requires a spawned-agent context (there
+        // is no "self" to read outside one). `msg all <ws>` takes an explicit
+        // workspace id and needs no self — pass it (and any unknown sub) through.
+        Some("msg") if argv.get(1).map(String::as_str) == Some("list") => {
+            let me = require_self("msg list")?;
+            let mut out = Vec::with_capacity(argv.len() + 1);
+            out.push("msg".to_string());
+            out.push("list".to_string());
+            out.push(me.to_string()); // instanceId (injected from env)
+            out.extend_from_slice(&argv[2..]); // any --limit N tail
             Ok(out)
         }
         _ => Ok(argv),
@@ -1936,8 +1952,54 @@ enum OutMode {
     PositionRow,
     /// The workspace supervisor forest (`org`) as an indented tree.
     OrgTree,
+    /// A chronological inter-agent transcript (`msg list` / `msg all`).
+    MsgList,
     /// Pretty-printed JSON (everything else).
     Json,
+}
+
+/// A party's display label for the transcript: the enriched `<key>Name` when
+/// present, else a short (8-char) prefix of the raw instance id, else `?`.
+fn msg_party(row: &Value, name_key: &str, id_key: &str) -> String {
+    if let Some(name) = row.get(name_key).and_then(Value::as_str) {
+        return name.to_string();
+    }
+    let id = row.get(id_key).and_then(Value::as_str).unwrap_or("?");
+    id.get(..8).unwrap_or(id).to_string()
+}
+
+/// Render inter-agent messages as a chronological transcript. Rows arrive
+/// newest-first (the DB's DESC order); reverse them so the output reads like a
+/// conversation. One token-cheap line per message:
+/// `HH:MM  From → To  text` with a ` [queued]` marker on undelivered rows and a
+/// name-or-short-id fallback per party. An empty array → a single
+/// `(no messages)` line so an agent with no history sees a clean marker, not a
+/// bare `[]`.
+///
+/// `HH:MM` is sliced from the RFC3339 `createdAt` (chars 11..16) — deterministic
+/// regardless of the reader's local timezone.
+fn render_msg_transcript(rows: &[Value]) -> String {
+    if rows.is_empty() {
+        return "(no messages)\n".to_string();
+    }
+    let mut out = String::new();
+    for row in rows.iter().rev() {
+        let time = row
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(|ts| ts.get(11..16))
+            .unwrap_or("--:--");
+        let from = msg_party(row, "fromName", "fromInstanceId");
+        let to = msg_party(row, "toName", "toInstanceId");
+        let text = row.get("text").and_then(Value::as_str).unwrap_or("");
+        let queued = if row.get("status").and_then(Value::as_str) == Some("queued") {
+            " [queued]"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{time}  {from} → {to}  {text}{queued}\n"));
+    }
+    out
 }
 
 /// Render `position set`'s updated row as one line: name · track · level ·
@@ -2170,6 +2232,8 @@ async fn main() -> ExitCode {
         OutMode::PositionRow
     } else if argv.first().map(String::as_str) == Some("org") {
         OutMode::OrgTree
+    } else if argv.first().map(String::as_str) == Some("msg") {
+        OutMode::MsgList
     } else {
         OutMode::Json
     };
@@ -2341,6 +2405,13 @@ async fn main() -> ExitCode {
                 let empty: Vec<Value> = Vec::new();
                 let rows = result.as_array().unwrap_or(&empty);
                 print!("{}", render_org_tree(rows));
+            }
+            // `msg list` / `msg all` → a chronological transcript, not the JSON
+            // array of UUID-keyed rows (which defeats the point of a re-read).
+            OutMode::MsgList => {
+                let empty: Vec<Value> = Vec::new();
+                let rows = result.as_array().unwrap_or(&empty);
+                print!("{}", render_msg_transcript(rows));
             }
             OutMode::Json => {
                 let pretty =
@@ -3136,6 +3207,64 @@ mod tests {
         // human line — the point is it TERMINATES.
         let tree = super::render_org_tree(&rows);
         assert!(tree.starts_with("(human)\n"), "{tree}");
+    }
+
+    // ── msg: self-expansion + transcript rendering ────────────────────────
+
+    #[test]
+    fn expand_msg_list_injects_self_before_limit() {
+        let out = expand_self_args(v(&["msg", "list"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["msg", "list", "self1"]));
+        // The injected id lands at argv[2], BEFORE any --limit tail.
+        let out = expand_self_args(v(&["msg", "list", "--limit", "5"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["msg", "list", "self1", "--limit", "5"]));
+    }
+
+    #[test]
+    fn expand_msg_list_requires_self() {
+        assert!(expand_self_args(v(&["msg", "list"]), None).is_err());
+        assert!(expand_self_args(v(&["msg", "list"]), Some("")).is_err());
+    }
+
+    #[test]
+    fn expand_msg_all_passes_through() {
+        let all = v(&["msg", "all", "ws1"]);
+        assert_eq!(expand_self_args(all.clone(), None).unwrap(), all);
+        let all_lim = v(&["msg", "all", "ws1", "--limit", "10"]);
+        assert_eq!(
+            expand_self_args(all_lim.clone(), Some("self1")).unwrap(),
+            all_lim
+        );
+    }
+
+    #[test]
+    fn render_msg_transcript_reverses_to_chronological_with_names() {
+        // DB order is newest-first; input here is [newer, older].
+        let rows = vec![
+            serde_json::json!({ "createdAt": "2026-07-08T12:05:00+00:00", "fromName": "Bravo", "toName": "Alpha", "text": "reply", "status": "delivered" }),
+            serde_json::json!({ "createdAt": "2026-07-08T12:01:00+00:00", "fromName": "Alpha", "toName": "Bravo", "text": "hello", "status": "delivered" }),
+        ];
+        let expected = "12:01  Alpha → Bravo  hello\n\
+                        12:05  Bravo → Alpha  reply\n";
+        assert_eq!(super::render_msg_transcript(&rows), expected);
+    }
+
+    #[test]
+    fn render_msg_transcript_marks_queued_and_falls_back_to_short_id() {
+        let rows = vec![serde_json::json!({
+            "createdAt": "2026-07-08T09:30:00+00:00",
+            "fromInstanceId": "0123456789abcdef", "toInstanceId": "fedcba9876543210",
+            "text": "offline", "status": "queued"
+        })];
+        assert_eq!(
+            super::render_msg_transcript(&rows),
+            "09:30  01234567 → fedcba98  offline [queued]\n"
+        );
+    }
+
+    #[test]
+    fn render_msg_transcript_empty_is_clean_marker() {
+        assert_eq!(super::render_msg_transcript(&[]), "(no messages)\n");
     }
 
     // ── stage: private-index commit + attribution + snapshot op log ───────
