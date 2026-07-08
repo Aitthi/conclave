@@ -15,6 +15,18 @@
       "title": "Right rail · Chats"
     },
     {
+      "id": "design-empty",
+      "title": "Design view · empty state"
+    },
+    {
+      "id": "design-native",
+      "title": "Design view · full-window (ready)"
+    },
+    {
+      "id": "design-states",
+      "title": "Design view · canvas states"
+    },
+    {
       "id": "escalation-trace",
       "title": "Task detail · Escalation trace"
     },
@@ -45,13 +57,17 @@
     {
       "id": "roster-positions",
       "title": "Roster · Position display"
+    },
+    {
+      "id": "supervisor-picker",
+      "title": "Supervisor picker · states"
     }
   ],
   "phase": "prototype",
   "store": {},
   "errors": [],
-  "updatedAt": "16:07:28",
-  "reportedAt": "2026-07-05T09:07:28.723Z",
+  "updatedAt": "12:11:28 PM",
+  "reportedAt": "2026-07-06T05:11:28.403Z",
   "gates": [
     {
       "antipattern": "em-dash-overuse",
