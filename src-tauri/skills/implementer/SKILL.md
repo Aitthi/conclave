@@ -33,8 +33,11 @@ the Collaboration skill; this one only covers what implementing adds.
 ## UI work builds from the design record, not from imagination
 
 - If the task touches anything the user sees, find the design record BEFORE
-  the first edit: the task's own canon field (`conclave task get <ws>
-  <slug>`), `design:*` keys on the blackboard, and the Arta canvas —
+  the first edit: use `conclave task list <ws>` only for slim orientation,
+  then `conclave task brief <ws> <slug>` for the task's canon field,
+  boundary, and current pointers. Use `conclave task get <ws> <slug>` only
+  if the brief lacks enough canon detail or full plan text is required.
+  Also check `design:*` keys on the blackboard and the Arta canvas —
   `.arta/proto/screens/<screen>.tsx` plus `.arta/snapshots/<screen>.png`.
   The proto `.tsx` is canon: tokens, spacing, copy, states, icons — read the
   file itself, not just the screenshot.
@@ -50,8 +53,10 @@ the Collaboration skill; this one only covers what implementing adds.
 ## Know who to ask — it is written down, not guessed
 
 - Your escalation target is named in the handoff message and on the task
-  itself (its owner id and plan body). Read those before asking anyone
-  anything: `conclave task get <ws> <slug>`.
+  itself (owner id and plan pointers). Read `conclave task list <ws>` for
+  slim orientation, then `conclave task brief <ws> <slug>` before asking
+  anyone anything. Use `conclave task get <ws> <slug>` only when the brief
+  lacks enough owner/plan detail or full history is required.
 - Escalate to the LEAD, not the human — with `conclave tell <ownerId>
   <message>`; text printed in your own terminal reaches nobody. The human
   delegated the loop; going around the lead re-opens decisions that are

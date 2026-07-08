@@ -111,9 +111,12 @@ the gap between them is where leads fail.
 
 - Fan out only along INDEPENDENT lanes: partition the plan so no two
   implementers need the same files — one task object per lane, each with its
-  own `--boundary` declaring the paths it owns. If the tasks chain into each
-  other, parallel implementers buy merge conflicts, not speed — keep it one
-  implementer and say so.
+  own `--boundary` declaring the paths it owns. Implementers should see that
+  partition through `conclave task list <ws>` for slim orientation and
+  `conclave task brief <ws> <slug>` for the bounded lane packet; reserve
+  `conclave task get <ws> <slug>` for full plan text or history. If the
+  tasks chain into each other, parallel implementers buy merge conflicts,
+  not speed — keep it one implementer and say so.
 - Mixed roles (implementer + reviewer + researcher) need no extra machinery —
   the existing topology holds: everyone escalates to you, everyone reads the
   same records.
@@ -210,8 +213,10 @@ the gap between them is where leads fail.
   challenge or its ruling, or a note prefixed `READY`/`BLOCKED`/`ESCALATION`;
   routine
   progress (plain notes, passing gates, `claimed`/`in_progress`) records
-  silently, so pull it with `conclave task get <ws> <slug>` on your own
-  cadence. Review landed commits against the plan and stay interruptible —
+  silently, so pull it with `conclave task brief <ws> <slug>` on your own
+  cadence after `conclave task list <ws>` orientation. Use `task get` only
+  when the brief lacks enough detail or full history is required. Review
+  landed commits against the plan and stay interruptible —
   catch drift while it is one commit old, not one phase old.
 - Do not hover. Review on the implementer's cadence (when their notes and
   gates land), not on a timer that interrupts them. The stall engine
