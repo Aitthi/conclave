@@ -41,25 +41,44 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
     });
   }, []);
 
-  const loadStatus = useCallback(async () => {
+  const loadStatus = useCallback(async (): Promise<BrowserStatus | null> => {
     try {
       const st = await ipc.browser.status();
-      if (!mounted.current) return;
+      if (!mounted.current) return null;
       setStatus(st);
       if (st.ok && st.url && !urlInput) setUrlInput(st.url);
+      return st;
     } catch (err) {
       if (import.meta.env.DEV) console.error("InAppBrowserView: status failed", err);
       if (mounted.current) setStatus({ ok: false, message: "couldn't read browser status" });
+      return null;
     }
   }, [urlInput]);
 
   // On mount: show the overlay, position it, read status. On unmount: hide the
   // overlay (never close) so the page keeps running for background agents.
+  //
+  // Visibility is backend-passive (runtime::browser never calls show/hide on
+  // open/goto) — the backend always creates/updates the webview hidden so an
+  // agent-initiated open never paints over another tab. That means an agent
+  // opening/navigating while this tab is already mounted needs this component
+  // to notice and re-assert visibility itself; the `reconcile` poll below is
+  // that mechanism (re-showing is idempotent, harmless if already visible).
   useEffect(() => {
     mounted.current = true;
     void ipc.browser.setVisible({ visible: true }).catch(() => {});
     syncBounds();
     void loadStatus();
+
+    const reconcile = async () => {
+      const st = await loadStatus();
+      if (!mounted.current || !st) return;
+      if (st.ok) {
+        void ipc.browser.setVisible({ visible: true }).catch(() => {});
+        syncBounds();
+      }
+    };
+    const poll = window.setInterval(() => void reconcile(), 2000);
 
     const el = regionRef.current;
     const ro = el ? new ResizeObserver(() => syncBounds()) : null;
@@ -69,6 +88,7 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
     return () => {
       mounted.current = false;
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      window.clearInterval(poll);
       window.removeEventListener("resize", syncBounds);
       ro?.disconnect();
       void ipc.browser.setVisible({ visible: false }).catch(() => {});

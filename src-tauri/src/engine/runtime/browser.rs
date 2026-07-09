@@ -372,10 +372,10 @@ fn state_from(view: &Webview) -> BrowserState {
 /// Run one `eval_with_callback` round trip and parse its JSON result. Bridges
 /// the `Fn(String)` callback to async via a oneshot; the `Mutex<Option<_>>`
 /// lets the (multiply-callable, `'static`) callback consume the sender once.
-async fn eval_value(win: &Webview, js: String) -> Result<serde_json::Value, BrowserError> {
+async fn eval_value(view: &Webview, js: String) -> Result<serde_json::Value, BrowserError> {
     let (tx, rx) = oneshot::channel::<String>();
     let slot = Mutex::new(Some(tx));
-    win.eval_with_callback(js, move |result: String| {
+    view.eval_with_callback(js, move |result: String| {
         if let Ok(mut guard) = slot.lock() {
             if let Some(tx) = guard.take() {
                 let _ = tx.send(result);
@@ -412,7 +412,6 @@ pub async fn open(
     let target = normalize_url(url)?;
     if let Some(view) = webview(app) {
         view.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
-        let _ = view.show();
         return Ok(state_from(&view));
     }
     let window = app
@@ -426,10 +425,11 @@ pub async fn open(
             size,
         )
         .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    // No rect yet → keep it hidden until React positions and shows it.
-    if bounds.is_none() {
-        let _ = view.hide();
-    }
+    // Visibility is owned by the frontend (set_visible on the Browser tab's
+    // mount/unmount). Always create hidden so a background agent-initiated open
+    // never paints over whatever tab the human is on; the mounted Browser tab
+    // shows it via set_visible.
+    let _ = view.hide();
     Ok(state_from(&view))
 }
 
