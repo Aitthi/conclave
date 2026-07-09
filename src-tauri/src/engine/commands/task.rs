@@ -985,16 +985,68 @@ struct RuleReq {
     text: String,
 }
 
+/// Minimum characters a challenge reference may carry — the length of the
+/// short event ids the CLI itself displays. Write-side twin of the timer's
+/// `RULED_ID_PREFIX_MIN` (task_timer.rs), which keeps tolerating prefix-form
+/// challengeIds already recorded before this resolution existed.
+const CHALLENGE_REF_MIN: usize = 8;
+
+/// Resolve a caller's challenge reference — the full event id, or a prefix of
+/// at least [`CHALLENGE_REF_MIN`] chars as the CLI displays — against the task's
+/// own challenge events. Anything that does not name exactly ONE challenge is
+/// an error, never stored: the 343ee8d6/c07d2dfe incident (2026-07-09) came
+/// from `rule` recording an unresolved short id that no exact-match reader
+/// could ever connect back to its challenge.
+fn resolve_challenge_event_id(reference: &str, challenge_ids: &[&str]) -> Result<String, AppError> {
+    if let Some(exact) = challenge_ids.iter().find(|id| **id == reference) {
+        return Ok((*exact).to_string());
+    }
+    if reference.len() < CHALLENGE_REF_MIN {
+        return Err(AppError::Invalid(format!(
+            "challengeEventId '{reference}' is too short — pass the full event id or at least \
+             its first {CHALLENGE_REF_MIN} characters"
+        )));
+    }
+    let hits: Vec<&&str> = challenge_ids
+        .iter()
+        .filter(|id| id.starts_with(reference))
+        .collect();
+    match hits.as_slice() {
+        [only] => Ok((**only).to_string()),
+        [] => Err(AppError::NotFound(format!(
+            "no challenge event on this task matches '{reference}'"
+        ))),
+        _ => Err(AppError::Invalid(format!(
+            "challengeEventId '{reference}' is ambiguous — {} challenge events share that \
+             prefix; pass more characters",
+            hits.len()
+        ))),
+    }
+}
+
 /// Append a `ruling` event resolving a prior `challenge`. `payload.by` is
-/// always the ruling actor (frozen: `{"challengeId","text","by"}`).
+/// always the ruling actor (frozen: `{"challengeId","text","by"}`); the
+/// stored `challengeId` is always the FULL event id, resolved via
+/// [`resolve_challenge_event_id`] from whatever form the caller passed.
 pub async fn rule(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: RuleReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
+    let task = repo::task::get(&state.db, &req.workspace_id, &req.slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("task slug={} not found", req.slug)))?;
+    let events = repo::task::events_for(&state.db, &task.id, i64::MAX).await?;
+    let challenge_ids: Vec<&str> = events
+        .iter()
+        .filter(|e| e.kind == "challenge")
+        .map(|e| e.id.as_str())
+        .collect();
+    let challenge_id = resolve_challenge_event_id(&req.challenge_event_id, &challenge_ids)?;
+
     let payload_json = json!({
-        "challengeId": req.challenge_event_id,
+        "challengeId": challenge_id,
         "text": req.text,
         "by": req.actor_id,
     })
@@ -2449,6 +2501,139 @@ mod tests {
         assert_eq!(ruling["payload"]["challengeId"], challenge_event["id"]);
         assert_eq!(ruling["payload"]["by"], json!(lead));
         assert_eq!(ruling["payload"]["text"], json!("go with fix Y"));
+    }
+
+    /// Seed one task with one challenge and return (ws, lead, full challenge
+    /// event id) — the shared bed for the short-id resolution tests below.
+    async fn fixture_challenge(state: &AppState) -> (String, String, String) {
+        let ws = fixture_workspace(state).await;
+        let actor = fixture_instance(state, &ws, "Agent").await;
+        let lead = fixture_instance(state, &ws, "Lead").await;
+        create(
+            state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        let event = challenge(
+            state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "c", "evidence": "e", "proposal": "p", "default": "d"
+            }),
+        )
+        .await
+        .expect("challenge failed");
+        let id = event["id"].as_str().unwrap().to_string();
+        (ws, lead, id)
+    }
+
+    async fn try_rule(
+        state: &AppState,
+        ws: &str,
+        lead: &str,
+        reference: &str,
+    ) -> Result<Value, AppError> {
+        rule(
+            state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": lead,
+                "challengeEventId": reference, "text": "ruled"
+            }),
+        )
+        .await
+    }
+
+    /// Regression companion to the 343ee8d6/c07d2dfe incident: the CLI shows
+    /// event ids as 8-char prefixes, so that is what humans pass to `task
+    /// rule`. The STORED challengeId must be the resolved FULL id — the
+    /// deadline sweep and every other cross-reference compare against it.
+    #[tokio::test]
+    async fn rule_resolves_a_short_id_prefix_to_the_full_challenge_id() {
+        let state = AppState::for_tests().await;
+        let (ws, lead, full_id) = fixture_challenge(&state).await;
+
+        let ruling = try_rule(&state, &ws, &lead, &full_id[..8])
+            .await
+            .expect("short-id rule failed");
+        assert_eq!(
+            ruling["payload"]["challengeId"],
+            json!(full_id),
+            "the stored challengeId must be the FULL resolved id, not the prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_rejects_an_unknown_a_too_short_and_a_non_challenge_reference() {
+        let state = AppState::for_tests().await;
+        let (ws, lead, full_id) = fixture_challenge(&state).await;
+
+        let unknown = try_rule(&state, &ws, &lead, "deadbeef")
+            .await
+            .expect_err("an unknown 8-char reference must be rejected");
+        assert!(
+            format!("{unknown:?}").contains("no challenge event"),
+            "unknown reference names the problem: {unknown:?}"
+        );
+
+        let too_short = try_rule(&state, &ws, &lead, &full_id[..7])
+            .await
+            .expect_err("a reference under 8 chars must be rejected");
+        assert!(
+            format!("{too_short:?}").contains("too short"),
+            "short reference names the problem: {too_short:?}"
+        );
+
+        // A full, real event id that is NOT a challenge (the task's own
+        // `note` event) must not be rulable.
+        let note_event = note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": lead, "text": "n" }),
+        )
+        .await
+        .expect("note failed");
+        let not_a_challenge = try_rule(&state, &ws, &lead, note_event["id"].as_str().unwrap())
+            .await
+            .expect_err("a non-challenge event id must be rejected");
+        assert!(
+            format!("{not_a_challenge:?}").contains("no challenge event"),
+            "non-challenge reference names the problem: {not_a_challenge:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_rejects_an_ambiguous_short_id_prefix() {
+        let state = AppState::for_tests().await;
+        let (ws, lead, full_id) = fixture_challenge(&state).await;
+
+        // Forge a second challenge event sharing the first 8 characters —
+        // UUIDs never collide on their own, so seed the collision directly.
+        let task_row = repo::task::get(&state.db, &ws, "t1")
+            .await
+            .expect("get failed")
+            .expect("task exists");
+        let twin_id = format!("{}-forged-twin", &full_id[..8]);
+        sqlx::query(
+            "INSERT INTO task_event (id, task_id, kind, actor_agent_id, payload, created_at) \
+             VALUES (?1, ?2, 'challenge', NULL, '{}', '2026-07-09T00:00:00+00:00')",
+        )
+        .bind(&twin_id)
+        .bind(&task_row.id)
+        .execute(&state.db)
+        .await
+        .expect("forge twin failed");
+
+        let ambiguous = try_rule(&state, &ws, &lead, &full_id[..8])
+            .await
+            .expect_err("an ambiguous prefix must be rejected");
+        assert!(
+            format!("{ambiguous:?}").contains("ambiguous"),
+            "ambiguous reference names the problem: {ambiguous:?}"
+        );
+        // The full id still resolves — ambiguity is a property of the prefix.
+        try_rule(&state, &ws, &lead, &full_id)
+            .await
+            .expect("full id must still rule");
     }
 
     #[tokio::test]
