@@ -2830,6 +2830,52 @@ fn memory_reminder_workspace_id(argv: &[String]) -> Option<String> {
     }
 }
 
+/// Extract `.tool_input.command` from a Claude Code PreToolUse payload.
+/// `None` when the path is missing, not a string, or empty — the caller
+/// treats every `None` as "emit nothing, exit 0" (fail-open).
+fn extract_bash_command(input: &Value) -> Option<String> {
+    let cmd = input.get("tool_input")?.get("command")?.as_str()?;
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.to_string())
+    }
+}
+
+/// Map one `rtk rewrite` run onto the PreToolUse hook response (rtk >= 0.23.0
+/// exit-code contract): 0 = rewrite (auto-allow), 3 = rewrite but let Claude
+/// Code prompt the user (no `permissionDecision`), 1/2/anything else = pass
+/// through. `None` means "emit nothing, exit 0". An empty or identical
+/// rewrite is also `None`: emitting it would clobber or churn the command.
+fn rtk_hook_response(input: &Value, exit_code: i32, stdout: &str) -> Option<Value> {
+    if exit_code != 0 && exit_code != 3 {
+        return None;
+    }
+    let original = extract_bash_command(input)?;
+    let rewritten = stdout.trim_end_matches('\n');
+    if rewritten.is_empty() || rewritten == original {
+        return None;
+    }
+    // `updatedInput` replaces tool_input wholesale, so carry every sibling
+    // key (description, timeout, …) and swap only `command`.
+    let mut updated = input["tool_input"].clone();
+    updated["command"] = json!(rewritten);
+    let output = if exit_code == 0 {
+        json!({
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "RTK auto-rewrite",
+            "updatedInput": updated,
+        })
+    } else {
+        json!({
+            "hookEventName": "PreToolUse",
+            "updatedInput": updated,
+        })
+    };
+    Some(json!({ "hookSpecificOutput": output }))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -4900,5 +4946,108 @@ mod tests {
         assert_eq!(tip, first, "ref must still point at the first snapshot");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── rtk-hook PreToolUse protocol (task rtk-hook-verb) ───────────────────
+
+    /// A realistic PreToolUse payload: `tool_input` carries the command plus
+    /// sibling keys that must survive into `updatedInput` untouched.
+    fn rtk_hook_input() -> serde_json::Value {
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status", "description": "Show status"}
+        })
+    }
+
+    #[test]
+    fn extract_bash_command_reads_tool_input_command() {
+        assert_eq!(
+            super::extract_bash_command(&rtk_hook_input()),
+            Some("git status".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_bash_command_missing_or_empty_is_none() {
+        assert_eq!(super::extract_bash_command(&serde_json::json!({})), None);
+        assert_eq!(
+            super::extract_bash_command(&serde_json::json!({"tool_input": {}})),
+            None
+        );
+        assert_eq!(
+            super::extract_bash_command(&serde_json::json!({"tool_input": {"command": ""}})),
+            None
+        );
+        assert_eq!(
+            super::extract_bash_command(&serde_json::json!({"tool_input": {"command": 3}})),
+            None
+        );
+    }
+
+    #[test]
+    fn rtk_hook_response_exit0_rewritten_allows_with_updated_input() {
+        // Trailing newline from the rtk process is trimmed before emit.
+        let out = super::rtk_hook_response(&rtk_hook_input(), 0, "rtk git status\n")
+            .expect("rewritten command must produce a hook response");
+        let hso = &out["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PreToolUse");
+        assert_eq!(hso["permissionDecision"], "allow");
+        assert_eq!(hso["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hso["updatedInput"]["command"], "rtk git status");
+        assert_eq!(
+            hso["updatedInput"]["description"], "Show status",
+            "sibling tool_input keys must be preserved"
+        );
+    }
+
+    #[test]
+    fn rtk_hook_response_exit0_identical_is_none() {
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 0, "git status").is_none());
+        // Identical after trailing-newline trim counts as identical.
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 0, "git status\n").is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_exit0_empty_stdout_is_none() {
+        // An empty rewrite would clobber the command — fail-open instead.
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 0, "").is_none());
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 0, "\n").is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_exit1_and_exit2_pass_through() {
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 1, "anything").is_none());
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 2, "anything").is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_exit3_asks_without_permission_decision() {
+        let out = super::rtk_hook_response(&rtk_hook_input(), 3, "rtk git status\n")
+            .expect("exit 3 with a rewrite must produce a hook response");
+        let hso = &out["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PreToolUse");
+        assert_eq!(hso["updatedInput"]["command"], "rtk git status");
+        assert_eq!(
+            hso["updatedInput"]["description"], "Show status",
+            "sibling tool_input keys must be preserved"
+        );
+        assert!(hso.get("permissionDecision").is_none());
+        assert!(hso.get("permissionDecisionReason").is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_exit3_empty_stdout_is_none() {
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 3, "").is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_unknown_exit_is_none() {
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 127, "rtk git status").is_none());
+        assert!(super::rtk_hook_response(&rtk_hook_input(), -1, "rtk git status").is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_input_without_command_is_none() {
+        assert!(super::rtk_hook_response(&serde_json::json!({}), 0, "rtk x").is_none());
     }
 }
