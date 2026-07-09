@@ -1701,11 +1701,16 @@ mod tests {
         )
         .await
         .expect("set failed");
+        crate::engine::repo::session::set_context_reading(&pool, &session.id, 321, 8_000)
+            .await
+            .expect("set context reading failed");
 
         let after = list_by_workspace_with_launched_skills(&pool, &ws.id)
             .await
             .expect("query failed");
         assert_eq!(after[0].launched_skill_ids.as_deref(), Some(r#"["sk-1"]"#));
+        assert_eq!(after[0].context_tokens, Some(321));
+        assert_eq!(after[0].context_limit, Some(8_000));
         // "sk-1" resolves to no shipped/DB skill → dropped from skill_names.
         assert!(
             after[0].skill_names.is_empty(),

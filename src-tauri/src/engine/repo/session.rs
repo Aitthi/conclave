@@ -196,6 +196,33 @@ pub async fn set_context_tokens(
     Ok(())
 }
 
+/// Update a session's transcript-backed context reading and bump
+/// `last_active_at` to now.
+///
+/// Unlike [`set_context_tokens`], this persists the denominator that came from
+/// the same transcript reading as the token count. CLI transcript meters must
+/// keep these values together so later roster reads do not divide by the
+/// default session limit.
+pub async fn set_context_reading(
+    pool: &SqlitePool,
+    session_id: &str,
+    tokens: i64,
+    limit: i64,
+) -> sqlx::Result<()> {
+    let now = Utc::now().to_rfc3339();
+    QueryBuilder::<Sqlite>::table("session")
+        .update([
+            ("context_tokens", Bind::I64(tokens)),
+            ("context_limit", Bind::I64(limit)),
+            ("last_active_at", Bind::Text(now)),
+        ])
+        .where_eq("id", session_id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
 /// Persist the ordered list of skill ids actually used for the most recent
 /// launch. Compared against an agent definition's CURRENT attachments
 /// (`repo::skill::custom_skill_ids_by_agent` + builtin ids) to detect drift
@@ -346,6 +373,35 @@ mod tests {
         assert!(
             fetched.last_active_at.is_some(),
             "last_active_at must be stamped after an update"
+        );
+    }
+
+    /// set_context_reading updates the numerator and denominator together.
+    #[tokio::test]
+    async fn set_context_reading_reflected_in_get() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+
+        let row = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create_for_instance failed");
+        assert_eq!(row.context_tokens, Some(0));
+        assert_eq!(row.context_limit, Some(DEFAULT_CONTEXT_LIMIT));
+        assert!(row.last_active_at.is_none());
+
+        set_context_reading(&pool, &row.id, 321, 8_000)
+            .await
+            .expect("set_context_reading failed");
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(fetched.context_tokens, Some(321));
+        assert_eq!(fetched.context_limit, Some(8_000));
+        assert!(
+            fetched.last_active_at.is_some(),
+            "last_active_at must be stamped after a reading update"
         );
     }
 

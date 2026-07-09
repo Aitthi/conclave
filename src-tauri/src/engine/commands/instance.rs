@@ -1142,7 +1142,8 @@ async fn poll_transcript_context(
         return;
     }
 
-    let _ = repo::session::set_context_tokens(db, session_id, reading.tokens).await;
+    let _ =
+        repo::session::set_context_reading(db, session_id, reading.tokens, reading.limit).await;
     if let Some(app) = app {
         let _ = bus::session_context(
             app,
@@ -1980,6 +1981,11 @@ mod tests {
             after.context_tokens,
             Some(321),
             "CLI transcript reading must update the session context"
+        );
+        assert_eq!(
+            after.context_limit,
+            Some(8_000),
+            "CLI transcript reading must persist the transcript context limit"
         );
 
         let _ = std::fs::remove_dir_all(&claude_root);
