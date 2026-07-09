@@ -70,6 +70,7 @@ Subcommands:
   tell <agentId> <text...>          (agent→agent; inside a spawned agent)
   msg list [--limit N]              (read YOUR own inter-agent inbox+outbox, newest-first; inside a spawned agent)
   msg all  <workspaceId> [--limit N] (read the whole workspace's inter-agent traffic, newest-first)
+  orient <workspaceId>              (one bounded fresh-context packet: slim tasks, roster, your messages/watches, blackboard heads, self; inside a spawned agent)
   bb list <workspaceId>
   bb get <workspaceId> <key>
   bb set <workspaceId> <key> <value>
@@ -204,6 +205,16 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
                 return Err("conclave: restart (no arguments)".to_string());
             }
             Ok(vec!["restart".to_string(), me.to_string()])
+        }
+        // task conclave-orient: the fresh-context orientation packet is
+        // always about the CALLING agent (its inbox, its watches, its meter),
+        // so the actor slot is self-keyed exactly like `msg list`.
+        Some("orient") => {
+            let me = require_self("orient")?;
+            if argv.len() != 2 {
+                return Err("conclave: orient <workspaceId>".to_string());
+            }
+            Ok(vec!["orient".to_string(), me.to_string(), argv[1].clone()])
         }
         // ADR 0007: author stamping. Unlike `tell`/`snapshot save`/`restart`,
         // `memory remember` is valid both inside a spawned agent AND from a
@@ -3981,6 +3992,19 @@ mod tests {
     fn expand_msg_list_requires_self() {
         assert!(expand_self_args(v(&["msg", "list"]), None).is_err());
         assert!(expand_self_args(v(&["msg", "list"]), Some("")).is_err());
+    }
+
+    // ── orient (task conclave-orient) ──────────────────────────────────────
+
+    #[test]
+    fn expand_orient_injects_self_and_requires_it() {
+        let out = expand_self_args(v(&["orient", "ws1"]), Some("self1")).unwrap();
+        assert_eq!(out, v(&["orient", "self1", "ws1"]));
+        assert!(expand_self_args(v(&["orient", "ws1"]), None).is_err());
+        assert!(expand_self_args(v(&["orient", "ws1"]), Some("")).is_err());
+        // Arity is checked client-side: no workspace, or stray words, error out.
+        assert!(expand_self_args(v(&["orient"]), Some("self1")).is_err());
+        assert!(expand_self_args(v(&["orient", "ws1", "extra"]), Some("self1")).is_err());
     }
 
     #[test]
