@@ -2266,6 +2266,8 @@ enum OutMode {
     MsgList,
     /// A human-readable task resume packet (`task brief`).
     TaskBrief,
+    /// A compact fresh-context orientation packet (`orient`).
+    Orient,
     /// One-line gate confirmation (`task gate`) — the log excerpt already
     /// printed client-side; echoing the event JSON would re-send the tail.
     GateResult,
@@ -2319,6 +2321,128 @@ fn render_msg_transcript(rows: &[Value]) -> String {
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+/// The orient packet as a compact text block (task conclave-orient) — one
+/// line per row, transcript-style messages. Pretty-printing the same packet
+/// as JSON measured ~7.2KB on 2026-07-09 data, over the plan's ≤6KB target;
+/// this rendering carries the same fields at roughly half the bytes. The
+/// WIRE stays the structured JSON packet for any future UI consumer.
+fn render_orient(result: &Value) -> String {
+    let rows = |key: &str, result: &Value| -> Vec<Value> {
+        result
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut out = String::new();
+
+    if let Some(me) = result.get("self").filter(|v| !v.is_null()) {
+        let name = me.get("name").and_then(Value::as_str).unwrap_or("?");
+        let level = me.get("level").and_then(Value::as_str).unwrap_or("-");
+        let id = me.get("id").and_then(Value::as_str).unwrap_or("-");
+        out.push_str(&format!("you: {name} ({level})  {id}"));
+        if let Some(pct) = me.get("contextPct").and_then(Value::as_i64) {
+            out.push_str(&format!("  context={pct}%"));
+        }
+        out.push('\n');
+    }
+
+    let tasks = rows("tasks", result);
+    let total = result
+        .get("tasksTotal")
+        .and_then(Value::as_u64)
+        .unwrap_or(tasks.len() as u64);
+    let shown = if (tasks.len() as u64) < total {
+        format!(", first {}", tasks.len())
+    } else {
+        String::new()
+    };
+    out.push_str(&format!("\ntasks ({total} live{shown}):\n"));
+    if tasks.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for t in &tasks {
+        let field = |k: &str| t.get(k).and_then(Value::as_str).unwrap_or("-");
+        let implementer = t
+            .get("implementerAgentId")
+            .and_then(Value::as_str)
+            .map(short_id)
+            .unwrap_or("-");
+        let challenges = t.get("openChallenges").and_then(Value::as_u64).unwrap_or(0);
+        let marker = if challenges > 0 {
+            format!("  [open challenges: {challenges}]")
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "  {}  {}  impl={implementer}  {}{marker}\n",
+            field("slug"),
+            field("state"),
+            field("title"),
+        ));
+    }
+
+    let roster = rows("roster", result);
+    out.push_str(&format!("\nroster ({}):\n", roster.len()));
+    for a in &roster {
+        let field = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or("-");
+        let working = match a.get("working").and_then(Value::as_bool) {
+            Some(true) => "working",
+            Some(false) => "idle",
+            None => "offline",
+        };
+        out.push_str(&format!(
+            "  {} ({})  {}  {working}  {}\n",
+            field("name"),
+            field("level"),
+            field("id"),
+            field("model"),
+        ));
+    }
+
+    let messages = rows("messages", result);
+    out.push_str(&format!("\nmessages (latest {}):\n", messages.len()));
+    if messages.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for m in &messages {
+        let time = m
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .and_then(|ts| ts.get(11..16))
+            .unwrap_or("--:--");
+        let field = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("?");
+        out.push_str(&format!(
+            "  {time}  {} → {}  {}\n",
+            field("from"),
+            field("to"),
+            field("text"),
+        ));
+    }
+
+    let blackboard = rows("blackboard", result);
+    out.push_str(&format!("\nblackboard ({}):\n", blackboard.len()));
+    for entry in &blackboard {
+        let field = |k: &str| entry.get(k).and_then(Value::as_str).unwrap_or("");
+        out.push_str(&format!("  {} = {}\n", field("key"), field("value")));
+    }
+
+    let watches: Vec<String> = rows("watches", result)
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    out.push_str(&format!(
+        "\nwatches: {}\n",
+        if watches.is_empty() {
+            "(none)".to_string()
+        } else {
+            watches.join(", ")
+        }
+    ));
+
+    out
 }
 
 fn render_task_brief_event(row: &Value) -> String {
@@ -2846,6 +2970,8 @@ async fn main() -> ExitCode {
         OutMode::MsgList
     } else if argv.first().map(String::as_str) == Some("task") && sub == Some("brief") {
         OutMode::TaskBrief
+    } else if argv.first().map(String::as_str) == Some("orient") {
+        OutMode::Orient
     } else if gate_exit_code.is_some() {
         OutMode::GateResult
     } else {
@@ -3044,6 +3170,9 @@ async fn main() -> ExitCode {
                 render_msg_transcript(rows)
             }
             OutMode::TaskBrief => render_task_brief(result),
+            // `orient` → the compact text packet; pretty JSON of the same
+            // data overshoots the plan's byte target (see `render_orient`).
+            OutMode::Orient => render_orient(result),
             // `task gate` → one confirmation line; the log excerpt already
             // printed client-side and the tail is on the ledger.
             OutMode::GateResult => render_gate_result(result),
@@ -3995,6 +4124,51 @@ mod tests {
     }
 
     // ── orient (task conclave-orient) ──────────────────────────────────────
+
+    #[test]
+    fn render_orient_is_compact_text_with_all_sections() {
+        let packet = serde_json::json!({
+            "tasks": [{
+                "slug": "t1", "state": "review", "title": "T1",
+                "implementerAgentId": "07fd0f59-3e13", "updatedAt": "2026-07-09T14:00:00Z",
+                "openChallenges": 1
+            }],
+            "tasksTotal": 2,
+            "roster": [{
+                "id": "id-1", "name": "Tiësto", "level": "senior",
+                "working": true, "model": "claude-fable-5"
+            }],
+            "messages": [{
+                "from": "Peer", "to": "Me", "text": "hello",
+                "createdAt": "2026-07-09T14:21:00Z"
+            }],
+            "blackboard": [{ "key": "k1", "value": "v1" }],
+            "watches": ["t1"],
+            "self": { "id": "id-1", "name": "Tiësto", "level": "senior", "contextPct": 61 }
+        });
+        let out = super::render_orient(&packet);
+        assert!(out.starts_with("you: Tiësto (senior)  id-1  context=61%\n"));
+        assert!(out.contains(
+            "tasks (2 live, first 1):\n  t1  review  impl=07fd0f59  T1  [open challenges: 1]\n"
+        ));
+        assert!(out.contains("roster (1):\n  Tiësto (senior)  id-1  working  claude-fable-5\n"));
+        assert!(out.contains("messages (latest 1):\n  14:21  Peer → Me  hello\n"));
+        assert!(out.contains("blackboard (1):\n  k1 = v1\n"));
+        assert!(out.ends_with("watches: t1\n"));
+        assert!(!out.contains('{'), "text rendering, not JSON: {out}");
+    }
+
+    #[test]
+    fn render_orient_empty_sections_have_markers() {
+        let packet = serde_json::json!({
+            "tasks": [], "tasksTotal": 0, "roster": [], "messages": [],
+            "blackboard": [], "watches": [], "self": null
+        });
+        let out = super::render_orient(&packet);
+        assert!(out.contains("tasks (0 live):\n  (none)\n"));
+        assert!(out.contains("messages (latest 0):\n  (none)\n"));
+        assert!(out.ends_with("watches: (none)\n"));
+    }
 
     #[test]
     fn expand_orient_injects_self_and_requires_it() {
