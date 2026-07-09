@@ -241,6 +241,8 @@ export function Builder({
     initialDef?.permissionMode ?? "auto",
   );
   const [contextWindow, setContextWindow] = useState<string>(() => initialContextWindow(initialDef));
+  // Token filter (rtk): absent/null on the definition means enabled (default ON).
+  const [rtkEnabled, setRtkEnabled] = useState<boolean>(initialDef?.rtkEnabled ?? true);
   const [customArgs, setCustomArgs] = useState(initialDef?.customArgs ?? "");
   // Custom env is opt-in so the starter template isn't saved by accident.
   const [useCustomEnv, setUseCustomEnv] = useState(
@@ -532,6 +534,8 @@ export function Builder({
         // CLI launch config (claude-code + codex; omitted for other kinds).
         permissionMode: showCliConfig ? permissionMode : undefined,
         contextWindow: contextWindowForSave,
+        // Token filter (rtk) — claude-code only; the engine treats absent as ON.
+        rtkEnabled: isClaudeCode ? rtkEnabled : undefined,
         customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
@@ -1346,6 +1350,20 @@ export function Builder({
                       />
                     </div>
                   </div>
+                )}
+
+                {/* Token filter (rtk) — Claude Code only; absent/null = ON. */}
+                {isClaudeCode && (
+                <div className="px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12.5px] text-text-secondary">Token filter (rtk)</span>
+                    <Toggle on={rtkEnabled} onChange={setRtkEnabled} label="Token filter (rtk)" />
+                  </div>
+                  <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                    Rewrites shell commands through rtk to compress output and save tokens. Claude
+                    agents only.
+                  </p>
+                </div>
                 )}
 
                 {/* Custom args */}
