@@ -65,12 +65,15 @@ the ones whose loss is unrecoverable.
 After a clear you'll run `conclave snapshot last`. Read it, then VERIFY against
 reality before acting — the world may have moved while you were gone:
 
+- `conclave orient <ws>` FIRST — one bounded packet: slim live tasks, roster,
+  your latest messages, blackboard heads, your watches. It replaces the old
+  task-list + agent-list + msg-list + bb-list fan-out.
 - `git log`: are the SHAs it names still the head? Did new commits land? In a
   shared workspace, peers kept working.
-- `conclave task list <ws>`, then `task brief <ws> <slug>` for each lane it names:
-  did states move, notes or gates land while you were gone?
-- `conclave bb get` the ad-hoc keys it watches; check for messages that arrived
-  during the gap.
+- `task brief <ws> <slug>` for each lane the handoff names: did states move,
+  notes or gates land while you were gone?
+- `conclave bb get` any ad-hoc key the handoff watches that orient's 80-char
+  head did not settle.
 
 Then continue from the EXACT next step the handoff names. Never restart work it
 marks done; never re-open decisions it records — they are as final as before the

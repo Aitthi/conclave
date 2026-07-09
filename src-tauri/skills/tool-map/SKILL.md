@@ -25,6 +25,7 @@ gate` likewise shows only a bounded log excerpt — the full log lands in
 - **Workspaces** — `ws list · use`.
 - **Blackboard** — `bb list · get · set · delete`. Key `config:distill-auto` opts a workspace into the timer-driven distiller nudge (`{distiller, reviewer, cooldownHours}`); absent = OFF, `bb delete` is the kill switch.
 - **Memory** — `memory search · remember · delete · status · propose · queue · approve · reject`.
+- **Orient** — `orient <ws>`: ONE bounded fresh-context packet — slim live tasks, roster, your latest messages, blackboard heads, your watches, self — the first command after any restore/clear, replacing the old task-list + agent-list + msg-list + bb-list fan-out.
 - **Context** — `snapshot save · last · list · read · create`; `restart` (self-triggered save-then-die).
 - **Browser** — `browser open · goto · status · snapshot · click · type · eval · screenshot · close`: drive a page without Playwright/Puppeteer.
 
