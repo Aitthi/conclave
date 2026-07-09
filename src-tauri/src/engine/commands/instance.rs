@@ -627,6 +627,41 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
             let mut launch = String::from(base);
             if base == "claude" {
+                // Resolve the rtk PreToolUse hook (A5): only when the agent
+                // hasn't opted out (`rtk_enabled` NULL/absent defaults to ON,
+                // per the DB column's house style) AND both shim links the
+                // agent's Bash hook will actually invoke are present on disk
+                // right now — `ensure_conclave_shim` ran best-effort above
+                // and may have skipped the `rtk` link entirely (dev run
+                // without the binary staged) or linked a since-removed
+                // target. `is_usable_bin` applies the SAME zero-size-counts-
+                // as-absent guard `resolve_rtk_bin` uses, so a placeholder
+                // rtk build artifact never gets wired into a live hook.
+                // Fail open: any gap here just means no PreToolUse hook,
+                // never a blocked spawn.
+                let rtk_on = def.rtk_enabled.unwrap_or(true);
+                let rtk_hook = conclave_bin.as_ref().filter(|_| rtk_on).and_then(|bin| {
+                    let cli_bin = bin.join("conclave");
+                    let rtk_bin = bin.join("rtk");
+                    if cli_bin.is_file() && crate::engine::agentctx::is_usable_bin(&rtk_bin) {
+                        Some(runtime::sandbox_config::RtkHook { cli_bin, rtk_bin })
+                    } else {
+                        None
+                    }
+                });
+
+                // Awareness sentence appended ONLY when the hook was actually
+                // installed (same append-when-installed style as the
+                // conclave path sentence above) — an agent whose rtk hook
+                // never got wired has nothing to be warned about.
+                let preamble = match &rtk_hook {
+                    Some(_) => format!(
+                        "{preamble} {}",
+                        crate::engine::agentctx::rtk_awareness_sentence()
+                    ),
+                    None => preamble,
+                };
+
                 if let Some(mode) = def.permission_mode.as_deref() {
                     // Validated to an allowlist at save time, but quote anyway so a
                     // future bypass can't inject a second shell command here.
@@ -648,13 +683,14 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 // written to the transcript), plus the sandbox socket
                 // allowance when the spawn runs sandboxed (Route A — keeps
                 // conclave inside the sandbox, opens only the one IPC socket,
-                // and auto-approves the sandboxed call). Fail-soft: on a write
+                // and auto-approves the sandboxed call), plus the rtk
+                // PreToolUse hook resolved above. Fail-soft: on a write
                 // error the agent still works, just without the transcript
                 // meter and with the one-time seatbelt modal.
                 match runtime::sandbox_config::write_claude_settings(
                     &id,
                     socket_path.as_deref(),
-                    None, // TODO(A5): thread the resolved RtkHook through the spawn path.
+                    rtk_hook.as_ref(),
                 ) {
                     Ok(path) => launch.push_str(&format!(
                         " --settings {}",

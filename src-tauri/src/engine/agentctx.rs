@@ -276,8 +276,10 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
 /// a placeholder (e.g. an empty `rtk` before the real binary lands) must
 /// never be treated as a resolved binary — fail open and let resolution fall
 /// through to the next candidate rather than linking/reporting a zero-size
-/// file.
-fn is_usable_bin(path: &std::path::Path) -> bool {
+/// file. `pub(crate)` so `commands::instance` can apply the SAME zero-size
+/// guard when deciding whether the rtk shim LINK it just resolved is still
+/// usable at spawn time (A5), rather than re-implementing the check.
+pub(crate) fn is_usable_bin(path: &std::path::Path) -> bool {
     path.is_file()
         && std::fs::metadata(path)
             .map(|m| m.len() > 0)
@@ -468,6 +470,28 @@ pub fn conclave_path_sentence(path: &std::path::Path) -> String {
         "The conclave binary's full path is `{path}`; if `conclave` is ever not found on PATH, run \
 it via this full path, quoted, instead of searching for it."
     )
+}
+
+/// A5 awareness sentence: appended to the preamble ONLY when the caller
+/// (`commands::instance`) actually installed the rtk PreToolUse hook for this
+/// spawn (both shim links resolved and `def.rtk_enabled` isn't `false`) —
+/// mirrors [`conclave_path_sentence`]'s append-when-installed contract.
+/// Single line, no `=` (ADR 0001); no interpolated fields, so no
+/// `sanitize_field` call is needed here (the sentence is a fixed literal).
+///
+/// Wording note: the pinned rtk (v0.42.4) documents no bypass env var for
+/// its Claude Code `PreToolUse` hook (`hooks/claude/rtk-rewrite.sh` has zero
+/// env-var checks) or for its own `rtk rewrite` subcommand. The only bypass
+/// env found in the clone, `RTK_DISABLED`, belongs to the unrelated "pi"
+/// coding-agent extension (`hooks/pi/rtk.ts`) and has no effect on our
+/// `conclave rtk-hook` integration, so it is not named here — the only real
+/// escape hatch is disabling the `rtk_enabled` toggle for the agent.
+#[must_use]
+pub fn rtk_awareness_sentence() -> String {
+    "Your shell commands may be transparently rewritten through the rtk token filter to keep \
+output compact; never prefix commands with rtk yourself, and if you truly need full unfiltered \
+output, ask your lead to disable the rtk toggle for this agent."
+        .to_string()
 }
 
 #[cfg(test)]
@@ -1078,6 +1102,22 @@ text>`. After it confirms, stop and wait for the restart."
         let s = super::conclave_path_sentence(std::path::Path::new("/tmp/conclave"));
         assert!(s.contains("not found"), "{s}");
         assert!(s.contains("run it via this full path"), "{s}");
+    }
+
+    /// A5: appended to the preamble ONLY when the rtk PreToolUse hook was
+    /// actually installed for this spawn — same single-line/`=`-free
+    /// invariant as every other sentence (ADR 0001).
+    #[test]
+    fn rtk_awareness_sentence_is_single_line_and_equals_free() {
+        let s = super::rtk_awareness_sentence();
+        assert!(!s.contains('\n'), "no newline: {s}");
+        assert!(!s.contains('='), "no '=': {s}");
+    }
+
+    #[test]
+    fn rtk_awareness_sentence_mentions_rtk() {
+        let s = super::rtk_awareness_sentence();
+        assert!(s.contains("rtk"), "{s}");
     }
 
     /// The full assembled preamble (bootstrap + skill pointer + conclave path
