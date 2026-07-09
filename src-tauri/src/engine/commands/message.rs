@@ -2,6 +2,12 @@ use crate::engine::{bus, repo, runtime::StdinError, AppError, AppState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Gaps (ms) before each submit-Enter sent after an injected message's text.
+/// Escalating so at least one CR arrives after the receiver drained the text
+/// out of the PTY — a CR read in the same burst as the text is treated as
+/// paste content, not a keystroke, leaving the message stuck in the composer.
+const SUBMIT_CR_DELAYS_MS: [u64; 3] = [40, 120, 300];
+
 /// Payload for `message.send` — a line of user input destined for a live session.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,14 +140,19 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
     let body = format!("[from {sender} · {from_instance_id}] {text}");
     let status = match state.runtime.send_stdin(&to_instance_id, &body) {
         // Delivered to a live backend — now SUBMIT it. A TUI's Enter is CR (\r),
-        // not LF; and sending the CR in the SAME write as the text makes Codex's
-        // paste-burst detection treat it as literal paste content (cursor drops to
-        // a new line, nothing submits). Send the CR as a separate keystroke after
-        // a short beat so it registers as a real Enter. Mirrors the StdinBar
-        // self-send fix (text, pause, then \r).
+        // not LF; and sending the CR in the SAME write as the text makes the
+        // receiver's paste-burst detection treat it as literal paste content
+        // (cursor drops to a new line, nothing submits). Worse, a SINGLE spaced
+        // CR still races the receiver's PTY drain: under load the 40ms beat
+        // elapses before the text is read, the CR coalesces into the same read
+        // burst, and the message sits unsubmitted in the composer. So press
+        // Enter at escalating gaps — at least one CR lands as an isolated
+        // keystroke, and extra Enters on an already-empty composer are no-ops.
         Ok(()) => {
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            let _ = state.runtime.send_stdin(&to_instance_id, "\r");
+            for delay_ms in SUBMIT_CR_DELAYS_MS {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                let _ = state.runtime.send_stdin(&to_instance_id, "\r");
+            }
             "delivered"
         }
         // Target isn't running: RECORD the message as queued but do NOT error and
@@ -698,5 +709,46 @@ mod tests {
             Some(true)
         );
         assert!(val.get("id").and_then(Value::as_str).is_some());
+    }
+
+    /// The submit CR must be RETRIED: a single CR races the receiver's PTY
+    /// drain — if it coalesces into the same read burst as the text, the TUI
+    /// treats it as paste content and the message sits unsubmitted in the
+    /// composer. Three spaced CRs make at least one land as an isolated
+    /// keystroke; extra Enters on an already-empty composer are no-ops.
+    #[tokio::test]
+    async fn inject_live_target_retries_submit_cr() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists")
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "hi" }),
+        )
+        .await
+        .expect("inject should deliver to a live target");
+
+        let mut writes = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            writes.push(w);
+        }
+        assert_eq!(
+            writes.len(),
+            1 + SUBMIT_CR_DELAYS_MS.len(),
+            "expected tagged body + one CR per retry slot, got {writes:?}"
+        );
+        assert!(writes[0].ends_with("] hi"), "first write is the tagged body");
+        for cr in &writes[1..] {
+            assert_eq!(cr, "\r", "every follow-up write is a bare Enter");
+        }
     }
 }
