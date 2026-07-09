@@ -79,25 +79,46 @@ const CLAUDE_MODELS = [
 ];
 
 /** Quick-fill Codex model presets (context window is an editable numeric
- *  model_context_window override, bounded by the selected model's known max). */
+ *  model_context_window override; these values seed observed defaults). */
 const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
 
-const CODEX_CONTEXT_WINDOWS: Record<string, number> = {
+const CODEX_CONTEXT_WINDOW_DEFAULTS: Record<string, number> = {
   "gpt-5.5": 258_400,
   "gpt-5.4": 258_400,
   "gpt-5.4-mini": 258_400,
   "gpt-5.3-codex-spark": 121_600,
   "gpt-5-codex": 258_400,
+  "gpt-5.3-codex": 258_400,
 };
 
-const CODEX_UNKNOWN_CONTEXT_WINDOW_MAX = Math.max(...Object.values(CODEX_CONTEXT_WINDOWS));
+const CODEX_CONTEXT_WINDOW_MAX: Record<string, number> = {
+  "gpt-5.5": 400_000,
+  "gpt-5.4": 1_050_000,
+  "gpt-5.4-mini": 400_000,
+  "gpt-5.3-codex-spark": 128_000,
+  "gpt-5-codex": 400_000,
+  "gpt-5.3-codex": 400_000,
+};
+
+const CODEX_UNKNOWN_CONTEXT_WINDOW_DEFAULT = Math.max(
+  ...Object.values(CODEX_CONTEXT_WINDOW_DEFAULTS),
+);
+const CODEX_UNKNOWN_CONTEXT_WINDOW_MAX = 400_000;
+
+function codexContextWindowDefault(modelId: string): number {
+  return CODEX_CONTEXT_WINDOW_DEFAULTS[modelId.trim()] ?? CODEX_UNKNOWN_CONTEXT_WINDOW_DEFAULT;
+}
 
 function codexContextWindowMax(modelId: string): number {
-  return CODEX_CONTEXT_WINDOWS[modelId.trim()] ?? CODEX_UNKNOWN_CONTEXT_WINDOW_MAX;
+  return CODEX_CONTEXT_WINDOW_MAX[modelId.trim()] ?? CODEX_UNKNOWN_CONTEXT_WINDOW_MAX;
+}
+
+function codexContextWindowMaxVerified(modelId: string): boolean {
+  return modelId.trim() in CODEX_CONTEXT_WINDOW_MAX;
 }
 
 function codexDefaultContextWindow(modelId: string): string {
-  return String(codexContextWindowMax(modelId));
+  return String(codexContextWindowDefault(modelId));
 }
 
 function isPositiveIntegerText(text: string): boolean {
@@ -399,7 +420,9 @@ export function Builder({
   const isCodex = agentType === "cli" && cliKind === "codex";
   const showCliConfig = isClaudeCode || isCodex;
   const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
+  const codexDefaultContextWindowValue = codexContextWindowDefault(model);
   const codexMaxContextWindow = codexContextWindowMax(model);
+  const codexMaxVerified = codexContextWindowMaxVerified(model);
   const codexContextWindowNumber = Number(contextWindow.trim());
   const codexContextWindowInvalid =
     isCodex &&
@@ -1300,8 +1323,9 @@ export function Builder({
                       <div className="min-w-0">
                         <div className="text-[12.5px] text-text-secondary">Context window</div>
                         <div className="mt-0.5 text-[10.5px] text-text-tertiary truncate">
-                          Max {codexMaxContextWindow.toLocaleString()} tokens for{" "}
-                          <span className="font-mono">{model.trim() || "custom model"}</span>
+                          {codexMaxVerified
+                            ? `Default ${codexDefaultContextWindowValue.toLocaleString()} · max ${codexMaxContextWindow.toLocaleString()}`
+                            : `Custom model · fallback max ${codexMaxContextWindow.toLocaleString()}`}
                         </div>
                       </div>
                       <input
