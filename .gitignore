@@ -27,3 +27,5 @@ dist-ssr
 
 # uishot capture output
 .shots/
+
+src-tauri/binaries/
