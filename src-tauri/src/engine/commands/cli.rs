@@ -906,23 +906,35 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
     let verb = argv.get(1).map(String::as_str);
     match verb {
         Some("list") => {
+            let usage = "cli: task list <workspaceId> [--state s] [--full | --all]";
             let workspace_id = argv
                 .get(2)
-                .ok_or_else(|| {
-                    AppError::Invalid("cli: task list <workspaceId> [--state s] [--full]".into())
-                })?;
+                .ok_or_else(|| AppError::Invalid(usage.into()))?;
             let (state, rest) = take_flag(&argv[3..], "--state");
             let (full, rest) = take_switch(&rest, "--full");
-            if !rest.is_empty() {
-                return Err(AppError::Invalid(
-                    "cli: task list <workspaceId> [--state s] [--full]".into(),
-                ));
+            let (all, rest) = take_switch(&rest, "--all");
+            // `--full` already includes every state — combining it with
+            // `--all` is contradictory input, rejected like any stray word.
+            if !rest.is_empty() || (full && all) {
+                return Err(AppError::Invalid(usage.into()));
             }
             let mut params = json!({ "workspaceId": workspace_id });
             if let Some(state) = state {
                 params["state"] = json!(state);
             }
-            params["includePlan"] = json!(full);
+            // Ruling 3f1ab20e (task cli-output-economy): the CLI board is slim
+            // by default; `--full` restores the pre-slim full shape with the
+            // plan included (subsumes the old `--full` = includePlan meaning);
+            // `--all` keeps the slim shape but includes merged/abandoned.
+            if full {
+                params["slim"] = json!(false);
+                params["includePlan"] = json!(true);
+            } else {
+                params["slim"] = json!(true);
+                if all {
+                    params["all"] = json!(true);
+                }
+            }
             Ok(("task.list", params))
         }
 
@@ -1089,19 +1101,23 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             let sha = argv.get(7).ok_or_else(|| AppError::Invalid(usage.into()))?;
             let cwd = argv.get(8).ok_or_else(|| AppError::Invalid(usage.into()))?;
             let tail = argv.get(9).ok_or_else(|| AppError::Invalid(usage.into()))?;
-            if argv.len() != 10 {
+            // Word 11 (optional): the client-side path of the FULL gate log
+            // (task cli-output-economy). Absent from pre-logPath CLI builds,
+            // whose 10-word form must keep recording unchanged.
+            if argv.len() != 10 && argv.len() != 11 {
                 return Err(AppError::Invalid(usage.into()));
             }
             let exit: i64 = exit_raw
                 .parse()
                 .map_err(|_| AppError::Invalid(format!("cli: task gate: bad exit code '{exit_raw}'")))?;
-            Ok((
-                "task.gate",
-                json!({
-                    "workspaceId": workspace_id, "slug": slug, "actorId": actor_id,
-                    "cmd": cmd, "exit": exit, "sha": sha, "cwd": cwd, "tail": tail
-                }),
-            ))
+            let mut params = json!({
+                "workspaceId": workspace_id, "slug": slug, "actorId": actor_id,
+                "cmd": cmd, "exit": exit, "sha": sha, "cwd": cwd, "tail": tail
+            });
+            if let Some(log_path) = argv.get(10) {
+                params["logPath"] = json!(log_path);
+            }
+            Ok(("task.gate", params))
         }
 
         Some("challenge") => {
@@ -1905,23 +1921,35 @@ mod tests {
     // ── task (ADR 0008) ─────────────────────────────────────────────────────
 
     #[test]
-    fn task_list_maps_correctly_with_and_without_state() {
+    fn task_list_defaults_to_slim_and_full_restores_plan_shape() {
         assert_eq!(ok_method(&["task", "list", "ws1"]), "task.list");
         assert_eq!(
             ok_params(&["task", "list", "ws1"]),
-            json!({ "workspaceId": "ws1", "includePlan": false })
+            json!({ "workspaceId": "ws1", "slim": true })
         );
         assert_eq!(
             ok_params(&["task", "list", "ws1", "--state", "claimed"]),
-            json!({ "workspaceId": "ws1", "state": "claimed", "includePlan": false })
+            json!({ "workspaceId": "ws1", "state": "claimed", "slim": true })
         );
         assert_eq!(
             ok_params(&["task", "list", "ws1", "--full"]),
-            json!({ "workspaceId": "ws1", "includePlan": true })
+            json!({ "workspaceId": "ws1", "slim": false, "includePlan": true })
         );
         assert_eq!(
             ok_params(&["task", "list", "ws1", "--state", "claimed", "--full"]),
-            json!({ "workspaceId": "ws1", "state": "claimed", "includePlan": true })
+            json!({ "workspaceId": "ws1", "state": "claimed", "slim": false, "includePlan": true })
+        );
+    }
+
+    #[test]
+    fn task_list_all_stays_slim_but_includes_closed() {
+        assert_eq!(
+            ok_params(&["task", "list", "ws1", "--all"]),
+            json!({ "workspaceId": "ws1", "slim": true, "all": true })
+        );
+        assert_eq!(
+            ok_params(&["task", "list", "ws1", "--state", "merged", "--all"]),
+            json!({ "workspaceId": "ws1", "state": "merged", "slim": true, "all": true })
         );
     }
 
@@ -1929,6 +1957,8 @@ mod tests {
     fn task_list_extra_args_is_invalid() {
         assert!(is_invalid(&["task", "list", "ws1", "extra"]));
         assert!(is_invalid(&["task", "list", "ws1", "--full", "extra"]));
+        // Contradictory: --full already includes every state.
+        assert!(is_invalid(&["task", "list", "ws1", "--full", "--all"]));
     }
 
     #[test]
@@ -2095,6 +2125,32 @@ mod tests {
         assert_eq!(params["cwd"], json!("/repo"));
         assert_eq!(params["tail"], json!("FAILED"));
         assert_eq!(params["actorId"], json!("actor1"));
+        // The 10-word (pre-logPath) form must not grow a logPath key.
+        assert!(params.get("logPath").is_none());
+    }
+
+    #[test]
+    fn task_gate_eleventh_word_maps_to_log_path() {
+        let params = ok_params(&[
+            "task",
+            "gate",
+            "actor1",
+            "ws1",
+            "t1",
+            "cargo test",
+            "0",
+            "sha123",
+            "/repo",
+            "ok",
+            "/logs/gate-t1.log",
+        ]);
+        assert_eq!(params["logPath"], json!("/logs/gate-t1.log"));
+        assert_eq!(params["tail"], json!("ok"));
+        // Twelve words is stray input, not a longer gate form.
+        assert!(is_invalid(&[
+            "task", "gate", "actor1", "ws1", "t1", "cmd", "0", "sha", "/repo", "tail", "/log",
+            "extra"
+        ]));
     }
 
     #[test]
