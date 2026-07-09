@@ -1,6 +1,6 @@
 use crate::engine::commands::{
-    agent, artifact, blackboard, browser, cli, design, fusion, instance, memory, message, provider,
-    role, skill, skill_draft, snapshot, task, tool, workspace,
+    agent, artifact, blackboard, browser, cli, design, fusion, instance, memory, message, orient,
+    provider, role, skill, skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -50,6 +50,9 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "message.inject" => message::inject(state, payload).await,
         "message.list" => message::list(state, payload).await,
         "message.listForWorkspace" => message::list_for_workspace(state, payload).await,
+
+        // ── orient ────────────────────────────────────────────────────────
+        "orient.list" => orient::list(state, payload).await,
 
         // ── blackboard ────────────────────────────────────────────────────
         "blackboard.list" => blackboard::list(state, payload).await,
