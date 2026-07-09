@@ -10,16 +10,21 @@ the full deep record. The blackboard is for durable facts that fit no task;
 Memory is for knowledge that outlives the task itself. See Collaboration,
 Implementer/Leadership, and Memory for the protocol each verb serves.
 
+Any CLI response over 10KB is capped: the first 2KB prints, the full text is
+written under the app-support `cli-output/` dir and the printed pointer names
+the file. `CONCLAVE_NO_CAP=1` disables the cap; the `snapshot` family is never
+capped (a restore must arrive whole).
+
 | Family | Run | Purpose |
 |--------|-----|---------|
-| Work items | `conclave task list <workspaceId> [--state s] [--full]` | slim board orientation by default; `--full` includes plan-bearing rows |
+| Work items | `conclave task list <workspaceId> [--state s] [--full \| --all]` | slim open-task rows by default (slug, state, title, implementer, updatedAt, openChallenges count); `--full` restores full plan-bearing rows; `--all` keeps the slim shape but includes merged/abandoned |
 | Work items | `conclave task brief <workspaceId> <slug> [--limit N]` | bounded resume packet: metadata, boundary, canon, capped plan excerpt, open challenges, latest gates/events, memory hits |
 | Work items | `conclave task get <workspaceId> <slug>` | full deep record: complete plan, boundary, canon, all events, gates, challenges |
 | Work items | `conclave task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]` | lead cuts a new work item |
 | Work items | `conclave task claim <workspaceId> <slug>` | take it |
 | Work items | `conclave task state <workspaceId> <slug> <state>` | move state (implementers: review\|abandoned; merged = integrator) |
 | Work items | `conclave task note <workspaceId> <slug> <text...>` | log progress, decisions, outcomes |
-| Work items | `conclave task gate <workspaceId> <slug> -- <cmd...>` | run a verification, proof recorded on the ledger — commit first, then gate — the gate pins `git rev-parse HEAD` at run time; words after `--` pass verbatim (not shell-reparsed); wrap shell syntax in `sh -c "…"` |
+| Work items | `conclave task gate <workspaceId> <slug> -- <cmd...>` | run a verification, proof recorded on the ledger — commit first, then gate — the gate pins `git rev-parse HEAD` at run time; words after `--` pass verbatim (not shell-reparsed); wrap shell syntax in `sh -c "…"`; the terminal shows only a bounded log excerpt — the FULL log lands in the cli-output dir, its path recorded on the gate event as `logPath` |
 | Work items | `conclave uishot [--task <slug>] <args...>` | run the workspace's UI capture script (package.json `uishot`) and SEE the result; `--task` records it as a task gate |
 | Work items | `conclave task challenge <workspaceId> <slug> --claim t --evidence t --proposal t --default t [--deadline-min N]` | dispute a plan/decision with a stated default |
 | Work items | `conclave task rule <workspaceId> <slug> <challengeEventId> <text...>` | settle a challenge (lead) |
