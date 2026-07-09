@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl};
 use tokio::sync::oneshot;
 
 /// Stable label for the single shared browser window (plan §Runtime Notes).
@@ -41,6 +41,11 @@ const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_TEXT: usize = 12_000;
 const HARD_MAX_TEXT: usize = 50_000;
 
+/// Offscreen anchor for a browser opened before React has reported its region
+/// rectangle — keeps the native overlay from flashing over the app chrome until
+/// the first `set_bounds` positions it.
+const OFFSCREEN: f64 = -10_000.0;
+
 // ── Result types (mirrored 1:1 by src/ipc/types.ts, camelCase) ──────────────
 
 /// Result of `open`/`goto`/`status`/`close`. `ok` is false with a `message`
@@ -56,6 +61,17 @@ pub struct BrowserState {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Viewport rectangle (logical pixels) the Browser tab reserves for the native
+/// webview overlay. Mirrored by `BrowserBounds` in `src/ipc/types.ts`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// Result of an in-page action (`click`/`type`).
@@ -170,6 +186,23 @@ fn clamp_max_text(requested: Option<i64>) -> usize {
     match requested {
         Some(n) if n > 0 => (n as usize).min(HARD_MAX_TEXT),
         _ => DEFAULT_MAX_TEXT,
+    }
+}
+
+/// Resolve an optional region rect into a concrete `(position, size)`. Absent →
+/// offscreen 1×1 (hidden until React reports a rect); present → the rect with
+/// non-negative width/height (a mid-layout measurement can momentarily be
+/// negative and must never reach the platform).
+fn resolve_bounds(bounds: Option<Bounds>) -> (LogicalPosition<f64>, LogicalSize<f64>) {
+    match bounds {
+        Some(b) => (
+            LogicalPosition::new(b.x, b.y),
+            LogicalSize::new(b.width.max(0.0), b.height.max(0.0)),
+        ),
+        None => (
+            LogicalPosition::new(OFFSCREEN, OFFSCREEN),
+            LogicalSize::new(1.0, 1.0),
+        ),
     }
 }
 
@@ -314,22 +347,24 @@ fn eval_js(js: &str) -> String {
 
 // ── Tauri-backed page tools ─────────────────────────────────────────────────
 
-/// The single shared browser window, if it is currently open.
-fn window(app: &AppHandle) -> Option<WebviewWindow> {
-    app.get_webview_window(BROWSER_LABEL)
+/// The single shared browser webview, if it is currently open.
+fn webview(app: &AppHandle) -> Option<Webview> {
+    app.get_webview(BROWSER_LABEL)
 }
 
-fn require_window(app: &AppHandle) -> Result<WebviewWindow, BrowserError> {
-    window(app).ok_or(BrowserError::NotOpen)
+fn require_webview(app: &AppHandle) -> Result<Webview, BrowserError> {
+    webview(app).ok_or(BrowserError::NotOpen)
 }
 
-/// Best-effort current URL/title for a state reply. Reads are cheap and may lag
-/// a still-loading navigation; that's acceptable for a status line.
-fn state_from(win: &WebviewWindow) -> BrowserState {
+/// Best-effort current URL for a state reply. `Webview` (a child webview) has no
+/// page-title getter — title belongs to the window — so embedded state carries
+/// only the URL; the human reads the page title from the live page itself, and
+/// agents get it from `snapshot`.
+fn state_from(view: &Webview) -> BrowserState {
     BrowserState {
         ok: true,
-        url: win.url().ok().map(|u| u.to_string()),
-        title: win.title().ok(),
+        url: view.url().ok().map(|u| u.to_string()),
+        title: None,
         message: None,
     }
 }
@@ -337,7 +372,7 @@ fn state_from(win: &WebviewWindow) -> BrowserState {
 /// Run one `eval_with_callback` round trip and parse its JSON result. Bridges
 /// the `Fn(String)` callback to async via a oneshot; the `Mutex<Option<_>>`
 /// lets the (multiply-callable, `'static`) callback consume the sender once.
-async fn eval_value(win: &WebviewWindow, js: String) -> Result<serde_json::Value, BrowserError> {
+async fn eval_value(win: &Webview, js: String) -> Result<serde_json::Value, BrowserError> {
     let (tx, rx) = oneshot::channel::<String>();
     let slot = Mutex::new(Some(tx));
     win.eval_with_callback(js, move |result: String| {
@@ -366,38 +401,51 @@ fn reject_page_error(v: &serde_json::Value) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// Open the browser at `url` (creating the window) or, if already open,
-/// navigate the existing one and focus it.
-pub async fn open(app: &AppHandle, url: &str) -> Result<BrowserState, BrowserError> {
+/// Open the browser at `url`. If already open, navigate the existing webview and
+/// show it. Otherwise add a child webview to the main window at `bounds` (or
+/// offscreen+hidden when React has not reported a rect yet).
+pub async fn open(
+    app: &AppHandle,
+    url: &str,
+    bounds: Option<Bounds>,
+) -> Result<BrowserState, BrowserError> {
     let target = normalize_url(url)?;
-    if let Some(win) = window(app) {
-        win.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
-        let _ = win.show();
-        let _ = win.set_focus();
-        return Ok(state_from(&win));
+    if let Some(view) = webview(app) {
+        view.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
+        let _ = view.show();
+        return Ok(state_from(&view));
     }
-    let win = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(target))
-        .title("Browser")
-        .inner_size(1024.0, 768.0)
-        .build()
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| BrowserError::Webview("main window not found".into()))?;
+    let (position, size) = resolve_bounds(bounds);
+    let view = window
+        .add_child(
+            WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(target)),
+            position,
+            size,
+        )
         .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    let _ = win.set_focus();
-    Ok(state_from(&win))
+    // No rect yet → keep it hidden until React positions and shows it.
+    if bounds.is_none() {
+        let _ = view.hide();
+    }
+    Ok(state_from(&view))
 }
 
 /// Navigate the current browser window. Errors with [`BrowserError::NotOpen`]
 /// if no browser is open (use `open` to create one).
 pub async fn goto(app: &AppHandle, url: &str) -> Result<BrowserState, BrowserError> {
     let target = normalize_url(url)?;
-    let win = require_window(app)?;
-    win.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
-    Ok(state_from(&win))
+    let view = require_webview(app)?;
+    view.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
+    Ok(state_from(&view))
 }
 
 /// Report the current URL/title, or a graceful `ok:false` when nothing is open.
 pub async fn status(app: &AppHandle) -> Result<BrowserState, BrowserError> {
-    match window(app) {
-        Some(win) => Ok(state_from(&win)),
+    match webview(app) {
+        Some(view) => Ok(state_from(&view)),
         None => Ok(BrowserState {
             ok: false,
             url: None,
@@ -409,8 +457,8 @@ pub async fn status(app: &AppHandle) -> Result<BrowserState, BrowserError> {
 
 /// DOM/text snapshot of the current page (capped body text).
 pub async fn snapshot(app: &AppHandle, max_text: Option<i64>) -> Result<BrowserSnapshot, BrowserError> {
-    let win = require_window(app)?;
-    let value = eval_value(&win, snapshot_js(clamp_max_text(max_text))).await?;
+    let view = require_webview(app)?;
+    let value = eval_value(&view, snapshot_js(clamp_max_text(max_text))).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("snapshot shape mismatch: {e}")))
@@ -418,8 +466,8 @@ pub async fn snapshot(app: &AppHandle, max_text: Option<i64>) -> Result<BrowserS
 
 /// Click the element matching `selector` (selector as emitted by `snapshot`).
 pub async fn click(app: &AppHandle, selector: &str) -> Result<BrowserActionResult, BrowserError> {
-    let win = require_window(app)?;
-    let value = eval_value(&win, click_js(selector)).await?;
+    let view = require_webview(app)?;
+    let value = eval_value(&view, click_js(selector)).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("click result shape mismatch: {e}")))
@@ -431,8 +479,8 @@ pub async fn type_text(
     selector: &str,
     text: &str,
 ) -> Result<BrowserActionResult, BrowserError> {
-    let win = require_window(app)?;
-    let value = eval_value(&win, type_js(selector, text)).await?;
+    let view = require_webview(app)?;
+    let value = eval_value(&view, type_js(selector, text)).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("type result shape mismatch: {e}")))
@@ -441,8 +489,8 @@ pub async fn type_text(
 /// Escape hatch: evaluate `js` in the page and return its JSON result. Local
 /// tool only — never exposed over any network or plugin passthrough.
 pub async fn eval_json(app: &AppHandle, js: &str) -> Result<serde_json::Value, BrowserError> {
-    let win = require_window(app)?;
-    let value = eval_value(&win, eval_js(js)).await?;
+    let view = require_webview(app)?;
+    let value = eval_value(&view, eval_js(js)).await?;
     reject_page_error(&value)?;
     Ok(value)
 }
@@ -450,8 +498,30 @@ pub async fn eval_json(app: &AppHandle, js: &str) -> Result<serde_json::Value, B
 /// Close the browser window. Idempotent — closing when nothing is open is a
 /// graceful `ok:true`.
 pub async fn close(app: &AppHandle) -> Result<BrowserState, BrowserError> {
-    if let Some(win) = window(app) {
-        win.close().map_err(|e| BrowserError::Webview(e.to_string()))?;
+    if let Some(view) = webview(app) {
+        view.close().map_err(|e| BrowserError::Webview(e.to_string()))?;
+    }
+    Ok(BrowserState { ok: true, url: None, title: None, message: None })
+}
+
+/// Position/resize the embedded webview over the Browser tab's reserved region.
+/// Graceful no-op `ok` when no browser is open.
+pub async fn set_bounds(app: &AppHandle, bounds: Bounds) -> Result<BrowserState, BrowserError> {
+    if let Some(view) = webview(app) {
+        let (position, size) = resolve_bounds(Some(bounds));
+        view.set_position(position).map_err(|e| BrowserError::Webview(e.to_string()))?;
+        view.set_size(size).map_err(|e| BrowserError::Webview(e.to_string()))?;
+    }
+    Ok(BrowserState { ok: true, url: None, title: None, message: None })
+}
+
+/// Show/hide the embedded webview on tab switch WITHOUT closing it — the page
+/// stays loaded so an agent keeps driving it in the background. Graceful no-op
+/// `ok` when no browser is open.
+pub async fn set_visible(app: &AppHandle, visible: bool) -> Result<BrowserState, BrowserError> {
+    if let Some(view) = webview(app) {
+        let res = if visible { view.show() } else { view.hide() };
+        res.map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
     Ok(BrowserState { ok: true, url: None, title: None, message: None })
 }
@@ -529,5 +599,23 @@ mod tests {
         let js = eval_js("document.title");
         assert!(js.contains("document.title"));
         assert!(js.contains("__error"), "raw eval must not throw past the callback");
+    }
+
+    #[test]
+    fn resolve_bounds_uses_given_rect_and_clamps_negative_size() {
+        let (pos, size) = resolve_bounds(Some(Bounds { x: 40.0, y: 12.0, width: 800.0, height: -5.0 }));
+        assert_eq!(pos, tauri::LogicalPosition::new(40.0, 12.0));
+        // A negative height from a mid-layout measurement must clamp to 0, never
+        // pass a negative size to the platform.
+        assert_eq!(size, tauri::LogicalSize::new(800.0, 0.0));
+    }
+
+    #[test]
+    fn resolve_bounds_defaults_offscreen_when_absent() {
+        // Before React reports a rect, the webview must sit offscreen so it never
+        // flashes as a stray overlay over the app chrome.
+        let (pos, size) = resolve_bounds(None);
+        assert_eq!(pos, tauri::LogicalPosition::new(OFFSCREEN, OFFSCREEN));
+        assert_eq!(size, tauri::LogicalSize::new(1.0, 1.0));
     }
 }
