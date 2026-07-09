@@ -86,5 +86,6 @@ export const handlers: FixtureHandlers = {
   // no-ops (fixed, no Tauri). A missing handler would throw by design.
   "browser.setBounds": () => ({ ok: true }),
   "browser.setVisible": () => ({ ok: true }),
+  "browser.close": () => ({ ok: false, message: "no browser is open" }),
   "browser.screenshot": () => ({ path: "/tmp/browser-screenshot.png", width: 1280, height: 800 }),
 };

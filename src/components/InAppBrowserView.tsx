@@ -137,6 +137,23 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
     if (mounted.current) setBusy(false);
   }, [busy, loadStatus]);
 
+  // Close the live page (native webview). Distinct from the header X, which only
+  // hides this tab and leaves the page running for background agents.
+  const doClose = useCallback(async () => {
+    if (busy || !status?.ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const st = await ipc.browser.close();
+      if (mounted.current) setStatus(st);
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("InAppBrowserView: close failed", err);
+      if (mounted.current) setError("Couldn't close the page");
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }, [busy, status]);
+
   const isOpen = !!status?.ok;
 
   return (
@@ -187,6 +204,14 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
           title="Refresh status"
         >
           <RotateCcw className={`w-[14px] h-[14px]${busy ? " animate-spin" : ""}`} />
+        </button>
+        <button
+          onClick={() => void doClose()}
+          disabled={busy || !isOpen}
+          className="h-8 w-8 grid place-items-center rounded-lg ring-hair text-text-secondary hover:bg-overlay/[0.04] disabled:opacity-40"
+          title="Close page"
+        >
+          <X className="w-[14px] h-[14px]" />
         </button>
       </div>
 
