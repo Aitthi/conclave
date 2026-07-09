@@ -529,15 +529,36 @@ mod tests {
         assert_eq!(events[0]["kind"], json!("gate"), "newest first");
         assert_eq!(events[1]["kind"], json!("state"));
 
-        // `task list <ws>` — RULED 2026-07-04 #2 (amended, Arta fidelity F1):
-        // rows carry the board's derived `lastGates`/`challenges` fields over
-        // the SAME real wire path (Arta's canon renders these on every card;
-        // no N+1 `task.get`).
+        // `task list <ws>` — ruling 3f1ab20e (task cli-output-economy): the
+        // bare CLI wire form is SLIM — board-orientation fields only, no
+        // derived `lastGates`/`challenges` rows.
         let listed = call(&mut write, &mut reader, 5, json!(["task", "list", ws])).await;
         let row = listed
             .as_array()
             .and_then(|a| a.iter().find(|t| t["slug"] == "acceptance-task"))
             .expect("acceptance-task present in list");
+        assert_eq!(row["state"], json!("claimed"));
+        assert_eq!(row["openChallenges"], json!(0));
+        assert!(
+            row.get("lastGates").is_none(),
+            "slim rows must not carry lastGates"
+        );
+
+        // `task list <ws> --full` — RULED 2026-07-04 #2 (amended, Arta
+        // fidelity F1): full rows carry the board's derived
+        // `lastGates`/`challenges` fields over the SAME real wire path
+        // (Arta's canon renders these on every card; no N+1 `task.get`).
+        let full = call(
+            &mut write,
+            &mut reader,
+            6,
+            json!(["task", "list", ws, "--full"]),
+        )
+        .await;
+        let row = full
+            .as_array()
+            .and_then(|a| a.iter().find(|t| t["slug"] == "acceptance-task"))
+            .expect("acceptance-task present in full list");
         let last_gates = row["lastGates"].as_array().expect("lastGates array");
         assert_eq!(last_gates.len(), 1);
         assert_eq!(last_gates[0]["cmd"], json!("cargo test --lib"));
