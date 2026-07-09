@@ -99,7 +99,7 @@ Subcommands:
   stage restore <workspaceId> <slug> <snapSha>           (restore boundary paths from a snapshot; auto-snaps first; inside a spawned agent)
   stage clear   <workspaceId> <slug>                    (delete the snapshot ref)
   task create   <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]
-  task list     <workspaceId> [--state s] [--full]
+  task list     <workspaceId> [--state s] [--full | --all]  (slim open-task rows by default; --full = full rows incl plan; --all = slim rows incl merged/abandoned)
   task get      <workspaceId> <slug>
   task brief    <workspaceId> <slug> [--limit N]
   task claim    <workspaceId> <slug>          (inside a spawned agent)
@@ -1697,6 +1697,167 @@ fn tail_bytes(text: &str, max_bytes: usize) -> String {
 /// Gate tail is capped at 2000 bytes (ADR 0008: "truncate tail to 2000 bytes").
 const GATE_TAIL_MAX_BYTES: usize = 2000;
 
+// ── output economy (task cli-output-economy) ────────────────────────────────
+//
+// Every verb's rendered response passes through ONE cap point in `main`: past
+// `CLI_OUTPUT_CAP_BYTES` the full text is written under the cli-output dir and
+// only a head + pointer reaches the terminal, so no future verb can flood an
+// agent's context. Gate runs additionally keep their FULL build log there and
+// print only a bounded excerpt. `CONCLAVE_NO_CAP` (any non-empty value)
+// disables the cap; the `snapshot` family is always exempt — a restore must
+// arrive whole.
+
+/// A rendered response longer than this gets capped to a head + file pointer.
+const CLI_OUTPUT_CAP_BYTES: usize = 10_000;
+
+/// How much of a capped response still reaches the terminal.
+const CLI_OUTPUT_HEAD_BYTES: usize = 2_000;
+
+/// Files in the cli-output dir older than this are pruned on each new write.
+const CLI_OUTPUT_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Lines of gate log printed to the terminal: the last 40, plus the first 10
+/// as a header when anything was omitted between them.
+const GATE_PRINT_TAIL_LINES: usize = 40;
+const GATE_PRINT_HEAD_LINES: usize = 10;
+
+/// First `max_bytes` of `text`, lossy at a broken UTF-8 boundary — the head
+/// counterpart of [`tail_bytes`].
+fn head_bytes(text: &str, max_bytes: usize) -> String {
+    let bytes = text.as_bytes();
+    if bytes.len() <= max_bytes {
+        return text.to_string();
+    }
+    String::from_utf8_lossy(&bytes[..max_bytes]).into_owned()
+}
+
+/// `~/Library/Application Support/Conclave/cli-output` — capped responses and
+/// full gate logs land here (same `dirs::data_dir()` root as the socket).
+fn cli_output_dir() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("Conclave").join("cli-output"))
+}
+
+/// Best-effort housekeeping: delete cli-output files older than
+/// [`CLI_OUTPUT_MAX_AGE`]. Errors are ignored — pruning must never fail the
+/// write that triggered it.
+fn prune_cli_output(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > CLI_OUTPUT_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Write `content` to `<cli-output>/<label>-<utcTs>-<pid>.<ext>` (pruning old
+/// files first) and return the file's path.
+fn write_cli_output(label: &str, ext: &str, content: &str) -> Result<PathBuf, String> {
+    let dir = cli_output_dir().ok_or("could not resolve user data directory")?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    prune_cli_output(&dir);
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
+    let path = dir.join(format!("{label}-{stamp}-{}.{ext}", std::process::id()));
+    std::fs::write(&path, content)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// A filesystem-safe label for the invoked verb (`task-list`, `bb-get`, …):
+/// the first two argv words, lowercased, non `[a-z0-9-]` squashed to `-`.
+fn verb_label(argv: &[String]) -> String {
+    let label = argv
+        .iter()
+        .take(2)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if label.is_empty() {
+        "output".to_string()
+    } else {
+        label
+    }
+}
+
+/// True when the cap is disabled for this process (`CONCLAVE_NO_CAP` set to
+/// any non-empty value).
+fn cap_disabled() -> bool {
+    std::env::var("CONCLAVE_NO_CAP").is_ok_and(|v| !v.is_empty())
+}
+
+/// The single cap point: print `rendered` whole when it fits (or `no_cap`),
+/// else persist the full text and print only [`CLI_OUTPUT_HEAD_BYTES`] plus a
+/// pointer. A failed persist prints everything — losing evidence to save
+/// bytes would invert the point.
+fn emit_capped(label: &str, rendered: &str, no_cap: bool) {
+    if no_cap || rendered.len() <= CLI_OUTPUT_CAP_BYTES {
+        print!("{rendered}");
+        return;
+    }
+    match write_cli_output(label, "txt", rendered) {
+        Ok(path) => {
+            let head = head_bytes(rendered, CLI_OUTPUT_HEAD_BYTES);
+            let newline = if head.ends_with('\n') { "" } else { "\n" };
+            println!(
+                "{head}{newline}[capped: full output at {} ({} bytes)]",
+                path.display(),
+                rendered.len()
+            );
+        }
+        Err(e) => {
+            print!("{rendered}");
+            eprintln!("conclave: output cap: {e}");
+        }
+    }
+}
+
+/// The bounded terminal view of a gate log: the whole thing when it is at
+/// most [`GATE_PRINT_TAIL_LINES`] lines, else the first
+/// [`GATE_PRINT_HEAD_LINES`] lines, an omission marker, and the last
+/// [`GATE_PRINT_TAIL_LINES`] lines. Always newline-terminated when non-empty.
+fn gate_log_excerpt(combined: &str, log_path: Option<&std::path::Path>) -> String {
+    if combined.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = combined.lines().collect();
+    if lines.len() <= GATE_PRINT_TAIL_LINES {
+        let newline = if combined.ends_with('\n') { "" } else { "\n" };
+        return format!("{combined}{newline}");
+    }
+    let marker = |omitted: usize| match log_path {
+        Some(p) => format!("[... {omitted} lines omitted — full log: {}]", p.display()),
+        None => format!("[... {omitted} lines omitted ...]"),
+    };
+    let tail = lines[lines.len() - GATE_PRINT_TAIL_LINES..].join("\n");
+    // A 10-line header only fits when it cannot overlap the 40-line tail.
+    if lines.len() <= GATE_PRINT_HEAD_LINES + GATE_PRINT_TAIL_LINES {
+        let omitted = lines.len() - GATE_PRINT_TAIL_LINES;
+        return format!("{}\n{tail}\n", marker(omitted));
+    }
+    let omitted = lines.len() - GATE_PRINT_HEAD_LINES - GATE_PRINT_TAIL_LINES;
+    let head = lines[..GATE_PRINT_HEAD_LINES].join("\n");
+    format!("{head}\n{}\n{tail}\n", marker(omitted))
+}
+
 /// Quote `word` as a single POSIX shell word: wrapped in single quotes with
 /// any embedded `'` rewritten to the standard `'\''` escape (close the quote,
 /// emit an escaped literal quote, reopen). Single quotes disable all shell
@@ -1803,6 +1964,20 @@ fn run_task_gate(
     let combined = String::from_utf8_lossy(&output.stdout).into_owned();
     let tail = tail_bytes(&combined, GATE_TAIL_MAX_BYTES);
 
+    // Task cli-output-economy: the FULL log goes to a file (so the evidence
+    // survives without flooding the caller's context), the terminal gets a
+    // bounded excerpt, and the gate event records where the file is. A failed
+    // write is non-fatal — the gate still records with its 2000-byte tail,
+    // exactly like a pre-logPath build.
+    let log_path = match write_cli_output(&format!("gate-{slug}"), "log", &combined) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            eprintln!("conclave: task gate: could not persist the full log ({e})");
+            None
+        }
+    };
+    print!("{}", gate_log_excerpt(&combined, log_path.as_deref()));
+
     // Best-effort: a gate run outside a git repo (or a detached/corrupt HEAD)
     // must still record its evidence — "unknown" beats failing the whole gate.
     let sha = std::process::Command::new("git")
@@ -1815,21 +1990,22 @@ fn run_task_gate(
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    Ok((
-        vec![
-            "task".to_string(),
-            "gate".to_string(),
-            me.to_string(),
-            workspace_id,
-            slug,
-            recorded_cmd,
-            exit_code.to_string(),
-            sha,
-            cwd.to_string_lossy().into_owned(),
-            tail,
-        ],
-        exit_code,
-    ))
+    let mut wire = vec![
+        "task".to_string(),
+        "gate".to_string(),
+        me.to_string(),
+        workspace_id,
+        slug,
+        recorded_cmd,
+        exit_code.to_string(),
+        sha,
+        cwd.to_string_lossy().into_owned(),
+        tail,
+    ];
+    if let Some(path) = &log_path {
+        wire.push(path.to_string_lossy().into_owned());
+    }
+    Ok((wire, exit_code))
 }
 
 // ── uishot (ADR 0008: capture runs caller-side) ────────────────────────────
@@ -2079,6 +2255,9 @@ enum OutMode {
     MsgList,
     /// A human-readable task resume packet (`task brief`).
     TaskBrief,
+    /// One-line gate confirmation (`task gate`) — the log excerpt already
+    /// printed client-side; echoing the event JSON would re-send the tail.
+    GateResult,
     /// Pretty-printed JSON (everything else).
     Json,
 }
@@ -2375,6 +2554,37 @@ fn render_task_brief(result: &Value) -> String {
 /// Render `position set`'s updated row as one line: name · track · level ·
 /// reports-to. Absent fields show `-`; a cleared/absent supervisor shows
 /// `(human)`.
+/// One line for a recorded gate event: cmd, exit, pinned SHA, and where the
+/// full log landed. The 40-line excerpt already printed while the command
+/// ran; echoing the event JSON here would just re-send the 2000-byte tail.
+fn render_gate_result(result: &Value) -> String {
+    let payload = result.get("payload");
+    let get_str = |k: &str| {
+        payload
+            .and_then(|p| p.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+    };
+    let exit = payload
+        .and_then(|p| p.get("exit"))
+        .and_then(Value::as_i64)
+        .unwrap_or(-1);
+    let sha = get_str("sha");
+    let mut line = format!(
+        "gate recorded: {} exit={exit} sha={}",
+        get_str("cmd"),
+        short_id(sha)
+    );
+    if let Some(log_path) = payload
+        .and_then(|p| p.get("logPath"))
+        .and_then(Value::as_str)
+    {
+        line.push_str(&format!(" log={log_path}"));
+    }
+    line.push('\n');
+    line
+}
+
 fn render_position_row(row: &Value) -> String {
     let f = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or("-");
     let reports_to = row
@@ -2625,6 +2835,8 @@ async fn main() -> ExitCode {
         OutMode::MsgList
     } else if argv.first().map(String::as_str) == Some("task") && sub == Some("brief") {
         OutMode::TaskBrief
+    } else if gate_exit_code.is_some() {
+        OutMode::GateResult
     } else {
         OutMode::Json
     };
@@ -2650,6 +2862,10 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // Captured before `argv` moves into the request: the label a capped
+    // response's spill file is named after.
+    let out_label = verb_label(&argv);
 
     // Build the JSON-RPC 2.0 request envelope. The server-side `cli.exec`
     // allowlist validates the subcommand; this client is intentionally dumb.
@@ -2705,7 +2921,10 @@ async fn main() -> ExitCode {
     }
 
     if let Some(result) = response.get("result") {
-        match out_mode {
+        // Each arm RENDERS; the print happens once below, through the global
+        // output cap (task cli-output-economy). The `snapshot` family is
+        // exempt — a restored handoff must arrive whole.
+        let rendered = match out_mode {
             // Terse: `tell` → "delivered -> <to>"; `snapshot save` → "saved <id>".
             // Never echo the payload text back into the agent's context.
             OutMode::Terse => {
@@ -2714,10 +2933,10 @@ async fn main() -> ExitCode {
                         .get("status")
                         .and_then(Value::as_str)
                         .unwrap_or("sent");
-                    println!("{status} -> {to}");
+                    format!("{status} -> {to}\n")
                 } else {
                     let id = result.get("id").and_then(Value::as_str).unwrap_or("");
-                    println!("saved snapshot {id}");
+                    format!("saved snapshot {id}\n")
                 }
             }
             // The carried-forward handoff — the whole point of `snapshot last` is
@@ -2726,7 +2945,7 @@ async fn main() -> ExitCode {
             // (non-zero) rather than print a placeholder the agent would silently
             // "restore" from.
             OutMode::Handoff => match result.get("carriedForward").and_then(Value::as_str) {
-                Some(content) => println!("{content}"),
+                Some(content) => format!("{content}\n"),
                 None => {
                     eprintln!(
                         "conclave: latest snapshot has no handoff content (type: {})",
@@ -2738,7 +2957,7 @@ async fn main() -> ExitCode {
             // `restart`'s whole point is telling the agent what to do next —
             // print that instruction, not the status/phase JSON row.
             OutMode::Instruction => match result.get("instruction").and_then(Value::as_str) {
-                Some(text) => println!("{text}"),
+                Some(text) => format!("{text}\n"),
                 None => {
                     eprintln!(
                         "conclave: restart response has no instruction field (status: {})",
@@ -2751,7 +2970,7 @@ async fn main() -> ExitCode {
             // artifact add …)` and reference it.
             OutMode::ArtifactId => {
                 let id = result.get("id").and_then(Value::as_str).unwrap_or("");
-                println!("{id}");
+                format!("{id}\n")
             }
             // `artifact list` → one line per artifact, newest first, WITHOUT the
             // body (the plan's "no content dump"). Empty workspace → a marker.
@@ -2759,8 +2978,9 @@ async fn main() -> ExitCode {
                 let empty: Vec<Value> = Vec::new();
                 let rows = result.as_array().unwrap_or(&empty);
                 if rows.is_empty() {
-                    println!("(no artifacts)");
+                    "(no artifacts)\n".to_string()
                 } else {
+                    let mut out = String::new();
                     for row in rows {
                         let id = row.get("id").and_then(Value::as_str).unwrap_or("");
                         let short = id.get(..8).unwrap_or(id);
@@ -2768,54 +2988,61 @@ async fn main() -> ExitCode {
                         let title = row.get("title").and_then(Value::as_str).unwrap_or("-");
                         let agent = row.get("agentId").and_then(Value::as_str).unwrap_or("-");
                         let created = row.get("createdAt").and_then(Value::as_str).unwrap_or("-");
-                        println!("{short}  {kind:<8}  {title}  ({agent}, {created})");
+                        out.push_str(&format!(
+                            "{short}  {kind:<8}  {title}  ({agent}, {created})\n"
+                        ));
                     }
+                    out
                 }
             }
             // `artifact get` → a short metadata header, a blank line, then the
             // full body verbatim to stdout.
             OutMode::ArtifactGet => {
                 let field = |k: &str| result.get(k).and_then(Value::as_str).unwrap_or("-");
-                println!("id:       {}", field("id"));
-                println!("title:    {}", field("title"));
-                println!("kind:     {}", field("kind"));
-                println!("agent:    {}", field("agentId"));
+                let mut out = String::new();
+                out.push_str(&format!("id:       {}\n", field("id")));
+                out.push_str(&format!("title:    {}\n", field("title")));
+                out.push_str(&format!("kind:     {}\n", field("kind")));
+                out.push_str(&format!("agent:    {}\n", field("agentId")));
                 if let Some(f) = result.get("filename").and_then(Value::as_str) {
-                    println!("filename: {f}");
+                    out.push_str(&format!("filename: {f}\n"));
                 }
-                println!("created:  {}", field("createdAt"));
-                println!();
-                println!(
-                    "{}",
+                out.push_str(&format!("created:  {}\n", field("createdAt")));
+                out.push('\n');
+                out.push_str(&format!(
+                    "{}\n",
                     result.get("content").and_then(Value::as_str).unwrap_or("")
-                );
+                ));
+                out
             }
             // `position set` → one line describing the updated agent.
             OutMode::PositionRow => {
-                println!("{}", render_position_row(result));
+                format!("{}\n", render_position_row(result))
             }
             // `org` → the workspace supervisor forest as an indented tree.
             OutMode::OrgTree => {
                 let empty: Vec<Value> = Vec::new();
                 let rows = result.as_array().unwrap_or(&empty);
-                print!("{}", render_org_tree(rows));
+                render_org_tree(rows)
             }
             // `msg list` / `msg all` → a chronological transcript, not the JSON
             // array of UUID-keyed rows (which defeats the point of a re-read).
             OutMode::MsgList => {
                 let empty: Vec<Value> = Vec::new();
                 let rows = result.as_array().unwrap_or(&empty);
-                print!("{}", render_msg_transcript(rows));
+                render_msg_transcript(rows)
             }
-            OutMode::TaskBrief => {
-                print!("{}", render_task_brief(result));
-            }
+            OutMode::TaskBrief => render_task_brief(result),
+            // `task gate` → one confirmation line; the log excerpt already
+            // printed client-side and the tail is on the ledger.
+            OutMode::GateResult => render_gate_result(result),
             OutMode::Json => {
                 let pretty =
                     serde_json::to_string_pretty(result).expect("serialize result cannot fail");
-                println!("{pretty}");
+                format!("{pretty}\n")
             }
-        }
+        };
+        emit_capped(&out_label, &rendered, cap_disabled() || is_snapshot);
         if let Some(ws) = &task_boundary_workspace_id {
             println!(
                 "\nBoundary reached — what did this cost to learn that the repo doesn't record? \
@@ -2843,6 +3070,58 @@ mod tests {
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── output economy (task cli-output-economy) ────────────────────────────
+
+    #[test]
+    fn head_bytes_passes_short_text_through_and_cuts_lossily() {
+        assert_eq!(super::head_bytes("short", 10), "short");
+        assert_eq!(super::head_bytes("abcdef", 3), "abc");
+        // 'ก' is 3 bytes; cutting mid-codepoint must stay lossy, not panic.
+        let cut = super::head_bytes("กข", 4);
+        assert!(cut.starts_with('ก'));
+    }
+
+    #[test]
+    fn gate_log_excerpt_short_log_prints_whole_and_newline_terminated() {
+        assert_eq!(super::gate_log_excerpt("", None), "");
+        assert_eq!(super::gate_log_excerpt("one\ntwo", None), "one\ntwo\n");
+        assert_eq!(super::gate_log_excerpt("one\ntwo\n", None), "one\ntwo\n");
+    }
+
+    #[test]
+    fn gate_log_excerpt_medium_log_keeps_tail_only() {
+        // 45 lines: a 10-line header would overlap the 40-line tail.
+        let log = (1..=45).map(|i| format!("line{i}\n")).collect::<String>();
+        let excerpt = super::gate_log_excerpt(&log, None);
+        assert!(excerpt.starts_with("[... 5 lines omitted ...]\nline6\n"));
+        assert!(excerpt.ends_with("line45\n"));
+        assert!(!excerpt.contains("line5\n"), "overlap lines appear once");
+    }
+
+    #[test]
+    fn gate_log_excerpt_long_log_has_head_marker_and_tail() {
+        let log = (1..=100).map(|i| format!("line{i}\n")).collect::<String>();
+        let excerpt = super::gate_log_excerpt(&log, Some(Path::new("/logs/g.log")));
+        assert!(excerpt.starts_with("line1\n"));
+        assert!(
+            excerpt.contains("line10\n[... 50 lines omitted — full log: /logs/g.log]\nline61\n")
+        );
+        assert!(excerpt.ends_with("line100\n"));
+        assert!(
+            !excerpt.contains("line60\n"),
+            "omitted middle stays omitted"
+        );
+    }
+
+    #[test]
+    fn verb_label_is_filesystem_safe() {
+        assert_eq!(super::verb_label(&v(&["task", "list", "ws1"])), "task-list");
+        assert_eq!(super::verb_label(&v(&["bb", "get"])), "bb-get");
+        assert_eq!(super::verb_label(&v(&["ws"])), "ws");
+        assert_eq!(super::verb_label(&v(&["a/b", "c d"])), "a-b-c-d");
+        assert_eq!(super::verb_label(&[]), "output");
     }
 
     // ── uishot (ADR 0008: caller-side capture wrapper) ─────────────────────
