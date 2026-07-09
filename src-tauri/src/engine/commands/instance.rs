@@ -651,7 +651,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 // and auto-approves the sandboxed call). Fail-soft: on a write
                 // error the agent still works, just without the transcript
                 // meter and with the one-time seatbelt modal.
-                match runtime::sandbox_config::write_claude_settings(&id, socket_path.as_deref()) {
+                match runtime::sandbox_config::write_claude_settings(
+                    &id,
+                    socket_path.as_deref(),
+                    None, // TODO(A5): thread the resolved RtkHook through the spawn path.
+                ) {
                     Ok(path) => launch.push_str(&format!(
                         " --settings {}",
                         shell_quote(&path.to_string_lossy())

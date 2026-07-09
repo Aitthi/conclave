@@ -138,15 +138,46 @@ pub fn owner_marker_command(instance_id: &str) -> String {
     format!("echo '{payload}'")
 }
 
+/// Absolute paths (resolved at spawn/settings-write time, per A2) of the
+/// conclave CLI shim and the bundled rtk binary, embedded verbatim into the
+/// generated PreToolUse hook command. Claude Code hook execution does not
+/// inherit the agent shell's PATH, so these must be absolute — never a bare
+/// `conclave`/`rtk`.
+pub struct RtkHook {
+    pub cli_bin: PathBuf,
+    pub rtk_bin: PathBuf,
+}
+
+/// Substring that identifies a conclave-owned PreToolUse hook group (as
+/// opposed to a foreign one) on re-merge, mirroring [`OWNER_MARKER_PHRASE`]
+/// for the SessionStart group.
+const RTK_HOOK_MARKER: &str = "rtk-hook";
+
+/// The exact hook command contract (Lane A writes it, Lane B implements it):
+/// both absolute paths single-quoted, e.g.
+/// `'<cli_bin>' rtk-hook --rtk '<rtk_bin>'`.
+fn rtk_hook_command(rtk: &RtkHook) -> String {
+    format!(
+        "'{}' rtk-hook --rtk '{}'",
+        rtk.cli_bin.display(),
+        rtk.rtk_bin.display()
+    )
+}
+
 /// Build the full per-instance claude settings: always the owner-marker
 /// SessionStart hook; plus the sandbox socket allowance when the spawn runs
-/// sandboxed (`socket_path` present). Preserves foreign keys and any foreign
-/// SessionStart hook groups in `existing`; our own marker group (identified by
-/// the marker phrase) is replaced, so a stale instance id self-repairs.
+/// sandboxed (`socket_path` present); plus an optional PreToolUse hook that
+/// routes Bash calls through the bundled rtk token filter (`rtk` present).
+/// Preserves foreign keys and any foreign SessionStart/PreToolUse hook groups
+/// in `existing`; our own marker groups (identified by the marker phrase /
+/// `"rtk-hook"` substring) are replaced, so a stale instance id or a stale rtk
+/// path self-repairs. When `rtk` is `None`, the `PreToolUse` key is left
+/// entirely untouched (not even created empty) — fail-open, no-op.
 pub fn claude_agent_settings(
     instance_id: &str,
     socket_path: Option<&str>,
     existing: Option<serde_json::Value>,
+    rtk: Option<&RtkHook>,
 ) -> serde_json::Value {
     use serde_json::Value;
     let mut root = match socket_path {
@@ -191,6 +222,35 @@ pub fn claude_agent_settings(
         "hooks": [{ "type": "command", "command": owner_marker_command(instance_id) }]
     }));
 
+    // PreToolUse rtk-hook group: only touch the key at all when rtk routing
+    // is requested. Mirrors the SessionStart dedup/replace above, but keyed
+    // on the `"rtk-hook"` substring rather than the owner-marker phrase.
+    if let Some(rtk) = rtk {
+        let pre_tool_use = hooks
+            .entry("PreToolUse")
+            .and_modify(|v| {
+                if !v.is_array() {
+                    *v = Value::Array(Vec::new());
+                }
+            })
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("PreToolUse is an array");
+
+        // Drop any previous conclave rtk-hook group, keep everything else
+        // (foreign PreToolUse entries), then append the current one.
+        pre_tool_use.retain(|group| {
+            !group
+                .pointer("/hooks/0/command")
+                .and_then(Value::as_str)
+                .is_some_and(|cmd| cmd.contains(RTK_HOOK_MARKER))
+        });
+        pre_tool_use.push(serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": rtk_hook_command(rtk) }]
+        }));
+    }
+
     root
 }
 
@@ -208,11 +268,13 @@ pub fn claude_settings_path(instance_id: &str) -> PathBuf {
 /// Write the per-instance claude settings file and return its path (to pass
 /// via `--settings`). Always merges the owner-marker SessionStart hook; the
 /// socket allowance is merged only when `socket_path` is present (sandboxed
-/// spawn). Reads any existing file at the path and preserves its other keys;
-/// creates the `agent-settings` dir on first use.
+/// spawn); the PreToolUse rtk-hook group is merged only when `rtk` is present.
+/// Reads any existing file at the path and preserves its other keys; creates
+/// the `agent-settings` dir on first use.
 pub fn write_claude_settings(
     instance_id: &str,
     socket_path: Option<&str>,
+    rtk: Option<&RtkHook>,
 ) -> std::io::Result<PathBuf> {
     let path = claude_settings_path(instance_id);
     if let Some(dir) = path.parent() {
@@ -221,7 +283,7 @@ pub fn write_claude_settings(
     let existing = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let merged = claude_agent_settings(instance_id, socket_path, existing);
+    let merged = claude_agent_settings(instance_id, socket_path, existing, rtk);
     let body = serde_json::to_string_pretty(&merged).map_err(std::io::Error::other)?;
     std::fs::write(&path, body)?;
     Ok(path)
@@ -280,7 +342,7 @@ mod tests {
         // The transcript context meter can only attribute a claude transcript
         // to an instance if the owner marker is RECORDED in it; the SessionStart
         // hook is the recorded channel (--append-system-prompt never is).
-        let v = claude_agent_settings("inst-9", None, None);
+        let v = claude_agent_settings("inst-9", None, None, None);
         let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("hook command present");
@@ -292,7 +354,7 @@ mod tests {
     #[test]
     fn agent_settings_with_socket_carry_hook_and_sandbox() {
         let sock = "/tmp/conclave.sock";
-        let v = claude_agent_settings("inst-9", Some(sock), None);
+        let v = claude_agent_settings("inst-9", Some(sock), None, None);
         assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
         let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
@@ -302,13 +364,13 @@ mod tests {
 
     #[test]
     fn agent_settings_owner_hook_is_idempotent_and_self_repairing() {
-        let once = claude_agent_settings("inst-9", None, None);
-        let twice = claude_agent_settings("inst-9", None, Some(once.clone()));
+        let once = claude_agent_settings("inst-9", None, None, None);
+        let twice = claude_agent_settings("inst-9", None, Some(once.clone()), None);
         assert_eq!(once, twice, "re-merge must not duplicate the hook group");
 
         // A stale marker for a different id (e.g. file reused) is replaced.
-        let stale = claude_agent_settings("inst-old", None, None);
-        let repaired = claude_agent_settings("inst-9", None, Some(stale));
+        let stale = claude_agent_settings("inst-old", None, None, None);
+        let repaired = claude_agent_settings("inst-9", None, Some(stale), None);
         let groups = repaired["hooks"]["SessionStart"]
             .as_array()
             .expect("SessionStart groups");
@@ -320,13 +382,90 @@ mod tests {
     }
 
     #[test]
+    fn agent_settings_with_rtk_adds_pre_tool_use_bash_hook() {
+        let rtk = RtkHook {
+            cli_bin: PathBuf::from("/Users/x/Library/Application Support/Conclave/bin/conclave"),
+            rtk_bin: PathBuf::from("/Users/x/Library/Application Support/Conclave/bin/rtk"),
+        };
+        let v = claude_agent_settings("inst-9", None, None, Some(&rtk));
+        assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], json!("Bash"));
+        let cmd = v["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command present");
+        assert_eq!(
+            cmd,
+            "'/Users/x/Library/Application Support/Conclave/bin/conclave' rtk-hook --rtk '/Users/x/Library/Application Support/Conclave/bin/rtk'"
+        );
+    }
+
+    #[test]
+    fn agent_settings_without_rtk_adds_no_pre_tool_use_key() {
+        let v = claude_agent_settings("inst-9", None, None, None);
+        assert!(v["hooks"].get("PreToolUse").is_none());
+    }
+
+    #[test]
+    fn agent_settings_without_rtk_preserves_foreign_pre_tool_use_untouched() {
+        let existing = json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo foreign" }] }
+            ]}
+        });
+        let v = claude_agent_settings("inst-9", None, Some(existing.clone()), None);
+        assert_eq!(
+            v["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"],
+            "foreign PreToolUse entry must survive untouched when rtk is None"
+        );
+    }
+
+    #[test]
+    fn agent_settings_rtk_replaces_prior_conclave_group_not_duplicate() {
+        let rtk = RtkHook {
+            cli_bin: PathBuf::from("/bin/conclave"),
+            rtk_bin: PathBuf::from("/bin/rtk"),
+        };
+        let once = claude_agent_settings("inst-9", None, None, Some(&rtk));
+        let twice = claude_agent_settings("inst-9", None, Some(once.clone()), Some(&rtk));
+        assert_eq!(
+            once, twice,
+            "re-merge must not duplicate the rtk hook group"
+        );
+        let groups = twice["hooks"]["PreToolUse"].as_array().expect("groups");
+        assert_eq!(groups.len(), 1);
+    }
+
+    #[test]
+    fn agent_settings_rtk_preserves_foreign_pre_tool_use_entries() {
+        let rtk = RtkHook {
+            cli_bin: PathBuf::from("/bin/conclave"),
+            rtk_bin: PathBuf::from("/bin/rtk"),
+        };
+        let existing = json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Write", "hooks": [{ "type": "command", "command": "echo foreign" }] }
+            ]}
+        });
+        let v = claude_agent_settings("inst-9", None, Some(existing), Some(&rtk));
+        let groups = v["hooks"]["PreToolUse"].as_array().expect("groups");
+        assert_eq!(
+            groups.len(),
+            2,
+            "foreign PreToolUse group must survive the merge"
+        );
+        assert!(groups
+            .iter()
+            .any(|g| g["hooks"][0]["command"].as_str() == Some("echo foreign")));
+        assert!(groups.iter().any(|g| g["matcher"] == json!("Bash")));
+    }
+
+    #[test]
     fn agent_settings_preserve_foreign_session_start_hooks() {
         let existing = json!({
             "hooks": { "SessionStart": [
                 { "hooks": [{ "type": "command", "command": "echo unrelated" }] }
             ]}
         });
-        let v = claude_agent_settings("inst-9", None, Some(existing));
+        let v = claude_agent_settings("inst-9", None, Some(existing), None);
         let groups = v["hooks"]["SessionStart"].as_array().expect("groups");
         assert_eq!(groups.len(), 2, "foreign hook group must survive the merge");
         assert!(groups
