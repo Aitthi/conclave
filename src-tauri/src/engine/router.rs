@@ -130,6 +130,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "browser.close" => browser::close(state, payload).await,
         "browser.setBounds" => browser::set_bounds(state, payload).await,
         "browser.setVisible" => browser::set_visible(state, payload).await,
+        "browser.screenshot" => browser::screenshot(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

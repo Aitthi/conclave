@@ -49,6 +49,16 @@ struct EvalReq {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ScreenshotReq {
+    path: String,
+    #[serde(default)]
+    width: Option<f64>,
+    #[serde(default)]
+    height: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct VisibleReq {
     visible: bool,
 }
@@ -140,6 +150,20 @@ pub async fn close(state: &AppState, _payload: Value) -> Result<Value, AppError>
     to_value(browser::close(app).await.map_err(to_app_err)?)
 }
 
+pub async fn screenshot(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req =
+        serde_json::from_value::<ScreenshotReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    if req.path.trim().is_empty() {
+        return Err(AppError::Invalid("browser screenshot: path is required".into()));
+    }
+    let app = app_handle(state)?;
+    to_value(
+        browser::screenshot(app, &req.path, req.width, req.height)
+            .await
+            .map_err(to_app_err)?,
+    )
+}
+
 pub async fn set_bounds(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req = serde_json::from_value::<Bounds>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
@@ -170,6 +194,20 @@ mod tests {
     async fn set_visible_rejects_malformed_payload() {
         let state = AppState::for_tests().await;
         let err = set_visible(&state, json!({ "nope": true })).await.unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn screenshot_rejects_blank_path() {
+        let state = AppState::for_tests().await;
+        let err = screenshot(&state, json!({ "path": "" })).await.unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn screenshot_rejects_missing_path() {
+        let state = AppState::for_tests().await;
+        let err = screenshot(&state, json!({ "width": 800 })).await.unwrap_err();
         assert!(matches!(err, AppError::Invalid(_)));
     }
 }
