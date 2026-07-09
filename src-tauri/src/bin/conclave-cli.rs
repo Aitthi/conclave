@@ -123,6 +123,7 @@ Subcommands:
   browser status | snapshot [--max-text N] | close   (status/snapshot print JSON)
   browser click|type <selector> [text...] | eval <js...>   (selectors come from snapshot; eval is local-only)
   browser screenshot [path] [--width N] [--height N]   (path defaults to ./browser-screenshot.png, resolved to an absolute path in this shell's cwd)
+  rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
 
@@ -2830,6 +2831,44 @@ fn memory_reminder_workspace_id(argv: &[String]) -> Option<String> {
     }
 }
 
+/// `conclave rtk-hook --rtk <abs-path>` — the Claude Code PreToolUse hook
+/// body. LOCAL by design: it never touches the engine socket, so it keeps
+/// working while the engine is busy or restarting. Reads the PreToolUse JSON
+/// from stdin, runs `<rtk> rewrite <command>`, and prints the hook response
+/// when a rewrite applies. Fail-open by contract: every error path (missing
+/// flag, unreadable/malformed stdin, no command, rtk spawn failure) exits 0
+/// with no output so the agent's Bash tool never breaks.
+fn run_rtk_hook(rest: &[String]) -> ExitCode {
+    let rtk = match rest {
+        [flag, path, ..] if flag == "--rtk" => PathBuf::from(path),
+        _ => return ExitCode::SUCCESS,
+    };
+    let mut stdin_text = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin_text).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let Ok(input) = serde_json::from_str::<Value>(&stdin_text) else {
+        return ExitCode::SUCCESS;
+    };
+    let Some(cmd) = extract_bash_command(&input) else {
+        return ExitCode::SUCCESS;
+    };
+    // `output()` nulls the child's stdin and captures stderr, so a chatty or
+    // prompt-happy rtk can neither hang the hook nor leak into the protocol.
+    let Ok(output) = Command::new(&rtk).arg("rewrite").arg(&cmd).output() else {
+        return ExitCode::SUCCESS;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // A signal-killed rtk has no exit code; -1 falls into the unknown-code
+    // pass-through arm.
+    let exit_code = output.status.code().unwrap_or(-1);
+    if let Some(response) = rtk_hook_response(&input, exit_code, &stdout) {
+        // `Value`'s Display is compact JSON — exactly what the hook wants.
+        println!("{response}");
+    }
+    ExitCode::SUCCESS
+}
+
 /// Extract `.tool_input.command` from a Claude Code PreToolUse payload.
 /// `None` when the path is missing, not a string, or empty — the caller
 /// treats every `None` as "emit nothing, exit 0" (fail-open).
@@ -2899,6 +2938,13 @@ async fn main() -> ExitCode {
     // the generic `cli.exec` machinery below, same as `lane`.
     if argv[0] == "stage" {
         return run_stage(&argv, self_instance.as_deref()).await;
+    }
+
+    // `rtk-hook` is fully LOCAL (Claude Code PreToolUse hook body): it must
+    // keep working while the engine is busy or restarting, so it never
+    // touches the socket at all.
+    if argv[0] == "rtk-hook" {
+        return run_rtk_hook(&argv[1..]);
     }
 
     // `uishot` — client-side wrapper over the workspace's `package.json`
