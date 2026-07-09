@@ -225,6 +225,21 @@ fn collect_jsonl_files_inner(root: &Path, min_mtime: DateTime<Utc>, out: &mut Ve
     }
 }
 
+/// Context window implied by a Claude model id, when the id itself determines
+/// it. `None` means "unknown — use the session fallback". Claude Code
+/// transcripts carry no explicit window field (unlike Codex), so the assistant
+/// line's `message.model` is the only signal we have.
+fn claude_model_context_window(model: &str) -> Option<i64> {
+    let m = model.to_ascii_lowercase();
+    if m.contains("[1m]") {
+        return Some(1_000_000); // explicit 1M-beta variants, e.g. "claude-sonnet-4-5[1m]"
+    }
+    if m.starts_with("claude-fable-5") {
+        return Some(1_000_000); // Fable 5 sessions run the 1M window (verified live)
+    }
+    None
+}
+
 fn scan_claude_file(
     path: &Path,
     instance_id: &str,
@@ -238,6 +253,10 @@ fn scan_claude_file(
     let mut saw_workspace = false;
     let mut saw_instance = false;
     let mut latest_by_key: HashMap<String, (usize, i64)> = HashMap::new();
+    // Latest RECOGNIZED model's window. A `<synthetic>` or unknown id maps to
+    // None and leaves the previous recognized window in place, so mid-session
+    // noise never drops us back to the fallback.
+    let mut last_model_window: Option<i64> = None;
     let mut line_no = 0usize;
 
     for line in reader.lines().map_while(Result::ok) {
@@ -257,6 +276,13 @@ fn scan_claude_file(
         let Some(message) = value.get("message") else {
             continue;
         };
+        if let Some(window) = message
+            .get("model")
+            .and_then(Value::as_str)
+            .and_then(claude_model_context_window)
+        {
+            last_model_window = Some(window);
+        }
         let Some(usage) = message.get("usage") else {
             continue;
         };
@@ -283,7 +309,7 @@ fn scan_claude_file(
     }
     Some(ScannedReading {
         tokens,
-        limit: fallback_limit,
+        limit: last_model_window.unwrap_or(fallback_limit),
         observed_at,
         source_kind: TranscriptSourceKind::ClaudeCode,
     })
@@ -569,6 +595,28 @@ mod tests {
                 "id": "msg-1",
                 "role": "assistant",
                 "type": "message",
+                "usage": {
+                    "input_tokens": tokens - 3,
+                    "cache_creation_input_tokens": 1,
+                    "cache_read_input_tokens": 1,
+                    "output_tokens": 1
+                }
+            }
+        })
+    }
+
+    /// An assistant usage line that also carries `message.model`, mirroring how
+    /// real Claude Code transcripts stamp the model id on every assistant line.
+    /// `req` distinguishes lines so the latest-line dedupe keys them apart.
+    fn claude_usage_line_with_model(req: &str, tokens: i64, model: &str) -> Value {
+        json!({
+            "type": "assistant",
+            "requestId": req,
+            "message": {
+                "id": req,
+                "role": "assistant",
+                "type": "message",
+                "model": model,
                 "usage": {
                     "input_tokens": tokens - 3,
                     "cache_creation_input_tokens": 1,
@@ -1137,6 +1185,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// Helper: scan a single-file claude fixture built from an owner line plus
+    /// the given assistant lines, returning the reading (or None).
+    fn scan_claude_fixture(
+        instance_id: &str,
+        fallback_limit: i64,
+        assistant_lines: &[Value],
+    ) -> Option<ScannedReading> {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let file = claude_root.join("session.jsonl");
+        let mut lines = vec![claude_owner_line(instance_id, &workspace)];
+        lines.extend_from_slice(assistant_lines);
+        write_jsonl(&file, &lines);
+        let reading = scan_claude_file(
+            &file,
+            instance_id,
+            &workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            fallback_limit,
+        );
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+        reading
+    }
+
+    #[test]
+    fn claude_fable5_model_implies_1m_window() {
+        let reading = scan_claude_fixture(
+            "inst-fable",
+            200_000,
+            &[claude_usage_line_with_model("req-1", 75_900, "claude-fable-5")],
+        )
+        .expect("expected reading");
+        assert_eq!(reading.tokens, 75_900);
+        assert_eq!(reading.limit, 1_000_000);
+    }
+
+    #[test]
+    fn claude_1m_beta_variant_implies_1m_window() {
+        let reading = scan_claude_fixture(
+            "inst-1m",
+            200_000,
+            &[claude_usage_line_with_model("req-1", 500, "claude-sonnet-4-5[1m]")],
+        )
+        .expect("expected reading");
+        assert_eq!(reading.limit, 1_000_000);
+    }
+
+    #[test]
+    fn claude_200k_model_uses_fallback_limit() {
+        let reading = scan_claude_fixture(
+            "inst-opus",
+            200_000,
+            &[claude_usage_line_with_model("req-1", 500, "claude-opus-4-8")],
+        )
+        .expect("expected reading");
+        assert_eq!(reading.limit, 200_000);
+    }
+
+    #[test]
+    fn claude_no_model_field_uses_fallback_limit() {
+        let reading = scan_claude_fixture("inst-nomodel", 200_000, &[claude_usage_line(500)])
+            .expect("expected reading");
+        assert_eq!(reading.limit, 200_000);
+    }
+
+    #[test]
+    fn claude_last_recognized_model_wins_over_synthetic() {
+        // fable (1M) first, then a `<synthetic>` model line last. The synthetic
+        // id maps to nothing, so the last RECOGNIZED window (1M) must stick.
+        let reading = scan_claude_fixture(
+            "inst-synthetic",
+            200_000,
+            &[
+                claude_usage_line_with_model("req-1", 500, "claude-fable-5"),
+                claude_usage_line_with_model("req-2", 600, "<synthetic>"),
+            ],
+        )
+        .expect("expected reading");
+        assert_eq!(reading.limit, 1_000_000);
+    }
+
+    #[test]
+    fn claude_model_context_window_maps_known_ids() {
+        assert_eq!(
+            claude_model_context_window("claude-fable-5"),
+            Some(1_000_000)
+        );
+        // case-insensitive
+        assert_eq!(
+            claude_model_context_window("CLAUDE-FABLE-5"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            claude_model_context_window("claude-sonnet-4-5[1m]"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            claude_model_context_window("claude-sonnet-4-5[1M]"),
+            Some(1_000_000)
+        );
+        assert_eq!(claude_model_context_window("claude-opus-4-8"), None);
+        assert_eq!(claude_model_context_window("<synthetic>"), None);
+        assert_eq!(claude_model_context_window(""), None);
     }
 
     #[test]
