@@ -121,6 +121,7 @@ Subcommands:
   browser open|goto <url>              (in-app browser; missing scheme → https://)
   browser status | snapshot [--max-text N] | close   (status/snapshot print JSON)
   browser click|type <selector> [text...] | eval <js...>   (selectors come from snapshot; eval is local-only)
+  browser screenshot [path] [--width N] [--height N]   (path defaults to ./browser-screenshot.png, resolved to an absolute path in this shell's cwd)
   run <orchestratorId> <prompt...>
   help
 
@@ -326,6 +327,38 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             out.push("list".to_string());
             out.push(me.to_string()); // instanceId (injected from env)
             out.extend_from_slice(&argv[2..]); // any --limit N tail
+            Ok(out)
+        }
+        Some("browser") if argv.get(1).map(String::as_str) == Some("screenshot") => {
+            // Resolve the output path (default ./browser-screenshot.png) to an
+            // absolute path in the AGENT's cwd, so the app process — which has a
+            // different cwd — writes the PNG where the agent can read it.
+            let mut out = argv.clone();
+            // The path is the first non-flag token after "screenshot"; flags are
+            // --width/--height with a following value. Find it, or inject default.
+            let flags = ["--width", "--height"];
+            let mut i = 2;
+            let mut path_idx: Option<usize> = None;
+            while i < out.len() {
+                if flags.contains(&out[i].as_str()) {
+                    i += 2; // skip flag + its value
+                    continue;
+                }
+                path_idx = Some(i);
+                break;
+            }
+            let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+            match path_idx {
+                Some(idx) => {
+                    let p = std::path::Path::new(&out[idx]);
+                    if p.is_relative() {
+                        out[idx] = cwd.join(p).to_string_lossy().into_owned();
+                    }
+                }
+                None => {
+                    out.push(cwd.join("browser-screenshot.png").to_string_lossy().into_owned());
+                }
+            }
             Ok(out)
         }
         _ => Ok(argv),

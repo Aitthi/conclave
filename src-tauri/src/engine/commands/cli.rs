@@ -831,8 +831,37 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 }
                 Ok(("browser.close", Value::Null))
             }
+            Some("screenshot") => {
+                // path is positional (already absolute — the CLI resolved it in
+                // the agent's cwd); --width/--height are optional f64 flags.
+                let after = argv.get(2..).unwrap_or(&[]);
+                let (width_raw, after) = take_flag(after, "--width");
+                let (height_raw, after) = take_flag(&after, "--height");
+                let path = after.first().cloned().ok_or_else(|| {
+                    AppError::Invalid("cli: browser screenshot <path> [--width N] [--height N]".into())
+                })?;
+                if after.len() != 1 {
+                    return Err(AppError::Invalid(
+                        "cli: browser screenshot <path> [--width N] [--height N]".into(),
+                    ));
+                }
+                let mut params = json!({ "path": path });
+                if let Some(raw) = width_raw {
+                    let n = raw.parse::<f64>().map_err(|_| {
+                        AppError::Invalid("cli: browser screenshot: --width expects a number".into())
+                    })?;
+                    params["width"] = json!(n);
+                }
+                if let Some(raw) = height_raw {
+                    let n = raw.parse::<f64>().map_err(|_| {
+                        AppError::Invalid("cli: browser screenshot: --height expects a number".into())
+                    })?;
+                    params["height"] = json!(n);
+                }
+                Ok(("browser.screenshot", params))
+            }
             _ => Err(AppError::Invalid(
-                "cli: browser <open|goto|status|snapshot|click|type|eval|close> — unknown browser subcommand".into(),
+                "cli: browser <open|goto|status|snapshot|screenshot|click|type|eval|close> — unknown browser subcommand".into(),
             )),
         },
 
@@ -2853,6 +2882,30 @@ mod tests {
             json!({ "js": "1 + 2" })
         );
         assert!(is_invalid(&["browser", "eval"]));
+    }
+
+    #[test]
+    fn browser_screenshot_maps_with_defaults_and_flags() {
+        // path is positional; already absolute by the time map_argv sees it.
+        assert_eq!(
+            ok_method(&["browser", "screenshot", "/ws/shot.png"]),
+            "browser.screenshot"
+        );
+        assert_eq!(
+            ok_params(&["browser", "screenshot", "/ws/shot.png"]),
+            json!({ "path": "/ws/shot.png" })
+        );
+        assert_eq!(
+            ok_params(&[
+                "browser", "screenshot", "/ws/shot.png", "--width", "1440", "--height", "900"
+            ]),
+            json!({ "path": "/ws/shot.png", "width": 1440.0, "height": 900.0 })
+        );
+    }
+
+    #[test]
+    fn browser_screenshot_rejects_bad_dimension() {
+        assert!(is_invalid(&["browser", "screenshot", "/ws/s.png", "--width", "abc"]));
     }
 
     #[test]
