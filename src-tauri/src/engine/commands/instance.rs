@@ -67,9 +67,16 @@ fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
 
 fn append_codex_context_window_config(launch: &mut String, context_window: Option<&str>) {
     if let Some(tokens) = positive_context_window_tokens(context_window) {
+        let auto_compact_token_limit = (i128::from(tokens) * 95 / 100) as i64;
         launch.push_str(&format!(
             " -c {}",
             shell_quote(&format!("model_context_window={tokens}"))
+        ));
+        launch.push_str(&format!(
+            " -c {}",
+            shell_quote(&format!(
+                "model_auto_compact_token_limit={auto_compact_token_limit}"
+            ))
         ));
     }
 }
@@ -1477,22 +1484,37 @@ mod tests {
     #[test]
     fn codex_context_window_config_appends_numeric_override() {
         let mut launch = String::from("codex --model 'gpt-5.3-codex-spark'");
-        append_codex_context_window_config(&mut launch, Some("121600"));
+        append_codex_context_window_config(&mut launch, Some("400000"));
 
         assert!(
-            launch.contains(" -c 'model_context_window=121600'"),
+            launch.contains(" -c 'model_context_window=400000'"),
+            "{launch}"
+        );
+        assert!(
+            launch.contains(" -c 'model_auto_compact_token_limit=380000'"),
             "{launch}"
         );
     }
 
     #[test]
     fn codex_context_window_config_ignores_claude_sentinels() {
-        for value in [Some("1m"), Some("200k"), Some("0"), Some("-1"), None] {
+        for value in [
+            Some("1m"),
+            Some("200k"),
+            Some("0"),
+            Some("-1"),
+            Some("nonnumeric"),
+            None,
+        ] {
             let mut launch = String::from("codex");
             append_codex_context_window_config(&mut launch, value);
             assert!(
                 !launch.contains("model_context_window"),
                 "sentinel/invalid value must not become a Codex context override: {launch}"
+            );
+            assert!(
+                !launch.contains("model_auto_compact_token_limit"),
+                "sentinel/invalid value must not become a Codex auto-compact override: {launch}"
             );
         }
     }
@@ -1504,6 +1526,7 @@ mod tests {
 
         assert!(launch.contains("'claude-sonnet-5[1m]'"), "{launch}");
         assert!(!launch.contains("model_context_window"), "{launch}");
+        assert!(!launch.contains("model_auto_compact_token_limit"), "{launch}");
     }
 
     /// Create a workspace + agent_definition, instantiate an instance (idle,
