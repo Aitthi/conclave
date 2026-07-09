@@ -299,12 +299,9 @@ fn scan_claude_file(
         return None;
     }
 
-    let Some((_, tokens)) = latest_by_key
+    let (_, tokens) = latest_by_key
         .into_values()
-        .max_by_key(|(line_no, _)| *line_no)
-    else {
-        return None;
-    };
+        .max_by_key(|(line_no, _)| *line_no)?;
     let observed_at = file_modified_at(path)?;
     if observed_at < started_at {
         return None;

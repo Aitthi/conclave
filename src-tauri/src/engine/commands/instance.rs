@@ -946,12 +946,6 @@ async fn forward_session_output(
         .as_ref()
         .and_then(|s| s.context_limit)
         .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT);
-    let mut current_tokens = session_row
-        .as_ref()
-        .and_then(|s| s.context_tokens)
-        .unwrap_or(0);
-    let mut current_limit = limit;
-
     if track_context {
         // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
         // is the baseline at the previous persist, so we only write every
@@ -1038,7 +1032,14 @@ async fn forward_session_output(
             return;
         };
 
-        let mut last_transcript_poll: Option<std::time::Instant> = None;
+        let mut meter = TranscriptMeterState {
+            tokens: session_row
+                .as_ref()
+                .and_then(|s| s.context_tokens)
+                .unwrap_or(0),
+            limit,
+            last_poll: None,
+        };
         let mut poll_timer = tokio::time::interval(TRANSCRIPT_POLL_INTERVAL);
         poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         poll_timer.tick().await;
@@ -1064,9 +1065,7 @@ async fn forward_session_output(
                         &instance_id,
                         &session_id,
                         &transcript_ctx,
-                        &mut current_tokens,
-                        &mut current_limit,
-                        &mut last_transcript_poll,
+                        &mut meter,
                         false,
                     )
                     .await;
@@ -1078,9 +1077,7 @@ async fn forward_session_output(
                         &instance_id,
                         &session_id,
                         &transcript_ctx,
-                        &mut current_tokens,
-                        &mut current_limit,
-                        &mut last_transcript_poll,
+                        &mut meter,
                         false,
                     )
                     .await;
@@ -1094,9 +1091,7 @@ async fn forward_session_output(
             &instance_id,
             &session_id,
             &transcript_ctx,
-            &mut current_tokens,
-            &mut current_limit,
-            &mut last_transcript_poll,
+            &mut meter,
             true,
         )
         .await;
@@ -1118,6 +1113,14 @@ async fn forward_session_output(
     }
 }
 
+/// Mutable meter state threaded through transcript polls: the last persisted
+/// reading plus the poll-interval clock.
+struct TranscriptMeterState {
+    tokens: i64,
+    limit: i64,
+    last_poll: Option<std::time::Instant>,
+}
+
 /// Poll the transcript reader for the CLI transcript-backed meter and persist
 /// any newer reading.
 async fn poll_transcript_context(
@@ -1126,13 +1129,11 @@ async fn poll_transcript_context(
     instance_id: &str,
     session_id: &str,
     transcript_ctx: &TranscriptPollContext,
-    current_tokens: &mut i64,
-    current_limit: &mut i64,
-    last_poll: &mut Option<std::time::Instant>,
+    meter: &mut TranscriptMeterState,
     force: bool,
 ) {
     if !force {
-        if let Some(last) = last_poll.as_ref() {
+        if let Some(last) = meter.last_poll.as_ref() {
             if last.elapsed() < TRANSCRIPT_POLL_INTERVAL {
                 return;
             }
@@ -1160,15 +1161,15 @@ async fn poll_transcript_context(
     .ok()
     .flatten();
     let Some(reading) = reading else {
-        *last_poll = Some(std::time::Instant::now());
+        meter.last_poll = Some(std::time::Instant::now());
         return;
     };
 
-    let changed = reading.tokens != *current_tokens || reading.limit != *current_limit;
-    *current_tokens = reading.tokens;
-    *current_limit = reading.limit;
+    let changed = reading.tokens != meter.tokens || reading.limit != meter.limit;
+    meter.tokens = reading.tokens;
+    meter.limit = reading.limit;
     if !changed {
-        *last_poll = Some(std::time::Instant::now());
+        meter.last_poll = Some(std::time::Instant::now());
         return;
     }
 
@@ -1191,7 +1192,7 @@ async fn poll_transcript_context(
         reading.tokens, reading.source_kind, reading.observed_at
     );
 
-    *last_poll = Some(std::time::Instant::now());
+    meter.last_poll = Some(std::time::Instant::now());
 }
 
 /// Persist + emit the current context estimate, then run the auto-compact check.
