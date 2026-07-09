@@ -341,7 +341,15 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             let mut path_idx: Option<usize> = None;
             while i < out.len() {
                 if flags.contains(&out[i].as_str()) {
-                    i += 2; // skip flag + its value
+                    // Only skip the value slot if there IS one and it doesn't
+                    // itself look like a flag; otherwise treat this as a
+                    // malformed/missing-value flag and advance by one so we
+                    // don't misread the next flag as this one's value.
+                    if i + 1 < out.len() && !out[i + 1].starts_with("--") {
+                        i += 2; // skip flag + its value
+                    } else {
+                        i += 1;
+                    }
                     continue;
                 }
                 path_idx = Some(i);
@@ -3701,6 +3709,87 @@ mod tests {
             expand_self_args(all_lim.clone(), Some("self1")).unwrap(),
             all_lim
         );
+    }
+
+    // ── browser screenshot: path resolution ────────────────────────────────
+
+    #[test]
+    fn expand_browser_screenshot_resolves_relative_path_to_absolute() {
+        let out =
+            expand_self_args(v(&["browser", "screenshot", "shot.png"]), None).unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(
+            Path::new(&out[2]).is_absolute(),
+            "expected absolute path, got {}",
+            out[2]
+        );
+        assert!(
+            out[2].ends_with("shot.png"),
+            "expected path to end with the given filename, got {}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn expand_browser_screenshot_leaves_absolute_path_unchanged() {
+        let out = expand_self_args(
+            v(&["browser", "screenshot", "/tmp/shot.png"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out, v(&["browser", "screenshot", "/tmp/shot.png"]));
+    }
+
+    #[test]
+    fn expand_browser_screenshot_injects_default_path_when_absent() {
+        let out = expand_self_args(v(&["browser", "screenshot"]), None).unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(
+            Path::new(&out[2]).is_absolute(),
+            "expected absolute default path, got {}",
+            out[2]
+        );
+        assert!(
+            out[2].ends_with("browser-screenshot.png"),
+            "expected default filename, got {}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn expand_browser_screenshot_skips_flags_before_path() {
+        let out = expand_self_args(
+            v(&["browser", "screenshot", "--width", "1440", "shot.png"]),
+            None,
+        )
+        .unwrap();
+        // The path token is the last one; --width/1440 pass through untouched.
+        assert_eq!(out[2], "--width");
+        assert_eq!(out[3], "1440");
+        assert!(
+            Path::new(&out[4]).is_absolute(),
+            "expected the trailing token to be resolved, got {}",
+            out[4]
+        );
+        assert!(out[4].ends_with("shot.png"), "got {}", out[4]);
+    }
+
+    #[test]
+    fn expand_browser_screenshot_resolves_path_before_trailing_flags() {
+        let out = expand_self_args(
+            v(&["browser", "screenshot", "shot.png", "--width", "1440"]),
+            None,
+        )
+        .unwrap();
+        assert!(
+            Path::new(&out[2]).is_absolute(),
+            "expected the path token to be resolved, got {}",
+            out[2]
+        );
+        assert!(out[2].ends_with("shot.png"), "got {}", out[2]);
+        // The trailing flag pair is untouched and still present.
+        assert_eq!(out[3], "--width");
+        assert_eq!(out[4], "1440");
     }
 
     #[test]
