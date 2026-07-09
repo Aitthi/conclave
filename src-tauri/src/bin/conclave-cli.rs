@@ -364,7 +364,11 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
                     }
                 }
                 None => {
-                    out.push(cwd.join("browser-screenshot.png").to_string_lossy().into_owned());
+                    out.push(
+                        cwd.join("browser-screenshot.png")
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
                 }
             }
             Ok(out)
@@ -3715,8 +3719,7 @@ mod tests {
 
     #[test]
     fn expand_browser_screenshot_resolves_relative_path_to_absolute() {
-        let out =
-            expand_self_args(v(&["browser", "screenshot", "shot.png"]), None).unwrap();
+        let out = expand_self_args(v(&["browser", "screenshot", "shot.png"]), None).unwrap();
         assert_eq!(out.len(), 3);
         assert!(
             Path::new(&out[2]).is_absolute(),
@@ -3732,11 +3735,7 @@ mod tests {
 
     #[test]
     fn expand_browser_screenshot_leaves_absolute_path_unchanged() {
-        let out = expand_self_args(
-            v(&["browser", "screenshot", "/tmp/shot.png"]),
-            None,
-        )
-        .unwrap();
+        let out = expand_self_args(v(&["browser", "screenshot", "/tmp/shot.png"]), None).unwrap();
         assert_eq!(out, v(&["browser", "screenshot", "/tmp/shot.png"]));
     }
 
