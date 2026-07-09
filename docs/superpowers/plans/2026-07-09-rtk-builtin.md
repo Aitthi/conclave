@@ -29,6 +29,8 @@
 
 **Boundary:** `scripts/fetch-rtk.sh`, `src-tauri/tauri.conf.json`, `.gitignore`, `src-tauri/src/engine/agentctx.rs`, `src-tauri/src/engine/runtime/sandbox_config.rs`, `src-tauri/src/engine/commands/instance.rs`, `src-tauri/src/engine/migrations/0017_agent_rtk_enabled.sql`, `src-tauri/src/engine/db.rs`, `src-tauri/src/engine/repo/agent_definition.rs`, `src-tauri/src/engine/commands/agent.rs`
 
+**Boundary amendment (Detoro ruling on challenge 5432acf7, credit: Tiësto):** plus `src-tauri/build.rs` and `package.json`. tauri-build validates every `externalBin` entry EAGERLY on plain `cargo check/test/clippy` (reproduced: removing the staged binary fails cargo check with "resource path binaries/rtk-<triple> doesn't exist"). Per the immutable-boundary convention these two files land as separate scoped raw `git commit -- <path>` commits, not via `stage commit`.
+
 ### Task A1: fetch script + bundle config
 
 **Files:**
@@ -84,7 +86,26 @@ Append to `.gitignore`:
 src-tauri/binaries/
 ```
 
-- [ ] **Step 4: Commit** (`git status` must show binaries/ ignored)
+- [ ] **Step 4: placeholder so plain cargo builds stay green** (ruling 5432acf7)
+
+tauri-build validates every `externalBin` eagerly on plain `cargo check` — a tree
+that never ran `fetch-rtk.sh` must still compile. In `src-tauri/build.rs`, BEFORE
+`tauri_build::build()`: compute `binaries/rtk-<host-triple>` (host triple from the
+`TARGET` env var cargo sets for build scripts) and create it zero-byte
+(`std::fs::File::create`) when absent, `mkdir -p` included. Zero-size is the
+"placeholder" sentinel — A2's resolver treats zero-size files as unresolvable.
+
+In `package.json`, chain the fetch into the tauri script so real dev/build always
+stages the real binary first: `"tauri": "bash scripts/fetch-rtk.sh && tauri"`.
+
+Verify: `rm -f src-tauri/binaries/rtk-*` then `cargo check` (from src-tauri) →
+must PASS, and the placeholder file exists with size 0.
+
+- [ ] **Step 5: Commit.** Boundary note: `src-tauri/build.rs` and `package.json`
+are post-ruling additions OUTSIDE the original task boundary — land each as its own
+scoped raw commit (`git commit -- src-tauri/build.rs`, `git commit -- package.json`),
+not via `stage commit`; everything else commits normally (`git status` must show
+binaries/ ignored).
 
 ### Task A2: runtime resolver + shim symlink
 
@@ -95,7 +116,7 @@ src-tauri/binaries/
 **Interfaces:**
 - Produces: `pub fn resolve_rtk_bin() -> Option<PathBuf>` (thin `current_exe()` wrapper) + testable inner `fn resolve_rtk_bin_from(exe_dir: &Path, dev_binaries_dir: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf>`; `ensure_conclave_shim()` now also maintains `<data_dir>/Conclave/bin/rtk` symlink.
 
-- [ ] **Step 1: Failing tests** — in the existing `#[cfg(test)]` module: (a) `resolve_rtk_bin_from` returns the sibling `rtk` when present in a tempdir exe_dir; (b) falls back to a `rtk-*`-named file in the dev binaries dir when no sibling; (c) returns None when neither exists and PATH lookup is skipped (pass an empty PATH via the inner fn taking `path_var: Option<&OsStr>`). Follow the memory pattern: current_exe() wrapper is untestable — test the inner fn only.
+- [ ] **Step 1: Failing tests** — in the existing `#[cfg(test)]` module: (a) `resolve_rtk_bin_from` returns the sibling `rtk` when present in a tempdir exe_dir; (b) falls back to a `rtk-*`-named file in the dev binaries dir when no sibling; (c) returns None when neither exists and PATH lookup is skipped (pass an empty PATH via the inner fn taking `path_var: Option<&OsStr>`); (d) **zero-size files are unresolvable** (ruling 5432acf7): a 0-byte sibling `rtk` AND a 0-byte dev `rtk-<triple>` placeholder → `None` — the build.rs placeholder must never become a shim link. Follow the memory pattern: current_exe() wrapper is untestable — test the inner fn only.
 - [ ] **Step 2: Verify FAIL** (`cargo test -p conclave resolve_rtk` — adjust package name to the actual `src-tauri` crate name, see Cargo.toml).
 - [ ] **Step 3: Implement.** Resolution order: (1) `exe_dir.join("rtk")` if `is_file()`; (2) first `is_file()` entry named `rtk-*` in `dev_binaries_dir` (wrapper passes `Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries")`); (3) scan `std::env::split_paths(path_var)` for an executable `rtk`. In `ensure_conclave_shim()`, after the conclave link, `if let Some(rtk) = resolve_rtk_bin() { refresh_shim_link(...) }` reusing the existing atomic pattern (generalize `refresh_shim_link` to take the link name if it currently hardcodes `conclave`). rtk unresolvable = fine, shim just lacks the link.
 - [ ] **Step 4: Tests PASS, fmt, commit.**
@@ -219,6 +240,7 @@ Merge order: any (A/B/C independent). After all merged: rerun 3 Rust gates + uis
 
 ## Risk ledger
 
+- **tauri-build validates `externalBin` eagerly on plain cargo builds** (found live by Tiësto, challenge 5432acf7): without the build.rs zero-byte placeholder, any tree that hasn't run `fetch-rtk.sh` fails `cargo check`. The placeholder + zero-size resolver guard + package.json fetch chain keep both cargo and runtime fail-open.
 - `cargo install --git --tag`: tag naming may be `rtk-v0.42.4` (release-please) — A1 Step 2 verifies and fixes.
 - `refresh_shim_link` may hardcode the `conclave` link name — A2 generalizes it; keep the conclave behavior byte-identical.
 - `list_with_counts` has a HARDCODED column list that must stay in sync with `COLS` — A4 touches both or the query breaks at runtime, not compile time.
