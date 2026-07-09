@@ -26,6 +26,7 @@ import type {
   BrowserSnapshot,
   BrowserActionResult,
   BrowserBounds,
+  BrowserShot,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -349,6 +350,7 @@ export interface Commands {
   "browser.close": { req: void; res: BrowserStatus };
   "browser.setBounds": { req: BrowserBounds; res: BrowserStatus };
   "browser.setVisible": { req: { visible: boolean }; res: BrowserStatus };
+  "browser.screenshot": { req: { path: string; width?: number; height?: number }; res: BrowserShot };
 }
 
 // ---------------------------------------------------------------------------
@@ -489,5 +491,6 @@ export const ipc = {
     close: () => call("browser.close"),
     setBounds: (req: Commands["browser.setBounds"]["req"]) => call("browser.setBounds", req),
     setVisible: (req: Commands["browser.setVisible"]["req"]) => call("browser.setVisible", req),
+    screenshot: (req: Commands["browser.screenshot"]["req"]) => call("browser.screenshot", req),
   },
 } as const;

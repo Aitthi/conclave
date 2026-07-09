@@ -452,3 +452,11 @@ export interface BrowserBounds {
   width: number;
   height: number;
 }
+
+// Result of browser.screenshot — the written PNG path + capture dims. Mirrors
+// the Rust `BrowserShot` struct.
+export interface BrowserShot {
+  path: string;
+  width: number;
+  height: number;
+}

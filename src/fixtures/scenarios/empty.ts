@@ -38,4 +38,5 @@ export const handlers: FixtureHandlers = {
   "browser.status": () => ({ ok: false, message: "no browser is open" }),
   "browser.setBounds": () => ({ ok: true }),
   "browser.setVisible": () => ({ ok: true }),
+  "browser.screenshot": () => ({ path: "/tmp/browser-screenshot.png", width: 1280, height: 800 }),
 };

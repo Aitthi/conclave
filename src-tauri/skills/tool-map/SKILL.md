@@ -73,6 +73,7 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Browser | `conclave browser type <selector> <text...>` | focus + fill an input-like element |
 | Browser | `conclave browser eval <js...>` | escape hatch: run JS in the page, return the JSON result (same-user local tool; never networked) |
 | Browser | `conclave browser close` | close the browser window |
+| Browser | `conclave browser screenshot <path> [--width N] [--height N]` | capture the current page to a PNG (macOS) — returns the file path, Read it to see the pixels |
 | Help | `conclave help` | this list, live — trust it over any cached copy |
 
 ## Artifacts — when to save one
