@@ -662,16 +662,20 @@ pub struct ChallengeCandidate {
     pub payload: String,
 }
 
-/// Every `challenge` event across every workspace, with its owning task's
-/// context. The caller filters to overdue-and-unruled (parsing
-/// `payload.deadlineAt` and cross-referencing [`ruling_challenge_ids`]) —
-/// done in Rust rather than SQL/JSON1 to keep this query engine-agnostic.
+/// Every `challenge` event on a still-LIVE task, with its owning task's
+/// context. Merged/abandoned tasks are excluded at the source: a closed
+/// task's dispute is over, so its deadline must never fire a default or page
+/// anyone (second half of the 343ee8d6/c07d2dfe incident, 2026-07-09). The
+/// caller filters the rest to overdue-and-unruled (parsing
+/// `payload.deadlineAt` and cross-referencing the ruling payloads) — done in
+/// Rust rather than SQL/JSON1 to keep this query engine-agnostic. Sole
+/// caller: the challenge-deadline timer.
 pub async fn open_challenge_candidates(pool: &SqlitePool) -> sqlx::Result<Vec<ChallengeCandidate>> {
     sqlx::query_as::<_, ChallengeCandidate>(
         "SELECT e.id AS event_id, t.workspace_id, t.slug, t.owner_agent_id, \
          e.actor_agent_id, e.payload \
          FROM task_event e JOIN task t ON t.id = e.task_id \
-         WHERE e.kind = 'challenge'",
+         WHERE e.kind = 'challenge' AND t.state NOT IN ('merged', 'abandoned')",
     )
     .fetch_all(pool)
     .await

@@ -231,6 +231,27 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
     }
 }
 
+/// A ruling's `challengeId` must have at least this many characters to count
+/// as a prefix reference. The CLI renders task-event ids as 8-char prefixes,
+/// so 8 is exactly what a human-issued `task rule` carries; anything shorter
+/// is malformed and must not wildcard-match every candidate.
+const RULED_ID_PREFIX_MIN: usize = 8;
+
+/// Whether `candidate_event_id` (a full challenge event id) is covered by any
+/// recorded ruling. Exact match first; otherwise a ruling counts when its
+/// stored `challengeId` is a ≥[`RULED_ID_PREFIX_MIN`]-char PREFIX of the
+/// candidate — the 343ee8d6/c07d2dfe incident (2026-07-09) proved humans rule
+/// by the short id the CLI displays (`challengeId: "98ea352a"`), and an
+/// exact-only comparison let the deadline default fire over a real ruling.
+fn is_ruled(candidate_event_id: &str, ruled_ids: &HashSet<String>) -> bool {
+    if ruled_ids.contains(candidate_event_id) {
+        return true;
+    }
+    ruled_ids
+        .iter()
+        .any(|ruled| ruled.len() >= RULED_ID_PREFIX_MIN && candidate_event_id.starts_with(ruled))
+}
+
 async fn check_challenge_deadlines(state: &AppState, now: DateTime<Utc>) {
     let Ok(candidates) = repo::task::open_challenge_candidates(&state.db).await else {
         return;
@@ -249,7 +270,7 @@ async fn check_challenge_deadlines(state: &AppState, now: DateTime<Utc>) {
         .collect();
 
     for c in candidates {
-        if ruled_ids.contains(&c.event_id) {
+        if is_ruled(&c.event_id, &ruled_ids) {
             continue;
         }
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&c.payload) else {
@@ -1230,6 +1251,145 @@ mod tests {
                 .iter()
                 .all(|e| e["kind"] != "ruling"),
             "an advisory (no deadline) challenge must never auto-default"
+        );
+    }
+
+    /// Regression for the 343ee8d6/c07d2dfe incident (2026-07-09): the CLI
+    /// prints task-event ids as 8-char prefixes, so a lead's `task rule`
+    /// stored `challengeId: "98ea352a"` while the candidate loop compared
+    /// against the FULL event id — the manual ruling was invisible to the
+    /// dedup and the deadline default fired anyway, 90 minutes after the
+    /// ruling, on a task that was already merged. Seeds the exact same
+    /// shape: the ruling references the challenge by its short-id prefix.
+    #[tokio::test]
+    async fn ruling_referencing_the_challenge_by_short_id_prefix_blocks_the_default() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        let challenge_event = task::challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": challenger,
+                "claim": "c", "evidence": "e", "proposal": "p",
+                "default": "d", "deadlineMin": 10
+            }),
+        )
+        .await
+        .expect("challenge failed");
+        let full_id = challenge_event["id"].as_str().unwrap();
+        // The ruling arrives BEFORE the deadline, referencing the challenge
+        // the way the CLI displays it — by its first 8 characters.
+        task::rule(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": owner,
+                "challengeEventId": &full_id[..8], "text": "resolved manually"
+            }),
+        )
+        .await
+        .expect("rule failed");
+
+        let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
+
+        let got = task::get(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("get failed");
+        let rulings: Vec<_> = got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "ruling")
+            .collect();
+        assert_eq!(
+            rulings.len(),
+            1,
+            "the short-id manual ruling must stand — no default appended"
+        );
+        assert_eq!(rulings[0]["payload"]["by"], json!(owner));
+        // And nobody is paged about a default that must not exist.
+        assert_eq!(inbox(&state, &owner).await.len(), 0, "owner not paged");
+        assert_eq!(
+            inbox(&state, &challenger).await.len(),
+            0,
+            "challenger not paged"
+        );
+    }
+
+    /// Second half of the same incident: the default fired on a task that was
+    /// already MERGED and closed. A challenge on a merged or abandoned task
+    /// must never fire a deadline default at all, ruled or not.
+    #[tokio::test]
+    async fn challenge_on_a_merged_or_abandoned_task_never_fires_a_default() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Owner").await;
+        let challenger = fixture_instance(&state, &ws, "Challenger").await;
+        for (slug, terminal) in [("t-merged", "merged"), ("t-abandoned", "abandoned")] {
+            task::create(
+                &state,
+                json!({ "workspaceId": ws, "slug": slug, "title": "T", "ownerAgentId": owner }),
+            )
+            .await
+            .expect("create failed");
+            task::challenge(
+                &state,
+                json!({
+                    "workspaceId": ws, "slug": slug, "actorId": challenger,
+                    "claim": "c", "evidence": "e", "proposal": "p",
+                    "default": "d", "deadlineMin": 10
+                }),
+            )
+            .await
+            .expect("challenge failed");
+            task::claim(
+                &state,
+                json!({ "workspaceId": ws, "slug": slug, "actorId": challenger }),
+            )
+            .await
+            .expect("claim failed");
+            let chain: &[&str] = match terminal {
+                "merged" => &["in_progress", "review", "merged"],
+                _ => &["in_progress", "abandoned"],
+            };
+            for next in chain {
+                task::set_state(
+                    &state,
+                    json!({ "workspaceId": ws, "slug": slug, "state": next, "actorId": challenger }),
+                )
+                .await
+                .expect("set_state failed");
+            }
+        }
+
+        let mut ticker = Ticker::new();
+        tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
+
+        for slug in ["t-merged", "t-abandoned"] {
+            let got = task::get(&state, json!({ "workspaceId": ws, "slug": slug }))
+                .await
+                .expect("get failed");
+            assert!(
+                got["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|e| e["kind"] != "ruling"),
+                "{slug}: a closed task's challenge must never auto-default"
+            );
+        }
+        assert_eq!(inbox(&state, &owner).await.len(), 0, "owner not paged");
+        assert_eq!(
+            inbox(&state, &challenger).await.len(),
+            0,
+            "challenger not paged"
         );
     }
 
