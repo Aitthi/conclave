@@ -1217,7 +1217,11 @@ mod tests {
         let reading = scan_claude_fixture(
             "inst-fable",
             200_000,
-            &[claude_usage_line_with_model("req-1", 75_900, "claude-fable-5")],
+            &[claude_usage_line_with_model(
+                "req-1",
+                75_900,
+                "claude-fable-5",
+            )],
         )
         .expect("expected reading");
         assert_eq!(reading.tokens, 75_900);
@@ -1229,7 +1233,11 @@ mod tests {
         let reading = scan_claude_fixture(
             "inst-1m",
             200_000,
-            &[claude_usage_line_with_model("req-1", 500, "claude-sonnet-4-5[1m]")],
+            &[claude_usage_line_with_model(
+                "req-1",
+                500,
+                "claude-sonnet-4-5[1m]",
+            )],
         )
         .expect("expected reading");
         assert_eq!(reading.limit, 1_000_000);
@@ -1240,7 +1248,11 @@ mod tests {
         let reading = scan_claude_fixture(
             "inst-opus",
             200_000,
-            &[claude_usage_line_with_model("req-1", 500, "claude-opus-4-8")],
+            &[claude_usage_line_with_model(
+                "req-1",
+                500,
+                "claude-opus-4-8",
+            )],
         )
         .expect("expected reading");
         assert_eq!(reading.limit, 200_000);
