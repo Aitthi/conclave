@@ -746,7 +746,10 @@ mod tests {
             1 + SUBMIT_CR_DELAYS_MS.len(),
             "expected tagged body + one CR per retry slot, got {writes:?}"
         );
-        assert!(writes[0].ends_with("] hi"), "first write is the tagged body");
+        assert!(
+            writes[0].ends_with("] hi"),
+            "first write is the tagged body"
+        );
         for cr in &writes[1..] {
             assert_eq!(cr, "\r", "every follow-up write is a bare Enter");
         }
