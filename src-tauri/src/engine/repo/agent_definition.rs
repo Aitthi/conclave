@@ -115,6 +115,10 @@ pub struct AgentDefRow {
         serialize_with = "serialize_json_text"
     )]
     pub selected_builtin_skill_ids: Option<String>,
+    /// rtk (Claude Code hook) toggle. `None` OR `Some(true)` = enabled;
+    /// `Some(false)` = disabled. Nullable INTEGER column, NULL defaults ON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtk_enabled: Option<bool>,
     pub created_at: String,
 }
 
@@ -170,6 +174,10 @@ pub struct AgentDefListItem {
         serialize_with = "serialize_json_text"
     )]
     pub selected_builtin_skill_ids: Option<String>,
+    /// rtk (Claude Code hook) toggle. `None` OR `Some(true)` = enabled;
+    /// `Some(false)` = disabled. Nullable INTEGER column, NULL defaults ON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtk_enabled: Option<bool>,
     pub created_at: String,
     /// How many workspaces this definition has been added to.
     pub in_workspaces: i64,
@@ -177,7 +185,7 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 21] = [
+const COLS: [&str; 22] = [
     "id",
     "name",
     "role",
@@ -198,6 +206,7 @@ const COLS: [&str; 21] = [
     "secret_env_keys",
     "context_window",
     "selected_builtin_skill_ids",
+    "rtk_enabled",
     "created_at",
 ];
 
@@ -238,6 +247,9 @@ pub struct AgentDefinitionInput {
     /// JSON array of optional builtin skill ids selected for this agent
     /// definition (see ADR 0003). `None` clears the selection.
     pub selected_builtin_skill_ids: Option<String>,
+    /// rtk (Claude Code hook) toggle. `None` OR `Some(true)` = enabled;
+    /// `Some(false)` = disabled.
+    pub rtk_enabled: Option<bool>,
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -270,7 +282,7 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
          d.provider_id, d.model, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
          d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
-         d.selected_builtin_skill_ids, \
+         d.selected_builtin_skill_ids, d.rtk_enabled, \
          d.created_at, \
          (SELECT COUNT(*) FROM workspace_agent wa WHERE wa.agent_def_id = d.id) AS in_workspaces \
          FROM agent_definition d \
@@ -418,6 +430,10 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
                     .map(Bind::Text)
                     .unwrap_or(Bind::Null),
             ),
+            (
+                "rtk_enabled",
+                input.rtk_enabled.map(Bind::Bool).unwrap_or(Bind::Null),
+            ),
             ("created_at", Bind::Text(created_at.clone())),
         ])
         .execute(pool)
@@ -445,6 +461,7 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         secret_env_keys: input.secret_env_keys,
         context_window: input.context_window,
         selected_builtin_skill_ids: input.selected_builtin_skill_ids,
+        rtk_enabled: input.rtk_enabled,
         created_at,
     })
 }
@@ -526,6 +543,10 @@ pub async fn update(
                     .map(Bind::Text)
                     .unwrap_or(Bind::Null),
             ),
+            (
+                "rtk_enabled",
+                input.rtk_enabled.map(Bind::Bool).unwrap_or(Bind::Null),
+            ),
         ])
         .where_eq("id", id)
         .execute(pool)
@@ -579,6 +600,7 @@ mod tests {
             secret_env_keys: None,
             context_window: None,
             selected_builtin_skill_ids: None,
+            rtk_enabled: None,
         }
     }
 
@@ -611,6 +633,7 @@ mod tests {
                 secret_env_keys: Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#.into()),
                 context_window: Some("1m".into()),
                 selected_builtin_skill_ids: None,
+                rtk_enabled: Some(false),
             },
         )
         .await
@@ -639,6 +662,7 @@ mod tests {
         assert_eq!(row.share_blackboard, Some(true));
         assert_eq!(row.auto_submit_injected, Some(false));
         assert_eq!(row.allowed_senders.as_deref(), Some("all"));
+        assert_eq!(row.rtk_enabled, Some(false), "explicit disable round-trips");
         assert!(!row.id.is_empty());
         assert!(!row.created_at.is_empty());
 
@@ -664,6 +688,10 @@ mod tests {
         assert!(minimal.custom_env.is_none());
         assert!(minimal.secret_env_keys.is_none());
         assert!(minimal.context_window.is_none());
+        assert!(
+            minimal.rtk_enabled.is_none(),
+            "unset rtk_enabled round-trips to None (means enabled)"
+        );
 
         let fetched2 = get(&pool, &minimal.id)
             .await
@@ -704,6 +732,7 @@ mod tests {
                 secret_env_keys: None,
                 context_window: Some("200k".into()),
                 selected_builtin_skill_ids: None,
+                rtk_enabled: Some(true),
             },
         )
         .await
@@ -726,6 +755,11 @@ mod tests {
         assert_eq!(updated.share_blackboard, Some(true));
         assert_eq!(updated.auto_submit_injected, Some(true));
         assert_eq!(updated.allowed_senders.as_deref(), Some("selected"));
+        assert_eq!(
+            updated.rtk_enabled,
+            Some(true),
+            "explicit enable round-trips through update"
+        );
         // created_at preserved
         assert_eq!(updated.created_at, row.created_at);
     }
@@ -802,6 +836,7 @@ mod tests {
                 secret_env_keys: Some(r#"["ANTHROPIC_AUTH_TOKEN"]"#.into()),
                 context_window: Some("1m".into()),
                 selected_builtin_skill_ids: None,
+                rtk_enabled: Some(false),
             },
         )
         .await
@@ -856,6 +891,11 @@ mod tests {
             json.get("allowedSenders").is_some(),
             "must have allowedSenders"
         );
+        assert_eq!(
+            json.get("rtkEnabled"),
+            Some(&serde_json::Value::Bool(false)),
+            "must have rtkEnabled as a JSON bool"
+        );
 
         // snake_case must NOT appear
         assert!(
@@ -880,6 +920,10 @@ mod tests {
             json.get("allowed_senders").is_none(),
             "must NOT have allowed_senders"
         );
+        assert!(
+            json.get("rtk_enabled").is_none(),
+            "must NOT have rtk_enabled"
+        );
 
         // list item also serializes inWorkspaces in camelCase
         let items = list_with_counts(&pool).await.expect("list failed");
@@ -891,6 +935,11 @@ mod tests {
         assert!(
             item_json.get("in_workspaces").is_none(),
             "must NOT have in_workspaces"
+        );
+        assert_eq!(
+            item_json.get("rtkEnabled"),
+            Some(&serde_json::Value::Bool(false)),
+            "list_with_counts hardcoded column list must include rtk_enabled"
         );
     }
 
@@ -957,5 +1006,51 @@ mod tests {
 
         let listed = list_with_counts(&pool).await.expect("list failed");
         assert_eq!(listed[0].context_window.as_deref(), Some("121600"));
+    }
+
+    /// `rtk_enabled` tri-state round-trip (Task A4 wire contract): unset stays
+    /// `None` (== enabled), an explicit `Some(false)` persists as disabled, and
+    /// `update` can flip it back to `Some(true)` (explicit enable).
+    #[tokio::test]
+    async fn rtk_enabled_tristate_roundtrip() {
+        let pool = connect_in_memory().await;
+
+        // Save without rtk_enabled -> None (means enabled by default).
+        let unset = create(&pool, &minimal_input("Unset", "cli", "own"))
+            .await
+            .expect("create failed");
+        assert!(unset.rtk_enabled.is_none());
+        let fetched_unset = get(&pool, &unset.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert!(fetched_unset.rtk_enabled.is_none());
+
+        // Save with rtk_enabled: Some(false) -> disabled, persists as such.
+        let disabled_input = AgentDefinitionInput {
+            name: "Disabled".into(),
+            agent_type: "cli".into(),
+            harness_mode: "own".into(),
+            rtk_enabled: Some(false),
+            ..Default::default()
+        };
+        let disabled = create(&pool, &disabled_input).await.expect("create failed");
+        assert_eq!(disabled.rtk_enabled, Some(false));
+        let fetched_disabled = get(&pool, &disabled.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert_eq!(fetched_disabled.rtk_enabled, Some(false));
+
+        // update() can flip it back to explicit Some(true).
+        let re_enabled_input = AgentDefinitionInput {
+            rtk_enabled: Some(true),
+            ..disabled_input
+        };
+        let re_enabled = update(&pool, &disabled.id, &re_enabled_input)
+            .await
+            .expect("update failed")
+            .expect("row should exist after update");
+        assert_eq!(re_enabled.rtk_enabled, Some(true));
     }
 }

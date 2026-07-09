@@ -212,6 +212,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 17 {
+        sqlx::raw_sql(include_str!("migrations/0017_agent_rtk_enabled.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 17;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -366,7 +375,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 16, "migrate() from v13 must reach schema v16");
+        assert_eq!(version, 17, "migrate() from v13 must reach schema v17");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -445,7 +454,7 @@ mod tests {
         assert_eq!(count, 26, "expected 26 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 16.
+    /// Running migrate twice must not error and must leave user_version == 17.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -478,7 +487,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 16, "user_version should be 16");
+        assert_eq!(version, 17, "user_version should be 17");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -681,7 +690,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -772,7 +781,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -882,7 +891,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped

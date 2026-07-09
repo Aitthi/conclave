@@ -81,6 +81,9 @@ struct SaveAgentReq {
     #[allow(dead_code)]
     tool_ids: Option<Vec<String>>,
     skill_ids: Option<Vec<String>>,
+    /// rtk (Claude Code hook) toggle. Absent or `Some(true)` = enabled;
+    /// `Some(false)` = disabled (Lane A ⇄ Lane C wire contract).
+    rtk_enabled: Option<bool>,
 }
 
 /// Payload for `agentDef.delete`.
@@ -308,6 +311,7 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         secret_env_keys,
         context_window: nonblank(req.context_window),
         selected_builtin_skill_ids,
+        rtk_enabled: req.rtk_enabled,
     };
 
     // Capture the previously-stored secret key NAMES (UPDATE only) so we can
