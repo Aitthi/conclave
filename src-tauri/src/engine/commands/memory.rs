@@ -731,7 +731,11 @@ fn bm25_score(
         return 0.0;
     }
     let length = document.len() as f32;
-    let average_length = if average_length > 0.0 { average_length } else { 1.0 };
+    let average_length = if average_length > 0.0 {
+        average_length
+    } else {
+        1.0
+    };
     query_terms
         .iter()
         .map(|term| {
@@ -879,12 +883,11 @@ async fn search_with_embedding(
         let generation = cached.generation;
         let query = query.clone();
         let query_text = req.query.clone();
-        let hits =
-            tokio::task::spawn_blocking(move || score_cached(&query, &query_text, &cached.rows, limit))
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!("memory search worker failed: {error}"))
-                })??;
+        let hits = tokio::task::spawn_blocking(move || {
+            score_cached(&query, &query_text, &cached.rows, limit)
+        })
+        .await
+        .map_err(|error| AppError::Internal(format!("memory search worker failed: {error}")))??;
 
         if cache.generation(&req.workspace_id) == generation {
             return Ok(json!({ "hits": hits }));
@@ -1079,14 +1082,20 @@ pub async fn graph(state: &AppState, payload: Value) -> Result<Value, AppError> 
     let mut token_index: HashMap<&str, Vec<usize>> = HashMap::new();
     for (chunk_index, tokens) in tokens_by_chunk.iter().enumerate() {
         for token in tokens {
-            token_index.entry(token.as_str()).or_default().push(chunk_index);
+            token_index
+                .entry(token.as_str())
+                .or_default()
+                .push(chunk_index);
         }
     }
     let mut wiki_pairs: HashSet<(usize, usize)> = HashSet::new();
     for indices in token_index.values() {
         for left in 0..indices.len() {
             for right in (left + 1)..indices.len() {
-                wiki_pairs.insert((indices[left].min(indices[right]), indices[left].max(indices[right])));
+                wiki_pairs.insert((
+                    indices[left].min(indices[right]),
+                    indices[left].max(indices[right]),
+                ));
             }
         }
     }
@@ -1343,10 +1352,7 @@ pub async fn reject(state: &AppState, payload: Value) -> Result<Value, AppError>
     )
     .await?
     .ok_or_else(|| {
-        AppError::Invalid(format!(
-            "proposal id={} is no longer pending",
-            proposal.id
-        ))
+        AppError::Invalid(format!("proposal id={} is no longer pending", proposal.id))
     })?;
     Ok(json!({ "id": reviewed.id, "state": reviewed.state }))
 }
@@ -1449,15 +1455,28 @@ mod tests {
         remember_text(&state, Arc::clone(&cache), &ws, "first")
             .await
             .expect("remember");
-        let after_insert = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
-        assert_eq!(after_insert, 1, "a real insert must emit memory:changed once");
+        let after_insert = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
+        assert_eq!(
+            after_insert, 1,
+            "a real insert must emit memory:changed once"
+        );
 
         // Re-remembering the SAME text dedupes (no row written) — must NOT
         // emit again (decision 2).
         remember_text(&state, Arc::clone(&cache), &ws, "first")
             .await
             .expect("deduped remember");
-        let after_dedup = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let after_dedup = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
         assert_eq!(after_dedup, 1, "a deduped remember must not emit again");
     }
 
@@ -1469,7 +1488,14 @@ mod tests {
         let remembered = remember_text(&state, Arc::clone(&cache), &ws, "one")
             .await
             .expect("remember");
-        let count = || emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let count = || {
+            emit_probe()
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|w| *w == &ws)
+                .count()
+        };
         let after_remember = count(); // the remember above already emitted once
 
         delete_with_cache(
@@ -1511,7 +1537,12 @@ mod tests {
         clear_with_cache(&state, json!({ "workspaceId": ws }), Arc::clone(&cache))
             .await
             .expect("clear empty");
-        let after_empty = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let after_empty = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
         assert_eq!(after_empty, 0, "clearing nothing must not emit");
 
         remember_text(&state, Arc::clone(&cache), &ws, "one")
@@ -1521,7 +1552,12 @@ mod tests {
             .await
             .expect("clear populated");
         // remember (1) + clear (1) = 2 emits total for this workspace.
-        let after_populated = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let after_populated = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
         assert_eq!(after_populated, 2, "clearing an actual row must emit");
     }
 
@@ -1543,8 +1579,16 @@ mod tests {
         )
         .await
         .expect("propose");
-        let emits_after_propose = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
-        assert_eq!(emits_after_propose, 0, "propose never touches memory_chunk — must not emit");
+        let emits_after_propose = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
+        assert_eq!(
+            emits_after_propose, 0,
+            "propose never touches memory_chunk — must not emit"
+        );
 
         approve_with_embedder(
             &state,
@@ -1554,7 +1598,12 @@ mod tests {
         )
         .await
         .expect("approve");
-        let emits_after_approve = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let emits_after_approve = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
         assert_eq!(emits_after_approve, 1, "approve writes a chunk — must emit");
 
         // A second proposal that gets REJECTED must never emit either.
@@ -1574,8 +1623,16 @@ mod tests {
         )
         .await
         .expect("reject");
-        let emits_after_reject = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
-        assert_eq!(emits_after_reject, 1, "reject never touches memory_chunk — must not emit");
+        let emits_after_reject = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
+        assert_eq!(
+            emits_after_reject, 1,
+            "reject never touches memory_chunk — must not emit"
+        );
     }
 
     #[tokio::test]
@@ -2091,7 +2148,9 @@ mod tests {
         )
         .await
         .expect_err("re-reject must error");
-        assert!(matches!(reject_again, AppError::Invalid(message) if message.contains("not pending")));
+        assert!(
+            matches!(reject_again, AppError::Invalid(message) if message.contains("not pending"))
+        );
         let approve_rejected = approve_with_embedder(
             &state,
             json!({ "workspaceId": ws, "reviewerId": reviewer, "proposalId": proposal_id }),
@@ -2100,7 +2159,9 @@ mod tests {
         )
         .await
         .expect_err("approve of rejected must error");
-        assert!(matches!(approve_rejected, AppError::Invalid(message) if message.contains("not pending")));
+        assert!(
+            matches!(approve_rejected, AppError::Invalid(message) if message.contains("not pending"))
+        );
     }
 
     /// Embedder that lands a reject on the target proposal DURING `embed`, so
@@ -2165,7 +2226,12 @@ mod tests {
         .expect("propose");
         let proposal_id = proposed["id"].as_str().unwrap().to_owned();
 
-        let baseline = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let baseline = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
 
         let embedder = Arc::new(RejectDuringEmbed {
             inner: FakeEmbedder::new(DIMENSION),
@@ -2193,7 +2259,10 @@ mod tests {
         )
         .await
         .expect("status");
-        assert_eq!(status["chunks"], 0, "a rolled-back approve leaves no chunk (F1)");
+        assert_eq!(
+            status["chunks"], 0,
+            "a rolled-back approve leaves no chunk (F1)"
+        );
 
         // The racer's reject stands; nothing landed in `approved`.
         let rejected = queue(&state, json!({ "workspaceId": ws, "state": "rejected" }))
@@ -2206,7 +2275,12 @@ mod tests {
         assert!(approved["proposals"].as_array().unwrap().is_empty());
 
         // No memory:changed emitted for the write that rolled back.
-        let after = emit_probe().lock().unwrap().iter().filter(|w| *w == &ws).count();
+        let after = emit_probe()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| *w == &ws)
+            .count();
         assert_eq!(
             after, baseline,
             "a rolled-back approve must not emit memory:changed"
@@ -2348,10 +2422,13 @@ mod tests {
         let state = AppState::for_tests().await;
         let workspace_id = fixture_workspace(&state, "graph-empty").await;
 
-        let result =
-            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
-                .await
-                .expect("graph on empty index");
+        let result = router::dispatch(
+            &state,
+            "memory.graph",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await
+        .expect("graph on empty index");
         assert_eq!(result, json!({ "nodes": [], "edges": [] }));
     }
 
@@ -2362,14 +2439,38 @@ mod tests {
 
         // Orthogonal embeddings hold `related` cosine similarity at exactly 0
         // for every pair, isolating this test to `wiki`-edge derivation.
-        let a = insert_chunk(&state, &workspace_id, "loves [[Alpha]] concept", &basis_vector(0), "wiki-a").await;
-        let b = insert_chunk(&state, &workspace_id, "shares [[alpha]] too", &basis_vector(1), "wiki-b").await;
-        insert_chunk(&state, &workspace_id, "no tokens here", &basis_vector(2), "wiki-c").await;
+        let a = insert_chunk(
+            &state,
+            &workspace_id,
+            "loves [[Alpha]] concept",
+            &basis_vector(0),
+            "wiki-a",
+        )
+        .await;
+        let b = insert_chunk(
+            &state,
+            &workspace_id,
+            "shares [[alpha]] too",
+            &basis_vector(1),
+            "wiki-b",
+        )
+        .await;
+        insert_chunk(
+            &state,
+            &workspace_id,
+            "no tokens here",
+            &basis_vector(2),
+            "wiki-c",
+        )
+        .await;
 
-        let result =
-            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
-                .await
-                .expect("graph");
+        let result = router::dispatch(
+            &state,
+            "memory.graph",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await
+        .expect("graph");
         assert_eq!(result["nodes"].as_array().unwrap().len(), 3);
 
         let edges = result["edges"].as_array().unwrap();
@@ -2401,15 +2502,46 @@ mod tests {
         // `related` edge between them must be suppressed. r shares no token
         // but is also identical in direction, so it gets `related` edges to
         // both p and q. s is orthogonal to everything and stays isolated.
-        let p = insert_chunk(&state, &workspace_id, "[[shared]] one", &basis_vector(0), "rel-p").await;
-        let q = insert_chunk(&state, &workspace_id, "[[shared]] two", &basis_vector(0), "rel-q").await;
-        let r = insert_chunk(&state, &workspace_id, "no tokens, same direction", &basis_vector(0), "rel-r").await;
-        insert_chunk(&state, &workspace_id, "no tokens, orthogonal", &basis_vector(1), "rel-s").await;
+        let p = insert_chunk(
+            &state,
+            &workspace_id,
+            "[[shared]] one",
+            &basis_vector(0),
+            "rel-p",
+        )
+        .await;
+        let q = insert_chunk(
+            &state,
+            &workspace_id,
+            "[[shared]] two",
+            &basis_vector(0),
+            "rel-q",
+        )
+        .await;
+        let r = insert_chunk(
+            &state,
+            &workspace_id,
+            "no tokens, same direction",
+            &basis_vector(0),
+            "rel-r",
+        )
+        .await;
+        insert_chunk(
+            &state,
+            &workspace_id,
+            "no tokens, orthogonal",
+            &basis_vector(1),
+            "rel-s",
+        )
+        .await;
 
-        let result =
-            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
-                .await
-                .expect("graph");
+        let result = router::dispatch(
+            &state,
+            "memory.graph",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await
+        .expect("graph");
         let edges = result["edges"].as_array().unwrap().clone();
         assert_eq!(edges.len(), 3, "{edges:?}");
 
@@ -2426,10 +2558,15 @@ mod tests {
             HashSet::from([p.row.id.as_str(), q.row.id.as_str()])
         );
 
-        let related: Vec<&Value> = edges.iter().filter(|edge| edge["rel"] == "related").collect();
+        let related: Vec<&Value> = edges
+            .iter()
+            .filter(|edge| edge["rel"] == "related")
+            .collect();
         assert_eq!(related.len(), 2, "{related:?}");
         for edge in &related {
-            let score = edge["score"].as_f64().expect("related edge carries a score");
+            let score = edge["score"]
+                .as_f64()
+                .expect("related edge carries a score");
             assert!(
                 (score - 1.0).abs() < 1e-4,
                 "identical unit vectors must score ~1.0 cosine, got {score}"
@@ -2479,10 +2616,13 @@ mod tests {
         let e1 = insert_chunk(&state, &workspace_id, "e1", &angled(48.0), "topk-e1").await;
         let e2 = insert_chunk(&state, &workspace_id, "e2", &angled(49.0), "topk-e2").await;
 
-        let result =
-            router::dispatch(&state, "memory.graph", json!({ "workspaceId": workspace_id }))
-                .await
-                .expect("graph");
+        let result = router::dispatch(
+            &state,
+            "memory.graph",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await
+        .expect("graph");
         let edges = result["edges"].as_array().unwrap();
 
         let a_id = json!(a.row.id);
@@ -2578,7 +2718,10 @@ mod tests {
             cached_row("lower", "alpha unicorn", vec![0.6, 0.8]),
         ];
         let hits = score_cached(&query, "unicorn", &rows, 2).expect("hybrid score");
-        assert_eq!(hits[0].id, "lower", "token match must outrank higher cosine");
+        assert_eq!(
+            hits[0].id, "lower",
+            "token match must outrank higher cosine"
+        );
         assert_eq!(hits[1].id, "higher");
         assert!(hits[0].score > hits[1].score);
 
@@ -2600,7 +2743,11 @@ mod tests {
         let first = score_cached(&query, "shared token", &rows, 3).expect("first");
         let second = score_cached(&query, "shared token", &rows, 3).expect("second");
         let ids = |hits: &[SearchHit]| hits.iter().map(|h| h.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&first), ids(&second), "same store + query ⇒ same ranking");
+        assert_eq!(
+            ids(&first),
+            ids(&second),
+            "same store + query ⇒ same ranking"
+        );
     }
 
     async fn insert_benchmark_fixture(
@@ -2768,8 +2915,9 @@ mod tests {
 
         let state = AppState::for_tests().await;
         let cache = Arc::new(MemorySearchCache::new());
-        let embedder: Arc<dyn Embedder> =
-            Arc::new(crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir));
+        let embedder: Arc<dyn Embedder> = Arc::new(
+            crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir),
+        );
         let workspace_id = fixture_workspace(&state, "t6-offline-search").await;
 
         // Fresh in-memory DB (AppState::for_tests), so this must re-remember
@@ -2860,8 +3008,11 @@ mod tests {
             .find(|path| path.is_file() && !path.to_string_lossy().ends_with(".lock"))
             .expect("at least one non-lock blob file in the warm cache");
         let original = std::fs::read(&blob).expect("read original blob");
-        std::fs::write(&blob, b"not a valid onnx model, corrupted for T6 validation")
-            .expect("corrupt blob");
+        std::fs::write(
+            &blob,
+            b"not a valid onnx model, corrupted for T6 validation",
+        )
+        .expect("corrupt blob");
 
         let corrupt_embedder: Arc<dyn Embedder> = Arc::new(
             crate::engine::runtime::embedder::FastembedEmbedder::new(cache_dir.clone()),

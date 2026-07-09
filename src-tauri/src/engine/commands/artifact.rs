@@ -14,13 +14,17 @@ use serde_json::Value;
 /// The artifact `kind` allowlist (plan §4 / Decision 3). Kept here — the
 /// command layer is the choke point every caller (ipc + `conclave artifact
 /// add`) funnels through, so an unknown kind is rejected once, centrally.
-pub const ARTIFACT_KINDS: [&str; 7] = ["markdown", "code", "html", "svg", "mermaid", "react", "text"];
+pub const ARTIFACT_KINDS: [&str; 7] = [
+    "markdown", "code", "html", "svg", "mermaid", "react", "text",
+];
 
 /// Validate that `workspace_id` exists, else [`AppError::NotFound`] (mirrors
 /// `commands::task::require_workspace`).
 async fn require_workspace(state: &AppState, workspace_id: &str) -> Result<(), AppError> {
     if !repo::workspace::exists(&state.db, workspace_id).await? {
-        return Err(AppError::NotFound(format!("workspace id={workspace_id} not found")));
+        return Err(AppError::NotFound(format!(
+            "workspace id={workspace_id} not found"
+        )));
     }
     Ok(())
 }
@@ -52,7 +56,8 @@ struct AddReq {
 /// Persist a workspace-scoped artifact. Rejects an unknown `kind` with the
 /// allowed list, and a missing `workspaceId`.
 pub async fn add(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: AddReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: AddReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     if !ARTIFACT_KINDS.contains(&req.kind.as_str()) {
         return Err(AppError::Invalid(format!(
@@ -87,7 +92,8 @@ struct ListReq {
 
 /// List a workspace's artifacts, newest first.
 pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: ListReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: ListReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
     let rows = repo::artifact::list_artifacts(&state.db, &req.workspace_id).await?;
     serde_json::to_value(&rows).map_err(|e| AppError::Internal(e.to_string()))
@@ -103,7 +109,8 @@ struct GetReq {
 
 /// Fetch one artifact by id, or [`AppError::NotFound`].
 pub async fn get(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: GetReq = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req: GetReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let row = repo::artifact::get_artifact(&state.db, &req.id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("artifact id={} not found", req.id)))?;
@@ -145,9 +152,15 @@ mod tests {
         )
         .await
         .expect("add failed");
-        let id = added.get("id").and_then(Value::as_str).expect("id").to_owned();
+        let id = added
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("id")
+            .to_owned();
 
-        let listed = list(&state, json!({ "workspaceId": ws })).await.expect("list failed");
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
         assert_eq!(listed.as_array().expect("array").len(), 1);
 
         let got = get(&state, json!({ "id": id })).await.expect("get failed");
@@ -158,7 +171,9 @@ mod tests {
     #[tokio::test]
     async fn get_missing_is_not_found() {
         let state = AppState::for_tests().await;
-        let err = get(&state, json!({ "id": "nope" })).await.expect_err("must 404");
+        let err = get(&state, json!({ "id": "nope" }))
+            .await
+            .expect_err("must 404");
         assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
     }
 

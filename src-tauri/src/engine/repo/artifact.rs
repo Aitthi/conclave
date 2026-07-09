@@ -117,7 +117,10 @@ pub async fn insert_artifact(
 /// List a workspace's artifacts, newest first (matches the
 /// `idx_artifact_ws_created` index). Content is included — the Artifacts view
 /// renders each artifact from this one call.
-pub async fn list_artifacts(pool: &SqlitePool, workspace_id: &str) -> sqlx::Result<Vec<ArtifactRow>> {
+pub async fn list_artifacts(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> sqlx::Result<Vec<ArtifactRow>> {
     QueryBuilder::<Sqlite>::table("artifact")
         .select(ARTIFACT_COLS)
         .where_eq("workspace_id", workspace_id)
@@ -181,7 +184,10 @@ mod tests {
     #[tokio::test]
     async fn get_missing_returns_none() {
         let pool = connect_in_memory().await;
-        assert!(get_artifact(&pool, "nope").await.expect("get failed").is_none());
+        assert!(get_artifact(&pool, "nope")
+            .await
+            .expect("get failed")
+            .is_none());
     }
 
     #[tokio::test]
@@ -224,15 +230,30 @@ mod tests {
         // are None → those keys must be OMITTED (not `null`), matching the
         // optional TS fields.
         let json = serde_json::to_value(&art).expect("serialize failed");
-        assert_eq!(json.get("workspaceId").and_then(Value::as_str), Some(ws.as_str()));
+        assert_eq!(
+            json.get("workspaceId").and_then(Value::as_str),
+            Some(ws.as_str())
+        );
         assert!(json.get("agentId").is_some(), "must have agentId key");
         assert!(json.get("createdAt").is_some(), "must have createdAt key");
-        assert!(json.get("workspace_id").is_none(), "no snake_case workspace_id");
+        assert!(
+            json.get("workspace_id").is_none(),
+            "no snake_case workspace_id"
+        );
         assert!(json.get("created_at").is_none(), "no snake_case created_at");
         // skip_serializing_if: absent optionals are omitted, never JSON null.
-        assert!(json.get("messageId").is_none(), "absent messageId must be omitted, not null");
-        assert!(json.get("sandboxed").is_none(), "absent sandboxed must be omitted, not null");
-        assert!(!json.as_object().unwrap().values().any(Value::is_null), "no field serializes as null");
+        assert!(
+            json.get("messageId").is_none(),
+            "absent messageId must be omitted, not null"
+        );
+        assert!(
+            json.get("sandboxed").is_none(),
+            "absent sandboxed must be omitted, not null"
+        );
+        assert!(
+            !json.as_object().unwrap().values().any(Value::is_null),
+            "no field serializes as null"
+        );
     }
 
     /// Wire-shape contract for a chat-parsed (`kind='html'`) row: `sandboxed`
@@ -261,13 +282,33 @@ mod tests {
             .expect("legacy row exists");
         assert_eq!(row.kind.as_deref(), Some("html"));
         assert_eq!(row.content.as_deref(), Some("<h1>hi</h1>"));
-        assert_eq!(row.sandboxed, Some(false), "INTEGER 0 decodes to bool false");
+        assert_eq!(
+            row.sandboxed,
+            Some(false),
+            "INTEGER 0 decodes to bool false"
+        );
 
         let json = serde_json::to_value(&row).expect("serialize failed");
-        assert_eq!(json.get("sandboxed"), Some(&Value::Bool(false)), "sandboxed must be a JSON bool");
-        assert!(json.get("workspaceId").is_none(), "null workspaceId omitted, not null");
-        assert!(json.get("agentId").is_none(), "null agentId omitted, not null");
-        assert!(json.get("messageId").is_none(), "null messageId omitted, not null");
-        assert!(!json.as_object().unwrap().values().any(Value::is_null), "no field is JSON null");
+        assert_eq!(
+            json.get("sandboxed"),
+            Some(&Value::Bool(false)),
+            "sandboxed must be a JSON bool"
+        );
+        assert!(
+            json.get("workspaceId").is_none(),
+            "null workspaceId omitted, not null"
+        );
+        assert!(
+            json.get("agentId").is_none(),
+            "null agentId omitted, not null"
+        );
+        assert!(
+            json.get("messageId").is_none(),
+            "null messageId omitted, not null"
+        );
+        assert!(
+            !json.as_object().unwrap().values().any(Value::is_null),
+            "no field is JSON null"
+        );
     }
 }

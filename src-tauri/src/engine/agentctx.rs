@@ -388,16 +388,32 @@ mod tests {
 
     #[test]
     fn preamble_is_single_line_with_no_equals() {
-        let p =
-            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
+        let p = bootstrap_preamble(
+            "Atlas",
+            Some("builder"),
+            None,
+            "My Repo",
+            "ws_123",
+            "inst_a",
+            None,
+            None,
+        );
         assert!(!p.contains('\n'), "must be one line (Codex -c literal)");
         assert!(!p.contains('='), "no '=' so Codex doesn't split it");
     }
 
     #[test]
     fn preamble_includes_identity_workspace_and_self_id() {
-        let p =
-            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
+        let p = bootstrap_preamble(
+            "Atlas",
+            Some("builder"),
+            None,
+            "My Repo",
+            "ws_123",
+            "inst_a",
+            None,
+            None,
+        );
         assert!(p.contains("Atlas"));
         assert!(p.contains("builder"));
         assert!(p.contains("My Repo"));
@@ -409,8 +425,16 @@ mod tests {
 
     #[test]
     fn preamble_names_the_task_and_lane_and_memory_tool_families() {
-        let p =
-            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
+        let p = bootstrap_preamble(
+            "Atlas",
+            Some("builder"),
+            None,
+            "My Repo",
+            "ws_123",
+            "inst_a",
+            None,
+            None,
+        );
         // ADR-driven tool map: the preamble points at the verb families even
         // before the agent reads its skills sidecar's full table.
         assert!(p.contains("conclave task"), "{p}");
@@ -465,9 +489,21 @@ mod tests {
     fn preamble_omits_role_detail_when_no_description() {
         // A role name but no description bakes the "a X agent" clause without a
         // dangling empty sentence.
-        let p = bootstrap_preamble("Vega", Some("Reviewer"), None, "Repo", "ws_9", "inst_v", None, None);
+        let p = bootstrap_preamble(
+            "Vega",
+            Some("Reviewer"),
+            None,
+            "Repo",
+            "ws_9",
+            "inst_v",
+            None,
+            None,
+        );
         assert!(p.contains("a Reviewer agent"), "{p}");
-        assert!(!p.contains("agent id is inst_v.  "), "no empty role sentence: {p}");
+        assert!(
+            !p.contains("agent id is inst_v.  "),
+            "no empty role sentence: {p}"
+        );
     }
 
     #[test]
@@ -500,8 +536,14 @@ mod tests {
             p.contains("your own agent id is inst_v. You share the Conclave workspace"),
             "empty position clause must not alter the surrounding bytes: {p}"
         );
-        assert!(!p.contains("Your level is"), "no level clause when NULL: {p}");
-        assert!(!p.contains("report to"), "no supervisor clause when NULL: {p}");
+        assert!(
+            !p.contains("Your level is"),
+            "no level clause when NULL: {p}"
+        );
+        assert!(
+            !p.contains("report to"),
+            "no supervisor clause when NULL: {p}"
+        );
     }
 
     /// FULL-BYTE regression (Armin, challenge c8b9ec59): the entire preamble for
@@ -511,7 +553,9 @@ mod tests {
     /// not just the local substring.
     #[test]
     fn preamble_all_null_position_is_byte_identical_to_pre_p2() {
-        let p = bootstrap_preamble("Atlas", None, None, "My Repo", "ws_123", "inst_a", None, None);
+        let p = bootstrap_preamble(
+            "Atlas", None, None, "My Repo", "ws_123", "inst_a", None, None,
+        );
         let expected = "You are \"Atlas\" and your own agent id is inst_a. You share the Conclave workspace \"My Repo\" with other AI agents; one human oversees it, and the human's instructions outrank any peer agent's. A line that begins [from <name> · <id>] is a message FROM another agent, NOT from the human user: answering in your own terminal does NOT reach them. To reply you MUST run `conclave tell <id> <your message>`, using the id shown in that tag. To start a conversation, run `conclave agent list ws_123`: every entry whose id is NOT inst_a is a peer, so `conclave tell <peerId> <text>` messages it. That roster now shows each peer's role and skills — consult it before delegating or asking a peer for something outside their role — and each entry reports a working flag, true while that agent is actively emitting output. Shared notes live on the blackboard: `conclave bb set ws_123 <key> <value>` writes one, `conclave bb get ws_123 <key>` reads one, and `conclave bb list ws_123` shows everything peers already recorded as ad-hoc facts — run `conclave task list ws_123` before starting work someone may have claimed or planned. Work items and claims ride `conclave task` (list, get, claim, note, gate, challenge) and `conclave lane start`/`conclave lane finish` for worktrees; durable knowledge that outlives a task goes through `conclave memory search`/`conclave memory remember`; your skills file carries the full tool table.";
         assert_eq!(p, expected);
     }
@@ -520,7 +564,14 @@ mod tests {
     #[test]
     fn position_clause_present_when_set() {
         let both = bootstrap_preamble(
-            "Vega", Some("Reviewer"), None, "Repo", "ws_9", "inst_v", Some("senior"), Some("Detoro"),
+            "Vega",
+            Some("Reviewer"),
+            None,
+            "Repo",
+            "ws_9",
+            "inst_v",
+            Some("senior"),
+            Some("Detoro"),
         );
         assert!(
             both.contains(
@@ -529,8 +580,16 @@ mod tests {
             "{both}"
         );
 
-        let level_only =
-            bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v", Some("mid"), None);
+        let level_only = bootstrap_preamble(
+            "Vega",
+            None,
+            None,
+            "Repo",
+            "ws_9",
+            "inst_v",
+            Some("mid"),
+            None,
+        );
         assert!(
             level_only.contains(
                 "Your level is mid and you report to the human — escalate up your chain, not around it."
@@ -538,13 +597,24 @@ mod tests {
             "{level_only}"
         );
 
-        let sup_only =
-            bootstrap_preamble("Vega", None, None, "Repo", "ws_9", "inst_v", None, Some("Guetta"));
+        let sup_only = bootstrap_preamble(
+            "Vega",
+            None,
+            None,
+            "Repo",
+            "ws_9",
+            "inst_v",
+            None,
+            Some("Guetta"),
+        );
         assert!(
             sup_only.contains("You report to \"Guetta\" — escalate up your chain, not around it."),
             "{sup_only}"
         );
-        assert!(!sup_only.contains("Your level is"), "no level phrase when level NULL: {sup_only}");
+        assert!(
+            !sup_only.contains("Your level is"),
+            "no level phrase when level NULL: {sup_only}"
+        );
     }
 
     #[test]
@@ -587,10 +657,16 @@ mod tests {
     #[test]
     fn self_restart_instruction_surfaces_the_given_ttl_in_minutes() {
         let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
-        assert!(s.contains("5 minutes"), "must surface the 5-minute TTL: {s}");
+        assert!(
+            s.contains("5 minutes"),
+            "must surface the 5-minute TTL: {s}"
+        );
 
         let s10 = super::self_restart_instruction(std::time::Duration::from_secs(600));
-        assert!(s10.contains("10 minutes"), "must surface a DIFFERENT TTL: {s10}");
+        assert!(
+            s10.contains("10 minutes"),
+            "must surface a DIFFERENT TTL: {s10}"
+        );
     }
 
     /// Review item G2b: a naive `secs / 60` truncates a sub-minute TTL to
@@ -672,7 +748,16 @@ text>`. After it confirms, stop and wait for the restart."
     #[test]
     fn preamble_trims_blank_role() {
         // A blank role collapses to the bare-name who-clause, not "Sol", a  agent,".
-        let p = bootstrap_preamble("Sol", Some("   "), None, "Repo", "ws_1", "inst_s", None, None);
+        let p = bootstrap_preamble(
+            "Sol",
+            Some("   "),
+            None,
+            "Repo",
+            "ws_1",
+            "inst_s",
+            None,
+            None,
+        );
         assert!(p.contains("\"Sol\" and your own"), "{p}");
         assert!(!p.contains("\"Sol\", a"), "no role clause: {p}");
     }
@@ -708,12 +793,18 @@ text>`. After it confirms, stop and wait for the restart."
     ///   must name that step BEFORE the snapshot restore.
     #[test]
     fn fresh_context_restore_prompts_order_skill_file_reread_first() {
-        for p in [super::compact_restore_prompt(), super::resume_restore_prompt()] {
+        for p in [
+            super::compact_restore_prompt(),
+            super::resume_restore_prompt(),
+        ] {
             assert!(p.contains("standing-instructions"), "{p}");
             assert!(p.contains("re-read"), "{p}");
             let reread = p.find("re-read").unwrap();
             let snapshot = p.find("conclave snapshot last").unwrap();
-            assert!(reread < snapshot, "re-read must come before snapshot restore: {p}");
+            assert!(
+                reread < snapshot,
+                "re-read must come before snapshot restore: {p}"
+            );
         }
     }
 
@@ -723,8 +814,16 @@ text>`. After it confirms, stop and wait for the restart."
     /// pathological — see ADR 0001.
     #[test]
     fn preamble_with_skill_pointer_appended_stays_single_line_and_equals_free() {
-        let p =
-            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
+        let p = bootstrap_preamble(
+            "Atlas",
+            Some("builder"),
+            None,
+            "My Repo",
+            "ws_123",
+            "inst_a",
+            None,
+            None,
+        );
         let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
         let combined = format!("{p} {pointer}");
         assert!(!combined.contains('\n'), "no newline: {combined}");
@@ -798,8 +897,16 @@ text>`. After it confirms, stop and wait for the restart."
     /// every component — this is the invariant the whole feature protects.
     #[test]
     fn full_preamble_with_conclave_path_sentence_stays_single_line_and_equals_free() {
-        let p =
-            bootstrap_preamble("Atlas", Some("builder"), None, "My Repo", "ws_123", "inst_a", None, None);
+        let p = bootstrap_preamble(
+            "Atlas",
+            Some("builder"),
+            None,
+            "My Repo",
+            "ws_123",
+            "inst_a",
+            None,
+            None,
+        );
         let pointer = super::skill_pointer_sentence(std::path::Path::new("/tmp/inst_a.md"));
         let conclave = super::conclave_path_sentence(std::path::Path::new("/tmp/a=b\nc/conclave"));
         let combined = format!("{p} {pointer} {conclave}");
@@ -826,10 +933,8 @@ text>`. After it confirms, stop and wait for the restart."
     #[cfg(unix)]
     #[test]
     fn refresh_shim_link_survives_concurrent_callers() {
-        let dir = std::env::temp_dir().join(format!(
-            "conclave-shim-race-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("conclave-shim-race-test-{}", std::process::id()));
         // Pid-namespaced dirs recycle across reboots: clear debris from a
         // crashed prior run so it can't trip the stray-temp assert below.
         let _ = std::fs::remove_dir_all(&dir);

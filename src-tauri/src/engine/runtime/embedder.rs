@@ -273,7 +273,10 @@ mod tests {
         for vector in &a {
             assert_eq!(vector.len(), 384);
             let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-            assert!((norm - 1.0).abs() < 1e-5, "vector must be L2-normalized, norm={norm}");
+            assert!(
+                (norm - 1.0).abs() < 1e-5,
+                "vector must be L2-normalized, norm={norm}"
+            );
         }
     }
 
@@ -286,7 +289,10 @@ mod tests {
     #[test]
     fn model_cache_dir_is_scoped_under_conclave() {
         let dir = model_cache_dir();
-        assert!(dir.ends_with("Conclave/models"), "unexpected cache dir: {dir:?}");
+        assert!(
+            dir.ends_with("Conclave/models"),
+            "unexpected cache dir: {dir:?}"
+        );
     }
 
     #[test]
@@ -320,7 +326,10 @@ mod tests {
         let embedder =
             FastembedEmbedder::new(std::env::temp_dir().join("conclave-embedder-test-empty-2"));
         assert!(embedder.embed(&[]).expect("embed empty").is_empty());
-        assert!(!embedder.is_ready(), "embedding nothing must not load the model");
+        assert!(
+            !embedder.is_ready(),
+            "embedding nothing must not load the model"
+        );
     }
 
     #[test]
@@ -336,7 +345,10 @@ mod tests {
         // pre-embed `!is_ready` assertion below stays meaningful every run.
         let _ = std::fs::remove_dir_all(&cache_dir);
         let embedder = FastembedEmbedder::new(cache_dir);
-        assert!(!embedder.is_ready(), "must not report ready before the first embed call");
+        assert!(
+            !embedder.is_ready(),
+            "must not report ready before the first embed call"
+        );
 
         let texts = vec!["workspace memory system".to_string()];
         let embeddings = embedder.embed(&texts).expect("embed");
@@ -348,8 +360,14 @@ mod tests {
             .map(|value| value * value)
             .sum::<f32>()
             .sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "expected a unit vector, norm={norm}");
-        assert!(embedder.is_ready(), "must report ready once the session is loaded");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "expected a unit vector, norm={norm}"
+        );
+        assert!(
+            embedder.is_ready(),
+            "must report ready once the session is loaded"
+        );
     }
 
     #[test]
@@ -361,8 +379,7 @@ mod tests {
         // download + double model load against the same cache dir). This
         // drives a real concurrent cold start and asserts every thread still
         // gets a correct, consistent result with no panic/deadlock.
-        let cache_dir =
-            std::env::temp_dir().join("conclave-embedder-test-concurrent-cold-start");
+        let cache_dir = std::env::temp_dir().join("conclave-embedder-test-concurrent-cold-start");
         let _ = std::fs::remove_dir_all(&cache_dir);
         let embedder = std::sync::Arc::new(FastembedEmbedder::new(cache_dir));
 

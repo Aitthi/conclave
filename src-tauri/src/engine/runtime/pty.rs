@@ -306,7 +306,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "spawns a real `claude` process — manual-only idle-noise check"]
     async fn idle_claude_output_cadence_over_60s() {
-        let scratch = std::env::temp_dir().join(format!("conclave-idle-check-{}", std::process::id()));
+        let scratch =
+            std::env::temp_dir().join(format!("conclave-idle-check-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).expect("create scratch dir");
 
         let mut backend = spawn_cli("idle-check", "claude", &[], scratch.to_str().unwrap(), &[])
@@ -329,8 +330,11 @@ mod tests {
         let mut observations: Vec<(u128, usize)> = Vec::new();
         while start.elapsed() < window {
             let remaining = window - start.elapsed();
-            match tokio::time::timeout(remaining.min(std::time::Duration::from_secs(1)), backend.output_rx.recv())
-                .await
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_secs(1)),
+                backend.output_rx.recv(),
+            )
+            .await
             {
                 Ok(Some(chunk)) => observations.push((start.elapsed().as_millis(), chunk.len())),
                 Ok(None) => break, // child exited on its own
@@ -377,8 +381,14 @@ mod tests {
             std::env::temp_dir().join(format!("conclave-resize-check-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).expect("create scratch dir");
 
-        let mut backend = spawn_cli("resize-check", "claude", &[], scratch.to_str().unwrap(), &[])
-            .expect("spawn_cli failed — is `claude` on PATH?");
+        let mut backend = spawn_cli(
+            "resize-check",
+            "claude",
+            &[],
+            scratch.to_str().unwrap(),
+            &[],
+        )
+        .expect("spawn_cli failed — is `claude` on PATH?");
 
         // Drain until 2s pass with no new chunk — the initial paint has settled.
         loop {

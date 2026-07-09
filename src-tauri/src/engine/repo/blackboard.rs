@@ -412,7 +412,9 @@ mod tests {
         set(&pool, &ws1, "k", "\"v\"", Some(&agent))
             .await
             .expect("set ws1");
-        set(&pool, &ws2, "k", "\"v2\"", None).await.expect("set ws2");
+        set(&pool, &ws2, "k", "\"v2\"", None)
+            .await
+            .expect("set ws2");
         assert_eq!(list_activity(&pool, &ws1, 50).await.unwrap().len(), 1);
 
         assert!(delete(&pool, &ws1, "k").await.expect("delete"));

@@ -411,10 +411,11 @@ mod tests {
         )
         .await
         .expect("create agent_def failed");
-        let actor = crate::engine::repo::workspace_agent::instantiate(&state.db, &ws, &agent_def.id)
-            .await
-            .expect("instantiate failed")
-            .id;
+        let actor =
+            crate::engine::repo::workspace_agent::instantiate(&state.db, &ws, &agent_def.id)
+                .await
+                .expect("instantiate failed")
+                .id;
 
         let path = std::env::temp_dir().join("conclave-uds-test-task-verbs.sock");
         let _ = std::fs::remove_file(&path);
@@ -446,10 +447,16 @@ mod tests {
             let request = json!({ "jsonrpc": "2.0", "id": id, "method": "cli.exec", "params": { "argv": argv } });
             let mut line = serde_json::to_string(&request).expect("serialize request");
             line.push('\n');
-            write.write_all(line.as_bytes()).await.expect("write request");
+            write
+                .write_all(line.as_bytes())
+                .await
+                .expect("write request");
 
             let mut resp_line = String::new();
-            reader.read_line(&mut resp_line).await.expect("read response");
+            reader
+                .read_line(&mut resp_line)
+                .await
+                .expect("read response");
             let v: Value = serde_json::from_str(resp_line.trim()).expect("response is JSON");
             assert!(v.get("error").is_none(), "unexpected error: {v}");
             v["result"].clone()
@@ -460,7 +467,14 @@ mod tests {
             &mut write,
             &mut reader,
             1,
-            json!(["task", "create", ws, "acceptance-task", "Acceptance", "Task"]),
+            json!([
+                "task",
+                "create",
+                ws,
+                "acceptance-task",
+                "Acceptance",
+                "Task"
+            ]),
         )
         .await;
         assert_eq!(created["slug"], json!("acceptance-task"));
@@ -484,8 +498,16 @@ mod tests {
             &mut reader,
             3,
             json!([
-                "task", "gate", actor, ws, "acceptance-task",
-                "cargo test --lib", "0", "abc123", "/repo", "ok"
+                "task",
+                "gate",
+                actor,
+                ws,
+                "acceptance-task",
+                "cargo test --lib",
+                "0",
+                "abc123",
+                "/repo",
+                "ok"
             ]),
         )
         .await;
@@ -494,7 +516,13 @@ mod tests {
 
         // `task get <ws> <slug>` — sees the claim's state event AND the gate
         // event, newest-first.
-        let got = call(&mut write, &mut reader, 4, json!(["task", "get", ws, "acceptance-task"])).await;
+        let got = call(
+            &mut write,
+            &mut reader,
+            4,
+            json!(["task", "get", ws, "acceptance-task"]),
+        )
+        .await;
         assert_eq!(got["task"]["state"], json!("claimed"));
         let events = got["events"].as_array().expect("events array");
         assert_eq!(events.len(), 2, "state event from claim + gate event");
@@ -514,7 +542,11 @@ mod tests {
         assert_eq!(last_gates.len(), 1);
         assert_eq!(last_gates[0]["cmd"], json!("cargo test --lib"));
         assert_eq!(last_gates[0]["exit"], json!(0));
-        assert_eq!(row["challenges"], json!([]), "no challenges raised on this task");
+        assert_eq!(
+            row["challenges"],
+            json!([]),
+            "no challenges raised on this task"
+        );
 
         server.abort();
         let _ = std::fs::remove_file(&path);
@@ -526,15 +558,13 @@ mod tests {
     /// an impostor; `acquire_socket` now probes first and refuses.
     #[tokio::test]
     async fn acquire_socket_refuses_to_steal_a_live_owner() {
-        let path = std::env::temp_dir()
-            .join(format!("conclave-uds-steal-{}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("conclave-uds-steal-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         // "Instance A" — a live listener accepting on the path.
         let a = UnixListener::bind(&path).expect("bind A");
-        let a_task = tokio::spawn(async move {
-            while a.accept().await.is_ok() {}
-        });
+        let a_task = tokio::spawn(async move { while a.accept().await.is_ok() {} });
 
         // "Instance B" tries to acquire the SAME path. It must decline.
         let claimed = acquire_socket(&path).await;
@@ -558,8 +588,8 @@ mod tests {
     /// is removed and rebound, so a clean restart isn't blocked by debris.
     #[tokio::test]
     async fn acquire_socket_replaces_a_stale_socket() {
-        let path = std::env::temp_dir()
-            .join(format!("conclave-uds-stale-{}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("conclave-uds-stale-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         // Leave a stale socket FILE with no listener: bind then drop. Rust does
@@ -587,8 +617,8 @@ mod tests {
     /// No socket file at all (`ENOENT`) → bind cleanly, nothing to remove.
     #[tokio::test]
     async fn acquire_socket_binds_when_absent() {
-        let path = std::env::temp_dir()
-            .join(format!("conclave-uds-absent-{}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("conclave-uds-absent-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let claimed = acquire_socket(&path).await;

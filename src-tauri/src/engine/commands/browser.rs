@@ -87,13 +87,19 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, AppError> {
 }
 
 pub async fn open(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req = serde_json::from_value::<UrlReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req =
+        serde_json::from_value::<UrlReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
-    to_value(browser::open(app, &req.url, req.bounds).await.map_err(to_app_err)?)
+    to_value(
+        browser::open(app, &req.url, req.bounds)
+            .await
+            .map_err(to_app_err)?,
+    )
 }
 
 pub async fn goto(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req = serde_json::from_value::<UrlReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req =
+        serde_json::from_value::<UrlReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
     to_value(browser::goto(app, &req.url).await.map_err(to_app_err)?)
 }
@@ -109,21 +115,31 @@ pub async fn snapshot(state: &AppState, payload: Value) -> Result<Value, AppErro
     let req = if payload.is_null() {
         SnapshotReq { max_text: None }
     } else {
-        serde_json::from_value::<SnapshotReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?
+        serde_json::from_value::<SnapshotReq>(payload)
+            .map_err(|e| AppError::Invalid(e.to_string()))?
     };
     let app = app_handle(state)?;
-    to_value(browser::snapshot(app, req.max_text).await.map_err(to_app_err)?)
+    to_value(
+        browser::snapshot(app, req.max_text)
+            .await
+            .map_err(to_app_err)?,
+    )
 }
 
 pub async fn click(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req =
-        serde_json::from_value::<SelectorReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req = serde_json::from_value::<SelectorReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
-    to_value(browser::click(app, &req.selector).await.map_err(to_app_err)?)
+    to_value(
+        browser::click(app, &req.selector)
+            .await
+            .map_err(to_app_err)?,
+    )
 }
 
 pub async fn type_text(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req = serde_json::from_value::<TypeReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req =
+        serde_json::from_value::<TypeReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
     to_value(
         browser::type_text(app, &req.selector, &req.text)
@@ -139,7 +155,8 @@ pub async fn type_text(state: &AppState, payload: Value) -> Result<Value, AppErr
 /// network or plugin passthrough (`runtime::browser::eval_json` restates this).
 /// The JS is wrapped exception-safe on the runtime side; the result is JSON.
 pub async fn eval(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req = serde_json::from_value::<EvalReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req =
+        serde_json::from_value::<EvalReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
     // eval_json already returns a JSON Value — pass it through verbatim.
     browser::eval_json(app, &req.js).await.map_err(to_app_err)
@@ -151,10 +168,12 @@ pub async fn close(state: &AppState, _payload: Value) -> Result<Value, AppError>
 }
 
 pub async fn screenshot(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req =
-        serde_json::from_value::<ScreenshotReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req = serde_json::from_value::<ScreenshotReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     if req.path.trim().is_empty() {
-        return Err(AppError::Invalid("browser screenshot: path is required".into()));
+        return Err(AppError::Invalid(
+            "browser screenshot: path is required".into(),
+        ));
     }
     let app = app_handle(state)?;
     to_value(
@@ -165,15 +184,21 @@ pub async fn screenshot(state: &AppState, payload: Value) -> Result<Value, AppEr
 }
 
 pub async fn set_bounds(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req = serde_json::from_value::<Bounds>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req =
+        serde_json::from_value::<Bounds>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
     to_value(browser::set_bounds(app, req).await.map_err(to_app_err)?)
 }
 
 pub async fn set_visible(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req = serde_json::from_value::<VisibleReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req = serde_json::from_value::<VisibleReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
-    to_value(browser::set_visible(app, req.visible).await.map_err(to_app_err)?)
+    to_value(
+        browser::set_visible(app, req.visible)
+            .await
+            .map_err(to_app_err)?,
+    )
 }
 
 #[cfg(test)]
@@ -193,7 +218,9 @@ mod tests {
     #[tokio::test]
     async fn set_visible_rejects_malformed_payload() {
         let state = AppState::for_tests().await;
-        let err = set_visible(&state, json!({ "nope": true })).await.unwrap_err();
+        let err = set_visible(&state, json!({ "nope": true }))
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::Invalid(_)));
     }
 
@@ -207,7 +234,9 @@ mod tests {
     #[tokio::test]
     async fn screenshot_rejects_missing_path() {
         let state = AppState::for_tests().await;
-        let err = screenshot(&state, json!({ "width": 800 })).await.unwrap_err();
+        let err = screenshot(&state, json!({ "width": 800 }))
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::Invalid(_)));
     }
 }

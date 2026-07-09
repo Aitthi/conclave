@@ -237,7 +237,10 @@ pub async fn custom_skill_ids_by_agent(
 /// currently has `skill_id` attached. A skill content edit (`skill.save`) or
 /// removal (`skill.delete`) can affect many defs across many workspaces at
 /// once (ADR 0004's live-reload fan-out).
-pub async fn agent_def_ids_by_skill(pool: &SqlitePool, skill_id: &str) -> sqlx::Result<Vec<String>> {
+pub async fn agent_def_ids_by_skill(
+    pool: &SqlitePool,
+    skill_id: &str,
+) -> sqlx::Result<Vec<String>> {
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT agent_def_id FROM agent_skill WHERE skill_id = ?")
             .bind(skill_id)

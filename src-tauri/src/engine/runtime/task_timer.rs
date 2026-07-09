@@ -161,7 +161,9 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
         }
 
         if let Some(last_alert) = ticker.last_stall_alert.get(&c.id) {
-            if now.signed_duration_since(*last_alert) < Duration::minutes(STALL_ALERT_COOLDOWN_MINUTES) {
+            if now.signed_duration_since(*last_alert)
+                < Duration::minutes(STALL_ALERT_COOLDOWN_MINUTES)
+            {
                 continue;
             }
         }
@@ -225,7 +227,10 @@ async fn check_challenge_deadlines(state: &AppState, now: DateTime<Utc>) {
             continue;
         };
         // Advisory challenge (no --deadline-min given) — never auto-defaults.
-        let Some(deadline_at_str) = payload.get("deadlineAt").and_then(serde_json::Value::as_str) else {
+        let Some(deadline_at_str) = payload
+            .get("deadlineAt")
+            .and_then(serde_json::Value::as_str)
+        else {
             continue;
         };
         let Ok(deadline_at) = DateTime::parse_from_rfc3339(deadline_at_str) else {
@@ -411,7 +416,9 @@ async fn check_distill_nudge_for_workspace(
          (window since {window_start}); report the run summary back to me when done."
     );
     notify(state, &reviewer.id, &distiller.id, &text).await;
-    ticker.last_distill_nudge.insert(workspace_id.to_string(), now);
+    ticker
+        .last_distill_nudge
+        .insert(workspace_id.to_string(), now);
 }
 
 #[cfg(test)]
@@ -464,12 +471,18 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim failed");
+        task::watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
 
         // Derive the tick from the STORED claim-event timestamp so the rendered
         // minute is deterministically exactly 11 (stale = last_event + 11m −
@@ -481,7 +494,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|e| DateTime::parse_from_rfc3339(e["createdAt"].as_str().unwrap()).unwrap().with_timezone(&Utc))
+            .map(|e| {
+                DateTime::parse_from_rfc3339(e["createdAt"].as_str().unwrap())
+                    .unwrap()
+                    .with_timezone(&Utc)
+            })
             .max()
             .expect("has an event");
         let mut ticker = Ticker::new();
@@ -491,7 +508,11 @@ mod tests {
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
-        assert_eq!(inbox.as_array().unwrap().len(), 0, "must not fire before the threshold");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            0,
+            "must not fire before the threshold"
+        );
 
         // Exactly 11 minutes past the stored last event — alert fires.
         tick(&state, last_event_at + Duration::minutes(11), &mut ticker).await;
@@ -512,9 +533,10 @@ mod tests {
 
         // The stall pages the routing target ONLY — a watcher must NOT be paged
         // (proves the complete notification set excludes unintended delivery).
-        let watcher_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
-            .await
-            .expect("list failed");
+        let watcher_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+                .await
+                .expect("list failed");
         assert_eq!(
             watcher_inbox.as_array().unwrap().len(),
             0,
@@ -541,23 +563,31 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
 
         let mut ticker = Ticker::new();
         tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
 
-        let sup_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": supervisor }))
-            .await
-            .expect("list failed");
+        let sup_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": supervisor }))
+                .await
+                .expect("list failed");
         let sup_arr = sup_inbox.as_array().unwrap();
         assert_eq!(sup_arr.len(), 1, "the implementer's supervisor is paged");
-        assert!(sup_arr[0]["text"].as_str().unwrap().contains("AUTO"), "routed page keeps AUTO");
+        assert!(
+            sup_arr[0]["text"].as_str().unwrap().contains("AUTO"),
+            "routed page keeps AUTO"
+        );
 
-        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
-            .await
-            .expect("list failed");
+        let owner_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+                .await
+                .expect("list failed");
         assert_eq!(
             owner_inbox.as_array().unwrap().len(),
             0,
@@ -598,18 +628,29 @@ mod tests {
         tick(&state, Utc::now() + Duration::minutes(31), &mut ticker).await;
 
         // The owner's supervisor got exactly one notice, and it is AUTO-marked.
-        let sup_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner_sup }))
-            .await
-            .expect("list failed");
+        let sup_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": owner_sup }))
+                .await
+                .expect("list failed");
         let received: Vec<_> = sup_inbox
             .as_array()
             .unwrap()
             .iter()
             .filter(|m| m["toInstanceId"] == json!(owner_sup))
             .collect();
-        assert_eq!(received.len(), 1, "exactly one escalation notice up one level");
-        assert!(received[0]["text"].as_str().unwrap().contains("AUTO"), "escalation is AUTO-marked");
-        assert!(received[0]["text"].as_str().unwrap().contains("lapsed"), "names the lapse");
+        assert_eq!(
+            received.len(),
+            1,
+            "exactly one escalation notice up one level"
+        );
+        assert!(
+            received[0]["text"].as_str().unwrap().contains("AUTO"),
+            "escalation is AUTO-marked"
+        );
+        assert!(
+            received[0]["text"].as_str().unwrap().contains("lapsed"),
+            "names the lapse"
+        );
     }
 
     #[tokio::test]
@@ -624,9 +665,12 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
 
         let claimed_at = Utc::now();
         let mut ticker = Ticker::new();
@@ -649,7 +693,11 @@ mod tests {
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
-        assert_eq!(inbox.as_array().unwrap().len(), 2, "cooldown expired -> second alert fires");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            2,
+            "cooldown expired -> second alert fires"
+        );
     }
 
     /// The cooldown MUST be per-task, not a single global gate — Ticker keys
@@ -673,12 +721,18 @@ mod tests {
         )
         .await
         .expect("create t2");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim t1 failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t2", "actorId": implementer }))
-            .await
-            .expect("claim t2 failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim t1 failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t2", "actorId": implementer }),
+        )
+        .await
+        .expect("claim t2 failed");
 
         let claimed_at = Utc::now();
         let mut ticker = Ticker::new();
@@ -726,9 +780,12 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
         task::note(
             &state,
             json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer, "text": "still working" }),
@@ -746,7 +803,10 @@ mod tests {
         let candidates = repo::task::stall_candidates(&state.db)
             .await
             .expect("stall_candidates query failed");
-        let candidate = candidates.iter().find(|c| c.slug == "t1").expect("t1 present");
+        let candidate = candidates
+            .iter()
+            .find(|c| c.slug == "t1")
+            .expect("t1 present");
         assert_eq!(
             candidate.last_event_at, newest_created_at,
             "stall clock must track the NEWEST event (the note), not the original claim"
@@ -772,7 +832,11 @@ mod tests {
         let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
             .await
             .expect("list failed");
-        assert_eq!(inbox.as_array().unwrap().len(), 0, "an unclaimed task must never stall-alert");
+        assert_eq!(
+            inbox.as_array().unwrap().len(),
+            0,
+            "an unclaimed task must never stall-alert"
+        );
     }
 
     // ── challenge default ────────────────────────────────────────────────
@@ -790,9 +854,12 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::watch(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }))
-            .await
-            .expect("watch failed");
+        task::watch(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": watcher }),
+        )
+        .await
+        .expect("watch failed");
         let challenge_event = task::challenge(
             &state,
             json!({
@@ -807,9 +874,10 @@ mod tests {
         // The watcher's baseline: exactly the challenge line (a live-actor
         // notification, NOT a timer page). Snapshotted here so we can prove the
         // deadline tick adds NOTHING to the watcher's set.
-        let watcher_baseline = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
-            .await
-            .expect("list failed");
+        let watcher_baseline =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+                .await
+                .expect("list failed");
         let watcher_baseline = watcher_baseline.as_array().unwrap().clone();
         assert_eq!(watcher_baseline.len(), 1, "watcher got the challenge line");
         assert_eq!(watcher_baseline[0]["fromInstanceId"], json!(challenger));
@@ -840,7 +908,10 @@ mod tests {
             .expect("get failed");
         let events = got["events"].as_array().unwrap();
         assert_eq!(events.len(), 2, "a default ruling event must be appended");
-        let ruling = events.iter().find(|e| e["kind"] == "ruling").expect("ruling present");
+        let ruling = events
+            .iter()
+            .find(|e| e["kind"] == "ruling")
+            .expect("ruling present");
         assert_eq!(ruling["payload"]["by"], json!("default"));
         assert_eq!(ruling["payload"]["challengeId"], challenge_event["id"]);
         assert_eq!(ruling["payload"]["text"], json!("escalate to lead"));
@@ -849,9 +920,10 @@ mod tests {
         // each party here both SENDS one (as the "from" for the other's
         // notify) and RECEIVES one, so filter to `toInstanceId` to count
         // actual received notifications rather than raw list length.
-        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
-            .await
-            .expect("list failed");
+        let owner_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+                .await
+                .expect("list failed");
         let owner_received: Vec<_> = owner_inbox
             .as_array()
             .unwrap()
@@ -861,7 +933,11 @@ mod tests {
         // All-NULL byte-for-byte: exact stable tuple — the default-ruling text is
         // deterministic (no timestamp), so pin from/to/text fully. Owner receives
         // the line attributed to the challenger (the swapped real sender).
-        assert_eq!(owner_received.len(), 1, "owner must receive exactly one notification");
+        assert_eq!(
+            owner_received.len(),
+            1,
+            "owner must receive exactly one notification"
+        );
         assert_eq!(owner_received[0]["fromInstanceId"], json!(challenger));
         assert_eq!(owner_received[0]["toInstanceId"], json!(owner));
         assert_eq!(
@@ -879,7 +955,11 @@ mod tests {
             .iter()
             .filter(|m| m["toInstanceId"] == json!(challenger))
             .collect();
-        assert_eq!(challenger_received.len(), 1, "challenger must receive exactly one notification");
+        assert_eq!(
+            challenger_received.len(),
+            1,
+            "challenger must receive exactly one notification"
+        );
         assert_eq!(challenger_received[0]["fromInstanceId"], json!(owner));
         assert_eq!(challenger_received[0]["toInstanceId"], json!(challenger));
         assert_eq!(
@@ -889,9 +969,10 @@ mod tests {
 
         // The deadline default notifies the two PARTIES only — the watcher's set
         // is byte-for-byte its pre-tick baseline (no timer-added watcher page).
-        let watcher_after = crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
-            .await
-            .expect("list failed");
+        let watcher_after =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": watcher }))
+                .await
+                .expect("list failed");
         assert_eq!(
             watcher_after.as_array().unwrap(),
             &watcher_baseline,
@@ -936,7 +1017,11 @@ mod tests {
             .iter()
             .filter(|e| e["kind"] == "ruling")
             .collect();
-        assert_eq!(rulings.len(), 1, "a second tick must not insert a duplicate default ruling");
+        assert_eq!(
+            rulings.len(),
+            1,
+            "a second tick must not insert a duplicate default ruling"
+        );
     }
 
     #[tokio::test]
@@ -984,7 +1069,11 @@ mod tests {
             .iter()
             .filter(|e| e["kind"] == "ruling")
             .collect();
-        assert_eq!(rulings.len(), 1, "the manual ruling must stand — no default appended");
+        assert_eq!(
+            rulings.len(),
+            1,
+            "the manual ruling must stand — no default appended"
+        );
         assert_eq!(rulings[0]["payload"]["by"], json!(owner));
     }
 
@@ -993,9 +1082,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let challenger = fixture_instance(&state, &ws, "Challenger").await;
-        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
         task::challenge(
             &state,
             json!({
@@ -1013,7 +1105,11 @@ mod tests {
             .await
             .expect("get failed");
         assert!(
-            got["events"].as_array().unwrap().iter().all(|e| e["kind"] != "ruling"),
+            got["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["kind"] != "ruling"),
             "an advisory (no deadline) challenge must never auto-default"
         );
     }
@@ -1060,9 +1156,12 @@ mod tests {
         let state = AppState::for_tests().await;
         let ws = fixture_workspace(&state).await;
         let distiller = fixture_instance(&state, &ws, "Distiller").await;
-        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let mut ticker = Ticker::new();
         tick(&state, Utc::now() + Duration::hours(24), &mut ticker).await;
@@ -1081,9 +1180,12 @@ mod tests {
         let distiller = fixture_instance(&state, &ws, "Distiller").await;
         let reviewer = fixture_instance(&state, &ws, "Reviewer").await;
         set_distill_config(&state, &ws, &distiller, &reviewer).await;
-        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
 
         let hwm = Utc::now();
         set_distill_hwm(&state, &ws, hwm).await;
@@ -1109,12 +1211,18 @@ mod tests {
         // A real task_event happens BEFORE the hwm is recorded (`task::create`
         // alone inserts no task_event — only `claim`/`note`/etc. do) — nothing
         // newer than the hwm.
-        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        task::note(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "before hwm" }))
-            .await
-            .expect("note failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        task::note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "before hwm" }),
+        )
+        .await
+        .expect("note failed");
         let hwm = Utc::now();
         set_distill_hwm(&state, &ws, hwm).await;
 
@@ -1139,22 +1247,35 @@ mod tests {
         let hwm = Utc::now();
         set_distill_hwm(&state, &ws, hwm).await;
         // A real task_event AFTER the hwm.
-        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        task::note(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "after hwm" }))
-            .await
-            .expect("note failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        task::note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "after hwm" }),
+        )
+        .await
+        .expect("note failed");
 
         let mut ticker = Ticker::new();
         tick(&state, hwm + Duration::hours(7), &mut ticker).await;
 
         let inbox = distiller_inbox(&state, &distiller).await;
-        assert_eq!(inbox.len(), 1, "stale hwm + activity since must nudge exactly once");
+        assert_eq!(
+            inbox.len(),
+            1,
+            "stale hwm + activity since must nudge exactly once"
+        );
         assert_eq!(inbox[0]["fromInstanceId"], json!(reviewer));
         assert_eq!(inbox[0]["toInstanceId"], json!(distiller));
         let text = inbox[0]["text"].as_str().unwrap();
-        assert!(text.contains("memory-distiller"), "nudge must name the skill: {text}");
+        assert!(
+            text.contains("memory-distiller"),
+            "nudge must name the skill: {text}"
+        );
     }
 
     #[tokio::test]
@@ -1166,17 +1287,27 @@ mod tests {
         set_distill_config(&state, &ws, &distiller, &reviewer).await;
         let hwm = Utc::now();
         set_distill_hwm(&state, &ws, hwm).await;
-        task::create(&state, json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        task::note(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "after hwm" }))
-            .await
-            .expect("note failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        task::note(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": reviewer, "text": "after hwm" }),
+        )
+        .await
+        .expect("note failed");
 
         let mut ticker = Ticker::new();
         let base = hwm + Duration::hours(7);
         tick(&state, base, &mut ticker).await;
-        assert_eq!(distiller_inbox(&state, &distiller).await.len(), 1, "first tick nudges once");
+        assert_eq!(
+            distiller_inbox(&state, &distiller).await.len(),
+            1,
+            "first tick nudges once"
+        );
 
         // 5 minutes later — well within the 60-minute in-memory cooldown.
         tick(&state, base + Duration::minutes(5), &mut ticker).await;
@@ -1213,16 +1344,20 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
 
         let mut ticker = Ticker::new();
         tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
 
-        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
-            .await
-            .expect("list failed");
+        let owner_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+                .await
+                .expect("list failed");
         assert_eq!(
             owner_inbox.as_array().unwrap().len(),
             1,
@@ -1244,16 +1379,20 @@ mod tests {
         )
         .await
         .expect("create failed");
-        task::claim(&state, json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }))
-            .await
-            .expect("claim failed");
+        task::claim(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
 
         let mut ticker = Ticker::new();
         tick(&state, Utc::now() + Duration::minutes(11), &mut ticker).await;
 
-        let owner_inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
-            .await
-            .expect("list failed");
+        let owner_inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+                .await
+                .expect("list failed");
         assert_eq!(
             owner_inbox.as_array().unwrap().len(),
             1,
@@ -1274,26 +1413,43 @@ mod tests {
         set_distill_config(&state, &ws1, &distiller1, &reviewer1).await;
         let hwm1 = Utc::now();
         set_distill_hwm(&state, &ws1, hwm1).await;
-        task::create(&state, json!({ "workspaceId": ws1, "slug": "t1", "title": "T1" }))
-            .await
-            .expect("create failed");
-        task::note(&state, json!({ "workspaceId": ws1, "slug": "t1", "actorId": reviewer1, "text": "after hwm" }))
-            .await
-            .expect("note failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws1, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        task::note(
+            &state,
+            json!({ "workspaceId": ws1, "slug": "t1", "actorId": reviewer1, "text": "after hwm" }),
+        )
+        .await
+        .expect("note failed");
 
         set_distill_config(&state, &ws2, &distiller2, &reviewer2).await;
         // Fresh relative to the SAME injected `now` the tick below uses (one
         // tick checks every workspace against one `now`) — 1h old, inside the
         // 6h default cooldown — must not nudge regardless of ws1's schedule.
         set_distill_hwm(&state, &ws2, hwm1 + Duration::hours(6)).await;
-        task::create(&state, json!({ "workspaceId": ws2, "slug": "t2", "title": "T2" }))
-            .await
-            .expect("create failed");
+        task::create(
+            &state,
+            json!({ "workspaceId": ws2, "slug": "t2", "title": "T2" }),
+        )
+        .await
+        .expect("create failed");
 
         let mut ticker = Ticker::new();
         tick(&state, hwm1 + Duration::hours(7), &mut ticker).await;
 
-        assert_eq!(distiller_inbox(&state, &distiller1).await.len(), 1, "ws1 must nudge");
-        assert_eq!(distiller_inbox(&state, &distiller2).await.len(), 0, "ws2 must not nudge");
+        assert_eq!(
+            distiller_inbox(&state, &distiller1).await.len(),
+            1,
+            "ws1 must nudge"
+        );
+        assert_eq!(
+            distiller_inbox(&state, &distiller2).await.len(),
+            0,
+            "ws2 must not nudge"
+        );
     }
 }

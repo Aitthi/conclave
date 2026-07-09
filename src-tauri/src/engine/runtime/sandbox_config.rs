@@ -44,9 +44,7 @@ pub fn codex_socket_overrides(socket_path: &str) -> Vec<String> {
         "permissions.conclave.network.enabled=true".to_string(),
         // Inline TOML table with a double-quoted key: spaces + slashes in the
         // path are fine inside the quotes.
-        format!(
-            "permissions.conclave.network.unix_sockets={{\"{socket_path}\"=\"allow\"}}"
-        ),
+        format!("permissions.conclave.network.unix_sockets={{\"{socket_path}\"=\"allow\"}}"),
         "default_permissions=\"conclave\"".to_string(),
     ]
 }
@@ -59,7 +57,10 @@ pub fn codex_socket_overrides(socket_path: &str) -> Vec<String> {
 /// only the two `sandbox.*` keys we own are set. Route A from the research
 /// (surgical — opens exactly the one socket, keeps conclave inside the sandbox):
 /// `sandbox.network.allowUnixSockets` + `sandbox.autoAllowBashIfSandboxed`.
-pub fn claude_sandbox_settings(socket_path: &str, existing: Option<serde_json::Value>) -> serde_json::Value {
+pub fn claude_sandbox_settings(
+    socket_path: &str,
+    existing: Option<serde_json::Value>,
+) -> serde_json::Value {
     use serde_json::Value;
     let mut root = match existing {
         Some(Value::Object(_)) => existing.unwrap(),
@@ -238,7 +239,13 @@ mod tests {
 
     #[test]
     fn sandboxed_modes_need_the_hole() {
-        for mode in [None, Some("default"), Some("auto"), Some("acceptEdits"), Some("plan")] {
+        for mode in [
+            None,
+            Some("default"),
+            Some("auto"),
+            Some("acceptEdits"),
+            Some("plan"),
+        ] {
             assert!(needs_socket_hole(mode), "mode {mode:?} runs sandboxed");
         }
     }
@@ -333,9 +340,7 @@ mod tests {
         // Single shell word via echo + single quotes; payload is the documented
         // SessionStart additionalContext envelope.
         assert!(cmd.starts_with("echo '"), "command was {cmd}");
-        let json_body = cmd
-            .trim_start_matches("echo '")
-            .trim_end_matches('\'');
+        let json_body = cmd.trim_start_matches("echo '").trim_end_matches('\'');
         let v: Value = serde_json::from_str(json_body).expect("payload is valid JSON");
         assert_eq!(
             v["hookSpecificOutput"]["hookEventName"],
@@ -351,10 +356,7 @@ mod tests {
     fn claude_settings_fresh_has_route_a_keys() {
         let sock = "/Users/x/Library/Application Support/Conclave/conclave.sock";
         let v = claude_sandbox_settings(sock, None);
-        assert_eq!(
-            v["sandbox"]["network"]["allowUnixSockets"],
-            json!([sock])
-        );
+        assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
         assert_eq!(v["sandbox"]["autoAllowBashIfSandboxed"], json!(true));
     }
 
@@ -401,7 +403,10 @@ mod tests {
     #[test]
     fn claude_settings_path_lives_beside_socket() {
         let p = claude_settings_path("inst-123");
-        assert!(p.ends_with("agent-settings/inst-123.json"), "path was {p:?}");
+        assert!(
+            p.ends_with("agent-settings/inst-123.json"),
+            "path was {p:?}"
+        );
         // sibling of the Conclave data dir, not the workspace
         assert!(p.to_string_lossy().contains("Conclave"));
     }

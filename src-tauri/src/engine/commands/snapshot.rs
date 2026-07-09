@@ -875,7 +875,10 @@ mod tests {
             .expect("session exists");
         assert!(state
             .runtime
-            .register(&inst, crate::engine::runtime::LiveHandle::placeholder(&session.id))
+            .register(
+                &inst,
+                crate::engine::runtime::LiveHandle::placeholder(&session.id)
+            )
             .is_some());
 
         let err = resume(&state, json!({ "instanceId": inst }))
@@ -890,16 +893,22 @@ mod tests {
     async fn resume_with_handoff_ok() {
         let state = AppState::for_tests().await;
         let inst = fixture_instance(&state).await;
-        save(&state, json!({ "instanceId": inst, "text": "next: finish the parser" }))
-            .await
-            .expect("save failed");
+        save(
+            &state,
+            json!({ "instanceId": inst, "text": "next: finish the parser" }),
+        )
+        .await
+        .expect("save failed");
         let session = session::get_by_instance(&state.db, &inst)
             .await
             .expect("get_by_instance failed")
             .expect("session exists");
         assert!(state
             .runtime
-            .register(&inst, crate::engine::runtime::LiveHandle::placeholder(&session.id))
+            .register(
+                &inst,
+                crate::engine::runtime::LiveHandle::placeholder(&session.id)
+            )
             .is_some());
 
         let out = resume(&state, json!({ "instanceId": inst }))

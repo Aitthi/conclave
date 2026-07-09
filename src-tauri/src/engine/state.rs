@@ -56,8 +56,7 @@ pub struct AppState {
 
     /// Decoded memory vectors for warm exact search. The cache is bounded to
     /// four workspaces and invalidated by every completed memory write.
-    pub memory_search_cache:
-        std::sync::Arc<crate::engine::commands::memory::MemorySearchCache>,
+    pub memory_search_cache: std::sync::Arc<crate::engine::commands::memory::MemorySearchCache>,
 
     /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
     /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
@@ -201,9 +200,11 @@ impl AppState {
             db: crate::engine::db::connect_in_memory().await,
             app: OnceLock::new(),
             runtime: std::sync::Arc::new(crate::engine::runtime::Runtime::new()),
-            memory_embedder: std::sync::Arc::new(crate::engine::runtime::embedder::FakeEmbedder::new(
-                crate::engine::runtime::embedder::MINILM_L6_V2_Q_DIMENSION,
-            )),
+            memory_embedder: std::sync::Arc::new(
+                crate::engine::runtime::embedder::FakeEmbedder::new(
+                    crate::engine::runtime::embedder::MINILM_L6_V2_Q_DIMENSION,
+                ),
+            ),
             memory_search_cache: std::sync::Arc::new(
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),

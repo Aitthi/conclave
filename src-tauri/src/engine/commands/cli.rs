@@ -2813,12 +2813,18 @@ mod tests {
 
     #[test]
     fn browser_open_and_goto_map_url_verbatim() {
-        assert_eq!(ok_method(&["browser", "open", "example.com"]), "browser.open");
+        assert_eq!(
+            ok_method(&["browser", "open", "example.com"]),
+            "browser.open"
+        );
         assert_eq!(
             ok_params(&["browser", "open", "example.com"]),
             json!({ "url": "example.com" })
         );
-        assert_eq!(ok_method(&["browser", "goto", "https://x.test/"]), "browser.goto");
+        assert_eq!(
+            ok_method(&["browser", "goto", "https://x.test/"]),
+            "browser.goto"
+        );
         assert_eq!(
             ok_params(&["browser", "goto", "https://x.test/"]),
             json!({ "url": "https://x.test/" })
@@ -2863,7 +2869,10 @@ mod tests {
         );
         assert!(is_invalid(&["browser", "click"]));
         // type joins the trailing words into one text payload.
-        assert_eq!(ok_method(&["browser", "type", "#q", "hello", "world"]), "browser.type");
+        assert_eq!(
+            ok_method(&["browser", "type", "#q", "hello", "world"]),
+            "browser.type"
+        );
         assert_eq!(
             ok_params(&["browser", "type", "#q", "hello", "world"]),
             json!({ "selector": "#q", "text": "hello world" })
@@ -2897,7 +2906,13 @@ mod tests {
         );
         assert_eq!(
             ok_params(&[
-                "browser", "screenshot", "/ws/shot.png", "--width", "1440", "--height", "900"
+                "browser",
+                "screenshot",
+                "/ws/shot.png",
+                "--width",
+                "1440",
+                "--height",
+                "900"
             ]),
             json!({ "path": "/ws/shot.png", "width": 1440.0, "height": 900.0 })
         );
@@ -2905,7 +2920,13 @@ mod tests {
 
     #[test]
     fn browser_screenshot_rejects_bad_dimension() {
-        assert!(is_invalid(&["browser", "screenshot", "/ws/s.png", "--width", "abc"]));
+        assert!(is_invalid(&[
+            "browser",
+            "screenshot",
+            "/ws/s.png",
+            "--width",
+            "abc"
+        ]));
     }
 
     #[test]

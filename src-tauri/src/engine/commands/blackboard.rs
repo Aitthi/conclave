@@ -418,9 +418,12 @@ mod tests {
         let ws1 = fixture_workspace(&state).await;
         let ws2 = fixture_workspace(&state).await;
         let foreigner = fixture_instance(&state, &ws2, "Foreign").await;
-        set(&state, json!({ "workspaceId": ws1, "key": "k", "value": 1 }))
-            .await
-            .expect("set");
+        set(
+            &state,
+            json!({ "workspaceId": ws1, "key": "k", "value": 1 }),
+        )
+        .await
+        .expect("set");
 
         // Foreign deleter → Invalid, key survives.
         let err = delete(

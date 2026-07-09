@@ -61,7 +61,9 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         return Err(AppError::Invalid("role name must not be empty".into()));
     }
     if req.description.trim().is_empty() {
-        return Err(AppError::Invalid("role description must not be empty".into()));
+        return Err(AppError::Invalid(
+            "role description must not be empty".into(),
+        ));
     }
     if collides_with_builtin_slug(&req.name) {
         return Err(AppError::Invalid(
@@ -73,15 +75,9 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         if repo::role::list_builtin().iter().any(|r| r.id == id) {
             return Err(AppError::Invalid("cannot edit a builtin role".into()));
         }
-        let row = repo::role::update(
-            &state.db,
-            id,
-            &req.name,
-            &req.description,
-            &req.skill_ids,
-        )
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("role id={id} not found")))?;
+        let row = repo::role::update(&state.db, id, &req.name, &req.description, &req.skill_ids)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("role id={id} not found")))?;
         return serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()));
     }
 
@@ -184,11 +180,19 @@ mod tests {
     async fn save_rejects_empty_name_or_description() {
         let state = AppState::for_tests().await;
         assert!(matches!(
-            save(&state, serde_json::json!({ "name": "  ", "description": "d" })).await,
+            save(
+                &state,
+                serde_json::json!({ "name": "  ", "description": "d" })
+            )
+            .await,
             Err(AppError::Invalid(_))
         ));
         assert!(matches!(
-            save(&state, serde_json::json!({ "name": "X", "description": "" })).await,
+            save(
+                &state,
+                serde_json::json!({ "name": "X", "description": "" })
+            )
+            .await,
             Err(AppError::Invalid(_))
         ));
     }
@@ -231,11 +235,13 @@ mod tests {
         let listed = list(&state, Value::Null).await.expect("list failed");
         let arr = listed.as_array().unwrap();
         assert!(
-            arr.iter().any(|r| r["kind"] == "builtin" && r["id"] == "fix-lead"),
+            arr.iter()
+                .any(|r| r["kind"] == "builtin" && r["id"] == "fix-lead"),
             "builtin fixture role must appear"
         );
         assert!(
-            arr.iter().any(|r| r["kind"] == "custom" && r["name"] == "Zzz Custom"),
+            arr.iter()
+                .any(|r| r["kind"] == "custom" && r["name"] == "Zzz Custom"),
             "custom role must appear"
         );
         // Builtins come before customs.

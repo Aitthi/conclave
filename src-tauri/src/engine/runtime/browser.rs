@@ -24,7 +24,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl,
+};
 use tokio::sync::oneshot;
 
 /// Stable label for the single shared browser window (plan §Runtime Notes).
@@ -166,7 +168,9 @@ impl std::fmt::Display for BrowserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BrowserError::InvalidUrl(u) => write!(f, "invalid url: {u}"),
-            BrowserError::NotOpen => write!(f, "no browser is open — run `browser open <url>` first"),
+            BrowserError::NotOpen => {
+                write!(f, "no browser is open — run `browser open <url>` first")
+            }
             BrowserError::Webview(m) => write!(f, "browser webview error: {m}"),
             BrowserError::Page(m) => write!(f, "browser page error: {m}"),
             BrowserError::Timeout => write!(f, "browser page tool timed out"),
@@ -441,7 +445,8 @@ pub async fn open(
 ) -> Result<BrowserState, BrowserError> {
     let target = normalize_url(url)?;
     if let Some(view) = webview(app) {
-        view.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
+        view.navigate(target)
+            .map_err(|e| BrowserError::Webview(e.to_string()))?;
         return Ok(state_from(&view));
     }
     let window = app
@@ -468,7 +473,8 @@ pub async fn open(
 pub async fn goto(app: &AppHandle, url: &str) -> Result<BrowserState, BrowserError> {
     let target = normalize_url(url)?;
     let view = require_webview(app)?;
-    view.navigate(target).map_err(|e| BrowserError::Webview(e.to_string()))?;
+    view.navigate(target)
+        .map_err(|e| BrowserError::Webview(e.to_string()))?;
     Ok(state_from(&view))
 }
 
@@ -486,7 +492,10 @@ pub async fn status(app: &AppHandle) -> Result<BrowserState, BrowserError> {
 }
 
 /// DOM/text snapshot of the current page (capped body text).
-pub async fn snapshot(app: &AppHandle, max_text: Option<i64>) -> Result<BrowserSnapshot, BrowserError> {
+pub async fn snapshot(
+    app: &AppHandle,
+    max_text: Option<i64>,
+) -> Result<BrowserSnapshot, BrowserError> {
     let view = require_webview(app)?;
     let value = eval_value(&view, snapshot_js(clamp_max_text(max_text))).await?;
     reject_page_error(&value)?;
@@ -529,9 +538,15 @@ pub async fn eval_json(app: &AppHandle, js: &str) -> Result<serde_json::Value, B
 /// graceful `ok:true`.
 pub async fn close(app: &AppHandle) -> Result<BrowserState, BrowserError> {
     if let Some(view) = webview(app) {
-        view.close().map_err(|e| BrowserError::Webview(e.to_string()))?;
+        view.close()
+            .map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
-    Ok(BrowserState { ok: true, url: None, title: None, message: None })
+    Ok(BrowserState {
+        ok: true,
+        url: None,
+        title: None,
+        message: None,
+    })
 }
 
 /// One-shot slot carrying the encoded PNG (or an error string) from the
@@ -609,10 +624,9 @@ pub async fn screenshot(
                         send(&slot, Err("no TIFF representation".into()));
                         return;
                     };
-                    let Some(rep) = NSBitmapImageRep::initWithData(
-                        NSBitmapImageRep::alloc(),
-                        &tiff,
-                    ) else {
+                    let Some(rep) =
+                        NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)
+                    else {
                         send(&slot, Err("no bitmap rep".into()));
                         return;
                     };
@@ -653,7 +667,11 @@ pub async fn screenshot(
     std::fs::write(path, &bytes)
         .map_err(|e| BrowserError::Webview(format!("write {path}: {e}")))?;
 
-    Ok(BrowserShot { path: path.to_owned(), width: w, height: h })
+    Ok(BrowserShot {
+        path: path.to_owned(),
+        width: w,
+        height: h,
+    })
 }
 
 /// Non-macOS: capture uses a macOS-only native API.
@@ -674,10 +692,17 @@ pub async fn screenshot(
 pub async fn set_bounds(app: &AppHandle, bounds: Bounds) -> Result<BrowserState, BrowserError> {
     if let Some(view) = webview(app) {
         let (position, size) = resolve_bounds(Some(bounds));
-        view.set_position(position).map_err(|e| BrowserError::Webview(e.to_string()))?;
-        view.set_size(size).map_err(|e| BrowserError::Webview(e.to_string()))?;
+        view.set_position(position)
+            .map_err(|e| BrowserError::Webview(e.to_string()))?;
+        view.set_size(size)
+            .map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
-    Ok(BrowserState { ok: true, url: None, title: None, message: None })
+    Ok(BrowserState {
+        ok: true,
+        url: None,
+        title: None,
+        message: None,
+    })
 }
 
 /// Show/hide the embedded webview on tab switch WITHOUT closing it — the page
@@ -688,7 +713,12 @@ pub async fn set_visible(app: &AppHandle, visible: bool) -> Result<BrowserState,
         let res = if visible { view.show() } else { view.hide() };
         res.map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
-    Ok(BrowserState { ok: true, url: None, title: None, message: None })
+    Ok(BrowserState {
+        ok: true,
+        url: None,
+        title: None,
+        message: None,
+    })
 }
 
 #[cfg(test)]
@@ -697,7 +727,10 @@ mod tests {
 
     #[test]
     fn normalize_url_fills_missing_scheme_with_https() {
-        assert_eq!(normalize_url("example.com").unwrap().as_str(), "https://example.com/");
+        assert_eq!(
+            normalize_url("example.com").unwrap().as_str(),
+            "https://example.com/"
+        );
         assert_eq!(
             normalize_url("example.com/a/b?q=1").unwrap().as_str(),
             "https://example.com/a/b?q=1"
@@ -706,9 +739,18 @@ mod tests {
 
     #[test]
     fn normalize_url_preserves_explicit_and_special_schemes() {
-        assert_eq!(normalize_url("http://x.test/").unwrap().as_str(), "http://x.test/");
-        assert_eq!(normalize_url("https://x.test/").unwrap().as_str(), "https://x.test/");
-        assert_eq!(normalize_url("about:blank").unwrap().as_str(), "about:blank");
+        assert_eq!(
+            normalize_url("http://x.test/").unwrap().as_str(),
+            "http://x.test/"
+        );
+        assert_eq!(
+            normalize_url("https://x.test/").unwrap().as_str(),
+            "https://x.test/"
+        );
+        assert_eq!(
+            normalize_url("about:blank").unwrap().as_str(),
+            "about:blank"
+        );
         assert_eq!(
             normalize_url("file:///Users/x/page.html").unwrap().as_str(),
             "file:///Users/x/page.html"
@@ -717,16 +759,28 @@ mod tests {
 
     #[test]
     fn normalize_url_trims_and_rejects_empty() {
-        assert_eq!(normalize_url("  example.com  ").unwrap().as_str(), "https://example.com/");
-        assert!(matches!(normalize_url("   "), Err(BrowserError::InvalidUrl(_))));
-        assert!(matches!(normalize_url(""), Err(BrowserError::InvalidUrl(_))));
+        assert_eq!(
+            normalize_url("  example.com  ").unwrap().as_str(),
+            "https://example.com/"
+        );
+        assert!(matches!(
+            normalize_url("   "),
+            Err(BrowserError::InvalidUrl(_))
+        ));
+        assert!(matches!(
+            normalize_url(""),
+            Err(BrowserError::InvalidUrl(_))
+        ));
     }
 
     #[test]
     fn normalize_url_rejects_unparseable() {
         // A space in the authority survives the https:// prefix and fails to
         // parse — must fail loudly, not load a bogus page.
-        assert!(matches!(normalize_url("ht tp://%%%"), Err(BrowserError::InvalidUrl(_))));
+        assert!(matches!(
+            normalize_url("ht tp://%%%"),
+            Err(BrowserError::InvalidUrl(_))
+        ));
     }
 
     #[test]
@@ -741,9 +795,18 @@ mod tests {
     #[test]
     fn snapshot_js_embeds_the_cap_and_is_exception_safe() {
         let js = snapshot_js(4242);
-        assert!(js.contains("var MAX = 4242;"), "resolved cap must be inlined");
-        assert!(js.contains("__error"), "must return an error object, never throw");
-        assert!(!js.contains("__MAX_TEXT__"), "placeholder must be fully replaced");
+        assert!(
+            js.contains("var MAX = 4242;"),
+            "resolved cap must be inlined"
+        );
+        assert!(
+            js.contains("__error"),
+            "must return an error object, never throw"
+        );
+        assert!(
+            !js.contains("__MAX_TEXT__"),
+            "placeholder must be fully replaced"
+        );
     }
 
     #[test]
@@ -755,20 +818,34 @@ mod tests {
 
         let ty = type_js("#in", "he said \"hi\"\nline2");
         assert!(ty.contains(r##"querySelector("#in")"##));
-        assert!(ty.contains(r#""he said \"hi\"\nline2""#), "text must be JSON-escaped");
-        assert!(ty.contains("dispatchEvent"), "must notify page frameworks of the edit");
+        assert!(
+            ty.contains(r#""he said \"hi\"\nline2""#),
+            "text must be JSON-escaped"
+        );
+        assert!(
+            ty.contains("dispatchEvent"),
+            "must notify page frameworks of the edit"
+        );
     }
 
     #[test]
     fn eval_js_wraps_expression_in_try_catch() {
         let js = eval_js("document.title");
         assert!(js.contains("document.title"));
-        assert!(js.contains("__error"), "raw eval must not throw past the callback");
+        assert!(
+            js.contains("__error"),
+            "raw eval must not throw past the callback"
+        );
     }
 
     #[test]
     fn resolve_bounds_uses_given_rect_and_clamps_negative_size() {
-        let (pos, size) = resolve_bounds(Some(Bounds { x: 40.0, y: 12.0, width: 800.0, height: -5.0 }));
+        let (pos, size) = resolve_bounds(Some(Bounds {
+            x: 40.0,
+            y: 12.0,
+            width: 800.0,
+            height: -5.0,
+        }));
         assert_eq!(pos, tauri::LogicalPosition::new(40.0, 12.0));
         // A negative height from a mid-layout measurement must clamp to 0, never
         // pass a negative size to the platform.
@@ -787,7 +864,10 @@ mod tests {
     #[test]
     fn resolve_capture_size_defaults_and_clamps() {
         assert_eq!(resolve_capture_size(None, None), (1280.0, 800.0));
-        assert_eq!(resolve_capture_size(Some(1440.0), Some(900.0)), (1440.0, 900.0));
+        assert_eq!(
+            resolve_capture_size(Some(1440.0), Some(900.0)),
+            (1440.0, 900.0)
+        );
         // below-min clamps up to 1, above-max clamps down to 10000
         assert_eq!(resolve_capture_size(Some(0.0), Some(-4.0)), (1.0, 1.0));
         assert_eq!(resolve_capture_size(Some(99999.0), None), (10000.0, 800.0));

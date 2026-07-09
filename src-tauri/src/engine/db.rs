@@ -274,7 +274,10 @@ mod tests {
             include_str!("migrations/0012_task_system.sql"),
             include_str!("migrations/0013_memory_proposal.sql"),
         ] {
-            sqlx::raw_sql(sql).execute(&mut *tx).await.expect("apply pre-0014 migration");
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .expect("apply pre-0014 migration");
         }
         sqlx::raw_sql("PRAGMA user_version = 13;")
             .execute(&mut *tx)
@@ -422,7 +425,10 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("foreign_key_check query failed");
-        assert!(fk_violations.is_empty(), "0014 left dangling FKs: {fk_violations:?}");
+        assert!(
+            fk_violations.is_empty(),
+            "0014 left dangling FKs: {fk_violations:?}"
+        );
     }
 
     /// All entity tables must exist after migration.
@@ -498,7 +504,13 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/migrations");
         let mut numbers: Vec<u32> = std::fs::read_dir(&dir)
             .expect("read migrations dir")
-            .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .filter_map(|name| name.get(0..4).and_then(|prefix| prefix.parse::<u32>().ok()))
             .collect();
         numbers.sort_unstable();
@@ -524,7 +536,8 @@ mod tests {
             .await
             .expect("user_version query failed");
         assert_eq!(
-            version, i64::from(max_number),
+            version,
+            i64::from(max_number),
             "a fresh migrate() must land user_version at the highest migration file number"
         );
     }
@@ -777,11 +790,10 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert role should succeed");
-        let skill_ids: String =
-            sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
-                .fetch_one(&pool)
-                .await
-                .expect("select failed");
+        let skill_ids: String = sqlx::query_scalar("SELECT skill_ids FROM role WHERE id = 'r1'")
+            .fetch_one(&pool)
+            .await
+            .expect("select failed");
         assert_eq!(skill_ids, "[]");
 
         // agent_definition.role_id exists and defaults to NULL.
@@ -851,16 +863,18 @@ mod tests {
             .execute(&pool)
             .await
             .expect("delete workspace");
-        let remaining_index: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'")
-                .fetch_one(&pool)
-                .await
-                .expect("count memory index");
-        let remaining_chunks: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'")
-                .fetch_one(&pool)
-                .await
-                .expect("count memory chunks");
+        let remaining_index: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_index WHERE workspace_id = 'memory-ws'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count memory index");
+        let remaining_chunks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_chunk WHERE workspace_id = 'memory-ws'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count memory chunks");
         assert_eq!(remaining_index, 0, "memory index must cascade");
         assert_eq!(remaining_chunks, 0, "memory chunks must cascade");
 
@@ -904,9 +918,7 @@ mod tests {
             "query must use the composite index: {details:?}"
         );
         assert!(
-            details
-                .iter()
-                .all(|detail| !detail.contains("TEMP B-TREE")),
+            details.iter().all(|detail| !detail.contains("TEMP B-TREE")),
             "query must not sort each page into a temp B-tree: {details:?}"
         );
     }

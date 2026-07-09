@@ -98,8 +98,7 @@ impl TranscriptContextReader {
         // thousands of unrelated historical sessions (GBs). If the slug dir is
         // absent (unexpected cwd shape), fall back to the full root; the mtime
         // filter in `collect_jsonl_files` keeps even that fallback cheap.
-        let project_dir =
-            claude_project_dir(&self.config.claude_projects_root, workspace_folder);
+        let project_dir = claude_project_dir(&self.config.claude_projects_root, workspace_folder);
         let scan_root = if project_dir.is_dir() {
             project_dir
         } else {
@@ -300,7 +299,10 @@ fn scan_claude_file(
         return None;
     }
 
-    let Some((_, tokens)) = latest_by_key.into_values().max_by_key(|(line_no, _)| *line_no) else {
+    let Some((_, tokens)) = latest_by_key
+        .into_values()
+        .max_by_key(|(line_no, _)| *line_no)
+    else {
         return None;
     };
     let observed_at = file_modified_at(path)?;
@@ -342,21 +344,33 @@ fn scan_codex_file(
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
-        if value
-            .pointer("/payload/type")
-            .and_then(Value::as_str)
-            != Some("token_count")
-        {
+        if value.pointer("/payload/type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
 
         if let Some(cwd) = value
             .pointer("/payload/cwd")
             .and_then(Value::as_str)
-            .or_else(|| value.pointer("/payload/session_meta/cwd").and_then(Value::as_str))
-            .or_else(|| value.pointer("/payload/turn_context/cwd").and_then(Value::as_str))
-            .or_else(|| value.pointer("/payload/session_meta/payload/cwd").and_then(Value::as_str))
-            .or_else(|| value.pointer("/payload/turn_context/payload/cwd").and_then(Value::as_str))
+            .or_else(|| {
+                value
+                    .pointer("/payload/session_meta/cwd")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                value
+                    .pointer("/payload/turn_context/cwd")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                value
+                    .pointer("/payload/session_meta/payload/cwd")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                value
+                    .pointer("/payload/turn_context/payload/cwd")
+                    .and_then(Value::as_str)
+            })
         {
             if cwd == workspace_text.as_ref() {
                 saw_workspace = true;

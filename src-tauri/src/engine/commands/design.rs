@@ -44,7 +44,10 @@ fn build_info(dir: &Path, host: Option<design_host::HostInfo>) -> DesignInfo {
     let project_id = design_host::project_id_for(dir);
     match host {
         Some(v) => DesignInfo {
-            url: Some(format!("http://127.0.0.1:{}/?project={}", v.port, project_id)),
+            url: Some(format!(
+                "http://127.0.0.1:{}/?project={}",
+                v.port, project_id
+            )),
             port: Some(v.port),
             running: true,
             project_id,
@@ -85,7 +88,8 @@ pub async fn ensure(state: &AppState, payload: Value) -> Result<Value, AppError>
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    serde_json::to_value(build_info(&dir, Some(info))).map_err(|e| AppError::Internal(e.to_string()))
+    serde_json::to_value(build_info(&dir, Some(info)))
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// `design.status { workspaceId }` → same shape as `ensure`, `running: bool`,
@@ -290,17 +294,26 @@ mod tests {
     #[ignore]
     async fn ensure_round_trip() {
         let state = AppState::for_tests().await;
-        let tmp = std::env::temp_dir().join(format!("conclave-design-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("conclave-design-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).expect("mkdir scratch workspace");
-        let ws = repo::workspace::create(&state.db, "Design Test Scratch", tmp.to_str().unwrap(), None)
-            .await
-            .expect("insert scratch workspace");
+        let ws = repo::workspace::create(
+            &state.db,
+            "Design Test Scratch",
+            tmp.to_str().unwrap(),
+            None,
+        )
+        .await
+        .expect("insert scratch workspace");
 
         let res = ensure(&state, serde_json::json!({ "workspaceId": ws.id }))
             .await
             .expect("design.ensure failed");
         assert_eq!(res["running"], serde_json::json!(true));
-        let url = res["url"].as_str().expect("url present when running").to_owned();
+        let url = res["url"]
+            .as_str()
+            .expect("url present when running")
+            .to_owned();
 
         assert!(
             tmp.join("design/screens/welcome.tsx").is_file(),
@@ -309,7 +322,11 @@ mod tests {
 
         let client = reqwest::Client::new();
         let resp = client.get(&url).send().await.expect("GET host URL");
-        assert!(resp.status().is_success(), "host URL must 200: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "host URL must 200: {}",
+            resp.status()
+        );
 
         let port = res["port"].as_u64().expect("port present when running");
         let screen_path = tmp.join("design/screens/welcome.tsx");

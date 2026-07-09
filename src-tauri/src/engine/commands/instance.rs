@@ -197,7 +197,9 @@ async fn roster_row(
         .await?
         .into_iter()
         .find(|r| r.id == workspace_agent_id)
-        .ok_or_else(|| AppError::NotFound(format!("workspace agent id={workspace_agent_id} not found")))
+        .ok_or_else(|| {
+            AppError::NotFound(format!("workspace agent id={workspace_agent_id} not found"))
+        })
 }
 
 /// Parse one tri-state position field from the payload: key absent → `Keep`,
@@ -227,9 +229,9 @@ fn parse_position_field(
 /// a cycle or clobber a partial update. Emits `roster:changed`, returns the
 /// updated roster row.
 pub async fn set_position(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let obj = payload
-        .as_object()
-        .ok_or_else(|| AppError::Invalid("instance.setPosition: expected an object payload".into()))?;
+    let obj = payload.as_object().ok_or_else(|| {
+        AppError::Invalid("instance.setPosition: expected an object payload".into())
+    })?;
     let workspace_id = obj
         .get("workspaceId")
         .and_then(Value::as_str)
@@ -237,7 +239,9 @@ pub async fn set_position(state: &AppState, payload: Value) -> Result<Value, App
     let workspace_agent_id = obj
         .get("workspaceAgentId")
         .and_then(Value::as_str)
-        .ok_or_else(|| AppError::Invalid("instance.setPosition: workspaceAgentId is required".into()))?;
+        .ok_or_else(|| {
+            AppError::Invalid("instance.setPosition: workspaceAgentId is required".into())
+        })?;
 
     let level = parse_position_field(obj, "level")?;
     let supervisor = parse_position_field(obj, "supervisorAgentId")?;
@@ -258,9 +262,10 @@ pub async fn set_position(state: &AppState, payload: Value) -> Result<Value, App
         E::WorkspaceMismatch => AppError::Invalid(format!(
             "workspace agent id={workspace_agent_id} is not in workspace {workspace_id}"
         )),
-        E::LevelInvalid => {
-            AppError::Invalid(format!("level must be one of: {}", ALLOWED_LEVELS.join(", ")))
-        }
+        E::LevelInvalid => AppError::Invalid(format!(
+            "level must be one of: {}",
+            ALLOWED_LEVELS.join(", ")
+        )),
         E::SupervisorSelf => AppError::Invalid("an agent cannot supervise itself".into()),
         E::SupervisorNotFound => AppError::NotFound("supervisor not found".into()),
         E::SupervisorCrossWorkspace => {
@@ -392,9 +397,14 @@ pub(crate) async fn reload_skills_for_def(
         // Mirrors `write_skill_sidecar`'s own path construction (agentctx.rs)
         // — duplicated rather than refactoring that reviewed function, per
         // this task's additive-only constraint on agentctx.rs.
-        let sidecar_path = dirs::data_dir()
-            .map(|d| d.join("Conclave").join("skills").join(format!("{}.md", instance.id)));
-        let previous_body = sidecar_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        let sidecar_path = dirs::data_dir().map(|d| {
+            d.join("Conclave")
+                .join("skills")
+                .join(format!("{}.md", instance.id))
+        });
+        let previous_body = sidecar_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok());
         if previous_ids == skill_ids && previous_body.as_deref() == Some(body) {
             continue;
         }
@@ -567,10 +577,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // roster shows), so a fresh/restarted agent knows where it sits
             // before its first roster query. Absent → the preamble omits the
             // position clause (byte-identical to a pre-position-system launch).
-            let position = repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, &ws.id)
-                .await?
-                .into_iter()
-                .find(|r| r.id == id);
+            let position =
+                repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, &ws.id)
+                    .await?
+                    .into_iter()
+                    .find(|r| r.id == id);
             let level = position.as_ref().and_then(|r| r.level.clone());
             let supervisor_name = position.as_ref().and_then(|r| r.supervisor_name.clone());
 
@@ -603,17 +614,16 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // socket without a permission modal. Resolved at runtime from the
             // same `Conclave` data dir the server binds (never hardcoded), and
             // skipped in full-bypass mode (no sandbox to poke).
-            let socket_path = if runtime::sandbox_config::needs_socket_hole(
-                def.permission_mode.as_deref(),
-            ) {
-                Some(
-                    crate::engine::uds::socket_path()
-                        .to_string_lossy()
-                        .into_owned(),
-                )
-            } else {
-                None
-            };
+            let socket_path =
+                if runtime::sandbox_config::needs_socket_hole(def.permission_mode.as_deref()) {
+                    Some(
+                        crate::engine::uds::socket_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                } else {
+                    None
+                };
 
             let mut launch = String::from(base);
             if base == "claude" {
@@ -641,17 +651,14 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 // and auto-approves the sandboxed call). Fail-soft: on a write
                 // error the agent still works, just without the transcript
                 // meter and with the one-time seatbelt modal.
-                match runtime::sandbox_config::write_claude_settings(
-                    &id,
-                    socket_path.as_deref(),
-                ) {
+                match runtime::sandbox_config::write_claude_settings(&id, socket_path.as_deref()) {
                     Ok(path) => launch.push_str(&format!(
                         " --settings {}",
                         shell_quote(&path.to_string_lossy())
                     )),
-                    Err(e) => eprintln!(
-                        "[spawn] could not write claude agent settings for {id}: {e}"
-                    ),
+                    Err(e) => {
+                        eprintln!("[spawn] could not write claude agent settings for {id}: {e}")
+                    }
                 }
             } else if base == "codex" {
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
@@ -984,14 +991,9 @@ async fn forward_session_output(
 
             // Flush the estimate roughly every ~100 tokens of new output.
             if total_chars - last_flush_chars >= FLUSH_CHARS {
-                let compacted = flush_context_estimate(
-                    &db,
-                    app.as_ref(),
-                    &session_id,
-                    total_chars,
-                    limit,
-                )
-                .await;
+                let compacted =
+                    flush_context_estimate(&db, app.as_ref(), &session_id, total_chars, limit)
+                        .await;
                 last_flush_chars = total_chars;
                 if compacted {
                     // Auto-compact boundary: model the post-compaction window
@@ -1170,8 +1172,7 @@ async fn poll_transcript_context(
         return;
     }
 
-    let _ =
-        repo::session::set_context_reading(db, session_id, reading.tokens, reading.limit).await;
+    let _ = repo::session::set_context_reading(db, session_id, reading.tokens, reading.limit).await;
     if let Some(app) = app {
         let _ = bus::session_context(
             app,
@@ -1400,8 +1401,7 @@ pub(crate) async fn run_respawn_resume(
         if state.runtime.unregister(&instance_id) {
             // Mirror `stop`: persist + emit idle so the UI sees the transition.
             let _ = repo::workspace_agent::set_status(&state.db, &instance_id, "idle").await;
-            if let Ok(Some(session)) =
-                repo::session::get_by_instance(&state.db, &instance_id).await
+            if let Ok(Some(session)) = repo::session::get_by_instance(&state.db, &instance_id).await
             {
                 state.emit(
                     bus::SESSION_STATUS,
@@ -1493,11 +1493,11 @@ pub async fn resize(state: &AppState, payload: Value) -> Result<Value, AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
     use crate::engine::repo::{
         agent_definition::{self, AgentDefinitionInput},
         workspace, workspace_agent,
     };
+    use chrono::{DateTime, Utc};
     use serde_json::json;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -1547,7 +1547,10 @@ mod tests {
 
         assert!(launch.contains("'claude-sonnet-5[1m]'"), "{launch}");
         assert!(!launch.contains("model_context_window"), "{launch}");
-        assert!(!launch.contains("model_auto_compact_token_limit"), "{launch}");
+        assert!(
+            !launch.contains("model_auto_compact_token_limit"),
+            "{launch}"
+        );
     }
 
     /// Create a workspace + agent_definition, instantiate an instance (idle,
@@ -2459,7 +2462,10 @@ mod tests {
             .expect("one broken instance must not abort reload for its siblings");
 
         let contents = std::fs::read_to_string(&healthy_path).expect("healthy sidecar must exist");
-        assert!(contents.contains("Mandatory fixture content."), "{contents}");
+        assert!(
+            contents.contains("Mandatory fixture content."),
+            "{contents}"
+        );
         let _ = std::fs::remove_file(&healthy_path);
     }
 
@@ -2566,12 +2572,9 @@ mod tests {
         let (handle, mut rx) = runtime::LiveHandle::for_test(&session.id);
         assert!(state.runtime.register(&id, handle).is_some());
 
-        let out = restart(
-            &state,
-            json!({ "workspaceAgentId": id, "self": true }),
-        )
-        .await
-        .expect("restart failed");
+        let out = restart(&state, json!({ "workspaceAgentId": id, "self": true }))
+            .await
+            .expect("restart failed");
 
         assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
         assert!(
@@ -2582,7 +2585,10 @@ mod tests {
             .get("instruction")
             .and_then(Value::as_str)
             .expect("self-triggered restart must return an instruction");
-        assert!(instruction.contains("conclave snapshot save"), "{instruction}");
+        assert!(
+            instruction.contains("conclave snapshot save"),
+            "{instruction}"
+        );
         assert!(
             rx.try_recv().is_err(),
             "self-triggered restart must NOT write to the agent's own PTY"
@@ -2639,7 +2645,10 @@ mod tests {
             .expect("second restart must not error");
 
         assert_eq!(first.get("instruction"), second.get("instruction"));
-        assert!(state.take_restart_pending(&id), "must still be armed after the double trigger");
+        assert!(
+            state.take_restart_pending(&id),
+            "must still be armed after the double trigger"
+        );
     }
 
     /// Contrast case for `restart_self_true_live_does_not_write_to_pty`: the
@@ -2660,9 +2669,14 @@ mod tests {
             .await
             .expect("restart failed");
         assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
-        assert!(out.get("instruction").is_none(), "non-self path has no instruction field");
+        assert!(
+            out.get("instruction").is_none(),
+            "non-self path has no instruction field"
+        );
 
-        let sent = rx.try_recv().expect("non-self restart must inject the save prompt");
+        let sent = rx
+            .try_recv()
+            .expect("non-self restart must inject the save prompt");
         assert!(sent.contains("conclave snapshot save"), "{sent}");
     }
 

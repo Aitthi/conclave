@@ -241,7 +241,13 @@ pub async fn upsert_chunk_on(
 
     let normalized = normalize(input.embedding)?;
     let dimension = valid_dimension(normalized.len())?;
-    ensure_index_on(&mut *conn, input.workspace_id, input.model_id, normalized.len()).await?;
+    ensure_index_on(
+        &mut *conn,
+        input.workspace_id,
+        input.model_id,
+        normalized.len(),
+    )
+    .await?;
 
     let new_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();

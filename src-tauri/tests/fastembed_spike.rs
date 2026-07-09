@@ -87,7 +87,9 @@ fn second_run_is_offline() {
         .with_show_download_progress(false);
 
     let mut model = TextEmbedding::try_new(options).expect("model init from cache, offline");
-    let embeddings = model.embed(vec!["offline check"], None).expect("embed offline");
+    let embeddings = model
+        .embed(vec!["offline check"], None)
+        .expect("embed offline");
     assert_eq!(embeddings.len(), 1);
     println!("[T1 spike] offline embed OK, dim={}", embeddings[0].len());
 }
@@ -116,5 +118,8 @@ fn observes_execution_provider() {
         "[T1 spike] CPU EP (default, no explicit provider) embed ok: {}",
         cpu_out.is_ok()
     );
-    assert!(cpu_out.is_ok(), "CPU EP (the guaranteed baseline) must always work");
+    assert!(
+        cpu_out.is_ok(),
+        "CPU EP (the guaranteed baseline) must always work"
+    );
 }

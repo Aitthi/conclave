@@ -423,7 +423,11 @@ mod tests {
 
         let roles = super::read_builtin_roles_from(&dir);
 
-        assert_eq!(roles.len(), 1, "only the well-formed 'good' role should survive");
+        assert_eq!(
+            roles.len(),
+            1,
+            "only the well-formed 'good' role should survive"
+        );
         assert_eq!(roles[0].id, "good");
         assert_eq!(roles[0].name, "Good One");
         assert_eq!(roles[0].description, "Works.");
@@ -469,13 +473,19 @@ mod tests {
 
         let ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
         for expected in ["lead", "implementer", "reviewer", "researcher", "designer"] {
-            assert!(ids.contains(&expected), "builtin role '{expected}' must ship");
+            assert!(
+                ids.contains(&expected),
+                "builtin role '{expected}' must ship"
+            );
         }
 
         let lead = roles.iter().find(|r| r.id == "lead").expect("lead ships");
         assert_eq!(lead.name, "Lead");
         assert_eq!(lead.kind, "builtin");
-        assert!(!lead.description.is_empty(), "lead must carry a job description");
+        assert!(
+            !lead.description.is_empty(),
+            "lead must carry a job description"
+        );
         assert!(
             lead.skill_ids.contains(&"leadership".to_string()),
             "lead must bundle the leadership skill"

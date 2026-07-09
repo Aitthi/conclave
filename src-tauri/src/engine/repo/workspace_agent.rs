@@ -1691,8 +1691,14 @@ mod tests {
         assert!(before[0].skill_names.is_empty());
 
         let serialized = serde_json::to_value(&before[0]).expect("serialize failed");
-        assert!(serialized.get("contextTokens").is_some(), "must have contextTokens");
-        assert!(serialized.get("contextLimit").is_some(), "must have contextLimit");
+        assert!(
+            serialized.get("contextTokens").is_some(),
+            "must have contextTokens"
+        );
+        assert!(
+            serialized.get("contextLimit").is_some(),
+            "must have contextLimit"
+        );
 
         crate::engine::repo::session::set_launched_skill_ids(
             &pool,
@@ -1737,7 +1743,9 @@ mod tests {
         .await
         .expect("create agent_def failed");
 
-        let row = create(&pool, &ws.id, &def.id, "idle").await.expect("create workspace_agent");
+        let row = create(&pool, &ws.id, &def.id, "idle")
+            .await
+            .expect("create workspace_agent");
         let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
             .await
             .expect("query failed");
@@ -1748,8 +1756,14 @@ mod tests {
         assert!(roster[0].context_limit.is_none());
 
         let serialized = serde_json::to_value(&roster[0]).expect("serialize failed");
-        assert!(serialized.get("contextTokens").is_none(), "must omit contextTokens");
-        assert!(serialized.get("contextLimit").is_none(), "must omit contextLimit");
+        assert!(
+            serialized.get("contextTokens").is_none(),
+            "must omit contextTokens"
+        );
+        assert!(
+            serialized.get("contextLimit").is_none(),
+            "must omit contextLimit"
+        );
     }
 
     /// A3: the enriched roster resolves all four new fields — agent name, role

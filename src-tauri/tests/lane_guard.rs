@@ -164,7 +164,14 @@ fn guard_self_skips_inside_lane_worktree() {
     let wt = repo.join("wt");
     git_ok(
         &repo,
-        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "lane/x"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "lane/x",
+        ],
     );
 
     std::fs::write(wt.join("z.txt"), "z\n").unwrap();

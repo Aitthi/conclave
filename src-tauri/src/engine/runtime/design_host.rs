@@ -234,7 +234,10 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
-                if !matches!(out.components().next_back(), None | Some(std::path::Component::RootDir)) {
+                if !matches!(
+                    out.components().next_back(),
+                    None | Some(std::path::Component::RootDir)
+                ) {
                     out.pop();
                 } else if out.components().next_back().is_none() {
                     out.push("..");
@@ -315,7 +318,10 @@ async fn resolve_node() -> Result<PathBuf, DesignHostError> {
         ))
     })?;
     if major < MIN_NODE_MAJOR {
-        return Err(DesignHostError::NodeTooOld { found: raw_version, path });
+        return Err(DesignHostError::NodeTooOld {
+            found: raw_version,
+            path,
+        });
     }
     Ok(path)
 }
@@ -360,12 +366,20 @@ fn design_host_dir() -> Result<PathBuf, DesignHostError> {
             });
         }
     }
-    Ok(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../design-host")))
+    Ok(PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../design-host"
+    )))
 }
 
 fn bundled_design_host_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.parent()?.join("Resources").join("design-host"))
+    Some(
+        exe.parent()?
+            .parent()?
+            .join("Resources")
+            .join("design-host"),
+    )
 }
 
 /// Sync the bundled (read-only) design-host tree to a writable copy at
@@ -510,9 +524,15 @@ async fn ensure_deps_installed(dir: &Path) -> Result<(), DesignHostError> {
         return Ok(());
     }
     let shell = login_shell();
-    let pnpm_check = Command::new(&shell).args(["-l", "-i", "-c", "pnpm --version"]).output().await;
+    let pnpm_check = Command::new(&shell)
+        .args(["-l", "-i", "-c", "pnpm --version"])
+        .output()
+        .await;
     let (manager, install_cmd) = match &pnpm_check {
-        Ok(out) if out.status.success() && last_version_major(&String::from_utf8_lossy(&out.stdout)).is_some() => {
+        Ok(out)
+            if out.status.success()
+                && last_version_major(&String::from_utf8_lossy(&out.stdout)).is_some() =>
+        {
             ("pnpm", "pnpm install --frozen-lockfile=false")
         }
         other => {
@@ -774,7 +794,9 @@ async fn monitor(
 /// context.
 pub fn kill_on_exit() {
     let Some(sup) = SUPERVISOR.get() else { return };
-    let Ok(guard) = sup.slot.try_lock() else { return };
+    let Ok(guard) = sup.slot.try_lock() else {
+        return;
+    };
     let Some(slot) = guard.as_ref() else { return };
     kill_pid(slot.pid);
 }
@@ -787,7 +809,9 @@ pub fn kill_on_exit() {
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
     }
 }
 
@@ -826,12 +850,18 @@ mod tests {
             path: PathBuf::from("/Users/tharadon/.nvm/versions/node/v18.20.8/bin/node"),
         };
         let msg = err.to_string();
-        assert!(msg.contains("v18.20.8"), "must name the found version: {msg}");
+        assert!(
+            msg.contains("v18.20.8"),
+            "must name the found version: {msg}"
+        );
         assert!(
             msg.contains("/Users/tharadon/.nvm/versions/node/v18.20.8/bin/node"),
             "must name the node path: {msg}"
         );
-        assert!(msg.contains("20"), "must name the minimum required major: {msg}");
+        assert!(
+            msg.contains("20"),
+            "must name the minimum required major: {msg}"
+        );
         assert!(
             msg.to_lowercase().contains("install") || msg.to_lowercase().contains("nvm"),
             "must suggest a remedy: {msg}"
@@ -864,20 +894,34 @@ mod tests {
     #[test]
     fn project_id_normalizes_before_hashing() {
         let clean = project_id_for(Path::new("/Users/dev/app"));
-        assert_eq!(project_id_for(Path::new("/Users/dev/app/")), clean, "trailing slash");
+        assert_eq!(
+            project_id_for(Path::new("/Users/dev/app/")),
+            clean,
+            "trailing slash"
+        );
         assert_eq!(
             project_id_for(Path::new("/Users/dev/other/../app")),
             clean,
             ".. segment"
         );
-        assert_eq!(project_id_for(Path::new("/Users/dev/./app")), clean, ". segment");
+        assert_eq!(
+            project_id_for(Path::new("/Users/dev/./app")),
+            clean,
+            ". segment"
+        );
     }
 
     #[test]
     fn lexical_normalize_matches_path_resolve_semantics() {
         assert_eq!(lexical_normalize(Path::new("/a/b/")), PathBuf::from("/a/b"));
-        assert_eq!(lexical_normalize(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
-        assert_eq!(lexical_normalize(Path::new("/a/./b")), PathBuf::from("/a/b"));
+        assert_eq!(
+            lexical_normalize(Path::new("/a/b/../c")),
+            PathBuf::from("/a/c")
+        );
+        assert_eq!(
+            lexical_normalize(Path::new("/a/./b")),
+            PathBuf::from("/a/b")
+        );
         assert_eq!(lexical_normalize(Path::new("/a/b/..")), PathBuf::from("/a"));
         // `..` past root is a no-op (matches `path.resolve`'s clamping — it
         // never escapes above the filesystem root).
@@ -888,7 +932,10 @@ mod tests {
     /// convention (see e.g. `repo::skill`'s tests) for filesystem-backed unit
     /// tests — no external tempdir crate is a dependency here.
     fn scratch_dir(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("conclave-design-host-test-{tag}-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!(
+            "conclave-design-host-test-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ))
     }
 
     fn write_file(path: &Path, contents: &str) {
@@ -941,7 +988,10 @@ mod tests {
         // (rather than skip), this marker would disappear.
         write_file(&runtime.join("marker.txt"), "still here");
         sync_to_runtime(&bundled, &runtime).unwrap();
-        assert!(runtime.join("marker.txt").is_file(), "matching fingerprint must skip recopy");
+        assert!(
+            runtime.join("marker.txt").is_file(),
+            "matching fingerprint must skip recopy"
+        );
 
         std::fs::remove_dir_all(&bundled).ok();
         std::fs::remove_dir_all(&runtime).ok();
