@@ -258,13 +258,101 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
         .create(&bin)
         .ok()?;
 
-    if !refresh_shim_link(&cli, &bin) {
+    if !refresh_shim_link(&cli, &bin, "conclave") {
         return None;
     }
+
+    // rtk is optional: if it can't be resolved (dev run without the binary
+    // staged, unsupported host triple, etc.) the shim simply lacks the `rtk`
+    // link and rtk-dependent hooks fail open — never block the spawn on it.
+    if let Some(rtk) = resolve_rtk_bin() {
+        refresh_shim_link(&rtk, &bin, "rtk");
+    }
+
     Some(bin)
 }
 
-/// (Re)point `<bin>/conclave` at `cli` via symlink-at-temp-name + rename:
+/// True when `path` is a regular file AND non-empty. A build step that stages
+/// a placeholder (e.g. an empty `rtk` before the real binary lands) must
+/// never be treated as a resolved binary — fail open and let resolution fall
+/// through to the next candidate rather than linking/reporting a zero-size
+/// file.
+fn is_usable_bin(path: &std::path::Path) -> bool {
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+}
+
+/// `current_exe()`-driven wrapper around [`resolve_rtk_bin_from`] — see that
+/// function for the resolution order. Kept thin and untested directly (per
+/// the project pattern: `current_exe()` is not mockable), all logic lives in
+/// the inner fn.
+#[cfg(unix)]
+pub fn resolve_rtk_bin() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let dev_binaries_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    resolve_rtk_bin_from(
+        exe_dir,
+        &dev_binaries_dir,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+#[cfg(not(unix))]
+pub fn resolve_rtk_bin() -> Option<PathBuf> {
+    None
+}
+
+/// Resolve the `rtk` token-filter binary, in order:
+/// 1. `exe_dir.join("rtk")` — the packaged/bundled location, sibling of the
+///    app executable (mirrors `conclave-cli`'s lookup above).
+/// 2. The first `rtk-*` file in `dev_binaries_dir` (Tauri's external-binary
+///    staging convention, `src-tauri/binaries/rtk-<host-triple>`) — the dev
+///    build hasn't copied it next to the exe yet.
+/// 3. A `rtk` found by scanning `path_var` (e.g. `$PATH`) — a
+///    system-installed rtk.
+///
+/// Every candidate is required to be a non-empty regular file
+/// ([`is_usable_bin`]): a zero-size placeholder is skipped, not resolved.
+/// Returns `None` when no step finds one — the caller treats that as "rtk
+/// unavailable" and skips wiring the shim link, never as an error.
+fn resolve_rtk_bin_from(
+    exe_dir: &std::path::Path,
+    dev_binaries_dir: &std::path::Path,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let sibling = exe_dir.join("rtk");
+    if is_usable_bin(&sibling) {
+        return Some(sibling);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dev_binaries_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("rtk-") {
+                let candidate = entry.path();
+                if is_usable_bin(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    if let Some(path_var) = path_var {
+        for dir in std::env::split_paths(path_var) {
+            let candidate = dir.join("rtk");
+            if is_usable_bin(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+/// (Re)point `<bin>/<link_name>` at `cli` via symlink-at-temp-name + rename:
 /// `rename(2)` atomically replaces the old link, so N concurrent spawns (the
 /// app respawning every agent at relaunch) each land a complete link and none
 /// ever observes EEXIST. The previous remove-then-recreate pair lost exactly
@@ -276,7 +364,7 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
 /// concurrent spawns share one pid, so the counter is what keeps their temp
 /// files from colliding.
 #[cfg(unix)]
-fn refresh_shim_link(cli: &std::path::Path, bin: &std::path::Path) -> bool {
+fn refresh_shim_link(cli: &std::path::Path, bin: &std::path::Path, link_name: &str) -> bool {
     use std::os::unix::fs::symlink;
 
     static SHIM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -285,7 +373,7 @@ fn refresh_shim_link(cli: &std::path::Path, bin: &std::path::Path) -> bool {
         std::process::id(),
         SHIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let link = bin.join("conclave");
+    let link = bin.join(link_name);
     if symlink(cli, &tmp).is_err() {
         return false;
     }
@@ -385,6 +473,106 @@ it via this full path, quoted, instead of searching for it."
 #[cfg(test)]
 mod tests {
     use super::bootstrap_preamble;
+
+    /// Scratch dir under the OS temp dir, namespaced by pid + a caller-given
+    /// tag so parallel test threads (and parallel `cargo test` runs sharing a
+    /// pid) never collide. Callers are responsible for cleanup.
+    #[cfg(unix)]
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-agentctx-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_file(path: &std::path::Path, contents: &[u8]) {
+        std::fs::write(path, contents).expect("write test file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rtk_bin_from_finds_sibling_rtk() {
+        let exe_dir = scratch_dir("sibling");
+        let dev_dir = exe_dir.join("dev-binaries-unused");
+        write_file(&exe_dir.join("rtk"), b"#!/bin/sh\necho rtk\n");
+
+        let resolved = super::resolve_rtk_bin_from(&exe_dir, &dev_dir, None);
+        assert_eq!(resolved, Some(exe_dir.join("rtk")));
+
+        let _ = std::fs::remove_dir_all(&exe_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rtk_bin_from_falls_back_to_dev_binaries_dir() {
+        let exe_dir = scratch_dir("devfallback-exe");
+        let dev_dir = scratch_dir("devfallback-dev");
+        // No sibling `rtk` next to the exe.
+        let triple_bin = dev_dir.join("rtk-aarch64-apple-darwin");
+        write_file(&triple_bin, b"#!/bin/sh\necho rtk\n");
+
+        let resolved = super::resolve_rtk_bin_from(&exe_dir, &dev_dir, None);
+        assert_eq!(resolved, Some(triple_bin));
+
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        let _ = std::fs::remove_dir_all(&dev_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rtk_bin_from_returns_none_without_any_candidate() {
+        let exe_dir = scratch_dir("none-exe");
+        let dev_dir = scratch_dir("none-dev");
+        // Neither a sibling `rtk` nor any `rtk-*` in dev_dir, and PATH lookup
+        // is skipped via `path_var: None`.
+        let resolved = super::resolve_rtk_bin_from(&exe_dir, &dev_dir, None);
+        assert_eq!(resolved, None);
+
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        let _ = std::fs::remove_dir_all(&dev_dir);
+    }
+
+    /// Fail-open ruling: a zero-size candidate (e.g. a build placeholder that
+    /// created an empty file before the real binary was staged) must never be
+    /// treated as resolved — it's skipped and resolution falls through to the
+    /// next step, here the dev binaries dir.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rtk_bin_from_skips_zero_size_sibling_and_falls_through() {
+        let exe_dir = scratch_dir("zerosize-exe");
+        let dev_dir = scratch_dir("zerosize-dev");
+        write_file(&exe_dir.join("rtk"), b""); // zero-size placeholder
+        let triple_bin = dev_dir.join("rtk-x86_64-apple-darwin");
+        write_file(&triple_bin, b"#!/bin/sh\necho rtk\n");
+
+        let resolved = super::resolve_rtk_bin_from(&exe_dir, &dev_dir, None);
+        assert_eq!(resolved, Some(triple_bin));
+
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        let _ = std::fs::remove_dir_all(&dev_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rtk_bin_from_finds_rtk_on_path() {
+        let exe_dir = scratch_dir("path-exe");
+        let dev_dir = scratch_dir("path-dev");
+        let path_dir = scratch_dir("path-entry");
+        let rtk_on_path = path_dir.join("rtk");
+        write_file(&rtk_on_path, b"#!/bin/sh\necho rtk\n");
+        let path_var = std::env::join_paths([&path_dir]).expect("join PATH");
+
+        let resolved = super::resolve_rtk_bin_from(&exe_dir, &dev_dir, Some(path_var.as_os_str()));
+        assert_eq!(resolved, Some(rtk_on_path));
+
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        let _ = std::fs::remove_dir_all(&dev_dir);
+        let _ = std::fs::remove_dir_all(&path_dir);
+    }
 
     #[test]
     fn preamble_is_single_line_with_no_equals() {
@@ -945,7 +1133,7 @@ text>`. After it confirms, stop and wait for the restart."
 
         let results: Vec<bool> = std::thread::scope(|s| {
             (0..8)
-                .map(|_| s.spawn(|| super::refresh_shim_link(&cli, &bin)))
+                .map(|_| s.spawn(|| super::refresh_shim_link(&cli, &bin, "conclave")))
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|h| h.join().expect("thread panicked"))
