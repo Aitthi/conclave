@@ -89,14 +89,41 @@ fn default_distill_cooldown_hours() -> i64 {
     DISTILL_DEFAULT_COOLDOWN_HOURS
 }
 
+/// Context-usage ratio at which the soft "write your handoff at the next
+/// boundary" nudge fires (snapshot-nudge-70 plan, step 2).
+const CONTEXT_NUDGE_SOFT_RATIO: f64 = 0.70;
+
+/// Context-usage ratio at which the stronger "save the handoff NOW" nudge
+/// fires (snapshot-nudge-70 plan, step 3).
+const CONTEXT_NUDGE_HARD_RATIO: f64 = 0.85;
+
+/// Falling back BELOW this ratio re-arms both context nudges. The session row
+/// is 1:1 with its instance (`UNIQUE(workspace_agent_id)`) and keeps its id
+/// across respawns, so "a new session started" is only observable through the
+/// METER itself collapsing — which is exactly what `conclave restart`, a
+/// context clear, and an auto-compact all do. A running session never falls
+/// this far on its own, so the one-shot cannot re-fire mid-window.
+const CONTEXT_NUDGE_REARM_RATIO: f64 = 0.50;
+
+/// Which context nudges have fired for one instance's current context window
+/// (see [`CONTEXT_NUDGE_REARM_RATIO`] for the re-arm rule).
+#[derive(Clone, Copy, Default)]
+struct ContextNudgeFired {
+    soft: bool,
+    hard: bool,
+}
+
 /// Per-task last-stall-alert timestamps, held across ticks by [`run`]'s loop.
 /// Deliberately in-process only (ADR 0008 plan: "track last-alert in memory,
 /// not DB") — restarting the app resets the cooldown, which is an acceptable
 /// trade for not persisting a purely advisory rate-limit. `last_distill_nudge`
-/// is keyed by workspace_id and follows the same in-process-only rationale.
+/// is keyed by workspace_id and follows the same in-process-only rationale, as
+/// does `context_nudge_fired` (keyed by instance id; an app restart re-arms
+/// the nudges, worst case one repeat — the accepted trade).
 pub struct Ticker {
     last_stall_alert: HashMap<String, DateTime<Utc>>,
     last_distill_nudge: HashMap<String, DateTime<Utc>>,
+    context_nudge_fired: HashMap<String, ContextNudgeFired>,
 }
 
 impl Ticker {
@@ -104,6 +131,7 @@ impl Ticker {
         Self {
             last_stall_alert: HashMap::new(),
             last_distill_nudge: HashMap::new(),
+            context_nudge_fired: HashMap::new(),
         }
     }
 }
@@ -125,13 +153,14 @@ pub async fn run(state: std::sync::Arc<AppState>) {
     }
 }
 
-/// One timer pass: stall check, challenge-default check, then the
-/// distill-auto-nudge check. `now` is injected so tests can drive exact
-/// boundary behavior.
+/// One timer pass: stall check, challenge-default check, the
+/// distill-auto-nudge check, then the context-snapshot nudge check. `now` is
+/// injected so tests can drive exact boundary behavior.
 pub async fn tick(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker) {
     check_stalls(state, now, ticker).await;
     check_challenge_deadlines(state, now).await;
     check_distill_nudge(state, now, ticker).await;
+    check_context_nudges(state, ticker).await;
 }
 
 /// Deliver one notify line via the shared `tell` mechanism. Best-effort: the
@@ -419,6 +448,96 @@ async fn check_distill_nudge_for_workspace(
     ticker
         .last_distill_nudge
         .insert(workspace_id.to_string(), now);
+}
+
+/// Nudge each LIVE agent whose context window is filling up to write its
+/// handoff while there is still room to write a calm one (snapshot-nudge-70
+/// plan): once at [`CONTEXT_NUDGE_SOFT_RATIO`], once more at
+/// [`CONTEXT_NUDGE_HARD_RATIO`], re-armed only when the meter collapses
+/// ([`CONTEXT_NUDGE_REARM_RATIO`]).
+///
+/// The reading is the SAME session-row meter `conclave agent list` serves
+/// (persisted by `commands::instance`'s estimate/transcript pollers, joined by
+/// `list_by_workspace_with_launched_skills`) — no scanning of its own, and no
+/// extra cadence: it runs on the tick it shares with the stall check. Usage
+/// must be fully KNOWN — a missing session row, a `NULL` tokens/limit column,
+/// or a non-positive window skips the agent entirely. Attribution follows the
+/// `notify(actor, actor, …)` precedent above: the agent pages itself, no
+/// synthetic sender; the `[conclave context]` prefix marks it machine-built.
+async fn check_context_nudges(state: &AppState, ticker: &mut Ticker) {
+    let Ok(workspaces) = repo::workspace::list(&state.db).await else {
+        return;
+    };
+    for ws in workspaces {
+        let Ok(roster) =
+            repo::workspace_agent::list_by_workspace_with_launched_skills(&state.db, &ws.id).await
+        else {
+            continue;
+        };
+        for agent in roster {
+            // A dead backend can hold a high stale reading forever — never
+            // nudge it (inject would only queue, and the % is history).
+            if !state.runtime.is_live(&agent.id) {
+                continue;
+            }
+            let (Some(tokens), Some(limit)) = (agent.context_tokens, agent.context_limit) else {
+                continue;
+            };
+            if limit <= 0 {
+                continue;
+            }
+            let ratio = tokens as f64 / limit as f64;
+
+            let fired = ticker
+                .context_nudge_fired
+                .get(&agent.id)
+                .copied()
+                .unwrap_or_default();
+            if ratio < CONTEXT_NUDGE_REARM_RATIO {
+                if fired.soft || fired.hard {
+                    ticker
+                        .context_nudge_fired
+                        .insert(agent.id.clone(), ContextNudgeFired::default());
+                }
+                continue;
+            }
+
+            let pct = (ratio * 100.0).round() as i64;
+            // Crossing both thresholds in one tick fires ONLY the stronger
+            // nudge — two pages in the same instant would just be noise.
+            let (text, fired) = if ratio >= CONTEXT_NUDGE_HARD_RATIO && !fired.hard {
+                (
+                    format!(
+                        "[conclave context] You are at {pct}% of your context window. Save your \
+                         handoff NOW — run `conclave snapshot save <handoff>`, then `conclave \
+                         restart` — do not wait for a forced compact."
+                    ),
+                    ContextNudgeFired {
+                        soft: true,
+                        hard: true,
+                    },
+                )
+            } else if (CONTEXT_NUDGE_SOFT_RATIO..CONTEXT_NUDGE_HARD_RATIO).contains(&ratio)
+                && !fired.soft
+            {
+                (
+                    format!(
+                        "[conclave context] You are at {pct}% of your context window. At the next \
+                         natural boundary (task landed, review sent), write your handoff and run \
+                         conclave restart — do not wait for a forced compact."
+                    ),
+                    ContextNudgeFired {
+                        soft: true,
+                        hard: false,
+                    },
+                )
+            } else {
+                continue;
+            };
+            notify(state, &agent.id, &agent.id, &text).await;
+            ticker.context_nudge_fired.insert(agent.id.clone(), fired);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1450,6 +1569,206 @@ mod tests {
             distiller_inbox(&state, &distiller2).await.len(),
             0,
             "ws2 must not nudge"
+        );
+    }
+
+    // ── context-snapshot nudge ───────────────────────────────────────────
+
+    /// Fixed literal `now` for the context-nudge ticks — the check reads no
+    /// clock, so any instant works; a literal keeps the tests deterministic
+    /// (repo convention).
+    fn nudge_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-09T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Make the instance LIVE with an observable test backend, returning the
+    /// stdin receiver — it must stay alive for the duration of the test, or
+    /// the closed channel turns every inject into an error.
+    fn make_live(
+        state: &AppState,
+        instance_id: &str,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+        let (handle, rx) = crate::engine::runtime::LiveHandle::for_test("sess-test");
+        assert!(
+            state.runtime.register(instance_id, handle).is_some(),
+            "register test backend failed"
+        );
+        rx
+    }
+
+    async fn set_reading(state: &AppState, instance_id: &str, tokens: i64, limit: i64) {
+        let session = crate::engine::repo::session::get_by_instance(&state.db, instance_id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("instance has a session");
+        crate::engine::repo::session::set_context_reading(&state.db, &session.id, tokens, limit)
+            .await
+            .expect("set_context_reading failed");
+    }
+
+    async fn inbox(state: &AppState, instance_id: &str) -> Vec<serde_json::Value> {
+        crate::engine::commands::message::list(state, json!({ "instanceId": instance_id }))
+            .await
+            .expect("message list failed")
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn context_nudge_fires_soft_once_at_70_and_not_again() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let agent = fixture_instance(&state, &ws, "Meter").await;
+        let _rx = make_live(&state, &agent);
+        set_reading(&state, &agent, 140_000, 200_000).await;
+
+        let mut ticker = Ticker::new();
+        tick(&state, nudge_now(), &mut ticker).await;
+        let msgs = inbox(&state, &agent).await;
+        assert_eq!(msgs.len(), 1, "must fire once at 70%");
+        assert_eq!(msgs[0]["fromInstanceId"], json!(agent));
+        assert_eq!(msgs[0]["toInstanceId"], json!(agent));
+        assert_eq!(
+            msgs[0]["text"],
+            json!(
+                "[conclave context] You are at 70% of your context window. At the next natural \
+                 boundary (task landed, review sent), write your handoff and run conclave \
+                 restart — do not wait for a forced compact."
+            )
+        );
+
+        // Same reading, later ticks — one-shot must hold.
+        tick(&state, nudge_now(), &mut ticker).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 1, "must not repeat");
+    }
+
+    #[tokio::test]
+    async fn context_nudge_escalates_once_at_85() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let agent = fixture_instance(&state, &ws, "Meter").await;
+        let _rx = make_live(&state, &agent);
+        let mut ticker = Ticker::new();
+
+        set_reading(&state, &agent, 140_000, 200_000).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 1, "soft fired");
+
+        set_reading(&state, &agent, 170_000, 200_000).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        let msgs = inbox(&state, &agent).await;
+        assert_eq!(msgs.len(), 2, "hard escalation fired once");
+        // Newest-first or oldest-first, the hard text is the one that is not
+        // the soft line — pin it exactly.
+        let hard = json!(
+            "[conclave context] You are at 85% of your context window. Save your handoff NOW — \
+             run `conclave snapshot save <handoff>`, then `conclave restart` — do not wait for \
+             a forced compact."
+        );
+        assert!(
+            msgs.iter().any(|m| m["text"] == hard),
+            "hard variant must be delivered verbatim"
+        );
+
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 2, "must not repeat");
+    }
+
+    #[tokio::test]
+    async fn context_nudge_straight_past_both_thresholds_fires_only_the_hard_variant() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let agent = fixture_instance(&state, &ws, "Meter").await;
+        let _rx = make_live(&state, &agent);
+        set_reading(&state, &agent, 190_000, 200_000).await;
+
+        let mut ticker = Ticker::new();
+        tick(&state, nudge_now(), &mut ticker).await;
+        let msgs = inbox(&state, &agent).await;
+        assert_eq!(msgs.len(), 1, "one page, not two, when both cross at once");
+        assert_eq!(
+            msgs[0]["text"],
+            json!(
+                "[conclave context] You are at 95% of your context window. Save your handoff \
+                 NOW — run `conclave snapshot save <handoff>`, then `conclave restart` — do \
+                 not wait for a forced compact."
+            )
+        );
+
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 1, "must not repeat");
+    }
+
+    #[tokio::test]
+    async fn context_nudge_unknown_usage_never_fires() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let agent = fixture_instance(&state, &ws, "Meter").await;
+        let _rx = make_live(&state, &agent);
+
+        // Tokens/limit unresolved (NULL columns) — must be skipped entirely.
+        sqlx::query(
+            "UPDATE session SET context_tokens = NULL, context_limit = NULL \
+             WHERE workspace_agent_id = ?",
+        )
+        .bind(&agent)
+        .execute(&state.db)
+        .await
+        .expect("null-out reading failed");
+        let mut ticker = Ticker::new();
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 0, "NULL usage: no page");
+
+        // A non-positive window is equally unknown — never a division by it.
+        set_reading(&state, &agent, 190_000, 0).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 0, "zero window: no page");
+    }
+
+    #[tokio::test]
+    async fn context_nudge_skips_an_agent_with_no_live_backend() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let agent = fixture_instance(&state, &ws, "Meter").await;
+        // NOT registered live — a dead backend's stale reading must not page.
+        set_reading(&state, &agent, 180_000, 200_000).await;
+
+        let mut ticker = Ticker::new();
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 0, "not live: no page");
+    }
+
+    #[tokio::test]
+    async fn context_nudge_rearms_after_the_meter_collapses() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let agent = fixture_instance(&state, &ws, "Meter").await;
+        let _rx = make_live(&state, &agent);
+        let mut ticker = Ticker::new();
+
+        set_reading(&state, &agent, 180_000, 200_000).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 1, "hard fired at 90%");
+
+        // Meter collapse = restart/clear/compact — re-arms, fires nothing.
+        set_reading(&state, &agent, 10_000, 200_000).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        assert_eq!(inbox(&state, &agent).await.len(), 1, "collapse: no page");
+
+        // The next window filling up pages again from the soft threshold.
+        set_reading(&state, &agent, 150_000, 200_000).await;
+        tick(&state, nudge_now(), &mut ticker).await;
+        let msgs = inbox(&state, &agent).await;
+        assert_eq!(msgs.len(), 2, "re-armed: soft fires for the new window");
+        assert!(
+            msgs.iter().any(|m| m["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("[conclave context] You are at 75%"))),
+            "the new page reports the new window's 75%"
         );
     }
 }
