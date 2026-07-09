@@ -66,6 +66,10 @@ export function AppShell() {
   //    workspace views (same toggle pattern as Blackboard/Memory/LaneBoard). ──
   const [showBrowser, setShowBrowser] = useState(false);
 
+  // Whether an agent-driven browser is currently open — polled so the Rail can
+  // show a dot even while the human is on another tab.
+  const [browserActive, setBrowserActive] = useState(false);
+
   // Bumped whenever the set of agents in the active workspace changes (add via
   // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
   // key/refetch off it so the two views stay in sync without a manual reload.
@@ -195,6 +199,28 @@ export function AppShell() {
         break;
     }
   });
+
+  useEffect(() => {
+    if (!activeWorkspaceId) {
+      setBrowserActive(false);
+      return;
+    }
+    let alive = true;
+    const check = () => {
+      ipc.browser
+        .status()
+        .then((st) => {
+          if (alive) setBrowserActive(!!st.ok);
+        })
+        .catch(() => {});
+    };
+    check();
+    const id = window.setInterval(check, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -340,6 +366,7 @@ export function AppShell() {
             artifactsOpen={showArtifacts}
             designOpen={showDesign}
             browserOpen={showBrowser}
+            browserActive={browserActive}
             onSelectWorkspace={handleSelectWorkspace}
             onOpenBrowser={() => {
               if (!activeWorkspaceId) return;

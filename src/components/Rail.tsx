@@ -13,6 +13,7 @@ interface RailProps {
   artifactsOpen?: boolean;
   designOpen?: boolean;
   browserOpen?: boolean;
+  browserActive?: boolean;
   onOpenArtifacts?: () => void;
   onOpenDesign?: () => void;
   onOpenBrowser?: () => void;
@@ -62,6 +63,7 @@ export function Rail({
   artifactsOpen,
   designOpen,
   browserOpen,
+  browserActive,
   onOpenArtifacts,
   onOpenDesign,
   onOpenBrowser,
@@ -141,14 +143,22 @@ export function Rail({
           >
             <Package className="w-[17px] h-[17px]" />
           </RailActionButton>
-          <RailActionButton
-            active={!!browserOpen}
-            disabled={workspaceScopedDisabled}
-            title="Browser view"
-            onClick={onOpenBrowser}
-          >
-            <Globe className="w-[17px] h-[17px]" />
-          </RailActionButton>
+          <div className="relative">
+            <RailActionButton
+              active={!!browserOpen}
+              disabled={workspaceScopedDisabled}
+              title="Browser view"
+              onClick={onOpenBrowser}
+            >
+              <Globe className="w-[17px] h-[17px]" />
+            </RailActionButton>
+            {browserActive && !browserOpen && (
+              <span
+                className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-success ring-2 ring-fill-soft"
+                title="A browser is open"
+              />
+            )}
+          </div>
         </div>
 
         {/* Bottom actions. Conclave CLI + Settings are hidden for now until they
