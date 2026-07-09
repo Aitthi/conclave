@@ -186,6 +186,23 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── orient (task conclave-orient) ─────────────────────────────────
+        // Wire form `orient <actorId> <workspaceId>` — the actor slot is
+        // injected client-side by `expand_self_args` (self-keyed like `msg
+        // list`; the packet's messages/watches/self sections need "me").
+        "orient" => {
+            let usage = "cli: orient <workspaceId>";
+            let actor_id = argv.get(1).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let workspace_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            if argv.len() != 3 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok((
+                "orient.list",
+                json!({ "workspaceId": workspace_id, "actorId": actor_id }),
+            ))
+        }
+
         // ── bb ────────────────────────────────────────────────────────────
         "bb" => match argv.get(1).map(String::as_str) {
             Some("list") => {
@@ -1418,6 +1435,24 @@ mod tests {
         assert!(is_invalid(&["msg", "list", "self1", "--limit", "x"])); // non-integer
         assert!(is_invalid(&["msg", "list", "self1", "extra"])); // trailing junk
         assert!(is_invalid(&["msg", "all", "ws1", "extra"])); // trailing junk
+    }
+
+    // ── orient (task conclave-orient) ───────────────────────────────────────
+
+    #[test]
+    fn orient_maps_correctly() {
+        assert_eq!(ok_method(&["orient", "self1", "ws1"]), "orient.list");
+        assert_eq!(
+            ok_params(&["orient", "self1", "ws1"]),
+            json!({ "workspaceId": "ws1", "actorId": "self1" })
+        );
+    }
+
+    #[test]
+    fn orient_wrong_arity_is_invalid() {
+        assert!(is_invalid(&["orient"]));
+        assert!(is_invalid(&["orient", "self1"])); // no workspace (client injects self)
+        assert!(is_invalid(&["orient", "self1", "ws1", "extra"])); // trailing junk
     }
 
     // ── bb ────────────────────────────────────────────────────────────────
