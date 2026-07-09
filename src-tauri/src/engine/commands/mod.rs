@@ -10,6 +10,7 @@ pub mod memory;
 #[cfg(test)]
 mod memory_bench;
 pub mod message;
+pub mod orient;
 pub mod provider;
 pub mod role;
 pub mod skill;
