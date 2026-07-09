@@ -443,3 +443,12 @@ export interface BrowserSnapshot {
   inputs: BrowserSnapshotInput[];
   buttons: BrowserSnapshotButton[];
 }
+
+// Viewport rectangle the Browser tab reserves for the native webview overlay
+// (logical pixels). Mirrors the Rust `Bounds` struct.
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}

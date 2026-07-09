@@ -82,15 +82,8 @@ export const handlers: FixtureHandlers = {
     url: "https://example.com/",
     title: "Example Domain",
   }),
-  "browser.snapshot": () => ({
-    url: "https://example.com/",
-    title: "Example Domain",
-    text: "Example Domain. This domain is for use in illustrative examples in documents. You may use this domain in literature without prior coordination or asking for permission.",
-    headings: ["Example Domain"],
-    links: [
-      { text: "More information...", href: "https://www.iana.org/domains/example", selector: "a" },
-    ],
-    inputs: [],
-    buttons: [],
-  }),
+  // UI-only overlay plumbing — fixture mode has no native webview, so these are
+  // no-ops (fixed, no Tauri). A missing handler would throw by design.
+  "browser.setBounds": () => ({ ok: true }),
+  "browser.setVisible": () => ({ ok: true }),
 };

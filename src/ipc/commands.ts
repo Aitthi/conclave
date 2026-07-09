@@ -25,6 +25,7 @@ import type {
   BrowserStatus,
   BrowserSnapshot,
   BrowserActionResult,
+  BrowserBounds,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -338,7 +339,7 @@ export interface Commands {
   };
 
   // ── In-app browser agent tools (runtime::browser) ───────────────────────
-  "browser.open": { req: { url: string }; res: BrowserStatus };
+  "browser.open": { req: { url: string; bounds?: BrowserBounds }; res: BrowserStatus };
   "browser.goto": { req: { url: string }; res: BrowserStatus };
   "browser.status": { req: void; res: BrowserStatus };
   "browser.snapshot": { req: { maxText?: number } | void; res: BrowserSnapshot };
@@ -346,6 +347,8 @@ export interface Commands {
   "browser.type": { req: { selector: string; text: string }; res: BrowserActionResult };
   "browser.eval": { req: { js: string }; res: unknown };
   "browser.close": { req: void; res: BrowserStatus };
+  "browser.setBounds": { req: BrowserBounds; res: BrowserStatus };
+  "browser.setVisible": { req: { visible: boolean }; res: BrowserStatus };
 }
 
 // ---------------------------------------------------------------------------
@@ -484,5 +487,7 @@ export const ipc = {
     type: (req: Commands["browser.type"]["req"]) => call("browser.type", req),
     eval: (req: Commands["browser.eval"]["req"]) => call("browser.eval", req),
     close: () => call("browser.close"),
+    setBounds: (req: Commands["browser.setBounds"]["req"]) => call("browser.setBounds", req),
+    setVisible: (req: Commands["browser.setVisible"]["req"]) => call("browser.setVisible", req),
   },
 } as const;

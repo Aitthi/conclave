@@ -34,6 +34,7 @@ export type {
   BrowserSnapshotLink,
   BrowserSnapshotInput,
   BrowserSnapshotButton,
+  BrowserBounds,
 } from "./types";
 
 export type { Commands } from "./commands";
