@@ -118,6 +118,9 @@ Subcommands:
   position set  <workspaceId> <agentId> [--level <junior|mid|senior|principal>|none] [--supervisor <agentId>|none]  (at least one flag; \"none\" clears)
   org           <workspaceId>          (indented supervisor tree)
   design review <workspaceId> [--json]  (deterministic design QA; gate with the plain form — --json is for data retrieval, it always exits 0)
+  browser open|goto <url>              (in-app browser; missing scheme → https://)
+  browser status | snapshot [--max-text N] | close   (status/snapshot print JSON)
+  browser click|type <selector> [text...] | eval <js...>   (selectors come from snapshot; eval is local-only)
   run <orchestratorId> <prompt...>
   help
 

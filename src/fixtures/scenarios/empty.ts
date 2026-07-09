@@ -33,4 +33,7 @@ export const handlers: FixtureHandlers = {
   "skill.list": () => [],
   "provider.list": () => [],
   "session.resize": () => undefined,
+  // Fresh-install look: no browser open. status returns ok:false so the view
+  // shows its "no browser open" empty state and never calls snapshot.
+  "browser.status": () => ({ ok: false, message: "no browser is open" }),
 };

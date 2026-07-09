@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Hexagon, FolderPlus, Package, PenTool, UsersRound, Wand2 } from "lucide-react";
+import { Globe, Hexagon, FolderPlus, Package, PenTool, UsersRound, Wand2 } from "lucide-react";
 
 import type { Workspace } from "../ipc";
 
@@ -12,8 +12,10 @@ interface RailProps {
   onSelectWorkspace: (id: string) => void;
   artifactsOpen?: boolean;
   designOpen?: boolean;
+  browserOpen?: boolean;
   onOpenArtifacts?: () => void;
   onOpenDesign?: () => void;
+  onOpenBrowser?: () => void;
   onOpenLibrary?: () => void;
   onOpenSkillLibrary?: () => void;
   onOpenLinkFolder?: () => void;
@@ -59,8 +61,10 @@ export function Rail({
   onSelectWorkspace,
   artifactsOpen,
   designOpen,
+  browserOpen,
   onOpenArtifacts,
   onOpenDesign,
+  onOpenBrowser,
   onOpenLibrary,
   onOpenSkillLibrary,
   onOpenLinkFolder,
@@ -136,6 +140,14 @@ export function Rail({
             onClick={onOpenArtifacts}
           >
             <Package className="w-[17px] h-[17px]" />
+          </RailActionButton>
+          <RailActionButton
+            active={!!browserOpen}
+            disabled={workspaceScopedDisabled}
+            title="Browser view"
+            onClick={onOpenBrowser}
+          >
+            <Globe className="w-[17px] h-[17px]" />
           </RailActionButton>
         </div>
 

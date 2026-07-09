@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod blackboard;
+pub mod browser;
 pub mod cli;
 pub mod design;
 pub mod fusion;

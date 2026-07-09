@@ -22,6 +22,9 @@ import type {
   TaskEvent,
   Artifact,
   DesignInfo,
+  BrowserStatus,
+  BrowserSnapshot,
+  BrowserActionResult,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -333,6 +336,16 @@ export interface Commands {
     req: { workspaceId: string };
     res: DesignInfo;
   };
+
+  // ── In-app browser agent tools (runtime::browser) ───────────────────────
+  "browser.open": { req: { url: string }; res: BrowserStatus };
+  "browser.goto": { req: { url: string }; res: BrowserStatus };
+  "browser.status": { req: void; res: BrowserStatus };
+  "browser.snapshot": { req: { maxText?: number } | void; res: BrowserSnapshot };
+  "browser.click": { req: { selector: string }; res: BrowserActionResult };
+  "browser.type": { req: { selector: string; text: string }; res: BrowserActionResult };
+  "browser.eval": { req: { js: string }; res: unknown };
+  "browser.close": { req: void; res: BrowserStatus };
 }
 
 // ---------------------------------------------------------------------------
@@ -461,5 +474,15 @@ export const ipc = {
   design: {
     ensure: (req: Commands["design.ensure"]["req"]) => call("design.ensure", req),
     status: (req: Commands["design.status"]["req"]) => call("design.status", req),
+  },
+  browser: {
+    open: (req: Commands["browser.open"]["req"]) => call("browser.open", req),
+    goto: (req: Commands["browser.goto"]["req"]) => call("browser.goto", req),
+    status: () => call("browser.status"),
+    snapshot: (req?: Commands["browser.snapshot"]["req"]) => call("browser.snapshot", req),
+    click: (req: Commands["browser.click"]["req"]) => call("browser.click", req),
+    type: (req: Commands["browser.type"]["req"]) => call("browser.type", req),
+    eval: (req: Commands["browser.eval"]["req"]) => call("browser.eval", req),
+    close: () => call("browser.close"),
   },
 } as const;

@@ -75,4 +75,22 @@ export const handlers: FixtureHandlers = {
   "skill.list": () => skills,
   "provider.list": () => providers,
   "session.resize": () => undefined,
+  // In-app browser control surface: status drives the header, snapshot fills
+  // the inspector. Fixed literals only — fixture mode never touches Tauri.
+  "browser.status": () => ({
+    ok: true,
+    url: "https://example.com/",
+    title: "Example Domain",
+  }),
+  "browser.snapshot": () => ({
+    url: "https://example.com/",
+    title: "Example Domain",
+    text: "Example Domain. This domain is for use in illustrative examples in documents. You may use this domain in literature without prior coordination or asking for permission.",
+    headings: ["Example Domain"],
+    links: [
+      { text: "More information...", href: "https://www.iana.org/domains/example", selector: "a" },
+    ],
+    inputs: [],
+    buttons: [],
+  }),
 };

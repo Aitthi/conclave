@@ -65,6 +65,14 @@ Implementer/Leadership, and Memory for the protocol each verb serves.
 | Context | `conclave snapshot list <sessionId>` / `snapshot read <snapshotId>` | browse saved handoffs |
 | Context | `conclave snapshot create <sessionId> <type> [label]` | snapshot another session (orchestration plumbing) |
 | Context | `conclave restart` | self-triggered restart — follow its printed save-then-die contract |
+| Browser | `conclave browser open <url>` | open/focus the in-app browser window (missing scheme → `https://`); drive a page without Playwright/Puppeteer |
+| Browser | `conclave browser goto <url>` | navigate the current browser window |
+| Browser | `conclave browser status` | JSON: current URL/title (or `ok:false` when nothing is open) |
+| Browser | `conclave browser snapshot [--max-text N]` | JSON DOM/text snapshot — url, title, capped text, headings, links, inputs, buttons — each with a reusable selector |
+| Browser | `conclave browser click <selector>` | click an element (selector as emitted by `snapshot`) |
+| Browser | `conclave browser type <selector> <text...>` | focus + fill an input-like element |
+| Browser | `conclave browser eval <js...>` | escape hatch: run JS in the page, return the JSON result (same-user local tool; never networked) |
+| Browser | `conclave browser close` | close the browser window |
 | Help | `conclave help` | this list, live — trust it over any cached copy |
 
 ## Artifacts — when to save one

@@ -1,6 +1,6 @@
 use crate::engine::commands::{
-    agent, artifact, blackboard, cli, design, fusion, instance, memory, message, provider, role,
-    skill, skill_draft, snapshot, task, tool, workspace,
+    agent, artifact, blackboard, browser, cli, design, fusion, instance, memory, message, provider,
+    role, skill, skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -118,6 +118,16 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "design.ensure" => design::ensure(state, payload).await,
         "design.status" => design::status(state, payload).await,
         "design.review" => design::review(state, payload).await,
+
+        // ── browser (in-app browser agent tools) ──────────────────────────
+        "browser.open" => browser::open(state, payload).await,
+        "browser.goto" => browser::goto(state, payload).await,
+        "browser.status" => browser::status(state, payload).await,
+        "browser.snapshot" => browser::snapshot(state, payload).await,
+        "browser.click" => browser::click(state, payload).await,
+        "browser.type" => browser::type_text(state, payload).await,
+        "browser.eval" => browser::eval(state, payload).await,
+        "browser.close" => browser::close(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

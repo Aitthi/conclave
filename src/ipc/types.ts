@@ -400,3 +400,46 @@ export interface DesignInfo {
   url?: string;
   port?: number;
 }
+
+// ── In-app browser agent tools (runtime::browser) ─────────────────────────
+// Mirrors the Rust `#[serde(rename_all = "camelCase")]` result structs. `ok`
+// is false (with a `message`) when there is no browser open to report on.
+export interface BrowserStatus {
+  ok: boolean;
+  url?: string;
+  title?: string;
+  message?: string;
+}
+
+export interface BrowserActionResult {
+  ok: boolean;
+  url?: string;
+  message?: string;
+}
+
+export interface BrowserSnapshotLink {
+  text: string;
+  href: string;
+  selector: string;
+}
+
+export interface BrowserSnapshotInput {
+  selector: string;
+  type?: string;
+  name?: string;
+}
+
+export interface BrowserSnapshotButton {
+  text: string;
+  selector: string;
+}
+
+export interface BrowserSnapshot {
+  url: string;
+  title: string;
+  text: string;
+  headings: string[];
+  links: BrowserSnapshotLink[];
+  inputs: BrowserSnapshotInput[];
+  buttons: BrowserSnapshotButton[];
+}

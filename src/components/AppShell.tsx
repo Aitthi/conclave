@@ -16,6 +16,7 @@ import { Blackboard } from "./Blackboard";
 import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
 import { LaneBoard } from "./LaneBoard";
+import { InAppBrowserView } from "./InAppBrowserView";
 
 /** Synchronous fixture-mode check (mirrors src/fixtures/mode.ts) — kept inline
  *  so prod builds never statically import the fixture module. The
@@ -59,6 +60,11 @@ export function AppShell() {
   // ── Design state — shell-plumbed now so Lane D can render inside the
   //    mounted workspace pane without touching the Rail. ──────────────────────
   const [showDesign, setShowDesign] = useState(false);
+
+  // ── Browser state — an in-app browser control surface (runtime::browser).
+  //    A center-pane destination, mutually exclusive with the other full-page
+  //    workspace views (same toggle pattern as Blackboard/Memory/LaneBoard). ──
+  const [showBrowser, setShowBrowser] = useState(false);
 
   // Bumped whenever the set of agents in the active workspace changes (add via
   // the Roster picker / remove an agent). Both the Roster and the WorkspacePane
@@ -137,6 +143,7 @@ export function AppShell() {
       library: () => setShowLibrary(true),
       builder: () => setShowBuilder(true),
       settings: () => setShowSettings(true),
+      browser: () => setShowBrowser(true),
     };
     (open[view] ?? open.home)();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -172,7 +179,10 @@ export function AppShell() {
         setShowLibrary(true);
         break;
       case "toggle_blackboard":
-        if (activeWorkspaceId) setShowBlackboard((v) => !v);
+        if (activeWorkspaceId) {
+          setShowBrowser(false);
+          setShowBlackboard((v) => !v);
+        }
         break;
       case "theme_system":
         setThemePref("system");
@@ -233,6 +243,7 @@ export function AppShell() {
     setShowChat(false);
     setShowMemory(false);
     setShowLaneBoard(false);
+    setShowBrowser(false);
     setShowArtifacts(false);
     setShowDesign(false);
     ipc.workspace.use({ workspaceId: id }).catch(() => {
@@ -253,7 +264,7 @@ export function AppShell() {
   // (like showDesign), so it renders INSIDE the WorkspacePane, not instead of
   // it (plan D3).
   const centerScreenOpen =
-    showChat || showBlackboard || showMemory || showLaneBoard;
+    showChat || showBlackboard || showMemory || showLaneBoard || showBrowser;
 
   // The live WorkspacePane (agent pane + the always-mounted Design slot) is the
   // visible center content exactly when a workspace is active and no center
@@ -328,7 +339,18 @@ export function AppShell() {
             activeWorkspaceId={activeWorkspaceId}
             artifactsOpen={showArtifacts}
             designOpen={showDesign}
+            browserOpen={showBrowser}
             onSelectWorkspace={handleSelectWorkspace}
+            onOpenBrowser={() => {
+              if (!activeWorkspaceId) return;
+              // Browser is a center screen — clear the other center screens so
+              // it actually shows (they precede it in the render order).
+              setShowChat(false);
+              setShowBlackboard(false);
+              setShowMemory(false);
+              setShowLaneBoard(false);
+              setShowBrowser((v) => !v);
+            }}
             onOpenDesign={() => {
               if (!activeWorkspaceId) return;
               setShowArtifacts(false);
@@ -475,6 +497,13 @@ export function AppShell() {
                 workspaceName={activeWorkspace?.name}
                 onClose={() => setShowLaneBoard(false)}
               />
+            ) : showBrowser && activeWorkspaceId ? (
+              <InAppBrowserView
+                key={activeWorkspaceId}
+                workspaceId={activeWorkspaceId}
+                workspaceName={activeWorkspace?.name}
+                onClose={() => setShowBrowser(false)}
+              />
             ) : workspacePaneVisible ? (
               // Remount per workspace AND per agents change so the pane refetches
               // its tabs when an agent is added/removed. `workspacePaneVisible` is
@@ -498,6 +527,7 @@ export function AppShell() {
                   setShowBlackboard(false);
                   setShowMemory(false);
                   setShowLaneBoard(false);
+                  setShowBrowser(false);
                   setShowChat(true);
                 }}
               />
@@ -585,6 +615,7 @@ export function AppShell() {
             setShowChat(false);
             setShowMemory(false);
             setShowLaneBoard(false);
+            setShowBrowser(false);
             setShowArtifacts(false);
             setShowDesign(false);
           }}

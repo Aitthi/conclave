@@ -760,9 +760,85 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── browser (in-app browser agent tools) ──────────────────────────
+        // `browser <open|goto|status|snapshot|click|type|eval|close>`. URL
+        // scheme normalization happens server-side in `runtime::browser`; this
+        // only maps verbs → router commands + payloads. Output is JSON.
+        "browser" => match argv.get(1).map(String::as_str) {
+            Some("open") => {
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: browser open <url>".into()));
+                }
+                Ok(("browser.open", json!({ "url": argv[2] })))
+            }
+            Some("goto") => {
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: browser goto <url>".into()));
+                }
+                Ok(("browser.goto", json!({ "url": argv[2] })))
+            }
+            Some("status") => {
+                if argv.len() != 2 {
+                    return Err(AppError::Invalid("cli: browser status".into()));
+                }
+                Ok(("browser.status", Value::Null))
+            }
+            Some("snapshot") => {
+                let (max, rest) = take_flag(argv.get(2..).unwrap_or(&[]), "--max-text");
+                if !rest.is_empty() {
+                    return Err(AppError::Invalid(
+                        "cli: browser snapshot [--max-text N]".into(),
+                    ));
+                }
+                let mut params = json!({});
+                if let Some(raw) = max {
+                    let n = raw.parse::<i64>().map_err(|_| {
+                        AppError::Invalid(
+                            "cli: browser snapshot: --max-text expects an integer".into(),
+                        )
+                    })?;
+                    params["maxText"] = json!(n);
+                }
+                Ok(("browser.snapshot", params))
+            }
+            Some("click") => {
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid("cli: browser click <selector>".into()));
+                }
+                Ok(("browser.click", json!({ "selector": argv[2] })))
+            }
+            Some("type") => {
+                let selector = argv.get(2).ok_or_else(|| {
+                    AppError::Invalid("cli: browser type <selector> <text...>".into())
+                })?;
+                if argv.len() < 4 {
+                    return Err(AppError::Invalid(
+                        "cli: browser type <selector> <text...>".into(),
+                    ));
+                }
+                let text = argv[3..].join(" ");
+                Ok(("browser.type", json!({ "selector": selector, "text": text })))
+            }
+            Some("eval") => {
+                if argv.len() < 3 {
+                    return Err(AppError::Invalid("cli: browser eval <js...>".into()));
+                }
+                Ok(("browser.eval", json!({ "js": argv[2..].join(" ") })))
+            }
+            Some("close") => {
+                if argv.len() != 2 {
+                    return Err(AppError::Invalid("cli: browser close".into()));
+                }
+                Ok(("browser.close", Value::Null))
+            }
+            _ => Err(AppError::Invalid(
+                "cli: browser <open|goto|status|snapshot|click|type|eval|close> — unknown browser subcommand".into(),
+            )),
+        },
+
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart, design, browser)"
         ))),
     }
 }
@@ -2702,5 +2778,86 @@ mod tests {
             json!("principal"),
             "level kept when supervisor cleared"
         );
+    }
+
+    // ── browser ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn browser_open_and_goto_map_url_verbatim() {
+        assert_eq!(ok_method(&["browser", "open", "example.com"]), "browser.open");
+        assert_eq!(
+            ok_params(&["browser", "open", "example.com"]),
+            json!({ "url": "example.com" })
+        );
+        assert_eq!(ok_method(&["browser", "goto", "https://x.test/"]), "browser.goto");
+        assert_eq!(
+            ok_params(&["browser", "goto", "https://x.test/"]),
+            json!({ "url": "https://x.test/" })
+        );
+    }
+
+    #[test]
+    fn browser_open_requires_exactly_one_url() {
+        assert!(is_invalid(&["browser", "open"]));
+        assert!(is_invalid(&["browser", "open", "a", "b"]));
+        assert!(is_invalid(&["browser", "goto"]));
+    }
+
+    #[test]
+    fn browser_status_and_close_are_void() {
+        assert_eq!(ok_method(&["browser", "status"]), "browser.status");
+        assert_eq!(ok_params(&["browser", "status"]), Value::Null);
+        assert_eq!(ok_method(&["browser", "close"]), "browser.close");
+        assert_eq!(ok_params(&["browser", "close"]), Value::Null);
+        assert!(is_invalid(&["browser", "status", "extra"]));
+        assert!(is_invalid(&["browser", "close", "extra"]));
+    }
+
+    #[test]
+    fn browser_snapshot_optional_max_text() {
+        assert_eq!(ok_method(&["browser", "snapshot"]), "browser.snapshot");
+        assert_eq!(ok_params(&["browser", "snapshot"]), json!({}));
+        assert_eq!(
+            ok_params(&["browser", "snapshot", "--max-text", "500"]),
+            json!({ "maxText": 500 })
+        );
+        // Non-integer and stray positional args are rejected.
+        assert!(is_invalid(&["browser", "snapshot", "--max-text", "lots"]));
+        assert!(is_invalid(&["browser", "snapshot", "junk"]));
+    }
+
+    #[test]
+    fn browser_click_and_type_map_selector_and_text() {
+        assert_eq!(
+            ok_params(&["browser", "click", "#submit"]),
+            json!({ "selector": "#submit" })
+        );
+        assert!(is_invalid(&["browser", "click"]));
+        // type joins the trailing words into one text payload.
+        assert_eq!(ok_method(&["browser", "type", "#q", "hello", "world"]), "browser.type");
+        assert_eq!(
+            ok_params(&["browser", "type", "#q", "hello", "world"]),
+            json!({ "selector": "#q", "text": "hello world" })
+        );
+        assert!(is_invalid(&["browser", "type", "#q"]));
+    }
+
+    #[test]
+    fn browser_eval_joins_js_and_rejects_empty() {
+        assert_eq!(
+            ok_params(&["browser", "eval", "document.title"]),
+            json!({ "js": "document.title" })
+        );
+        assert_eq!(
+            ok_params(&["browser", "eval", "1", "+", "2"]),
+            json!({ "js": "1 + 2" })
+        );
+        assert!(is_invalid(&["browser", "eval"]));
+    }
+
+    #[test]
+    fn browser_unknown_subcommand_is_invalid() {
+        assert!(is_invalid(&["browser"]));
+        assert!(is_invalid(&["browser", "frobnicate"]));
     }
 }

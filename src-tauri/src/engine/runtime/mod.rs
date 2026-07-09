@@ -19,6 +19,7 @@
 //! **never** held across an `.await`. A poisoned mutex is recovered with
 //! `unwrap_or_else(|e| e.into_inner())` so a panicked holder cannot cascade.
 
+pub mod browser;
 pub mod chat;
 pub mod design_host;
 // The memory-v1 embedder seam lands before its T3/T4 consumers.

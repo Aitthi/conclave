@@ -28,6 +28,12 @@ export type {
   TaskEventKind,
   TaskEvent,
   DesignInfo,
+  BrowserStatus,
+  BrowserActionResult,
+  BrowserSnapshot,
+  BrowserSnapshotLink,
+  BrowserSnapshotInput,
+  BrowserSnapshotButton,
 } from "./types";
 
 export type { Commands } from "./commands";
