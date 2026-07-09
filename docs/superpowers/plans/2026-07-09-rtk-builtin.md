@@ -222,12 +222,14 @@ printf '{"tool_input":{"command":"git status"}}' | \
 
 **Boundary:** `src/components/Builder.tsx`, `src/ipc/commands.ts`, `src/fixtures/scenarios/data.ts`
 
+**Boundary amendment (Detoro ruling on challenge a44bd6ec, credit: Dew):** plus `src/ipc/types.ts` — `AgentDefinition` is DEFINED at `src/ipc/types.ts:37` and merely imported by the three boundary files; without it the `rtkEnabled` field cannot typecheck. One additive line (`rtkEnabled?: boolean | null;`), landed as a separate scoped raw commit (`git commit -- src/ipc/types.ts`) per the immutable-boundary convention. Same defect class as ruling 5432acf7's sibling (defining file vs importer).
+
 **Interfaces:**
 - Consumes: field name `rtkEnabled?: boolean | null` (absent/null = ON) on agentDef save req and def objects (Lane A4 defines the engine side; the wire name is fixed by this plan — no need to wait for A).
 
 ### Task C1: toggle end-to-end in UI
 
-- [ ] **Step 1:** `src/ipc/commands.ts`: add `rtkEnabled?: boolean` to the `agentDef.save` request type (:63-96) and to the agent-def shape used in responses/fixtures.
+- [ ] **Step 1:** `src/ipc/types.ts`: add `rtkEnabled?: boolean | null;` to `export interface AgentDefinition` (:37) — commit this one line as its own scoped raw commit. Then `src/ipc/commands.ts`: add `rtkEnabled?: boolean` to the `agentDef.save` request type (:63-96).
 - [ ] **Step 2:** `src/components/Builder.tsx`: state `const [rtkEnabled, setRtkEnabled] = useState<boolean>(initialDef?.rtkEnabled ?? true);` (reset alongside the other initialDef effects); reuse the in-file `Toggle` component (:198-212) — label **"Token filter (rtk)"**, helper text **"Rewrites shell commands through rtk to compress output and save tokens. Claude agents only."** Render it with the other CLI-config toggles, only when the definition's cli kind is claude. Include `rtkEnabled` in the `ipc.agentDef.save({...})` payload (:512-536).
 - [ ] **Step 3:** `src/fixtures/scenarios/data.ts`: add `rtkEnabled: true` to one claude agent def and `rtkEnabled: false` to another (so the toggle renders both states from fixtures).
 - [ ] **Step 4: Gates:** `pnpm build` (tsc), then UI Pixel Gate: `pnpm uishot builder` — **open and Read `.shots/builder-default.png`**, confirm the toggle renders, is ON by default, no layout break (StdinBar width budget does not apply here, but check the row fits). Grep uishot console output for `[fixture]` errors. Record via `conclave task gate`, attach shot path in the READY note.
