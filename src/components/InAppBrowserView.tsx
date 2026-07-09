@@ -55,6 +55,24 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
     }
   }, [urlInput]);
 
+  // Periodic reconcile: keep the overlay shown+positioned and the status line
+  // fresh for an agent-initiated open/navigate, WITHOUT touching urlInput (that
+  // would clobber in-progress typing). Visibility is frontend-owned, so we
+  // re-assert it while the tab is mounted.
+  const reconcile = useCallback(async () => {
+    try {
+      const st = await ipc.browser.status();
+      if (!mounted.current) return;
+      setStatus(st);
+      if (st.ok) {
+        void ipc.browser.setVisible({ visible: true }).catch(() => {});
+        syncBounds();
+      }
+    } catch {
+      /* transient status read failure — leave last state, try next tick */
+    }
+  }, [syncBounds]);
+
   // On mount: show the overlay, position it, read status. On unmount: hide the
   // overlay (never close) so the page keeps running for background agents.
   //
@@ -70,15 +88,9 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
     syncBounds();
     void loadStatus();
 
-    const reconcile = async () => {
-      const st = await loadStatus();
-      if (!mounted.current || !st) return;
-      if (st.ok) {
-        void ipc.browser.setVisible({ visible: true }).catch(() => {});
-        syncBounds();
-      }
-    };
-    const poll = window.setInterval(() => void reconcile(), 2000);
+    const poll = window.setInterval(() => {
+      void reconcile();
+    }, 2000);
 
     const el = regionRef.current;
     const ro = el ? new ResizeObserver(() => syncBounds()) : null;
