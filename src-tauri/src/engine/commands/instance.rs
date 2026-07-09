@@ -1841,8 +1841,21 @@ mod tests {
                     "timestamp": "2099-01-01T00:00:00Z",
                     "payload": {
                         "cwd": workspace_row.folder_path.clone(),
-                        "id": id.clone(),
+                        "id": "codex-session-id-not-conclave-instance-id",
                         "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": format!("You are a Conclave agent, and your own agent id is {id}.")
+                            }
+                        ]
                     }
                 }),
                 serde_json::json!({

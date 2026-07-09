@@ -3,7 +3,7 @@
 //! This module is deliberately narrow:
 //! - It discovers candidate Claude Code and Codex transcript files.
 //! - It matches them to a specific agent instance using workspace cwd plus the
-//!   instance id appearing in the transcript.
+//!   bootstrap owner marker declaring the agent's own instance id.
 //! - It returns only usage numbers, a limit, an observation timestamp, and the
 //!   source kind.
 //!
@@ -208,13 +208,12 @@ fn scan_claude_file(
         if !saw_workspace && line.contains(workspace_text.as_ref()) {
             saw_workspace = true;
         }
-        if !saw_instance && line.contains(instance_id) {
-            saw_instance = true;
-        }
-
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if !saw_instance && claude_value_declares_owner(&value, instance_id) {
+            saw_instance = true;
+        }
         if value.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
@@ -271,13 +270,12 @@ fn scan_codex_file(
         if !saw_workspace && line.contains(workspace_text.as_ref()) {
             saw_workspace = true;
         }
-        if !saw_instance && line.contains(instance_id) {
-            saw_instance = true;
-        }
-
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if !saw_instance && codex_value_declares_owner(&value, instance_id) {
+            saw_instance = true;
+        }
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
@@ -338,6 +336,53 @@ fn scan_codex_file(
     }
 }
 
+fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let needle = format!("own agent id is {}", instance_id.to_ascii_lowercase());
+    text.contains(&needle)
+}
+
+fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
+    match value.get("type").and_then(Value::as_str) {
+        Some("attachment" | "user" | "system") => value_texts(value)
+            .any(|text| text_declares_own_agent_id(text, instance_id)),
+        _ => false,
+    }
+}
+
+fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return false;
+    }
+    let Some(payload) = value.get("payload") else {
+        return false;
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("developer")
+    {
+        return false;
+    }
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("input_text"))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .any(|text| text_declares_own_agent_id(text, instance_id))
+}
+
+fn value_texts(value: &Value) -> impl Iterator<Item = &str> {
+    [
+        value.get("text").and_then(Value::as_str),
+        value.get("content").and_then(Value::as_str),
+        value.pointer("/message/content").and_then(Value::as_str),
+        value.pointer("/message/text").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 fn sum_claude_usage(usage: &Value) -> i64 {
     usage
         .pointer("/input_tokens")
@@ -391,6 +436,73 @@ mod tests {
         std::fs::write(path, body).expect("write jsonl");
     }
 
+    fn codex_owner_line(instance_id: &str) -> Value {
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": format!("You are Dabin, and your own agent id is {instance_id}.")
+                    }
+                ]
+            }
+        })
+    }
+
+    fn codex_token_line(timestamp: &str, tokens: i64, limit: i64, workspace: &Path) -> Value {
+        json!({
+            "type": "event_msg",
+            "timestamp": timestamp,
+            "payload": {
+                "type": "token_count",
+                "cwd": workspace.to_string_lossy(),
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": tokens - 30,
+                        "cached_input_tokens": 10,
+                        "output_tokens": 11,
+                        "reasoning_output_tokens": 9,
+                        "total_tokens": tokens
+                    },
+                    "total_token_usage": { "total_tokens": tokens + 10_000 },
+                    "model_context_window": limit
+                }
+            }
+        })
+    }
+
+    fn claude_owner_line(instance_id: &str, workspace: &Path) -> Value {
+        json!({
+            "type": "user",
+            "cwd": workspace.to_string_lossy(),
+            "message": {
+                "role": "user",
+                "content": format!("Startup context: your own agent id is {instance_id}.")
+            }
+        })
+    }
+
+    fn claude_usage_line(tokens: i64) -> Value {
+        json!({
+            "type": "assistant",
+            "requestId": "req-1",
+            "message": {
+                "id": "msg-1",
+                "role": "assistant",
+                "type": "message",
+                "usage": {
+                    "input_tokens": tokens - 3,
+                    "cache_creation_input_tokens": 1,
+                    "cache_read_input_tokens": 1,
+                    "output_tokens": 1
+                }
+            }
+        })
+    }
+
     #[test]
     fn claude_dedupes_duplicate_assistant_usage() {
         let claude_root = tmp_root("claude-root");
@@ -405,7 +517,7 @@ mod tests {
                 json!({
                     "type": "attachment",
                     "cwd": workspace.to_string_lossy(),
-                    "sessionId": instance_id,
+                    "text": format!("your own agent id is {instance_id}"),
                 }),
                 json!({
                     "type": "assistant",
@@ -481,34 +593,13 @@ mod tests {
                     "timestamp": "2099-01-01T00:00:00Z",
                     "payload": {
                         "cwd": workspace.to_string_lossy(),
-                        "id": instance_id,
+                        "id": "codex-session-id-not-conclave-instance-id",
                         "originator": "codex-tui"
                     }
                 }),
-                json!({
-                    "type": "event_msg",
-                    "timestamp": "2099-01-01T00:00:01Z",
-                    "payload": {
-                        "type": "token_count",
-                        "info": {
-                            "last_token_usage": { "total_tokens": 111 },
-                            "total_token_usage": { "total_tokens": 999 },
-                            "model_context_window": 4_000
-                        }
-                    }
-                }),
-                json!({
-                    "type": "event_msg",
-                    "timestamp": "2099-01-01T00:00:02Z",
-                    "payload": {
-                        "type": "token_count",
-                        "info": {
-                            "last_token_usage": { "total_tokens": 222 },
-                            "total_token_usage": { "total_tokens": 9_999 },
-                            "model_context_window": 8_000
-                        }
-                    }
-                }),
+                codex_owner_line(instance_id),
+                codex_token_line("2099-01-01T00:00:01Z", 111, 4_000, &workspace),
+                codex_token_line("2099-01-01T00:00:02Z", 222, 8_000, &workspace),
             ],
         );
 
@@ -532,6 +623,249 @@ mod tests {
         assert_eq!(reading.source_kind, TranscriptSourceKind::Codex);
 
         let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn codex_uses_owner_marker_not_later_roster_mentions() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let agent_a = "agent-a";
+        let agent_b = "agent-b";
+
+        write_jsonl(
+            &codex_root.join("agent-a.jsonl"),
+            &[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace.to_string_lossy(),
+                        "id": "codex-session-a",
+                        "originator": "codex-tui"
+                    }
+                }),
+                codex_owner_line(agent_a),
+                codex_token_line("2099-01-01T00:00:01Z", 101, 1_000, &workspace),
+            ],
+        );
+        write_jsonl(
+            &codex_root.join("agent-b.jsonl"),
+            &[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace.to_string_lossy(),
+                        "id": "codex-session-b",
+                        "originator": "codex-tui"
+                    }
+                }),
+                codex_owner_line(agent_b),
+                json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": format!("Roster output mentions {agent_a}, but this is not ownership.")
+                            }
+                        ]
+                    }
+                }),
+                codex_token_line("2099-01-01T00:00:02Z", 202, 2_000, &workspace),
+            ],
+        );
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+
+        let reading_a = reader
+            .poll(
+                agent_a,
+                &workspace,
+                "codex",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("expected agent-a reading");
+        let reading_b = reader
+            .poll(
+                agent_b,
+                &workspace,
+                "codex",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("expected agent-b reading");
+
+        assert_eq!(reading_a.tokens, 101);
+        assert_eq!(reading_a.limit, 1_000);
+        assert_eq!(reading_b.tokens, 202);
+        assert_eq!(reading_b.limit, 2_000);
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn codex_ignores_workspace_file_with_only_arbitrary_id_mention() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "agent-mentioned-only";
+
+        write_jsonl(
+            &codex_root.join("mention-only.jsonl"),
+            &[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace.to_string_lossy(),
+                        "id": "codex-session",
+                        "originator": "codex-tui"
+                    }
+                }),
+                json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": format!("Task note mentions {instance_id}, but no owner marker exists.")
+                            }
+                        ]
+                    }
+                }),
+                codex_token_line("2099-01-01T00:00:01Z", 303, 3_000, &workspace),
+            ],
+        );
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+        assert!(
+            reader
+                .poll(
+                    instance_id,
+                    &workspace,
+                    "codex",
+                    DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+                )
+                .is_none(),
+            "arbitrary transcript text must not establish ownership"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn codex_token_formula_uses_reported_last_total_without_offset() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "agent-formula";
+
+        write_jsonl(
+            &codex_root.join("formula.jsonl"),
+            &[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace.to_string_lossy(),
+                        "id": "codex-session-formula",
+                        "originator": "codex-tui"
+                    }
+                }),
+                codex_owner_line(instance_id),
+                codex_token_line("2099-01-01T00:00:01Z", 222, 8_000, &workspace),
+            ],
+        );
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+        let reading = reader
+            .poll(
+                instance_id,
+                &workspace,
+                "codex",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("expected codex reading");
+
+        assert_eq!(reading.tokens, 222);
+        assert_eq!(reading.limit, 8_000);
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn claude_uses_owner_marker_not_later_mentions() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let agent_a = "claude-agent-a";
+        let agent_b = "claude-agent-b";
+
+        let file = claude_root.join("agent-b.jsonl");
+        write_jsonl(
+            &file,
+            &[
+                claude_owner_line(agent_b, &workspace),
+                json!({
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": format!("Later roster text mentions {agent_a}.")
+                    }
+                }),
+                claude_usage_line(77),
+            ],
+        );
+
+        assert!(
+            scan_claude_file(
+                &file,
+                agent_a,
+                &workspace,
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+                200_000,
+            )
+            .is_none(),
+            "later mentions must not establish Claude transcript ownership"
+        );
+        assert!(
+            scan_claude_file(
+                &file,
+                agent_b,
+                &workspace,
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+                200_000,
+            )
+            .is_some(),
+            "owner marker should match the owning Claude agent"
+        );
+
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
         let _ = std::fs::remove_dir_all(&workspace);
