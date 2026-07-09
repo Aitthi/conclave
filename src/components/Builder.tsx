@@ -34,7 +34,7 @@ export interface BuilderProps {
 type AgentType = "cli" | "chat" | "orchestrator";
 type CliKind = "claude-code" | "codex" | "custom";
 type PermissionMode = "auto" | "bypassPermissions";
-type ContextWindow = "1m" | "200k";
+type ClaudeContextWindow = "1m" | "200k";
 
 // ── Preset color swatches ────────────────────────────────────────────────────
 
@@ -78,9 +78,40 @@ const CLAUDE_MODELS = [
   "claude-haiku-4-5",
 ];
 
-/** Quick-fill Codex model presets (context window is fixed per model: gpt-5.5
- *  / gpt-5.4 = 1M, gpt-5.4-mini = 400K — not separately selectable). */
-const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+/** Quick-fill Codex model presets (context window is an editable numeric
+ *  model_context_window override, bounded by the selected model's known max). */
+const CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+
+const CODEX_CONTEXT_WINDOWS: Record<string, number> = {
+  "gpt-5.5": 258_400,
+  "gpt-5.4": 258_400,
+  "gpt-5.4-mini": 258_400,
+  "gpt-5.3-codex-spark": 121_600,
+  "gpt-5-codex": 258_400,
+};
+
+const CODEX_UNKNOWN_CONTEXT_WINDOW_MAX = Math.max(...Object.values(CODEX_CONTEXT_WINDOWS));
+
+function codexContextWindowMax(modelId: string): number {
+  return CODEX_CONTEXT_WINDOWS[modelId.trim()] ?? CODEX_UNKNOWN_CONTEXT_WINDOW_MAX;
+}
+
+function codexDefaultContextWindow(modelId: string): string {
+  return String(codexContextWindowMax(modelId));
+}
+
+function isPositiveIntegerText(text: string): boolean {
+  return /^[1-9]\d*$/.test(text.trim());
+}
+
+function initialContextWindow(def?: AgentDefinition): string {
+  if (def?.cliKind === "codex") {
+    return isPositiveIntegerText(def.contextWindow ?? "")
+      ? def.contextWindow!
+      : codexDefaultContextWindow(def.model ?? "");
+  }
+  return def?.contextWindow === "1m" ? "1m" : "200k";
+}
 
 /**
  * Sentinel shown for a secret env var already stored in the Keychain. Sending
@@ -188,9 +219,7 @@ export function Builder({
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     initialDef?.permissionMode ?? "auto",
   );
-  const [contextWindow, setContextWindow] = useState<ContextWindow>(
-    initialDef?.contextWindow ?? "200k",
-  );
+  const [contextWindow, setContextWindow] = useState<string>(() => initialContextWindow(initialDef));
   const [customArgs, setCustomArgs] = useState(initialDef?.customArgs ?? "");
   // Custom env is opt-in so the starter template isn't saved by accident.
   const [useCustomEnv, setUseCustomEnv] = useState(
@@ -370,6 +399,11 @@ export function Builder({
   const isCodex = agentType === "cli" && cliKind === "codex";
   const showCliConfig = isClaudeCode || isCodex;
   const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
+  const codexMaxContextWindow = codexContextWindowMax(model);
+  const codexContextWindowNumber = Number(contextWindow.trim());
+  const codexContextWindowInvalid =
+    isCodex &&
+    (!isPositiveIntegerText(contextWindow) || codexContextWindowNumber > codexMaxContextWindow);
   const positionEnabled = Boolean(
     scopedAgent && workspaceId && workspaceAgentId && initialDef?.id,
   );
@@ -395,11 +429,43 @@ export function Builder({
   const supervisorChanged =
     positionEnabled && (scopedAgent?.supervisorAgentId ?? null) !== supervisorDraft;
 
+  function selectCliKind(next: CliKind) {
+    setCliKind(next);
+    if (next === "codex") {
+      setContextWindow(codexDefaultContextWindow(model));
+    } else if (next === "claude-code" && contextWindow !== "1m" && contextWindow !== "200k") {
+      setContextWindow("200k");
+    }
+  }
+
+  function selectModelPreset(next: string) {
+    setModel(next);
+    if (isCodex) {
+      setContextWindow(codexDefaultContextWindow(next));
+    }
+  }
+
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave() {
     if (!name.trim()) {
       setError("Name is required");
       return;
+    }
+    let contextWindowForSave: string | undefined;
+    if (isClaudeCode) {
+      contextWindowForSave = contextWindow === "1m" ? "1m" : "200k";
+    } else if (isCodex) {
+      const trimmed = contextWindow.trim();
+      if (!isPositiveIntegerText(trimmed)) {
+        setError("Codex context window must be a positive integer");
+        return;
+      }
+      const tokens = Number(trimmed);
+      if (tokens > codexMaxContextWindow) {
+        setError(`Codex context window must be at most ${codexMaxContextWindow}`);
+        return;
+      }
+      contextWindowForSave = String(tokens);
     }
     // Parse the custom env up front so a JSON error is reported before saving.
     // Claude Code only — Codex doesn't use ANTHROPIC_* env config.
@@ -441,9 +507,8 @@ export function Builder({
         autoSubmitInjected: true,
         allowedSenders: "all",
         // CLI launch config (claude-code + codex; omitted for other kinds).
-        // contextWindow is Claude-only ([1m] suffix); Codex has no equivalent.
         permissionMode: showCliConfig ? permissionMode : undefined,
-        contextWindow: isClaudeCode ? contextWindow : undefined,
+        contextWindow: contextWindowForSave,
         customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
@@ -1059,7 +1124,7 @@ export function Builder({
                     role="radio"
                     aria-checked={cliKind === value}
                     disabled={soon}
-                    onClick={() => !soon && setCliKind(value)}
+                    onClick={() => !soon && selectCliKind(value)}
                     className={`flex-1 flex items-center justify-center gap-1 text-[12.5px] py-1.5 rounded-lg transition-colors ${
                       soon
                         ? "text-text-tertiary cursor-not-allowed"
@@ -1130,7 +1195,7 @@ export function Builder({
                     {modelPresets.map((m) => (
                       <button
                         key={m}
-                        onClick={() => setModel(m)}
+                        onClick={() => selectModelPreset(m)}
                         className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
                           model === m
                             ? "ring-accent/40 bg-accent/[0.08] text-accent"
@@ -1188,8 +1253,8 @@ export function Builder({
                   )}
                 </div>
 
-                {/* Context window — Claude only (the [1m] suffix is
-                    Claude-specific; Codex has no equivalent flag). */}
+                {/* Context window — Claude's [1m] suffix remains a segmented
+                    choice; Codex uses a numeric model_context_window override. */}
                 {isClaudeCode && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
@@ -1203,7 +1268,7 @@ export function Builder({
                         [
                           { value: "200k", label: "200K" },
                           { value: "1m", label: "1M" },
-                        ] as { value: ContextWindow; label: string }[]
+                        ] as { value: ClaudeContextWindow; label: string }[]
                       ).map(({ value, label }) => (
                         <button
                           key={value}
@@ -1227,6 +1292,36 @@ export function Builder({
                     </p>
                   )}
                 </div>
+                )}
+
+                {isCodex && (
+                  <div className="px-3 py-2">
+                    <div className="grid grid-cols-[minmax(0,1fr)_160px] items-center gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[12.5px] text-text-secondary">Context window</div>
+                        <div className="mt-0.5 text-[10.5px] text-text-tertiary truncate">
+                          Max {codexMaxContextWindow.toLocaleString()} tokens for{" "}
+                          <span className="font-mono">{model.trim() || "custom model"}</span>
+                        </div>
+                      </div>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        max={codexMaxContextWindow}
+                        step={1}
+                        value={contextWindow}
+                        onChange={(e) => setContextWindow(e.target.value)}
+                        className={`h-8 w-full rounded-lg bg-overlay/[0.035] px-2.5 text-right text-[12.5px] font-mono outline-none ring-1 ${
+                          codexContextWindowInvalid
+                            ? "ring-danger/50 focus:ring-danger/70"
+                            : "ring-overlay/[0.08] focus:ring-accent/50"
+                        }`}
+                        aria-invalid={codexContextWindowInvalid}
+                        aria-label="Codex context window tokens"
+                      />
+                    </div>
+                  </div>
                 )}
 
                 {/* Custom args */}

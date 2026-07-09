@@ -95,7 +95,7 @@ export const agentDefs: AgentDefinition[] = [
     color: "#4a9fd8",
     model: "gpt-5-codex",
     harnessMode: "own",
-    contextWindow: "200k",
+    contextWindow: "258400",
     defaultLevel: "mid",
     createdAt: "2026-07-01T09:08:00.000Z",
   },

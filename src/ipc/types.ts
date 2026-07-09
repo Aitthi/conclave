@@ -62,8 +62,10 @@ export interface AgentDefinition {
   customEnv?: Record<string, string>;
   /** Names of env vars whose VALUES are stored in the Keychain (not the values). */
   secretEnvKeys?: string[];
-  /** Model context window: "1m" appends the [1m] suffix, "200k" is standard. */
-  contextWindow?: "1m" | "200k";
+  /** Harness-specific context window config.
+   *  Claude Code: "1m" appends the [1m] suffix; "200k" is the standard model.
+   *  Codex: decimal token count passed as -c model_context_window=<tokens>. */
+  contextWindow?: string;
   /** Annotated by `agentDef.list`: the FULL set of skill ids (builtin first,
    *  then attached custom, matching the launch-snapshot ordering used by
    *  `repo::skill::content_for_agent`) a `cli` agent would use if launched

@@ -932,4 +932,30 @@ mod tests {
             "update with None must clear the column"
         );
     }
+
+    #[tokio::test]
+    async fn numeric_context_window_roundtrips_as_string() {
+        let pool = connect_in_memory().await;
+        let input = AgentDefinitionInput {
+            name: "Codex".into(),
+            agent_type: "cli".into(),
+            cli_kind: Some("codex".into()),
+            model: Some("gpt-5.3-codex-spark".into()),
+            harness_mode: "own".into(),
+            context_window: Some("121600".into()),
+            ..Default::default()
+        };
+
+        let row = create(&pool, &input).await.expect("create failed");
+        assert_eq!(row.context_window.as_deref(), Some("121600"));
+
+        let fetched = get(&pool, &row.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert_eq!(fetched.context_window.as_deref(), Some("121600"));
+
+        let listed = list_with_counts(&pool).await.expect("list failed");
+        assert_eq!(listed[0].context_window.as_deref(), Some("121600"));
+    }
 }

@@ -46,6 +46,34 @@ const RESTART_SETTLE_MS: u64 = 2_000;
 /// on purpose; a restart is a rare, human-triggered operation.
 const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
 
+// Single-quote a value so the shell doesn't glob it; POSIX-escape embedded
+// quotes so the value can't break out of the launch command.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn positive_context_window_tokens(value: Option<&str>) -> Option<i64> {
+    let tokens = value?.trim().parse::<i64>().ok()?;
+    (tokens > 0).then_some(tokens)
+}
+
+fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
+    if context_window == Some("1m") {
+        format!("{model}[1m]")
+    } else {
+        model.to_string()
+    }
+}
+
+fn append_codex_context_window_config(launch: &mut String, context_window: Option<&str>) {
+    if let Some(tokens) = positive_context_window_tokens(context_window) {
+        launch.push_str(&format!(
+            " -c {}",
+            shell_quote(&format!("model_context_window={tokens}"))
+        ));
+    }
+}
+
 // ── Request types ────────────────────────────────────────────────────────────
 
 /// Payload for `instance.list` — filter by workspace.
@@ -499,12 +527,9 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 .to_owned();
 
             // Build the launch command with the agent's configured flags. The
-            // 1M-context variant of a model is its id with a `[1m]` suffix —
-            // single-quoted so the shell doesn't try to glob the brackets.
-            // Claude-specific flags are gated to claude; custom args apply to any.
-            // Single-quote a value so the shell doesn't glob it (e.g. claude's
-            // `[1m]`); POSIX-escape any embedded quote so it can't break out.
-            let shell_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+            // 1M-context variant of a Claude model is its id with a `[1m]`
+            // suffix; Codex uses a numeric `model_context_window` config
+            // override. Custom args apply to either harness.
 
             // Resolved BEFORE preamble assembly (not just before the PATH
             // export, as before Task 5) so a PATH-fallback sentence naming
@@ -591,11 +616,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     launch.push_str(&format!(" --permission-mode {}", shell_quote(mode)));
                 }
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
-                    let eff = if def.context_window.as_deref() == Some("1m") {
-                        format!("{model}[1m]")
-                    } else {
-                        model.to_string()
-                    };
+                    let eff = effective_claude_model(model, def.context_window.as_deref());
                     launch.push_str(&format!(" --model {}", shell_quote(&eff)));
                 }
                 // Persistent system-prompt append → survives /clear.
@@ -623,6 +644,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
                 }
+                append_codex_context_window_config(&mut launch, def.context_window.as_deref());
                 // Codex's mode flags differ from claude's; map the shared
                 // permission_mode value to them. "auto" = never pause for
                 // approval but keep the sandbox; "bypass" = --yolo (alias of
@@ -1450,6 +1472,38 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn codex_context_window_config_appends_numeric_override() {
+        let mut launch = String::from("codex --model 'gpt-5.3-codex-spark'");
+        append_codex_context_window_config(&mut launch, Some("121600"));
+
+        assert!(
+            launch.contains(" -c 'model_context_window=121600'"),
+            "{launch}"
+        );
+    }
+
+    #[test]
+    fn codex_context_window_config_ignores_claude_sentinels() {
+        for value in [Some("1m"), Some("200k"), Some("0"), Some("-1"), None] {
+            let mut launch = String::from("codex");
+            append_codex_context_window_config(&mut launch, value);
+            assert!(
+                !launch.contains("model_context_window"),
+                "sentinel/invalid value must not become a Codex context override: {launch}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_context_window_suffix_stays_claude_only() {
+        let eff = effective_claude_model("claude-sonnet-5", Some("1m"));
+        let launch = format!("claude --model {}", shell_quote(&eff));
+
+        assert!(launch.contains("'claude-sonnet-5[1m]'"), "{launch}");
+        assert!(!launch.contains("model_context_window"), "{launch}");
+    }
 
     /// Create a workspace + agent_definition, instantiate an instance (idle,
     /// with a session), and return its workspace_agent id.
