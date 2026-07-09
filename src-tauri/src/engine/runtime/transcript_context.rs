@@ -382,6 +382,7 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
 fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
     match value.get("type").and_then(Value::as_str) {
         Some("attachment" | "user" | "system") => value_texts(value)
+            .iter()
             .any(|text| text_declares_own_agent_id(text, instance_id)),
         _ => false,
     }
@@ -409,15 +410,53 @@ fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
         .any(|text| text_declares_own_agent_id(text, instance_id))
 }
 
-fn value_texts(value: &Value) -> impl Iterator<Item = &str> {
-    [
-        value.get("text").and_then(Value::as_str),
-        value.get("content").and_then(Value::as_str),
-        value.pointer("/message/content").and_then(Value::as_str),
-        value.pointer("/message/text").and_then(Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
+/// Every text fragment a claude transcript line can carry the owner marker in.
+///
+/// Real transcripts deliver it three ways (verified against live files):
+/// - `attachment.content` — a LIST of strings, how claude-code records a
+///   SessionStart hook's `additionalContext` (type `hook_additional_context`).
+/// - `attachment.stdout` — raw hook stdout (type `hook_success`).
+/// - `message.content` — a plain string OR an array of `{type:"text",text}`
+///   blocks on `user`/`system` lines.
+fn value_texts(value: &Value) -> Vec<&str> {
+    let mut out = Vec::new();
+    if let Some(t) = value.get("text").and_then(Value::as_str) {
+        out.push(t);
+    }
+    push_content_texts(value.get("content"), &mut out);
+    if let Some(att) = value.get("attachment") {
+        push_content_texts(att.get("content"), &mut out);
+        if let Some(s) = att.get("stdout").and_then(Value::as_str) {
+            out.push(s);
+        }
+    }
+    push_content_texts(value.pointer("/message/content"), &mut out);
+    if let Some(t) = value.pointer("/message/text").and_then(Value::as_str) {
+        out.push(t);
+    }
+    out
+}
+
+/// Push every text a `content` node carries: a plain string, or an array of
+/// strings / `{type:"text",text}` blocks.
+fn push_content_texts<'v>(node: Option<&'v Value>, out: &mut Vec<&'v str>) {
+    match node {
+        Some(Value::String(s)) => out.push(s.as_str()),
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item {
+                    Value::String(s) => out.push(s.as_str()),
+                    Value::Object(_) => {
+                        if let Some(t) = item.get("text").and_then(Value::as_str) {
+                            out.push(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn sum_claude_usage(usage: &Value) -> i64 {
@@ -538,6 +577,134 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// The owner marker's real delivery channel: claude-code records a
+    /// SessionStart hook's `additionalContext` as an `attachment` line whose
+    /// `attachment.content` is a LIST of context strings. The system-prompt
+    /// append (`--append-system-prompt`) is never written to the transcript,
+    /// so this attachment shape is the only recorded form of the marker.
+    #[test]
+    fn claude_owner_via_session_start_hook_attachment() {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-hook-1";
+        let file = claude_root.join("session.jsonl");
+
+        write_jsonl(
+            &file,
+            &[
+                json!({
+                    "type": "attachment",
+                    "cwd": workspace.to_string_lossy(),
+                    "attachment": {
+                        "type": "hook_additional_context",
+                        "hookName": "SessionStart",
+                        "hookEvent": "SessionStart",
+                        "content": [
+                            format!("You are a Conclave agent, and your own agent id is {instance_id}.")
+                        ]
+                    }
+                }),
+                claude_usage_line(42),
+            ],
+        );
+
+        let reading = scan_claude_file(
+            &file,
+            instance_id,
+            &workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            200_000,
+        )
+        .expect("hook_additional_context attachment must establish ownership");
+        assert_eq!(reading.tokens, 42);
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// A SessionStart hook that prints plain text (no JSON wrapper) is recorded
+    /// as a `hook_success` attachment with the text in `attachment.stdout`.
+    #[test]
+    fn claude_owner_via_hook_stdout() {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-stdout-1";
+        let file = claude_root.join("session.jsonl");
+
+        write_jsonl(
+            &file,
+            &[
+                json!({
+                    "type": "attachment",
+                    "cwd": workspace.to_string_lossy(),
+                    "attachment": {
+                        "type": "hook_success",
+                        "hookName": "SessionStart",
+                        "hookEvent": "SessionStart",
+                        "content": "",
+                        "stdout": format!("your own agent id is {instance_id}\n"),
+                        "stderr": ""
+                    }
+                }),
+                claude_usage_line(43),
+            ],
+        );
+
+        let reading = scan_claude_file(
+            &file,
+            instance_id,
+            &workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            200_000,
+        )
+        .expect("hook_success stdout must establish ownership");
+        assert_eq!(reading.tokens, 43);
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// User messages in real transcripts frequently store `message.content` as
+    /// an ARRAY of typed blocks, not a plain string; a marker typed as a user
+    /// prompt (e.g. a post-/clear restore nudge) must still match.
+    #[test]
+    fn claude_owner_via_user_message_content_blocks() {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-blocks-1";
+        let file = claude_root.join("session.jsonl");
+
+        write_jsonl(
+            &file,
+            &[
+                json!({
+                    "type": "user",
+                    "cwd": workspace.to_string_lossy(),
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": format!("Startup: your own agent id is {instance_id}.") }
+                        ]
+                    }
+                }),
+                claude_usage_line(44),
+            ],
+        );
+
+        let reading = scan_claude_file(
+            &file,
+            instance_id,
+            &workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            200_000,
+        )
+        .expect("array-form user message content must establish ownership");
+        assert_eq!(reading.tokens, 44);
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]

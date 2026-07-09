@@ -631,21 +631,27 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     " --append-system-prompt {}",
                     shell_quote(&preamble)
                 ));
-                // Sandbox: allowlist the conclave socket via a generated
-                // per-instance settings file (Route A — keeps conclave inside
-                // the sandbox, opens only the one IPC socket, and auto-approves
-                // the sandboxed call). Fail-soft: on a write error the agent
-                // still works, just with the one-time seatbelt modal.
-                if let Some(sock) = &socket_path {
-                    match runtime::sandbox_config::write_claude_settings(&id, sock) {
-                        Ok(path) => launch.push_str(&format!(
-                            " --settings {}",
-                            shell_quote(&path.to_string_lossy())
-                        )),
-                        Err(e) => eprintln!(
-                            "[spawn] could not write claude sandbox settings for {id}: {e}"
-                        ),
-                    }
+                // Per-instance settings file, written on EVERY claude spawn:
+                // it always carries the SessionStart owner-marker hook (the
+                // transcript-recorded channel the context meter attributes
+                // transcripts with — the system-prompt append above is never
+                // written to the transcript), plus the sandbox socket
+                // allowance when the spawn runs sandboxed (Route A — keeps
+                // conclave inside the sandbox, opens only the one IPC socket,
+                // and auto-approves the sandboxed call). Fail-soft: on a write
+                // error the agent still works, just without the transcript
+                // meter and with the one-time seatbelt modal.
+                match runtime::sandbox_config::write_claude_settings(
+                    &id,
+                    socket_path.as_deref(),
+                ) {
+                    Ok(path) => launch.push_str(&format!(
+                        " --settings {}",
+                        shell_quote(&path.to_string_lossy())
+                    )),
+                    Err(e) => eprintln!(
+                        "[spawn] could not write claude agent settings for {id}: {e}"
+                    ),
                 }
             } else if base == "codex" {
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {

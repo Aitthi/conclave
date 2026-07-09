@@ -112,6 +112,87 @@ pub fn claude_sandbox_settings(socket_path: &str, existing: Option<serde_json::V
     root
 }
 
+/// The marker phrase the transcript-backed context meter matches on
+/// (`engine::runtime::transcript_context`). Also used here to recognize (and
+/// replace) our own hook group on re-merge.
+const OWNER_MARKER_PHRASE: &str = "own agent id is";
+
+/// Shell command for a SessionStart hook that injects the owner marker as
+/// `additionalContext`. claude-code records that context in the transcript
+/// (as a `hook_additional_context` attachment) on EVERY session start —
+/// startup, resume, /clear, compact — which is what lets the transcript
+/// context meter attribute the transcript to this instance. The system-prompt
+/// append carries the same sentence but is never written to the transcript.
+pub fn owner_marker_command(instance_id: &str) -> String {
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": format!(
+                "You are a Conclave agent, and your own agent id is {instance_id}."
+            )
+        }
+    });
+    // Instance ids are UUIDs (no quotes to escape); the JSON body uses only
+    // double quotes, so single-quoting it is a single safe shell word.
+    format!("echo '{payload}'")
+}
+
+/// Build the full per-instance claude settings: always the owner-marker
+/// SessionStart hook; plus the sandbox socket allowance when the spawn runs
+/// sandboxed (`socket_path` present). Preserves foreign keys and any foreign
+/// SessionStart hook groups in `existing`; our own marker group (identified by
+/// the marker phrase) is replaced, so a stale instance id self-repairs.
+pub fn claude_agent_settings(
+    instance_id: &str,
+    socket_path: Option<&str>,
+    existing: Option<serde_json::Value>,
+) -> serde_json::Value {
+    use serde_json::Value;
+    let mut root = match socket_path {
+        Some(sock) => claude_sandbox_settings(sock, existing),
+        None => match existing {
+            Some(v @ Value::Object(_)) => v,
+            _ => Value::Object(serde_json::Map::new()),
+        },
+    };
+    let obj = root.as_object_mut().expect("root is an object");
+
+    let hooks = obj
+        .entry("hooks")
+        .and_modify(|v| {
+            if !v.is_object() {
+                *v = Value::Object(serde_json::Map::new());
+            }
+        })
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .expect("hooks is an object");
+    let session_start = hooks
+        .entry("SessionStart")
+        .and_modify(|v| {
+            if !v.is_array() {
+                *v = Value::Array(Vec::new());
+            }
+        })
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("SessionStart is an array");
+
+    // Drop any previous conclave marker group (ours carry the marker phrase in
+    // their command), keep everything else, then append the current one.
+    session_start.retain(|group| {
+        !group
+            .pointer("/hooks/0/command")
+            .and_then(Value::as_str)
+            .is_some_and(|cmd| cmd.contains(OWNER_MARKER_PHRASE))
+    });
+    session_start.push(serde_json::json!({
+        "hooks": [{ "type": "command", "command": owner_marker_command(instance_id) }]
+    }));
+
+    root
+}
+
 /// Absolute path of the per-instance claude settings file we generate.
 /// `<data_dir>/Conclave/agent-settings/<instance_id>.json` — beside the socket
 /// and DB, never inside the user's workspace repo.
@@ -123,11 +204,15 @@ pub fn claude_settings_path(instance_id: &str) -> PathBuf {
         .join(format!("{instance_id}.json"))
 }
 
-/// Merge the socket allowance into the per-instance claude settings file and
-/// return its path (to pass via `--settings`). Reads any existing file at the
-/// path and preserves its other keys; creates the `agent-settings` dir on
-/// first use.
-pub fn write_claude_settings(instance_id: &str, socket_path: &str) -> std::io::Result<PathBuf> {
+/// Write the per-instance claude settings file and return its path (to pass
+/// via `--settings`). Always merges the owner-marker SessionStart hook; the
+/// socket allowance is merged only when `socket_path` is present (sandboxed
+/// spawn). Reads any existing file at the path and preserves its other keys;
+/// creates the `agent-settings` dir on first use.
+pub fn write_claude_settings(
+    instance_id: &str,
+    socket_path: Option<&str>,
+) -> std::io::Result<PathBuf> {
     let path = claude_settings_path(instance_id);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -135,7 +220,7 @@ pub fn write_claude_settings(instance_id: &str, socket_path: &str) -> std::io::R
     let existing = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let merged = claude_sandbox_settings(socket_path, existing);
+    let merged = claude_agent_settings(instance_id, socket_path, existing);
     let body = serde_json::to_string_pretty(&merged).map_err(std::io::Error::other)?;
     std::fs::write(&path, body)?;
     Ok(path)
@@ -181,6 +266,85 @@ mod tests {
             ov[2],
             "permissions.conclave.network.unix_sockets={\"/tmp/space dir/conclave.sock\"=\"allow\"}"
         );
+    }
+
+    #[test]
+    fn agent_settings_always_carry_owner_marker_hook() {
+        // The transcript context meter can only attribute a claude transcript
+        // to an instance if the owner marker is RECORDED in it; the SessionStart
+        // hook is the recorded channel (--append-system-prompt never is).
+        let v = claude_agent_settings("inst-9", None, None);
+        let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command present");
+        assert!(cmd.contains("own agent id is inst-9"), "command was {cmd}");
+        // No socket → no sandbox keys.
+        assert!(v.get("sandbox").is_none());
+    }
+
+    #[test]
+    fn agent_settings_with_socket_carry_hook_and_sandbox() {
+        let sock = "/tmp/conclave.sock";
+        let v = claude_agent_settings("inst-9", Some(sock), None);
+        assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
+        let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("hook command present");
+        assert!(cmd.contains("own agent id is inst-9"));
+    }
+
+    #[test]
+    fn agent_settings_owner_hook_is_idempotent_and_self_repairing() {
+        let once = claude_agent_settings("inst-9", None, None);
+        let twice = claude_agent_settings("inst-9", None, Some(once.clone()));
+        assert_eq!(once, twice, "re-merge must not duplicate the hook group");
+
+        // A stale marker for a different id (e.g. file reused) is replaced.
+        let stale = claude_agent_settings("inst-old", None, None);
+        let repaired = claude_agent_settings("inst-9", None, Some(stale));
+        let groups = repaired["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart groups");
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("own agent id is inst-9"));
+    }
+
+    #[test]
+    fn agent_settings_preserve_foreign_session_start_hooks() {
+        let existing = json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [{ "type": "command", "command": "echo unrelated" }] }
+            ]}
+        });
+        let v = claude_agent_settings("inst-9", None, Some(existing));
+        let groups = v["hooks"]["SessionStart"].as_array().expect("groups");
+        assert_eq!(groups.len(), 2, "foreign hook group must survive the merge");
+        assert!(groups
+            .iter()
+            .any(|g| g["hooks"][0]["command"].as_str() == Some("echo unrelated")));
+    }
+
+    #[test]
+    fn owner_marker_command_emits_additional_context_json() {
+        let cmd = owner_marker_command("inst-9");
+        // Single shell word via echo + single quotes; payload is the documented
+        // SessionStart additionalContext envelope.
+        assert!(cmd.starts_with("echo '"), "command was {cmd}");
+        let json_body = cmd
+            .trim_start_matches("echo '")
+            .trim_end_matches('\'');
+        let v: Value = serde_json::from_str(json_body).expect("payload is valid JSON");
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"],
+            json!("SessionStart")
+        );
+        assert!(v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("own agent id is inst-9"));
     }
 
     #[test]
