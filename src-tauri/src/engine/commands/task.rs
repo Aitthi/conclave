@@ -425,6 +425,33 @@ fn task_list_item_to_json(row: &TaskListRow, extras: &BoardExtras) -> Value {
     Value::Object(obj)
 }
 
+/// Build a `task.list` row in the SLIM shape (CLI-side board orientation,
+/// ruling 3f1ab20e on task cli-output-economy): ONLY `slug`, `state`, `title`,
+/// `implementerAgentId`, `updatedAt`, and `openChallenges` (a COUNT of
+/// unruled challenges, not the rows). No plan, no boundary, no `lastGates` —
+/// the full shape stays available via `task.get`/`task.brief` and the no-slim
+/// list.
+fn slim_task_list_item_to_json(row: &TaskListRow, extras: &BoardExtras) -> Value {
+    let open_challenges = extras
+        .challenges
+        .get(&row.id)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+                .count()
+        })
+        .unwrap_or(0);
+    json!({
+        "slug": row.slug,
+        "state": row.state,
+        "title": row.title,
+        "implementerAgentId": row.implementer_agent_id,
+        "updatedAt": row.updated_at,
+        "openChallenges": open_challenges,
+    })
+}
+
 /// Build the frozen `TaskEvent` wire shape from a [`TaskEventRow`].
 fn task_event_to_json(row: &TaskEventRow) -> Value {
     let mut obj = serde_json::Map::new();
@@ -516,26 +543,48 @@ struct ListReq {
     workspace_id: String,
     state: Option<String>,
     include_plan: Option<bool>,
+    slim: Option<bool>,
+    all: Option<bool>,
 }
 
 /// List a workspace's tasks (optionally filtered by `state`), each row
 /// carrying its `eventCount` plus the always-present derived board fields
 /// `lastGates` and `challenges` (both `[]` when none) — RULED 2026-07-04 #2
 /// (amended same day, Arta fidelity F1), see [`BoardExtras`].
+///
+/// `slim: true` (CLI board orientation, ruling 3f1ab20e) swaps each row for
+/// the low-context shape from [`slim_task_list_item_to_json`] and hides
+/// merged/abandoned tasks unless `all: true` or an explicit `state` filter
+/// asks for them. Payloads that do not send `slim` — the Tauri UI — get
+/// today's exact full shape; that invariant is regression-tested.
 pub async fn list(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: ListReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     require_workspace(state, &req.workspace_id).await?;
 
+    let slim = req.slim.unwrap_or(false);
     let rows = repo::task::list(
         &state.db,
         &req.workspace_id,
         req.state.as_deref(),
-        req.include_plan.unwrap_or(true),
+        !slim && req.include_plan.unwrap_or(true),
     )
     .await?;
     let events = repo::task::board_events_for_workspace(&state.db, &req.workspace_id).await?;
     let extras = derive_board_extras(&events);
+
+    if slim {
+        let include_closed = req.all.unwrap_or(false) || req.state.is_some();
+        return Ok(Value::Array(
+            rows.iter()
+                .filter(|row| {
+                    include_closed || !matches!(row.state.as_str(), "merged" | "abandoned")
+                })
+                .map(|row| slim_task_list_item_to_json(row, &extras))
+                .collect(),
+        ));
+    }
+
     Ok(Value::Array(
         rows.iter()
             .map(|row| task_list_item_to_json(row, &extras))
@@ -797,6 +846,11 @@ struct GateReq {
     sha: String,
     tail: String,
     cwd: String,
+    /// Client-side path of the FULL gate log (`conclave-cli` writes it under
+    /// its cli-output dir and ships only the 2000-byte `tail` over the wire —
+    /// task cli-output-economy). Optional so pre-logPath CLI builds keep
+    /// recording gates.
+    log_path: Option<String>,
 }
 
 /// Append a `gate` event. The command itself already ran client-side (see
@@ -811,14 +865,17 @@ pub async fn gate(state: &AppState, payload: Value) -> Result<Value, AppError> {
         enforce_scope(state, &req.workspace_id, actor, "actor").await?;
     }
 
-    let payload_json = json!({
+    let mut gate_payload = json!({
         "cmd": req.cmd,
         "exit": req.exit,
         "sha": req.sha,
         "tail": req.tail,
         "cwd": req.cwd,
-    })
-    .to_string();
+    });
+    if let Some(log_path) = &req.log_path {
+        gate_payload["logPath"] = json!(log_path);
+    }
+    let payload_json = gate_payload.to_string();
     let event = repo::task::add_gate(
         &state.db,
         &req.workspace_id,
@@ -1818,6 +1875,218 @@ mod tests {
             t2["lastGates"],
             json!([]),
             "t2's list row must not see t1's gate"
+        );
+    }
+
+    /// Walk `slug` from planned to `target` through the single-step chain
+    /// claimed → in_progress → review → merged (abandoned branches off
+    /// in_progress).
+    async fn walk_to_state(state: &AppState, ws: &str, slug: &str, actor: &str, target: &str) {
+        claim(
+            state,
+            json!({ "workspaceId": ws, "slug": slug, "actorId": actor }),
+        )
+        .await
+        .expect("claim");
+        let chain: &[&str] = match target {
+            "merged" => &["in_progress", "review", "merged"],
+            "abandoned" => &["in_progress", "abandoned"],
+            other => panic!("walk_to_state: unsupported target '{other}'"),
+        };
+        for next in chain {
+            set_state(
+                state,
+                json!({ "workspaceId": ws, "slug": slug, "state": next, "actorId": actor }),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("set_state {next}: {e:?}"));
+        }
+    }
+
+    /// The UI invariant behind ruling 3f1ab20e: a payload that does NOT send
+    /// `slim` gets today's exact full shape — plan, boundary, eventCount, and
+    /// the derived `lastGates`/`challenges` all present, closed tasks included.
+    #[tokio::test]
+    async fn list_without_slim_keeps_full_shape_and_closed_tasks() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "plan": "p1" }),
+        )
+        .await
+        .expect("create t1");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t2", "title": "T2" }),
+        )
+        .await
+        .expect("create t2");
+        walk_to_state(&state, &ws, "t2", &actor, "merged").await;
+
+        let listed = list(&state, json!({ "workspaceId": ws }))
+            .await
+            .expect("list failed");
+        let arr = listed.as_array().expect("array");
+        assert_eq!(arr.len(), 2, "no-slim list keeps merged tasks");
+        let t1 = arr.iter().find(|t| t["slug"] == "t1").expect("t1 present");
+        for key in [
+            "id",
+            "workspaceId",
+            "slug",
+            "title",
+            "state",
+            "fileBoundary",
+            "plan",
+            "createdAt",
+            "updatedAt",
+            "eventCount",
+            "lastGates",
+            "challenges",
+        ] {
+            assert!(t1.get(key).is_some(), "full row must carry '{key}'");
+        }
+        assert_eq!(t1["plan"], json!("p1"));
+    }
+
+    #[tokio::test]
+    async fn list_slim_rows_carry_only_slim_keys_and_hide_closed_tasks() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        for slug in ["t1", "t2", "t3"] {
+            create(
+                &state,
+                json!({ "workspaceId": ws, "slug": slug, "title": slug, "plan": "plan text" }),
+            )
+            .await
+            .expect("create");
+        }
+        walk_to_state(&state, &ws, "t2", &actor, "merged").await;
+        walk_to_state(&state, &ws, "t3", &actor, "abandoned").await;
+        challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "c", "evidence": "e", "proposal": "p", "default": "d"
+            }),
+        )
+        .await
+        .expect("challenge");
+
+        let listed = list(&state, json!({ "workspaceId": ws, "slim": true }))
+            .await
+            .expect("slim list failed");
+        let arr = listed.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "merged/abandoned hidden by default");
+        let row = &arr[0];
+        assert_eq!(row["slug"], json!("t1"));
+        assert_eq!(row["openChallenges"], json!(1));
+        let mut keys: Vec<&str> = row
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "implementerAgentId",
+                "openChallenges",
+                "slug",
+                "state",
+                "title",
+                "updatedAt"
+            ],
+            "slim row carries ONLY the slim keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_slim_all_and_state_filter_include_closed_tasks() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create t1");
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t2", "title": "T2" }),
+        )
+        .await
+        .expect("create t2");
+        walk_to_state(&state, &ws, "t2", &actor, "merged").await;
+
+        let all = list(
+            &state,
+            json!({ "workspaceId": ws, "slim": true, "all": true }),
+        )
+        .await
+        .expect("slim all failed");
+        let all_arr = all.as_array().expect("array");
+        assert_eq!(all_arr.len(), 2, "--all includes merged");
+        let merged_row = all_arr
+            .iter()
+            .find(|t| t["slug"] == "t2")
+            .expect("t2 present");
+        assert!(
+            merged_row.get("plan").is_none(),
+            "--all stays in the slim shape"
+        );
+
+        let filtered = list(
+            &state,
+            json!({ "workspaceId": ws, "slim": true, "state": "merged" }),
+        )
+        .await
+        .expect("slim state filter failed");
+        let filtered_arr = filtered.as_array().expect("array");
+        assert_eq!(filtered_arr.len(), 1, "explicit state filter wins");
+        assert_eq!(filtered_arr[0]["slug"], json!("t2"));
+    }
+
+    #[tokio::test]
+    async fn gate_records_log_path_when_sent_and_omits_it_when_absent() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create t1");
+
+        let with_path = gate(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "cmd": "cargo test", "exit": 0, "sha": "sha1", "tail": "ok", "cwd": "/repo",
+                "logPath": "/logs/gate-t1.log"
+            }),
+        )
+        .await
+        .expect("gate with logPath failed");
+        assert_eq!(with_path["payload"]["logPath"], json!("/logs/gate-t1.log"));
+
+        let without_path = gate(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "cmd": "cargo build", "exit": 0, "sha": "sha1", "tail": "ok", "cwd": "/repo"
+            }),
+        )
+        .await
+        .expect("gate without logPath failed");
+        assert!(
+            without_path["payload"].get("logPath").is_none(),
+            "pre-logPath CLI builds must record byte-identical payloads"
         );
     }
 
