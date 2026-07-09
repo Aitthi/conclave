@@ -463,6 +463,10 @@ pub struct WorkspaceAgentWithSkills {
         serialize_with = "serialize_launched_ids"
     )]
     pub launched_skill_ids: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<i64>,
     /// The agent definition's configured model id (e.g. `"claude-sonnet-5"`),
     /// `None` when unset — lets a lead factor model into delegation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,6 +516,8 @@ struct RosterQueryRow {
     status: String,
     added_at: String,
     launched_skill_ids: Option<String>,
+    context_tokens: Option<i64>,
+    context_limit: Option<i64>,
     agent_name: String,
     level: Option<String>,
     supervisor_agent_id: Option<String>,
@@ -545,7 +551,7 @@ pub async fn list_by_workspace_with_launched_skills(
     let rows: Vec<RosterQueryRow> = sqlx::query_as(
         "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
          wa.level, wa.supervisor_agent_id, supervisor_def.name AS supervisor_name, \
-         sess.launched_skill_ids, \
+         sess.launched_skill_ids, sess.context_tokens, sess.context_limit, \
          ad.name AS agent_name, ad.role_id AS role_id, ad.role AS role_text, \
          ad.model AS model, ad.cli_kind AS cli_kind \
          FROM workspace_agent wa \
@@ -610,6 +616,8 @@ pub async fn list_by_workspace_with_launched_skills(
                 role_description,
                 skill_names: skill_names_resolved,
                 launched_skill_ids: r.launched_skill_ids,
+                context_tokens: r.context_tokens,
+                context_limit: r.context_limit,
                 model: r.model,
                 cli_kind: r.cli_kind,
                 working: None,
@@ -1671,11 +1679,20 @@ mod tests {
             .await
             .expect("query failed");
         assert_eq!(before.len(), 1);
+        assert_eq!(before[0].context_tokens, Some(0));
+        assert_eq!(
+            before[0].context_limit,
+            Some(crate::engine::repo::session::DEFAULT_CONTEXT_LIMIT)
+        );
         assert!(before[0].launched_skill_ids.is_none());
         assert_eq!(before[0].name, "A");
         assert!(before[0].role_name.is_none());
         assert!(before[0].role_description.is_none());
         assert!(before[0].skill_names.is_empty());
+
+        let serialized = serde_json::to_value(&before[0]).expect("serialize failed");
+        assert!(serialized.get("contextTokens").is_some(), "must have contextTokens");
+        assert!(serialized.get("contextLimit").is_some(), "must have contextLimit");
 
         crate::engine::repo::session::set_launched_skill_ids(
             &pool,
@@ -1694,6 +1711,40 @@ mod tests {
             after[0].skill_names.is_empty(),
             "an unresolvable launched id must be dropped, not surfaced as a bare id"
         );
+    }
+
+    /// context meter values are omitted for roster rows without a session.
+    #[tokio::test]
+    async fn list_by_workspace_with_launched_skills_omits_context_without_session() {
+        let pool = connect_in_memory().await;
+        let ws = crate::engine::repo::workspace::create(&pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        let def = crate::engine::repo::agent_definition::create(
+            &pool,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "A".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+
+        let row = create(&pool, &ws.id, &def.id, "idle").await.expect("create workspace_agent");
+        let roster = list_by_workspace_with_launched_skills(&pool, &ws.id)
+            .await
+            .expect("query failed");
+
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].id, row.id);
+        assert!(roster[0].context_tokens.is_none());
+        assert!(roster[0].context_limit.is_none());
+
+        let serialized = serde_json::to_value(&roster[0]).expect("serialize failed");
+        assert!(serialized.get("contextTokens").is_none(), "must omit contextTokens");
+        assert!(serialized.get("contextLimit").is_none(), "must omit contextLimit");
     }
 
     /// A3: the enriched roster resolves all four new fields — agent name, role

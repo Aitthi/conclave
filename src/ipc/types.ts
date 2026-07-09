@@ -124,6 +124,12 @@ export interface WorkspaceAgent {
   /** Annotated by `instance.list`: skill ids used at the last launch (see
    *  Session.launchedSkillIds — same value, joined in for the Roster). */
   launchedSkillIds?: string[];
+  /** Annotated by `instance.list`: current context usage for the live session,
+   *  `None` when no session row is present. */
+  contextTokens?: number;
+  /** Annotated by `instance.list`: the corresponding context limit for the live
+   *  session, `None` when no session row is present. */
+  contextLimit?: number;
   /** Annotated by `instance.list`: the agent definition's configured model id
    *  (e.g. "claude-sonnet-5"), absent when unset. */
   model?: string;
