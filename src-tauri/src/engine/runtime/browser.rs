@@ -534,6 +534,141 @@ pub async fn close(app: &AppHandle) -> Result<BrowserState, BrowserError> {
     Ok(BrowserState { ok: true, url: None, title: None, message: None })
 }
 
+/// One-shot slot carrying the encoded PNG (or an error string) from the
+/// main-thread `takeSnapshot` completion block back to the async caller.
+#[cfg(target_os = "macos")]
+type ShotSlot = Mutex<Option<oneshot::Sender<Result<Vec<u8>, String>>>>;
+
+/// Capture the embedded page to a PNG at `path` (absolute; the CLI resolves it
+/// in the agent's cwd). Sizes the webview to the capture viewport, snapshots via
+/// WKWebView.takeSnapshot, restores the prior size, and writes the PNG. Works
+/// headless (the webview may be hidden/offscreen). macOS only.
+#[cfg(target_os = "macos")]
+pub async fn screenshot(
+    app: &AppHandle,
+    path: &str,
+    width: Option<f64>,
+    height: Option<f64>,
+) -> Result<BrowserShot, BrowserError> {
+    let view = require_webview(app)?;
+    let (w, h) = resolve_capture_size(width, height);
+
+    // Remember the current size so a background capture never disturbs a
+    // human-visible layout; restore it in every exit path below.
+    let prev = view.bounds().ok();
+
+    view.set_size(LogicalSize::new(w, h))
+        .map_err(|e| BrowserError::Webview(e.to_string()))?;
+    // Let WebKit run a layout pass at the new size before snapshotting; firing
+    // takeSnapshot in the same tick can capture pre-reflow content.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (tx, rx) = oneshot::channel::<Result<Vec<u8>, String>>();
+    let slot = Mutex::new(Some(tx));
+    let with_res = view.with_webview(move |platform| {
+        use block2::RcBlock;
+        use objc2::{AnyThread, MainThreadMarker};
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+        use objc2_foundation::{NSDictionary, NSNumber};
+        use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
+
+        // with_webview runs on the main thread; the WKWebView pointer comes from
+        // the platform handle's inner().
+        let send = |slot: &ShotSlot, v: Result<Vec<u8>, String>| {
+            if let Ok(mut g) = slot.lock() {
+                if let Some(tx) = g.take() {
+                    let _ = tx.send(v);
+                }
+            }
+        };
+        unsafe {
+            let mtm = MainThreadMarker::new_unchecked();
+            let wk_ptr = platform.inner() as *mut WKWebView;
+            if wk_ptr.is_null() {
+                send(&slot, Err("null WKWebView pointer".into()));
+                return;
+            }
+            let wk: &WKWebView = &*wk_ptr;
+            let cfg = WKSnapshotConfiguration::new(mtm);
+            cfg.setSnapshotWidth(Some(&NSNumber::new_f64(w)));
+
+            let handler = RcBlock::new(
+                move |image: *mut NSImage, error: *mut objc2_foundation::NSError| {
+                    if !error.is_null() {
+                        let msg = (*error).localizedDescription().to_string();
+                        send(&slot, Err(format!("takeSnapshot: {msg}")));
+                        return;
+                    }
+                    if image.is_null() {
+                        send(&slot, Err("takeSnapshot returned no image".into()));
+                        return;
+                    }
+                    let image: &NSImage = &*image;
+                    // NSImage → TIFF → NSBitmapImageRep → PNG NSData → bytes.
+                    let Some(tiff) = image.TIFFRepresentation() else {
+                        send(&slot, Err("no TIFF representation".into()));
+                        return;
+                    };
+                    let Some(rep) = NSBitmapImageRep::initWithData(
+                        NSBitmapImageRep::alloc(),
+                        &tiff,
+                    ) else {
+                        send(&slot, Err("no bitmap rep".into()));
+                        return;
+                    };
+                    let props = NSDictionary::new();
+                    let Some(png) =
+                        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props)
+                    else {
+                        send(&slot, Err("PNG encode failed".into()));
+                        return;
+                    };
+                    send(&slot, Ok(png.to_vec()));
+                },
+            );
+            wk.takeSnapshotWithConfiguration_completionHandler(Some(&cfg), &handler);
+        }
+    });
+
+    // Restore size regardless of how the snapshot went.
+    let restore = |view: &Webview, prev: &Option<tauri::Rect>| {
+        if let Some(rect) = prev {
+            let _ = view.set_size(rect.size);
+        }
+    };
+
+    if let Err(e) = with_res {
+        restore(&view, &prev);
+        return Err(BrowserError::Webview(e.to_string()));
+    }
+
+    let captured = tokio::time::timeout(SNAPSHOT_TIMEOUT, rx).await;
+    restore(&view, &prev);
+
+    let bytes = captured
+        .map_err(|_| BrowserError::Timeout)?
+        .map_err(|_| BrowserError::Webview("snapshot callback dropped".into()))?
+        .map_err(BrowserError::Page)?;
+
+    std::fs::write(path, &bytes)
+        .map_err(|e| BrowserError::Webview(format!("write {path}: {e}")))?;
+
+    Ok(BrowserShot { path: path.to_owned(), width: w, height: h })
+}
+
+/// Non-macOS: capture uses a macOS-only native API.
+#[cfg(not(target_os = "macos"))]
+pub async fn screenshot(
+    _app: &AppHandle,
+    _path: &str,
+    _width: Option<f64>,
+    _height: Option<f64>,
+) -> Result<BrowserShot, BrowserError> {
+    Err(BrowserError::Webview(
+        "screenshot is only supported on macOS".into(),
+    ))
+}
+
 /// Position/resize the embedded webview over the Browser tab's reserved region.
 /// Graceful no-op `ok` when no browser is open.
 pub async fn set_bounds(app: &AppHandle, bounds: Bounds) -> Result<BrowserState, BrowserError> {
