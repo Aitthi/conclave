@@ -1131,12 +1131,27 @@ async fn poll_transcript_context(
         }
     }
 
-    let Some(reading) = transcript_ctx.reader.poll(
-        instance_id,
-        Path::new(&transcript_ctx.workspace_folder),
-        &transcript_ctx.cli_kind,
-        transcript_ctx.started_at.clone(),
-    ) else {
+    // The reader walks the transcript tree and parses JSONL — synchronous,
+    // file-bound work. Run it on the blocking pool so it never stalls the async
+    // worker that also pumps PTY output and forwards keystrokes; blocking that
+    // worker is what froze the terminal (no input, delayed output) every poll.
+    let reader = transcript_ctx.reader.clone();
+    let instance_id_owned = instance_id.to_owned();
+    let workspace_folder = transcript_ctx.workspace_folder.clone();
+    let cli_kind = transcript_ctx.cli_kind.clone();
+    let started_at = transcript_ctx.started_at;
+    let reading = tokio::task::spawn_blocking(move || {
+        reader.poll(
+            &instance_id_owned,
+            Path::new(&workspace_folder),
+            &cli_kind,
+            started_at,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(reading) = reading else {
         *last_poll = Some(std::time::Instant::now());
         return;
     };

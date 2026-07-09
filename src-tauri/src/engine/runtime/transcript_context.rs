@@ -92,8 +92,21 @@ impl TranscriptContextReader {
         workspace_folder: &Path,
         started_at: DateTime<Utc>,
     ) -> Option<TranscriptContextReading> {
+        // Claude Code stores a workspace's transcripts under a per-cwd project
+        // directory (`~/.claude/projects/<slug-of-cwd>/`). Scan only that dir
+        // instead of the whole projects tree — on a real machine the tree holds
+        // thousands of unrelated historical sessions (GBs). If the slug dir is
+        // absent (unexpected cwd shape), fall back to the full root; the mtime
+        // filter in `collect_jsonl_files` keeps even that fallback cheap.
+        let project_dir =
+            claude_project_dir(&self.config.claude_projects_root, workspace_folder);
+        let scan_root = if project_dir.is_dir() {
+            project_dir
+        } else {
+            self.config.claude_projects_root.clone()
+        };
         let mut best: Option<ScannedReading> = None;
-        for path in collect_jsonl_files(&self.config.claude_projects_root) {
+        for path in collect_jsonl_files(&scan_root, started_at) {
             let Some(reading) = scan_claude_file(
                 &path,
                 instance_id,
@@ -115,7 +128,10 @@ impl TranscriptContextReader {
         started_at: DateTime<Utc>,
     ) -> Option<TranscriptContextReading> {
         let mut best: Option<ScannedReading> = None;
-        for path in collect_jsonl_files(&self.config.codex_sessions_root) {
+        // Codex stores sessions under date buckets, not per-cwd, so there is no
+        // dir to scope to — but the mtime filter still skips every rollout that
+        // was last written before this agent started, i.e. every closed session.
+        for path in collect_jsonl_files(&self.config.codex_sessions_root, started_at) {
             let Some(reading) = scan_codex_file(
                 &path,
                 instance_id,
@@ -168,22 +184,43 @@ fn choose_newer(
     }
 }
 
-fn collect_jsonl_files(root: &Path) -> Vec<PathBuf> {
+/// The Claude Code project directory for a workspace cwd. Claude slugifies the
+/// absolute cwd by replacing every non-alphanumeric character with `-` (e.g.
+/// `/Users/x/code/app` → `-Users-x-code-app`); mirror that so we can scan just
+/// this workspace's transcripts instead of the whole projects tree.
+fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
+    let slug: String = workspace_folder
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    root.join(slug)
+}
+
+/// Collect `.jsonl` files under `root` that were modified at or after
+/// `min_mtime`. A closed session's transcript can never gain the current
+/// agent's usage rows, so filtering by mtime here — a cheap `stat`, before any
+/// file is opened or parsed — keeps the meter off the (potentially many GB of)
+/// historical transcripts that a full parse would otherwise churn every poll.
+fn collect_jsonl_files(root: &Path, min_mtime: DateTime<Utc>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_jsonl_files_inner(root, &mut out);
+    collect_jsonl_files_inner(root, min_mtime, &mut out);
     out
 }
 
-fn collect_jsonl_files_inner(root: &Path, out: &mut Vec<PathBuf>) {
+fn collect_jsonl_files_inner(root: &Path, min_mtime: DateTime<Utc>, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl_files_inner(&path, out);
+            collect_jsonl_files_inner(&path, min_mtime, out);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            out.push(path);
+            match file_modified_at(&path) {
+                Some(modified) if modified >= min_mtime => out.push(path),
+                _ => {}
+            }
         }
     }
 }
@@ -572,6 +609,70 @@ mod tests {
         assert!(!reading.observed_at.is_empty());
 
         let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn poll_claude_scopes_to_cwd_project_dir_and_skips_other_projects() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-scope-1";
+
+        // In-scope transcript: lives in this workspace's slugified project dir.
+        let project_dir = claude_project_dir(&claude_root, &workspace);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        write_jsonl(
+            &project_dir.join("active.jsonl"),
+            &[
+                json!({
+                    "type": "attachment",
+                    "cwd": workspace.to_string_lossy(),
+                    "text": format!("your own agent id is {instance_id}"),
+                }),
+                claude_usage_line(50),
+            ],
+        );
+
+        // Decoy: a DIFFERENT project dir whose transcript also matches this
+        // workspace cwd + owner marker, written LATER (newer mtime) with a
+        // larger token count. A full-tree scan would read it and win on
+        // recency; a cwd-scoped scan must never open it.
+        let decoy_dir = claude_root.join("-Users-someone-else-other-project");
+        std::fs::create_dir_all(&decoy_dir).expect("create decoy dir");
+        write_jsonl(
+            &decoy_dir.join("decoy.jsonl"),
+            &[
+                json!({
+                    "type": "attachment",
+                    "cwd": workspace.to_string_lossy(),
+                    "text": format!("your own agent id is {instance_id}"),
+                }),
+                claude_usage_line(999),
+            ],
+        );
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+        let reading = reader
+            .poll(
+                instance_id,
+                &workspace,
+                "claude-code",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("expected in-scope reading");
+
+        assert_eq!(
+            reading.tokens, 50,
+            "scoped scan must read only the cwd project dir, never the decoy"
+        );
+
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
         let _ = std::fs::remove_dir_all(&workspace);
