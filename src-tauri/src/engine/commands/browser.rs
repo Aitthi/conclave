@@ -10,13 +10,15 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::engine::runtime::browser::{self, BrowserError};
+use crate::engine::runtime::browser::{self, Bounds, BrowserError};
 use crate::engine::{AppError, AppState};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UrlReq {
     url: String,
+    #[serde(default)]
+    bounds: Option<Bounds>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +47,12 @@ struct EvalReq {
     js: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisibleReq {
+    visible: bool,
+}
+
 /// Map a runtime-layer browser failure onto the command-layer error type. A
 /// bad URL / no-open-browser is the caller's mistake (`Invalid`); a WebView,
 /// in-page, or timeout failure is `Internal`.
@@ -71,7 +79,7 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, AppError> {
 pub async fn open(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req = serde_json::from_value::<UrlReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
-    to_value(browser::open(app, &req.url).await.map_err(to_app_err)?)
+    to_value(browser::open(app, &req.url, req.bounds).await.map_err(to_app_err)?)
 }
 
 pub async fn goto(state: &AppState, payload: Value) -> Result<Value, AppError> {
@@ -130,4 +138,38 @@ pub async fn eval(state: &AppState, payload: Value) -> Result<Value, AppError> {
 pub async fn close(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let app = app_handle(state)?;
     to_value(browser::close(app).await.map_err(to_app_err)?)
+}
+
+pub async fn set_bounds(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = serde_json::from_value::<Bounds>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let app = app_handle(state)?;
+    to_value(browser::set_bounds(app, req).await.map_err(to_app_err)?)
+}
+
+pub async fn set_visible(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = serde_json::from_value::<VisibleReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let app = app_handle(state)?;
+    to_value(browser::set_visible(app, req.visible).await.map_err(to_app_err)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Malformed payloads must be rejected as `Invalid` BEFORE any app-handle
+    // access, so these run without a live Tauri app.
+    #[tokio::test]
+    async fn set_bounds_rejects_malformed_payload() {
+        let state = AppState::for_tests().await;
+        let err = set_bounds(&state, json!({ "x": 1.0 })).await.unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn set_visible_rejects_malformed_payload() {
+        let state = AppState::for_tests().await;
+        let err = set_visible(&state, json!({ "nope": true })).await.unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
 }
