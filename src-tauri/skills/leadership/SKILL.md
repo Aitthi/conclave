@@ -46,7 +46,9 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   decision — a solo lane chosen without reading the roster is a default, not a
   decision.
 - DECLARE roles: `task create` stamps you as owner; name the implementer, or one
-  who must guess who rules escalations guesses the human.
+  who must guess who rules escalations guesses the human. If YOU can't tell who
+  leads a piece of work, read the task record (`task brief`, or `task get` for
+  full history) before asking anyone.
 
 ## Delegate and stay out
 
