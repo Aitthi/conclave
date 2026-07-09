@@ -46,6 +46,16 @@ const HARD_MAX_TEXT: usize = 50_000;
 /// the first `set_bounds` positions it.
 const OFFSCREEN: f64 = -10_000.0;
 
+/// Round-trip budget for a `takeSnapshot` capture (renders + PNG encode).
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Default capture viewport when the caller gives no size (logical px).
+const DEFAULT_CAPTURE_W: f64 = 1280.0;
+const DEFAULT_CAPTURE_H: f64 = 800.0;
+/// Hard bounds so a bad `--width/--height` can't ask for a 0-px or absurd canvas.
+const MIN_CAPTURE_PX: f64 = 1.0;
+const MAX_CAPTURE_PX: f64 = 10_000.0;
+
 // ── Result types (mirrored 1:1 by src/ipc/types.ts, camelCase) ──────────────
 
 /// Result of `open`/`goto`/`status`/`close`. `ok` is false with a `message`
@@ -121,6 +131,16 @@ pub struct SnapshotInput {
 pub struct SnapshotButton {
     pub text: String,
     pub selector: String,
+}
+
+/// Result of `screenshot` — the written PNG's path and the capture dimensions
+/// (logical px). Mirrored by `BrowserShot` in `src/ipc/types.ts`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserShot {
+    pub path: String,
+    pub width: f64,
+    pub height: f64,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -204,6 +224,16 @@ fn resolve_bounds(bounds: Option<Bounds>) -> (LogicalPosition<f64>, LogicalSize<
             LogicalSize::new(1.0, 1.0),
         ),
     }
+}
+
+/// Resolve the capture viewport: absent → default; present → clamped to
+/// `[MIN_CAPTURE_PX, MAX_CAPTURE_PX]`. Never returns a non-positive dimension.
+fn resolve_capture_size(width: Option<f64>, height: Option<f64>) -> (f64, f64) {
+    let clamp = |v: f64| v.clamp(MIN_CAPTURE_PX, MAX_CAPTURE_PX);
+    (
+        width.map(clamp).unwrap_or(DEFAULT_CAPTURE_W),
+        height.map(clamp).unwrap_or(DEFAULT_CAPTURE_H),
+    )
 }
 
 /// Embed an arbitrary Rust string as a safe JS string literal. `serde_json`
@@ -617,5 +647,14 @@ mod tests {
         let (pos, size) = resolve_bounds(None);
         assert_eq!(pos, tauri::LogicalPosition::new(OFFSCREEN, OFFSCREEN));
         assert_eq!(size, tauri::LogicalSize::new(1.0, 1.0));
+    }
+
+    #[test]
+    fn resolve_capture_size_defaults_and_clamps() {
+        assert_eq!(resolve_capture_size(None, None), (1280.0, 800.0));
+        assert_eq!(resolve_capture_size(Some(1440.0), Some(900.0)), (1440.0, 900.0));
+        // below-min clamps up to 1, above-max clamps down to 10000
+        assert_eq!(resolve_capture_size(Some(0.0), Some(-4.0)), (1.0, 1.0));
+        assert_eq!(resolve_capture_size(Some(99999.0), None), (10000.0, 800.0));
     }
 }
