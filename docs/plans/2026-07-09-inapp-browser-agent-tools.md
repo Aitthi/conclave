@@ -10,6 +10,18 @@ abandoned after a second stall with no lane diff to preserve. Recovery task
 uses slug `inapp-browser-agent-tools-recovery`. Gate examples below use
 `<task-slug>` intentionally.
 
+Amendment 2026-07-10 (Detoro, backlog-clear program): task recreated as slug
+`inapp-browser-agent-tools-v3` — the recovery task's ownerAgentId (d1a70cab,
+Aoki's former id) and design escalation (Hardwell 04b78b47) are both dead ids
+no longer on the roster, so challenge routing was broken; per the
+immutable-surface precedent that forces abandon+recreate. New owner: Detoro
+4fb2198c-e0d9-4e4b-af9e-d4e72542bace (Aoki, back ~13:00, may take over
+escalation duty — announced on the ledger if so). Design escalation is now
+Arta e13a6176-4240-4972-9266-826309d9a459 (current Designer). Implementer:
+Tiësto. Stale worktree from the FIRST slug (no diff, no commits) removed at
+recreate time. Plan content below is otherwise unchanged and remains the
+source of truth.
+
 ## Decision
 
 Ship a V1 Conclave-managed browser session that agents can drive through the
