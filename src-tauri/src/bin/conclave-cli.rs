@@ -1047,14 +1047,17 @@ fn build_boundary_tree(
     result
 }
 
-/// One-line stderr note for boundary entries [`build_boundary_tree`] skipped
-/// because they exist nowhere in this checkout. A note, not a warning: a
-/// plan legitimately declares files its later tasks will create.
-fn warn_skipped_boundary(verb: &str, skipped: &[String]) {
+/// One-line stderr note for skipped boundary entries — commit/snap skip
+/// entries absent from the checkout ([`build_boundary_tree`]), restore skips
+/// entries absent from the snapshot tree
+/// ([`restore_boundary_from_snapshot`]); `absent_from` names which. A note,
+/// not a warning: a plan legitimately declares files its later tasks will
+/// create.
+fn warn_skipped_boundary(verb: &str, skipped: &[String], absent_from: &str) {
     if !skipped.is_empty() {
         eprintln!(
             "conclave: stage {verb}: note — skipped {} declared boundary path(s) absent from \
-             this checkout: {}",
+             {absent_from}: {}",
             skipped.len(),
             skipped.join(", ")
         );
@@ -1451,7 +1454,7 @@ async fn stage_commit(
         &author_id,
     ) {
         Ok((sha, n_files, skipped)) => {
-            warn_skipped_boundary("commit", &skipped);
+            warn_skipped_boundary("commit", &skipped, "this checkout");
             let short = &sha[..12.min(sha.len())];
             println!("stage commit: {short} — {message} ({n_files} files)");
             let note_text = format!("stage commit {short} — {message} ({n_files} files)");
@@ -1514,12 +1517,12 @@ async fn stage_snap(
     let author_email = format!("{author_id}@agents.conclave.local");
     match snapshot(&repo, slug, &boundary, reason, &author_name, &author_email) {
         Ok((Some(sha), skipped)) => {
-            warn_skipped_boundary("snap", &skipped);
+            warn_skipped_boundary("snap", &skipped, "this checkout");
             println!("stage snap: {} ({reason})", &sha[..12.min(sha.len())]);
             ExitCode::SUCCESS
         }
         Ok((None, skipped)) => {
-            warn_skipped_boundary("snap", &skipped);
+            warn_skipped_boundary("snap", &skipped, "this checkout");
             println!("stage snap: no change since the last snapshot — skipped");
             ExitCode::SUCCESS
         }
@@ -1591,9 +1594,55 @@ fn validate_stage_restore_source(
     Ok(())
 }
 
+/// Worktree-restores `boundary` from `snap_sha`, tolerating declared entries
+/// the snapshot tree does not contain — the restore-side twin of the skip
+/// [`build_boundary_tree`] does for commit/snap (task
+/// stage-restore-missing-boundary-path): one absent entry used to make the
+/// single `git restore` invocation abort the whole restore. An entry absent
+/// from the snapshot has nothing to restore FROM (and `git restore` never
+/// deletes paths its source lacks), so it is skipped and returned for the
+/// caller to surface; an entry present in the snapshot but deleted from the
+/// worktree is a real restore (git recreates it). With every entry skipped no
+/// `git restore` runs at all — an empty pathspec would be an error, not a
+/// no-op. Returns `(restored, skipped)`.
+fn restore_boundary_from_snapshot(
+    repo: &std::path::Path,
+    snap_sha: &str,
+    boundary: &[String],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut kept: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for entry in boundary {
+        let trimmed = entry.strip_suffix('/').unwrap_or(entry.as_str());
+        // `cat-file -e <snap>:<path>` answers "is this path in the snapshot
+        // tree" (blob or subtree alike) without touching any index.
+        let present = !trimmed.is_empty()
+            && Command::new("git")
+                .current_dir(repo)
+                .args(["cat-file", "-e", &format!("{snap_sha}:{trimmed}")])
+                .output()
+                .map_err(|e| format!("could not run git cat-file: {e}"))?
+                .status
+                .success();
+        if present {
+            kept.push(entry.clone());
+        } else {
+            skipped.push(entry.clone());
+        }
+    }
+    if !kept.is_empty() {
+        let mut args: Vec<&str> = vec!["restore", "--worktree", "--source", snap_sha, "--"];
+        args.extend(kept.iter().map(String::as_str));
+        git_output(repo, &args)?;
+    }
+    Ok((kept, skipped))
+}
+
 /// `stage restore <ws> <slug> <snapSha>`: auto-snaps the current state first
 /// (decision 6 — so the restore itself is undoable), then `git restore
-/// --worktree` from `snapSha`. Never touches the index (no `--staged`).
+/// --worktree` from `snapSha` for the boundary paths the snapshot actually
+/// contains ([`restore_boundary_from_snapshot`]). Never touches the index
+/// (no `--staged`).
 async fn stage_restore(
     ws: &str,
     slug: &str,
@@ -1652,31 +1701,29 @@ async fn stage_restore(
         }
     }
 
-    println!(
-        "stage restore: restoring {} path(s) from {snap_sha}:",
-        boundary.len()
-    );
-    for p in &boundary {
-        println!("  {p}");
-    }
-
-    let mut args = vec!["restore", "--worktree", "--source", snap_sha, "--"];
-    args.extend(boundary.iter().map(String::as_str));
-    match Command::new("git").args(&args).status() {
-        Ok(s) if s.success() => {
+    match restore_boundary_from_snapshot(&repo, snap_sha, &boundary) {
+        Ok((restored, skipped)) => {
+            warn_skipped_boundary("restore", &skipped, &format!("snapshot {snap_sha}"));
+            if restored.is_empty() {
+                println!(
+                    "stage restore: nothing to restore — every declared boundary path is \
+                     absent from snapshot {snap_sha}"
+                );
+                return ExitCode::SUCCESS;
+            }
+            println!(
+                "stage restore: restored {} path(s) from {snap_sha}:",
+                restored.len()
+            );
+            for p in &restored {
+                println!("  {p}");
+            }
             println!("stage restore: done");
             ExitCode::SUCCESS
         }
-        Ok(s) => {
-            eprintln!(
-                "conclave: git restore failed (exit {})",
-                s.code().unwrap_or(-1)
-            );
-            ExitCode::FAILURE
-        }
         Err(e) => {
-            eprintln!("conclave: could not run git: {e}");
-            ExitCode::from(2)
+            eprintln!("conclave: stage restore: {e}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -6238,6 +6285,115 @@ mod tests {
         assert!(err.contains("refs/conclave/stage/missing"), "{err}");
         assert!(err.contains("does not exist"), "{err}");
         assert!(err.contains("conclave stage log ws-1 missing"), "{err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_skips_boundary_paths_absent_from_the_snapshot() {
+        // Restore-side twin of stage_commit_skips_a_boundary_path_that_never_
+        // existed: the boundary declares a file no task has created yet, so
+        // the snapshot tree lacks it — that entry must be skipped, not abort
+        // the whole `git restore`.
+        let dir = init_repo();
+        let boundary = vec![
+            "in-scope.txt".to_string(),
+            "migrations/0017_not_written_yet.sql".to_string(),
+        ];
+        let snap = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "manual",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap()
+        .0
+        .expect("snapshot must be created");
+        std::fs::write(dir.join("in-scope.txt"), "modified\n").unwrap();
+
+        let (restored, skipped) = super::restore_boundary_from_snapshot(&dir, &snap, &boundary)
+            .expect("an absent boundary path must not abort the restore");
+        assert_eq!(restored, vec!["in-scope.txt".to_string()]);
+        assert_eq!(
+            skipped,
+            vec!["migrations/0017_not_written_yet.sql".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
+            "v1\n",
+            "the present path must actually be restored"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_with_every_boundary_path_absent_is_a_no_op_not_an_error() {
+        // With ALL entries skipped no `git restore` may run at all: an empty
+        // pathspec is a git error, and any wider pathspec would sweep paths
+        // outside the boundary.
+        let dir = init_repo();
+        let snap = super::snapshot(
+            &dir,
+            "t1",
+            &["in-scope.txt".to_string()],
+            "manual",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap()
+        .0
+        .expect("snapshot must be created");
+        let boundary = vec!["ghost-a.rs".to_string(), "ghost-b.rs".to_string()];
+        std::fs::write(dir.join("in-scope.txt"), "modified\n").unwrap();
+
+        let (restored, skipped) = super::restore_boundary_from_snapshot(&dir, &snap, &boundary)
+            .expect("an all-absent restore must be a no-op, not an error");
+        assert!(restored.is_empty(), "nothing must restore: {restored:?}");
+        assert_eq!(skipped, boundary);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
+            "modified\n",
+            "a no-op restore must leave the worktree untouched"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_recreates_a_snapshot_path_deleted_from_the_worktree() {
+        // The skip must never swallow a REAL restore: gone from the worktree
+        // but present in the snapshot tree means "restore it" (git recreates
+        // the file), never "absent, skip".
+        let dir = init_repo();
+        let boundary = vec!["in-scope.txt".to_string()];
+        let snap = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "manual",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .unwrap()
+        .0
+        .expect("snapshot must be created");
+        std::fs::remove_file(dir.join("in-scope.txt")).unwrap();
+
+        let (restored, skipped) = super::restore_boundary_from_snapshot(&dir, &snap, &boundary)
+            .expect("a deleted-but-snapshotted path must restore, not skip");
+        assert_eq!(restored, boundary);
+        assert!(
+            skipped.is_empty(),
+            "snapshotted path wrongly skipped: {skipped:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("in-scope.txt")).unwrap(),
+            "v1\n",
+            "the deleted file must be recreated from the snapshot"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
