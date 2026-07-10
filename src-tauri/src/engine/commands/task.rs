@@ -182,14 +182,55 @@ struct BoardExtras {
 /// every event has been scanned (see [`derive_board_extras`]).
 struct PendingChallenge {
     id: String,
+    actor_agent_id: Option<String>,
     claim: String,
+    evidence: String,
+    proposal: String,
+    default_action: String,
     deadline_at: Option<String>,
+}
+
+impl PendingChallenge {
+    /// Read one `challenge` event row + its parsed payload. `deadlineAt` is
+    /// read straight from the stored payload (an absolute ISO instant the
+    /// `challenge` handler computed at insert time) — this layer never
+    /// re-derives it from minutes.
+    fn from_event(e: &TaskEventRow, payload: &Value) -> Self {
+        let text = |key: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        PendingChallenge {
+            id: e.id.clone(),
+            actor_agent_id: e.actor_agent_id.clone(),
+            claim: text("claim"),
+            evidence: text("evidence"),
+            proposal: text("proposal"),
+            default_action: text("default"),
+            deadline_at: payload
+                .get("deadlineAt")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }
+    }
 }
 
 struct BriefBoardSections {
     latest_gates: Vec<Value>,
     open_challenges: Vec<Value>,
 }
+
+/// Char cap on each ADDED open-challenge field (`actorAgentId`, `evidence`,
+/// `proposal`, `default`) in the `task.brief` packet (lead-council v1 design,
+/// 2026-07-10: "Unbounded challenge fields can erase context savings"). The
+/// exact number was delegated implementer judgment; 140 mirrors
+/// [`NOTIFY_SUMMARY_MAX_CHARS`] — a brief is a resume packet, not a
+/// transcript, and the full payload stays one `task.get` away. The
+/// pre-existing `id`/`claim`/`status`/`deadlineAt` fields are unchanged.
+const BRIEF_CHALLENGE_FIELD_MAX_CHARS: usize = 140;
 
 /// Cap on distinct `cmd`s tracked per task in `lastGates` (RULED 2026-07-04,
 /// Arta fidelity F1) — full gate history stays available via `task.get`.
@@ -232,26 +273,10 @@ fn derive_board_extras(events: &[TaskEventRow]) -> BoardExtras {
                     );
             }
             "challenge" => {
-                let claim = payload
-                    .get("claim")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                // deadlineAt is read straight from the stored payload (an
-                // absolute ISO instant the `challenge` handler computed at
-                // insert time) — this layer never re-derives it from minutes.
-                let deadline_at = payload
-                    .get("deadlineAt")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
                 challenge_rows
                     .entry(e.task_id.clone())
                     .or_default()
-                    .push(PendingChallenge {
-                        id: e.id.clone(),
-                        claim,
-                        deadline_at,
-                    });
+                    .push(PendingChallenge::from_event(e, &payload));
             }
             "ruling" => {
                 if let Some(challenge_id) = payload.get("challengeId").and_then(Value::as_str) {
@@ -336,20 +361,7 @@ fn derive_brief_board_sections(events: &[TaskEventRow], task_id: &str) -> BriefB
                 );
             }
             "challenge" => {
-                let claim = payload
-                    .get("claim")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let deadline_at = payload
-                    .get("deadlineAt")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                challenge_rows.push(PendingChallenge {
-                    id: e.id.clone(),
-                    claim,
-                    deadline_at,
-                });
+                challenge_rows.push(PendingChallenge::from_event(e, &payload));
             }
             "ruling" => {
                 if let Some(challenge_id) = payload.get("challengeId").and_then(Value::as_str) {
@@ -374,11 +386,25 @@ fn derive_brief_board_sections(events: &[TaskEventRow], task_id: &str) -> BriefB
         .into_iter()
         .filter(|challenge| !ruled_challenge_ids.contains(&challenge.id))
         .map(|challenge| {
+            // Every ADDED field is char-capped (see
+            // [`BRIEF_CHALLENGE_FIELD_MAX_CHARS`]) so a hostile or accidental
+            // memo cannot turn the brief into a transcript dump; the
+            // pre-existing id/claim/status/deadlineAt stay byte-identical.
+            let bounded =
+                |text: &str| json!(truncate_for_notify(text, BRIEF_CHALLENGE_FIELD_MAX_CHARS));
             let mut obj = json!({
                 "id": challenge.id,
                 "claim": challenge.claim,
                 "status": "open",
+                "evidence": bounded(&challenge.evidence),
+                "proposal": bounded(&challenge.proposal),
+                "default": bounded(&challenge.default_action),
             });
+            if let Some(actor) = &challenge.actor_agent_id {
+                // Omitted when absent — same convention as `TaskEvent`'s
+                // optional `actorAgentId`, never emitted as `null`.
+                obj["actorAgentId"] = bounded(actor);
+            }
             if let Some(deadline_at) = challenge.deadline_at {
                 obj["deadlineAt"] = json!(deadline_at);
             }
@@ -2416,6 +2442,14 @@ mod tests {
         assert_eq!(open_challenges.len(), 1);
         assert_eq!(open_challenges[0]["status"], json!("open"));
         assert_eq!(open_challenges[0]["claim"], json!("still missing"));
+        assert_eq!(open_challenges[0]["actorAgentId"], json!(actor));
+        assert_eq!(open_challenges[0]["evidence"], json!("log"));
+        assert_eq!(open_challenges[0]["proposal"], json!("fix it"));
+        assert_eq!(open_challenges[0]["default"], json!("escalate"));
+        assert!(
+            open_challenges[0].get("deadlineAt").is_none(),
+            "an advisory challenge (no deadlineMin) must OMIT deadlineAt, not null it"
+        );
 
         let latest_gates = brief["latestGates"].as_array().expect("latestGates array");
         assert_eq!(latest_gates.len(), 1);
@@ -2449,6 +2483,162 @@ mod tests {
             .expect("brief failed");
         assert_eq!(brief["memoryHits"], json!([]));
         assert_eq!(brief["memoryError"], json!("memory embedder not ready"));
+    }
+
+    #[tokio::test]
+    async fn brief_open_challenge_carries_full_council_fields_and_deadline() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "X broken", "evidence": "see gate log", "proposal": "revert Y",
+                "default": "escalate", "deadlineMin": 30
+            }),
+        )
+        .await
+        .expect("challenge failed");
+
+        let brief = brief(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("brief failed");
+        let row = &brief["openChallenges"].as_array().expect("array")[0];
+        assert_eq!(row["status"], json!("open"));
+        assert_eq!(row["claim"], json!("X broken"));
+        assert_eq!(row["actorAgentId"], json!(actor));
+        assert_eq!(row["evidence"], json!("see gate log"));
+        assert_eq!(row["proposal"], json!("revert Y"));
+        assert_eq!(row["default"], json!("escalate"));
+        assert!(
+            row["deadlineAt"].as_str().is_some(),
+            "deadlineMin must surface as the stored absolute deadlineAt"
+        );
+    }
+
+    #[tokio::test]
+    async fn brief_open_challenges_are_scoped_to_the_requested_task() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        for slug in ["t1", "t2"] {
+            create(
+                &state,
+                json!({ "workspaceId": ws, "slug": slug, "title": slug }),
+            )
+            .await
+            .expect("create failed");
+            challenge(
+                &state,
+                json!({
+                    "workspaceId": ws, "slug": slug, "actorId": actor,
+                    "claim": format!("claim-{slug}"), "evidence": format!("evidence-{slug}"),
+                    "proposal": "p", "default": "d"
+                }),
+            )
+            .await
+            .expect("challenge failed");
+        }
+
+        let brief = brief(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("brief failed");
+        let rows = brief["openChallenges"].as_array().expect("array");
+        assert_eq!(rows.len(), 1, "t2's challenge must not leak into t1's brief");
+        assert_eq!(rows[0]["claim"], json!("claim-t1"));
+        assert_eq!(rows[0]["evidence"], json!("evidence-t1"));
+    }
+
+    #[tokio::test]
+    async fn brief_open_challenge_fields_and_count_are_bounded() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        let long = "x".repeat(BRIEF_CHALLENGE_FIELD_MAX_CHARS * 3);
+        for i in 0..2 {
+            challenge(
+                &state,
+                json!({
+                    "workspaceId": ws, "slug": "t1", "actorId": actor,
+                    "claim": format!("claim-{i}"), "evidence": long.as_str(),
+                    "proposal": long.as_str(), "default": long.as_str()
+                }),
+            )
+            .await
+            .expect("challenge failed");
+        }
+
+        let brief = brief(&state, json!({ "workspaceId": ws, "slug": "t1", "limit": 1 }))
+            .await
+            .expect("brief failed");
+        let rows = brief["openChallenges"].as_array().expect("array");
+        assert_eq!(
+            rows.len(),
+            1,
+            "open-challenge COUNT must be bounded by the brief limit"
+        );
+        for key in ["evidence", "proposal", "default"] {
+            let value = rows[0][key].as_str().expect("string field");
+            assert_eq!(
+                value.chars().count(),
+                BRIEF_CHALLENGE_FIELD_MAX_CHARS + 1,
+                "'{key}' must be capped at {BRIEF_CHALLENGE_FIELD_MAX_CHARS} chars + ellipsis"
+            );
+            assert!(value.ends_with('…'), "'{key}' must end with an ellipsis");
+        }
+    }
+
+    #[tokio::test]
+    async fn brief_ruled_challenges_drop_out_of_the_open_set() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1" }),
+        )
+        .await
+        .expect("create failed");
+        let event = challenge(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "claim": "c", "evidence": "e", "proposal": "p", "default": "d"
+            }),
+        )
+        .await
+        .expect("challenge failed");
+        rule(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "actorId": actor,
+                "challengeEventId": event["id"], "text": "overruled"
+            }),
+        )
+        .await
+        .expect("rule failed");
+
+        let brief = brief(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("brief failed");
+        assert_eq!(
+            brief["openChallenges"],
+            json!([]),
+            "a ruled challenge must disappear from the open set"
+        );
     }
 
     // ── task.get ──────────────────────────────────────────────────────────

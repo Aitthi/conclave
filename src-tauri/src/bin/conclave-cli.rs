@@ -2586,6 +2586,21 @@ fn render_task_brief(result: &Value) -> String {
             .map(|d| format!("  deadline {d}"))
             .unwrap_or_default();
         out.push_str(&format!("  - {}  {}{}\n", short_id(id), claim, deadline));
+        // Council fields (lead-council v1) in a stable order; the engine
+        // already char-caps each value, and a line only appears when the
+        // brief packet carries a non-empty value.
+        for (label, key) in [
+            ("by", "actorAgentId"),
+            ("evidence", "evidence"),
+            ("proposal", "proposal"),
+            ("default", "default"),
+        ] {
+            if let Some(value) = challenge.get(key).and_then(Value::as_str) {
+                if !value.is_empty() {
+                    out.push_str(&format!("    {label}: {value}\n"));
+                }
+            }
+        }
     }
 
     out.push_str(&format!(
@@ -4429,7 +4444,11 @@ mod tests {
                 "planTruncated": true
             },
             "openChallenges": [
-                { "id": "challenge-12345678", "claim": "fix it", "status": "open" }
+                {
+                    "id": "challenge-12345678", "claim": "fix it", "status": "open",
+                    "actorAgentId": "actor-0123456789", "evidence": "gate log red",
+                    "proposal": "revert Y", "default": "escalate"
+                }
             ],
             "latestGates": [
                 { "id": "gate-12345678", "cmd": "cargo test", "exit": 0, "sha": "sha-abcdef12", "createdAt": "2026-07-08T00:00:00Z" }
@@ -4456,6 +4475,39 @@ mod tests {
         assert!(rendered.contains("event-12"), "{rendered}");
         assert!(rendered.contains("mem-1234"), "{rendered}");
         assert!(rendered.contains("… truncated"), "{rendered}");
+        // Council fields render in a stable by/evidence/proposal/default order.
+        let by = rendered
+            .find("    by: actor-0123456789\n")
+            .expect("actor line");
+        let evidence = rendered
+            .find("    evidence: gate log red\n")
+            .expect("evidence line");
+        let proposal = rendered
+            .find("    proposal: revert Y\n")
+            .expect("proposal line");
+        let default = rendered
+            .find("    default: escalate\n")
+            .expect("default line");
+        assert!(by < evidence && evidence < proposal && proposal < default);
+    }
+
+    #[test]
+    fn render_task_brief_omits_absent_council_fields() {
+        let brief = serde_json::json!({
+            "task": { "slug": "t1", "title": "T1", "state": "claimed" },
+            "openChallenges": [
+                { "id": "challenge-12345678", "claim": "fix it", "status": "open" }
+            ],
+        });
+
+        let rendered = super::render_task_brief(&brief);
+        assert!(rendered.contains("open challenges (1):"), "{rendered}");
+        for label in ["by:", "evidence:", "proposal:", "default:"] {
+            assert!(
+                !rendered.contains(label),
+                "absent field must not render a '{label}' line:\n{rendered}"
+            );
+        }
     }
 
     // ── stage: private-index commit + attribution + snapshot op log ───────
