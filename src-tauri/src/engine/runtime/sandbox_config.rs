@@ -38,15 +38,27 @@ pub fn needs_socket_hole(permission_mode: Option<&str>) -> bool {
 /// it — no domains are opened, only the one socket), allowlist the socket, and
 /// select the profile as the default applied to sandboxed tool calls. These are
 /// per-spawn `-c` args and never touch the user's `~/.codex/config.toml`.
-pub fn codex_socket_overrides(socket_path: &str) -> Vec<String> {
-    vec![
+/// `proxy_port` is `Some` when this spawn's env got the context-proxy
+/// `ANTHROPIC_BASE_URL` override (agent-proxy spec D8): the profile then also
+/// allows the loopback host in its network `domains` map — same inline-TOML
+/// map syntax as the proven `unix_sockets` grant — so nested CLI calls made
+/// from the sandboxed shell can reach the proxy. Keyed by host only: the
+/// domain map (like claude's `allowedDomains`) has no port syntax.
+pub fn codex_socket_overrides(socket_path: &str, proxy_port: Option<u16>) -> Vec<String> {
+    let mut overrides = vec![
         "permissions.conclave.extends=\":workspace\"".to_string(),
         "permissions.conclave.network.enabled=true".to_string(),
         // Inline TOML table with a double-quoted key: spaces + slashes in the
         // path are fine inside the quotes.
         format!("permissions.conclave.network.unix_sockets={{\"{socket_path}\"=\"allow\"}}"),
         "default_permissions=\"conclave\"".to_string(),
-    ]
+    ];
+    if proxy_port.is_some() {
+        overrides.push(
+            "permissions.conclave.network.domains={\"127.0.0.1\"=\"allow\"}".to_string(),
+        );
+    }
+    overrides
 }
 
 /// Build/merge the claude-code settings JSON that allowlists the conclave
@@ -54,11 +66,19 @@ pub fn codex_socket_overrides(socket_path: &str) -> Vec<String> {
 ///
 /// `existing` is the parsed contents of any settings file already at the target
 /// path (or `None`/`Null` for a fresh file); its other keys are preserved and
-/// only the two `sandbox.*` keys we own are set. Route A from the research
+/// only the `sandbox.*` keys we own are set. Route A from the research
 /// (surgical — opens exactly the one socket, keeps conclave inside the sandbox):
 /// `sandbox.network.allowUnixSockets` + `sandbox.autoAllowBashIfSandboxed`.
+///
+/// `proxy_port` is `Some` when this spawn's env got the context-proxy
+/// `ANTHROPIC_BASE_URL` override (agent-proxy spec D8): the sandbox then also
+/// pre-allows the loopback host via `sandbox.network.allowedDomains`, so
+/// nested CLI calls from the sandboxed shell can reach the proxy without a
+/// per-domain prompt. Entries are domain patterns (no port syntax per the
+/// sandboxing docs), so the hole is `127.0.0.1`, not `127.0.0.1:<port>`.
 pub fn claude_sandbox_settings(
     socket_path: &str,
+    proxy_port: Option<u16>,
     existing: Option<serde_json::Value>,
 ) -> serde_json::Value {
     use serde_json::Value;
@@ -104,6 +124,26 @@ pub fn claude_sandbox_settings(
         .expect("allowUnixSockets is an array");
     if !list.iter().any(|v| v.as_str() == Some(socket_path)) {
         list.push(Value::String(socket_path.to_string()));
+    }
+
+    // sandbox.network.allowedDomains gains the loopback host — only when the
+    // context-proxy injection fired, unioned so foreign entries survive and
+    // re-merge stays idempotent. When it didn't fire the key is not even
+    // created (settings stay byte-identical to the pre-proxy shape).
+    if proxy_port.is_some() {
+        let domains = network
+            .entry("allowedDomains")
+            .and_modify(|v| {
+                if !v.is_array() {
+                    *v = Value::Array(Vec::new());
+                }
+            })
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("allowedDomains is an array");
+        if !domains.iter().any(|v| v.as_str() == Some("127.0.0.1")) {
+            domains.push(Value::String("127.0.0.1".to_string()));
+        }
     }
 
     // sandbox.autoAllowBashIfSandboxed = true — skip the permission prompt for
@@ -178,10 +218,11 @@ pub fn claude_agent_settings(
     socket_path: Option<&str>,
     existing: Option<serde_json::Value>,
     rtk: Option<&RtkHook>,
+    proxy_port: Option<u16>,
 ) -> serde_json::Value {
     use serde_json::Value;
     let mut root = match socket_path {
-        Some(sock) => claude_sandbox_settings(sock, existing),
+        Some(sock) => claude_sandbox_settings(sock, proxy_port, existing),
         None => match existing {
             Some(v @ Value::Object(_)) => v,
             _ => Value::Object(serde_json::Map::new()),
@@ -275,6 +316,7 @@ pub fn write_claude_settings(
     instance_id: &str,
     socket_path: Option<&str>,
     rtk: Option<&RtkHook>,
+    proxy_port: Option<u16>,
 ) -> std::io::Result<PathBuf> {
     let path = claude_settings_path(instance_id);
     if let Some(dir) = path.parent() {
@@ -283,7 +325,7 @@ pub fn write_claude_settings(
     let existing = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let merged = claude_agent_settings(instance_id, socket_path, existing, rtk);
+    let merged = claude_agent_settings(instance_id, socket_path, existing, rtk, proxy_port);
     let body = serde_json::to_string_pretty(&merged).map_err(std::io::Error::other)?;
     std::fs::write(&path, body)?;
     Ok(path)
@@ -315,7 +357,7 @@ mod tests {
     #[test]
     fn codex_overrides_match_proven_recipe() {
         let sock = "/Users/x/Library/Application Support/Conclave/conclave.sock";
-        let ov = codex_socket_overrides(sock);
+        let ov = codex_socket_overrides(sock, None);
         assert_eq!(
             ov,
             vec![
@@ -330,7 +372,7 @@ mod tests {
     #[test]
     fn codex_socket_override_embeds_exact_path() {
         let sock = "/tmp/space dir/conclave.sock";
-        let ov = codex_socket_overrides(sock);
+        let ov = codex_socket_overrides(sock, None);
         assert_eq!(
             ov[2],
             "permissions.conclave.network.unix_sockets={\"/tmp/space dir/conclave.sock\"=\"allow\"}"
@@ -342,7 +384,7 @@ mod tests {
         // The transcript context meter can only attribute a claude transcript
         // to an instance if the owner marker is RECORDED in it; the SessionStart
         // hook is the recorded channel (--append-system-prompt never is).
-        let v = claude_agent_settings("inst-9", None, None, None);
+        let v = claude_agent_settings("inst-9", None, None, None, None);
         let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("hook command present");
@@ -354,7 +396,7 @@ mod tests {
     #[test]
     fn agent_settings_with_socket_carry_hook_and_sandbox() {
         let sock = "/tmp/conclave.sock";
-        let v = claude_agent_settings("inst-9", Some(sock), None, None);
+        let v = claude_agent_settings("inst-9", Some(sock), None, None, None);
         assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
         let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
@@ -364,13 +406,13 @@ mod tests {
 
     #[test]
     fn agent_settings_owner_hook_is_idempotent_and_self_repairing() {
-        let once = claude_agent_settings("inst-9", None, None, None);
-        let twice = claude_agent_settings("inst-9", None, Some(once.clone()), None);
+        let once = claude_agent_settings("inst-9", None, None, None, None);
+        let twice = claude_agent_settings("inst-9", None, Some(once.clone()), None, None);
         assert_eq!(once, twice, "re-merge must not duplicate the hook group");
 
         // A stale marker for a different id (e.g. file reused) is replaced.
-        let stale = claude_agent_settings("inst-old", None, None, None);
-        let repaired = claude_agent_settings("inst-9", None, Some(stale), None);
+        let stale = claude_agent_settings("inst-old", None, None, None, None);
+        let repaired = claude_agent_settings("inst-9", None, Some(stale), None, None);
         let groups = repaired["hooks"]["SessionStart"]
             .as_array()
             .expect("SessionStart groups");
@@ -387,7 +429,7 @@ mod tests {
             cli_bin: PathBuf::from("/Users/x/Library/Application Support/Conclave/bin/conclave"),
             rtk_bin: PathBuf::from("/Users/x/Library/Application Support/Conclave/bin/rtk"),
         };
-        let v = claude_agent_settings("inst-9", None, None, Some(&rtk));
+        let v = claude_agent_settings("inst-9", None, None, Some(&rtk), None);
         assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], json!("Bash"));
         let cmd = v["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
@@ -400,7 +442,7 @@ mod tests {
 
     #[test]
     fn agent_settings_without_rtk_adds_no_pre_tool_use_key() {
-        let v = claude_agent_settings("inst-9", None, None, None);
+        let v = claude_agent_settings("inst-9", None, None, None, None);
         assert!(v["hooks"].get("PreToolUse").is_none());
     }
 
@@ -411,7 +453,7 @@ mod tests {
                 { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo foreign" }] }
             ]}
         });
-        let v = claude_agent_settings("inst-9", None, Some(existing.clone()), None);
+        let v = claude_agent_settings("inst-9", None, Some(existing.clone()), None, None);
         assert_eq!(
             v["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"],
             "foreign PreToolUse entry must survive untouched when rtk is None"
@@ -424,8 +466,8 @@ mod tests {
             cli_bin: PathBuf::from("/bin/conclave"),
             rtk_bin: PathBuf::from("/bin/rtk"),
         };
-        let once = claude_agent_settings("inst-9", None, None, Some(&rtk));
-        let twice = claude_agent_settings("inst-9", None, Some(once.clone()), Some(&rtk));
+        let once = claude_agent_settings("inst-9", None, None, Some(&rtk), None);
+        let twice = claude_agent_settings("inst-9", None, Some(once.clone()), Some(&rtk), None);
         assert_eq!(
             once, twice,
             "re-merge must not duplicate the rtk hook group"
@@ -445,7 +487,7 @@ mod tests {
                 { "matcher": "Write", "hooks": [{ "type": "command", "command": "echo foreign" }] }
             ]}
         });
-        let v = claude_agent_settings("inst-9", None, Some(existing), Some(&rtk));
+        let v = claude_agent_settings("inst-9", None, Some(existing), Some(&rtk), None);
         let groups = v["hooks"]["PreToolUse"].as_array().expect("groups");
         assert_eq!(
             groups.len(),
@@ -465,7 +507,7 @@ mod tests {
                 { "hooks": [{ "type": "command", "command": "echo unrelated" }] }
             ]}
         });
-        let v = claude_agent_settings("inst-9", None, Some(existing), None);
+        let v = claude_agent_settings("inst-9", None, Some(existing), None, None);
         let groups = v["hooks"]["SessionStart"].as_array().expect("groups");
         assert_eq!(groups.len(), 2, "foreign hook group must survive the merge");
         assert!(groups
@@ -491,10 +533,71 @@ mod tests {
             .contains("own agent id is inst-9"));
     }
 
+    /// Context-proxy loopback allowlist (agent-proxy Task 11): when the spawn
+    /// injected `ANTHROPIC_BASE_URL`, the sandboxed shell's network allowlist
+    /// gains the loopback host so nested CLI calls can reach the proxy. Claude
+    /// `allowedDomains` entries are domain patterns (no port syntax per the
+    /// sandboxing docs), so the hole is `127.0.0.1`, not `127.0.0.1:<port>`.
+    #[test]
+    fn claude_settings_with_proxy_allow_loopback_domain() {
+        let sock = "/tmp/conclave.sock";
+        let v = claude_sandbox_settings(sock, Some(18787), None);
+        assert_eq!(
+            v["sandbox"]["network"]["allowedDomains"],
+            json!(["127.0.0.1"])
+        );
+        // The socket hole and auto-allow are unaffected.
+        assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
+        assert_eq!(v["sandbox"]["autoAllowBashIfSandboxed"], json!(true));
+    }
+
+    /// No proxy → the settings are byte-identical to the pre-task shape: the
+    /// `allowedDomains` key is not even created.
+    #[test]
+    fn claude_settings_without_proxy_add_no_allowed_domains() {
+        let v = claude_sandbox_settings("/tmp/conclave.sock", None, None);
+        assert!(v["sandbox"]["network"].get("allowedDomains").is_none());
+    }
+
+    /// Re-merge with the proxy on must not duplicate the loopback entry, and a
+    /// pre-existing foreign allowlist keeps its entries.
+    #[test]
+    fn claude_settings_proxy_domain_unions_and_stays_idempotent() {
+        let sock = "/tmp/conclave.sock";
+        let existing = json!({
+            "sandbox": { "network": { "allowedDomains": ["api.github.com"] } }
+        });
+        let once = claude_sandbox_settings(sock, Some(18787), Some(existing));
+        assert_eq!(
+            once["sandbox"]["network"]["allowedDomains"],
+            json!(["api.github.com", "127.0.0.1"])
+        );
+        let twice = claude_sandbox_settings(sock, Some(18787), Some(once.clone()));
+        assert_eq!(once, twice);
+    }
+
+    /// Codex analogue: proxy on → the `[permissions.conclave]` profile also
+    /// allowlists the loopback host in its network `domains` map (same map
+    /// syntax as the proven `unix_sockets` override); proxy off → the override
+    /// list is exactly the proven 4-entry recipe.
+    #[test]
+    fn codex_overrides_with_proxy_allow_loopback_domain() {
+        let sock = "/tmp/conclave.sock";
+        let ov = codex_socket_overrides(sock, Some(18787));
+        assert_eq!(ov.len(), 5);
+        assert!(ov.contains(
+            &"permissions.conclave.network.domains={\"127.0.0.1\"=\"allow\"}".to_string()
+        ));
+        // The proven recipe entries are all still present, unchanged.
+        for base in codex_socket_overrides(sock, None) {
+            assert!(ov.contains(&base), "missing base override {base}");
+        }
+    }
+
     #[test]
     fn claude_settings_fresh_has_route_a_keys() {
         let sock = "/Users/x/Library/Application Support/Conclave/conclave.sock";
-        let v = claude_sandbox_settings(sock, None);
+        let v = claude_sandbox_settings(sock, None, None);
         assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
         assert_eq!(v["sandbox"]["autoAllowBashIfSandboxed"], json!(true));
     }
@@ -509,7 +612,7 @@ mod tests {
                 "network": { "allowUnixSockets": ["/other.sock"] }
             }
         });
-        let v = claude_sandbox_settings(sock, Some(existing));
+        let v = claude_sandbox_settings(sock, None, Some(existing));
         // untouched sibling keys preserved
         assert_eq!(v["model"], json!("opus"));
         assert_eq!(v["sandbox"]["excludedCommands"], json!(["git"]));
@@ -524,8 +627,8 @@ mod tests {
     #[test]
     fn claude_settings_is_idempotent() {
         let sock = "/tmp/conclave.sock";
-        let once = claude_sandbox_settings(sock, None);
-        let twice = claude_sandbox_settings(sock, Some(once.clone()));
+        let once = claude_sandbox_settings(sock, None, None);
+        let twice = claude_sandbox_settings(sock, None, Some(once.clone()));
         assert_eq!(once, twice);
     }
 
@@ -534,7 +637,7 @@ mod tests {
         let sock = "/tmp/conclave.sock";
         // sandbox present but the wrong type — must be replaced, not panic.
         let existing = json!({ "sandbox": "oops" });
-        let v = claude_sandbox_settings(sock, Some(existing));
+        let v = claude_sandbox_settings(sock, None, Some(existing));
         assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
         assert!(v["sandbox"].is_object());
     }
@@ -553,7 +656,7 @@ mod tests {
     #[test]
     fn non_object_existing_settings_start_fresh() {
         let sock = "/tmp/conclave.sock";
-        let v: Value = claude_sandbox_settings(sock, Some(json!("not an object")));
+        let v: Value = claude_sandbox_settings(sock, None, Some(json!("not an object")));
         assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
     }
 }

@@ -84,6 +84,9 @@ struct SaveAgentReq {
     /// rtk (Claude Code hook) toggle. Absent or `Some(true)` = enabled;
     /// `Some(false)` = disabled (Lane A ⇄ Lane C wire contract).
     rtk_enabled: Option<bool>,
+    /// Context-proxy opt-in (agent-proxy spec D8). Absent or `Some(false)` =
+    /// disabled; only an explicit `Some(true)` opts the agent in.
+    proxy_enabled: Option<bool>,
 }
 
 /// Payload for `agentDef.delete`.
@@ -312,6 +315,7 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         context_window: nonblank(req.context_window),
         selected_builtin_skill_ids,
         rtk_enabled: req.rtk_enabled,
+        proxy_enabled: req.proxy_enabled,
     };
 
     // Capture the previously-stored secret key NAMES (UPDATE only) so we can

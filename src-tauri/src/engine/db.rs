@@ -239,6 +239,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 20 {
+        sqlx::raw_sql(include_str!("migrations/0020_agent_proxy_enabled.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 20;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -395,7 +404,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 19, "migrate() from v13 must reach schema v19");
+        assert_eq!(version, 20, "migrate() from v13 must reach schema v20");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -646,7 +655,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 19, "user_version should be 19");
+        assert_eq!(version, 20, "user_version should be 20");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -849,7 +858,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -940,7 +949,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1050,7 +1059,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
