@@ -1,6 +1,7 @@
 //! Code intelligence core for Conclave: one language registry, one walker,
 //! one index, shared by the map/graph/edit command families.
 pub mod error;
+pub mod graph;
 pub mod hash;
 pub mod index;
 pub mod lang;
