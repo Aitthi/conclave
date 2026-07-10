@@ -86,6 +86,10 @@ export const handlers: FixtureHandlers = {
     url: "https://example.com/",
     title: "Example Domain",
   }),
+  // Open echoes the requested URL back as the new status (deterministic — no
+  // Tauri, no clock). Without this handler the view's Open button throws the
+  // loud [fixture] error in fixture mode.
+  "browser.open": ({ url }) => ({ ok: true, url, title: "Example Domain" }),
   // UI-only overlay plumbing — fixture mode has no native webview, so these are
   // no-ops (fixed, no Tauri). A missing handler would throw by design.
   "browser.setBounds": () => ({ ok: true }),

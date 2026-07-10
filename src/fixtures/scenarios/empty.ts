@@ -36,6 +36,9 @@ export const handlers: FixtureHandlers = {
   // Fresh-install look: no browser open. status returns ok:false so the view
   // shows its "no browser open" empty state and never calls snapshot.
   "browser.status": () => ({ ok: false, message: "no browser is open" }),
+  // Open still works from the empty state (deterministic echo, no Tauri) —
+  // a missing handler would throw the loud [fixture] error on first click.
+  "browser.open": ({ url }) => ({ ok: true, url }),
   "browser.setBounds": () => ({ ok: true }),
   "browser.setVisible": () => ({ ok: true }),
   "browser.close": () => ({ ok: false, message: "no browser is open" }),
