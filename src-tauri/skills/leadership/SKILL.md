@@ -64,6 +64,37 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   Challenges route to the task owner, or the lowest common supervisor across
   chains; you rule anything that reaches you.
 
+## Convene a Lead council
+
+- When a plan needs more than one Lead's judgment, convene a council ON the
+  task ledger, never in a chat room: `conclave task create <ws> <slug> <title>
+  --plan-file <path> --watchers <memberId,memberId>` subscribes you (chair) and
+  every member atomically. A council is the chair plus at least two members.
+- The plan file opens with a ten-line `conclave-plan:v1` execution header —
+  line 1 the Markdown title, lines 2–10 a JSON contract. That header IS the
+  cold-start contract: `planPath` (the ONE canonical mutable repo plan),
+  `readingOrder`, `boundary`, `consumes`/`produces` anchors, and `gates` name
+  exactly what a zero-context implementer reads, edits, and runs. The stored
+  task plan is the immutable snapshot; the repo file it names must keep the
+  byte-identical header.
+- Sequence: members pull `task brief <ws> <slug>` and read only the header's
+  files and anchors; each contributes ONE bounded evidence memo; a material
+  alternative is a formal `task challenge`; you rule every challenge and amend
+  the canonical plan named by `planPath` — no member edits a separate copy.
+  After two rounds with no new evidence, rule and stop the exchange.
+- Gate before handoff: `conclave task gate <ws> <slug> -- conclave task
+  plan-check <ws> <slug>` green with zero open challenges. Only then create
+  downstream implementation tasks and hand each implementer the slug, reading
+  order, and escalation target (per Delegate and stay out) — never the council
+  transcript.
+- A council task still has exactly ONE owner: the chair, final ruler. Chairs
+  rotate between tasks, never inside one. A header or boundary defect found
+  before claim is fixed by amending the canonical plan, abandoning the
+  immutable task, and recreating it — never by an out-of-boundary integration
+  workaround that preserves the old slug.
+- Full contract and field rules:
+  `docs/superpowers/specs/2026-07-10-lead-council-v1-design.md`.
+
 ## When the lead implements directly
 
 - Direct implementation is RIGHT under three conditions: (a) the work lies outside

@@ -26,6 +26,22 @@ Collaboration, Leadership, and Implementer; this covers the LOOP between them.
   irreversible actions outside the plan. Everything else that FEELS human-worthy
   is just a hard decision — decide it.
 
+## Council decisions stay on the task
+
+- In a council (several Leads planning on one task), every MATERIAL position
+  is filed as a `task challenge` and every settled outcome is a `task rule`
+  PLUS an amendment to the canonical repo plan named by the task's execution
+  header. A position that lives only in `tell` messages settles nothing —
+  tells announce where to pull state, they never decide.
+- The two-round stop binds every member: after two rounds without new
+  evidence, the chair — the task owner — rules, and the ruling is final.
+- Never copy the debate transcript into downstream plans or implementer
+  messages: an implementer gets the slug and `task brief`, and every decision
+  stays reconstructable from the challenge and ruling events plus the amended
+  plan.
+- Convening, the header contract, and handoff live in Leadership; the full
+  protocol is `docs/superpowers/specs/2026-07-10-lead-council-v1-design.md`.
+
 ## Grill each other — challenge is the protocol, not a conflict
 
 - Any agent may grill any artifact: an implementer grills the plan, the lead
