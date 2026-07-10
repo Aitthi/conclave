@@ -45,6 +45,7 @@ unicode-normalization = "0.1"
 # uses above; `image-models` is unused (text embedding only, v1 uses MiniLM only).
 fastembed = { version = "5.17", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 codeintel = { path = "crates/codeintel" }
+ctxopt = { path = "crates/ctxopt" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -54,7 +55,7 @@ objc2-app-kit = { version = "0.3.2", features = ["NSImage", "NSBitmapImageRep", 
 block2 = "0.6"
 
 [workspace]
-members = ["crates/codeintel"]
+members = ["crates/codeintel", "crates/ctxopt"]
 
 [dev-dependencies]
 tempfile = "3"
