@@ -258,25 +258,13 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
         let last_event = last_event.with_timezone(&Utc);
         let stale_for = now.signed_duration_since(last_event);
 
-        // `StallCandidate` does not carry `workspace_id` (repo/task.rs:692),
-        // and this lane's boundary is exactly this file — resolved with a
-        // single-column lookup here per challenge 944b033b's default; the
-        // follow-up is to project `t.workspace_id` in `stall_candidates`.
-        let Ok(workspace_id) =
-            sqlx::query_scalar::<_, String>("SELECT workspace_id FROM task WHERE id = ?1")
-                .bind(&c.id)
-                .fetch_one(&state.db)
-                .await
-        else {
-            continue;
-        };
-        let (stall_minutes, cooldown_minutes) = match ws_config.get(&workspace_id) {
+        let (stall_minutes, cooldown_minutes) = match ws_config.get(&c.workspace_id) {
             Some(pair) => *pair,
             None => {
                 let pair = (
                     stall_override(
                         state,
-                        &workspace_id,
+                        &c.workspace_id,
                         STALL_MINUTES_KEY,
                         STALL_MINUTES,
                         STALL_MINUTES_MIN,
@@ -285,7 +273,7 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
                     .await,
                     stall_override(
                         state,
-                        &workspace_id,
+                        &c.workspace_id,
                         STALL_COOLDOWN_KEY,
                         STALL_ALERT_COOLDOWN_MINUTES,
                         STALL_COOLDOWN_MIN,
@@ -293,7 +281,7 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
                     )
                     .await,
                 );
-                ws_config.insert(workspace_id, pair);
+                ws_config.insert(c.workspace_id.clone(), pair);
                 pair
             }
         };
