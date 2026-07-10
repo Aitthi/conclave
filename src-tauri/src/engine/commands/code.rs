@@ -83,10 +83,6 @@ struct RewriteReq {
     lang: Option<String>,
 }
 
-fn parse<T: for<'de> Deserialize<'de>>(payload: Value) -> Result<T, AppError> {
-    serde_json::from_value::<T>(payload).map_err(|e| AppError::Invalid(e.to_string()))
-}
-
 fn root_of(raw: &str) -> Result<PathBuf, AppError> {
     let path = PathBuf::from(raw);
     if !path.is_absolute() {
@@ -125,7 +121,8 @@ async fn blocking<T: Send + 'static>(
 }
 
 pub async fn stats(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: RootReq = parse(payload)?;
+    let req =
+        serde_json::from_value::<RootReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let cache = state.code_cache.clone();
     let (data, warnings) = blocking(move || {
@@ -138,7 +135,8 @@ pub async fn stats(state: &AppState, payload: Value) -> Result<Value, AppError> 
 }
 
 pub async fn files(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: FilesReq = parse(payload)?;
+    let req = serde_json::from_value::<FilesReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
     let cache = state.code_cache.clone();
@@ -152,14 +150,16 @@ pub async fn files(state: &AppState, payload: Value) -> Result<Value, AppError> 
 }
 
 pub async fn tree(_state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: RootReq = parse(payload)?;
+    let req =
+        serde_json::from_value::<RootReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let data = blocking(move || codeintel::map::tree(&root).map_err(code_error)).await?;
     Ok(wrap(data, false, &[]))
 }
 
 pub async fn symbols(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: SymbolsReq = parse(payload)?;
+    let req = serde_json::from_value::<SymbolsReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let target = req.target;
     let all = req.all.unwrap_or(false);
@@ -178,7 +178,8 @@ pub async fn symbols(state: &AppState, payload: Value) -> Result<Value, AppError
 }
 
 pub async fn find(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: FindReq = parse(payload)?;
+    let req =
+        serde_json::from_value::<FindReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let exact = req.exact.unwrap_or(false);
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
@@ -195,7 +196,8 @@ pub async fn find(state: &AppState, payload: Value) -> Result<Value, AppError> {
 }
 
 pub async fn callers(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: TraversalReq = parse(payload)?;
+    let req = serde_json::from_value::<TraversalReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let depth = req.depth.unwrap_or(DEFAULT_DEPTH);
     let name = req.name;
@@ -210,7 +212,8 @@ pub async fn callers(state: &AppState, payload: Value) -> Result<Value, AppError
 }
 
 pub async fn callees(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: TraversalReq = parse(payload)?;
+    let req = serde_json::from_value::<TraversalReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let depth = req.depth.unwrap_or(DEFAULT_DEPTH);
     let name = req.name;
@@ -225,7 +228,8 @@ pub async fn callees(state: &AppState, payload: Value) -> Result<Value, AppError
 }
 
 pub async fn refs(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: RefsReq = parse(payload)?;
+    let req =
+        serde_json::from_value::<RefsReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
     let name = req.name;
@@ -241,7 +245,8 @@ pub async fn refs(state: &AppState, payload: Value) -> Result<Value, AppError> {
 }
 
 pub async fn impact(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: NamedReq = parse(payload)?;
+    let req = serde_json::from_value::<NamedReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let name = req.name;
     let cache = state.code_cache.clone();
@@ -255,7 +260,8 @@ pub async fn impact(state: &AppState, payload: Value) -> Result<Value, AppError>
 }
 
 pub async fn rename(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: RenameReq = parse(payload)?;
+    let req = serde_json::from_value::<RenameReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let cache = state.code_cache.clone();
     let (data, warnings) = blocking(move || {
@@ -279,7 +285,8 @@ pub async fn rename(state: &AppState, payload: Value) -> Result<Value, AppError>
 }
 
 pub async fn rewrite(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: RewriteReq = parse(payload)?;
+    let req = serde_json::from_value::<RewriteReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let root = root_of(&req.path)?;
     let cache = state.code_cache.clone();
     let data = blocking(move || {
@@ -354,5 +361,45 @@ mod tests {
         .unwrap();
         assert_eq!(out["data"]["dry_run"], true);
         assert!(std::fs::read_to_string(&file).unwrap().contains("old_name"));
+    }
+
+    #[tokio::test]
+    async fn apply_rename_invalidates_cache_for_next_query() {
+        let state = AppState::for_tests().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn old_name() {}\nfn c() { old_name(); }\n",
+        )
+        .unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let _ = find(&state, json!({"path": path, "name": "old_name"}))
+            .await
+            .unwrap();
+        let out = rename(
+            &state,
+            json!({
+                "path": path,
+                "old": "old_name",
+                "new": "new_name",
+                "apply": true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["data"]["dry_run"], false);
+
+        let after = find(&state, json!({"path": path, "name": "new_name"}))
+            .await
+            .unwrap();
+        assert!(
+            !after["data"].as_array().unwrap().is_empty(),
+            "cache served a stale index after --apply"
+        );
+        let stale = find(&state, json!({"path": path, "name": "old_name"}))
+            .await
+            .unwrap();
+        assert!(stale["data"].as_array().unwrap().is_empty());
     }
 }
