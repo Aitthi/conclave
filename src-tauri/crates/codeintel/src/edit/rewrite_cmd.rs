@@ -41,8 +41,10 @@ pub fn rewrite(
 
     let sources = walk_sources(root)?;
 
-    // Pass 1: discover which languages we'd process. `Language` lacks Ord/Hash,
-    // so dedup against a Vec — uniqueness is the only property we need.
+    // Pass 1: discover which languages we'd process. `Language` derives
+    // `Hash`/`Eq` in this crate, but we still dedup against a `Vec` — the
+    // list is tiny (one entry per language actually present) and this
+    // preserves the order languages first appear in the walk.
     let mut langs_to_process: Vec<CgLang> = Vec::new();
     for src in &sources {
         if let Some(target) = lang_filter {

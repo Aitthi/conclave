@@ -221,7 +221,7 @@ impl LangQueries {
                     Ok(q) => Some(q),
                     Err(e) => {
                         eprintln!(
-                            "codegraph: imports query skipped for {}: {e:#}",
+                            "codeintel: imports query skipped for {}: {e:#}",
                             lang.name()
                         );
                         None
@@ -232,7 +232,7 @@ impl LangQueries {
             .and_then(|src| match Query::new(&ts, src) {
                 Ok(q) => Some(q),
                 Err(e) => {
-                    eprintln!("codegraph: refs query skipped for {}: {e}", lang.name());
+                    eprintln!("codeintel: refs query skipped for {}: {e}", lang.name());
                     None
                 }
             });
@@ -368,7 +368,7 @@ pub(crate) fn index_one_file(
 
     let mut parser = Parser::new();
     if parser.set_language(&queries.ts).is_err() {
-        eprintln!("codegraph: set language failed for {rel}");
+        eprintln!("codeintel: set language failed for {rel}");
         return None;
     }
     let tree = parser.parse(&source, None)?;

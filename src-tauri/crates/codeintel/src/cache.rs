@@ -16,10 +16,20 @@
 //! 5. Queued files are re-parsed in parallel via `index_one_file`.
 //! 6. If anything changed (first build, a re-parse, or a deletion), the
 //!    `Index` is re-assembled from every current `FilePartial` (via the same
-//!    `assemble_index` `build_index` uses, so the result is
-//!    indistinguishable from a fresh `build_index` call) and stored as a new
-//!    `Arc<Index>`. Otherwise the previously stored `Arc` is returned
-//!    untouched — callers can `Arc::ptr_eq` to detect a true no-op refresh.
+//!    `assemble_index` `build_index` uses) and stored as a new `Arc<Index>`.
+//!    Otherwise the previously stored `Arc` is returned untouched — callers
+//!    can `Arc::ptr_eq` to detect a true no-op refresh.
+//!
+//! Contract with `build_index`: for a tree where every file is readable, the
+//! assembled `Index` is byte-identical to a fresh `build_index` call. Files
+//! that are present in the walk but fail to stat or fail to read (e.g. a
+//! permission change) do NOT vanish silently — they get the same
+//! parse-failure marker `index_one_file`'s `None` return produces, so they
+//! surface in `Index::warnings` as `"failed to parse <rel>"`, exactly like
+//! `build_index`'s handling of an unreadable/unparseable file. A file that
+//! later becomes readable again re-parses on its next `get_index` (the
+//! marker's stat is chosen so it never matches a real stat, forcing the
+//! comparison in step 2/3 to fall through to a reparse).
 //!
 //! `CodeIntelCache` is `Send + Sync` (a `Mutex` around the whole per-root
 //! map). Holding the mutex for the full duration of a refresh — including
@@ -68,6 +78,11 @@ struct CachedRoot {
 }
 
 struct CacheInner {
+    /// Keyed by the exact `PathBuf` passed to `get_index`/`invalidate_root` —
+    /// no canonicalization happens internally. Callers reaching the same
+    /// directory via two different paths (e.g. a symlink vs. its target, or
+    /// a relative vs. absolute path) get two independent cache entries.
+    /// Pass a canonicalized root to avoid that.
     roots: HashMap<PathBuf, CachedRoot>,
     /// Touch order, oldest first. The front is evicted when `roots` grows
     /// past `CAPACITY`.
@@ -122,6 +137,17 @@ impl CodeIntelCache {
         }
         let mut to_reparse: Vec<ReparseItem> = Vec::new();
         let mut stat_refresh: Vec<(String, SystemTime, u64)> = Vec::new();
+        // Files `walk_sources` listed but that failed to stat or failed to
+        // read here. Stored as a parse-failure marker (see `CachedFileEntry`
+        // doc) rather than dropped, so they surface in `Index::warnings`
+        // like `build_index` does for an unreadable file — see module doc.
+        let mut io_failures: Vec<(String, SystemTime, u64, FileHash)> = Vec::new();
+        // Sentinel marker stat: deliberately a value no real file stat will
+        // ever produce (well, short of a file created and left at exactly
+        // the Unix epoch with zero bytes), so the next `get_index` always
+        // treats a since-fixed file as "changed" and reparses it instead of
+        // trusting the marker's fast path.
+        const FAILURE_SENTINEL_MTIME: SystemTime = SystemTime::UNIX_EPOCH;
 
         {
             let existing = guard.roots.get(&root_key);
@@ -132,23 +158,35 @@ impl CodeIntelCache {
                     .unwrap_or(&f.path)
                     .to_string_lossy()
                     .into_owned();
-                // Stat (and, if needed, hash) failures here are treated as "the
-                // file is gone" rather than propagated: `walk_sources` already
-                // ran and listed this file, but under a TOCTOU race (deleted or
-                // replaced between the walk and this stat) the I/O can fail even
-                // though nothing is actually wrong with the cache or the rest of
-                // the walk. Matching `build_index`'s per-file graceful-degrade
-                // behaviour, we simply don't mark this file "seen" — the
-                // deletion pass below (which drops any stored entry not in
-                // `seen_rels`) then removes it like any other vanished file,
-                // instead of discarding the whole refresh (and a good cached
-                // `Arc`) over one file's benign disappearance. Errors from the
-                // walk itself (above, `walk_sources(root)?`) are NOT covered by
-                // this and remain hard errors.
+                // A stat or read failure here can mean one of two things:
+                // (a) the file is present but unreadable (e.g. permissions
+                // changed since the last index), or (b) a TOCTOU race —
+                // `walk_sources` listed the file, but it was deleted or
+                // replaced between the walk and this stat. We can't tell
+                // these apart without re-walking, so both take the same
+                // path: record an I/O-failure marker (parse-failure shaped,
+                // same as `index_one_file` returning `None`) rather than
+                // silently dropping the file. Case (b) is harmless — the
+                // *next* `get_index`'s walk won't list the file at all, so
+                // it never reaches this loop and falls to the deletion pass
+                // below instead, which drops the marker along with it.
+                // Errors from the walk itself (above, `walk_sources(root)?`)
+                // are NOT covered by this and remain hard errors.
                 let Ok(meta) = fs::metadata(&f.path) else {
+                    seen_rels.insert(rel.clone());
+                    any_change = true;
+                    io_failures.push((rel, FAILURE_SENTINEL_MTIME, 0, FileHash::new([0u8; 32])));
                     continue;
                 };
                 let Ok(mtime) = meta.modified() else {
+                    seen_rels.insert(rel.clone());
+                    any_change = true;
+                    io_failures.push((
+                        rel,
+                        FAILURE_SENTINEL_MTIME,
+                        meta.len(),
+                        FileHash::new([0u8; 32]),
+                    ));
                     continue;
                 };
                 let size = meta.len();
@@ -156,13 +194,28 @@ impl CodeIntelCache {
                 let stored = existing.and_then(|r| r.files.get(&rel));
                 if let Some(e) = stored {
                     if e.mtime == mtime && e.size == size {
-                        // Fast path: stat identical, nothing to do.
+                        // Fast path: stat identical, nothing to do. This also
+                        // covers an unchanged I/O-failure marker (still
+                        // unreadable, stat unchanged since the marker was
+                        // written) — it stays marked without re-attempting
+                        // the read.
                         seen_rels.insert(rel.clone());
                         continue;
                     }
                 }
 
                 let Ok(hash) = compute_file_hash(&f.path) else {
+                    // Stat succeeded (the file is present) but the read
+                    // failed — the common real-world case, e.g. a
+                    // permission change (chmod doesn't touch mtime/size, so
+                    // a caller must bump mtime — or call `invalidate_files`
+                    // — to even reach this branch on a previously-indexed
+                    // file). Keep the real mtime/size so a stat-only change
+                    // back to readable is detected as "changed" on the next
+                    // call.
+                    seen_rels.insert(rel.clone());
+                    any_change = true;
+                    io_failures.push((rel, mtime, size, FileHash::new([0u8; 32])));
                     continue;
                 };
                 seen_rels.insert(rel.clone());
@@ -176,6 +229,13 @@ impl CodeIntelCache {
                 }
 
                 any_change = true;
+                // Note: `hash` above already did a full read of this file to
+                // compute its digest; `index_one_file` (pass 2 below) reads
+                // it again from scratch to parse it. This double-read is
+                // intentional — it's the plan's literal hash-then-parse
+                // algorithm, not an oversight. Do not "optimize" it away by
+                // threading the already-read bytes through; that's out of
+                // scope for this fix.
                 to_reparse.push(ReparseItem {
                     rel,
                     path: f.path.clone(),
@@ -233,6 +293,20 @@ impl CodeIntelCache {
                         size: item.size,
                         hash: item.hash,
                         partial,
+                    },
+                );
+            }
+            for (rel, mtime, size, hash) in io_failures {
+                // Parse-failure marker: `partial: None` makes `assemble_index`
+                // emit a `warnings` entry for this file, matching
+                // `build_index`'s handling of an unreadable file.
+                root_entry.files.insert(
+                    rel,
+                    CachedFileEntry {
+                        mtime,
+                        size,
+                        hash,
+                        partial: None,
                     },
                 );
             }
