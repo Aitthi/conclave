@@ -978,6 +978,34 @@ mod tests {
     }
 
     #[test]
+    fn accepts_exactly_at_cap_arrays_and_strings() {
+        // Ruling be2e68d7 F5: every cap above pins only cap+1 rejection; an
+        // off-by-one toward strictness would false-pass without the
+        // at-cap acceptance side.
+        // readingOrder with exactly MAX_READING_ORDER entries.
+        let entries: Vec<String> = (0..MAX_READING_ORDER - 1)
+            .map(|i| format!("\"docs/f{i}.md\""))
+            .collect();
+        let plan = protocol_plan().replacen(
+            r#""readingOrder":["docs/superpowers/specs/example.md","docs/superpowers/plans/example.md"]"#,
+            &format!(
+                r#""readingOrder":[{},"docs/superpowers/plans/example.md"]"#,
+                entries.join(",")
+            ),
+            1,
+        );
+        parse_and_validate_header(&plan)
+            .expect("exactly MAX_READING_ORDER readingOrder entries must pass");
+        // Path of exactly MAX_PATH_LEN chars.
+        let exact = format!("docs/{}.md", "a".repeat(MAX_PATH_LEN - 8));
+        assert_eq!(exact.len(), MAX_PATH_LEN);
+        validate_repo_path("boundary", &exact).expect("a MAX_PATH_LEN path must pass");
+        // Gate of exactly MAX_GATE_LEN chars.
+        let plan = protocol_plan().replacen("git diff --check", &"g".repeat(MAX_GATE_LEN), 1);
+        parse_and_validate_header(&plan).expect("a MAX_GATE_LEN gate must pass");
+    }
+
+    #[test]
     fn rejects_unsorted_or_duplicate_boundary() {
         let unsorted = plan_with(
             "",

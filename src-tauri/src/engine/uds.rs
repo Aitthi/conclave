@@ -499,15 +499,14 @@ mod tests {
         assert_eq!(created["state"], json!("planned"));
 
         // `task claim <actorId> <ws> <slug>` (already self-expanded, mirroring
-        // what `conclave-cli` would send). REGRESSION (lead-council v1): claim
-        // keeps its exact five-word expanded wire form — the freshness
-        // preflight is CLI-local and must never grow this argv.
+        // what `conclave-cli` would send). This call is the engine ACCEPTING
+        // the five-word expanded wire form; the form itself is pinned
+        // CLI-side, where it is produced (`task_claim_injects_actor_from_env`
+        // pins the expansion, `direct_claim_preflight_matches_only_the_
+        // public_claim_form` pins that the freshness preflight never grows
+        // it) — ruling be2e68d7 F4 removed a tautological length assert here
+        // that advertised that coverage without exercising it.
         let claim_argv = json!(["task", "claim", actor, ws, "acceptance-task"]);
-        assert_eq!(
-            claim_argv.as_array().expect("argv array").len(),
-            5,
-            "claim wire form must stay five words"
-        );
         let claimed = call(&mut write, &mut reader, 2, claim_argv).await;
         assert_eq!(claimed["state"], json!("claimed"));
         assert_eq!(claimed["implementerAgentId"], json!(actor));

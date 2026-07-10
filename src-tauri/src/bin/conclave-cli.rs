@@ -543,7 +543,18 @@ async fn lane_task_wiring(ws: &str, slug: &str, self_instance: Option<&str>) {
     // fingerprint stays honest even when main has uncommitted plan edits
     // (spec "Freshness Warning": lane start creates its worktree first,
     // then hashes there). Warning-only; the claim below is sent unchanged.
-    claim_freshness_preflight(ws, slug, Some(&lane_worktree_root(slug)), self_instance).await;
+    // `suppress_unverifiable`: when `task get` itself soft-fails (task
+    // absent, app down) the claim below is about to soft-fail for the same
+    // reason with the calm note — the loud unverifiable warn would be pure
+    // noise here (ruling be2e68d7 F1).
+    claim_freshness_preflight(
+        ws,
+        slug,
+        Some(&lane_worktree_root(slug)),
+        self_instance,
+        true,
+    )
+    .await;
 
     let claim = vec![
         "task".to_string(),
@@ -2323,9 +2334,16 @@ enum PlanFreshness {
     NotCouncil,
     /// Council-tagged and everything matches — silent too.
     Fresh,
-    /// Council-tagged with freshness problems, or the preflight itself could
-    /// not be verified — warn loudly on stderr, never block the claim.
+    /// Council-tagged with freshness problems, or the engine answered with a
+    /// malformed envelope — warn loudly on stderr, never block the claim.
     Warn(Vec<String>),
+    /// `task get` itself failed (app down, task absent, old engine):
+    /// council-ness is unknowable. A direct claim still warns loudly, but
+    /// `lane start` suppresses this variant — its claim is about to soft-fail
+    /// for the same reason with the documented calm "skipping task claim"
+    /// note, and a loud unverifiable warn on top of it is pure noise on every
+    /// pre-task and app-down lane start (ruling be2e68d7 F1).
+    Unverifiable(Vec<String>),
 }
 
 /// The canonical ten-line header block: the RAW BYTES up to (not including)
@@ -2351,10 +2369,24 @@ fn min_canonical_header(plan: &str) -> Option<&str> {
 }
 
 /// The newest successful `plan_check` fingerprint from a `task get`
-/// envelope. `task get` returns `events` newest-first, so the first
-/// `plan_check` row is the latest — and the engine appends the typed event
-/// ONLY on a successful check, so presence means success.
+/// envelope. The engine appends the typed event ONLY on a successful check,
+/// so presence means success.
+///
+/// Prefers the envelope's `latestPlanCheck` field — a dedicated by-kind
+/// lookup that survives any number of newer events (ruling be2e68d7 F3: the
+/// `events` window is capped at the last 20, so scanning it false-warns "no
+/// plan-check" on any council task that accrued 20+ events after its newest
+/// check). When the field is absent (old engine) it falls back to scanning
+/// the capped window — exactly the pre-F3 behavior, warn-only either way.
 fn latest_plan_check_fingerprint(envelope: &Value) -> Option<String> {
+    if let Some(latest) = envelope.get("latestPlanCheck") {
+        // Present means the engine performed the dedicated lookup; `null`
+        // is an authoritative "no successful plan-check exists".
+        return latest
+            .pointer("/payload/planFingerprint")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
     envelope
         .get("events")?
         .as_array()?
@@ -2378,14 +2410,16 @@ fn assess_plan_freshness(
     task_get: &Result<Value, String>,
     read_plan: impl Fn(&str) -> Result<Vec<u8>, String>,
 ) -> PlanFreshness {
-    // Unverifiable read surface (engine down, old-engine error, malformed
-    // response): council status itself is unknowable, so warn rather than
-    // silently skip — the claim still proceeds (spec: "the preflight is
-    // unverifiable and warns, but the ordinary claim still proceeds").
+    // Unverifiable read surface: council status itself is unknowable, and
+    // the claim always proceeds (spec: "the preflight is unverifiable and
+    // warns, but the ordinary claim still proceeds"). A failed `task get`
+    // (engine down, task absent, old engine) is `Unverifiable` so `lane
+    // start` can stay calm about it; a malformed response from a LIVE engine
+    // stays a loud `Warn` on every path.
     let envelope = match task_get {
         Ok(v) => v,
         Err(e) => {
-            return PlanFreshness::Warn(vec![format!(
+            return PlanFreshness::Unverifiable(vec![format!(
                 "the preflight could not be verified: reading the task failed ({e})"
             )]);
         }
@@ -2498,11 +2532,28 @@ fn lane_worktree_root(slug: &str) -> PathBuf {
 /// `lane start`), and warn on stderr when anything is off. Infallible by
 /// design — whatever happens here, the caller sends the existing five-word
 /// claim argv unchanged afterwards.
+/// The problem lines a preflight outcome should print, if any. Pure, so the
+/// lane-vs-direct suppression rule is unit-testable: `suppress_unverifiable`
+/// (the `lane start` path) silences only [`PlanFreshness::Unverifiable`] —
+/// real freshness problems stay loud on every path (ruling be2e68d7 F1).
+fn freshness_problems_to_print(
+    outcome: PlanFreshness,
+    suppress_unverifiable: bool,
+) -> Option<Vec<String>> {
+    match outcome {
+        PlanFreshness::Warn(problems) => Some(problems),
+        PlanFreshness::Unverifiable(_) if suppress_unverifiable => None,
+        PlanFreshness::Unverifiable(problems) => Some(problems),
+        PlanFreshness::NotCouncil | PlanFreshness::Fresh => None,
+    }
+}
+
 async fn claim_freshness_preflight(
     ws: &str,
     slug: &str,
     checkout_root: Option<&std::path::Path>,
     self_instance: Option<&str>,
+    suppress_unverifiable: bool,
 ) {
     let got = uds_task_call(
         vec![
@@ -2525,7 +2576,10 @@ async fn claim_freshness_preflight(
         };
         read_checkout_file(&root, rel)
     };
-    if let PlanFreshness::Warn(problems) = assess_plan_freshness(&got, read_plan) {
+    if let Some(problems) = freshness_problems_to_print(
+        assess_plan_freshness(&got, read_plan),
+        suppress_unverifiable,
+    ) {
         print_plan_freshness_warning(ws, slug, &problems);
     }
 }
@@ -3567,7 +3621,7 @@ async fn main() -> ExitCode {
     // running engines keep working. See `claim_freshness_preflight` for the
     // release/version-skew integration note.
     if let Some((ws, slug)) = direct_claim_target(&argv) {
-        claim_freshness_preflight(ws, slug, None, self_instance.as_deref()).await;
+        claim_freshness_preflight(ws, slug, None, self_instance.as_deref(), false).await;
     }
 
     // Expand the self-keyed forms (`tell`, `snapshot save`, `snapshot last`,
@@ -4632,6 +4686,44 @@ mod tests {
     }
 
     #[test]
+    fn preflight_prefers_the_dedicated_latest_plan_check_lookup() {
+        // 20-event-cap regression (ruling be2e68d7 F3): the capped `events`
+        // window carries no plan_check row — 20+ newer events pushed it out —
+        // but the engine's dedicated by-kind lookup still finds it. The
+        // preflight must trust the lookup and stay silent, not false-warn
+        // "no successful plan-check".
+        let fp = sha256_hex(COUNCIL_PLAN.as_bytes());
+        let mut envelope = task_get_envelope(
+            COUNCIL_PLAN,
+            serde_json::json!([{ "id": "e2", "kind": "note", "payload": {} }]),
+        )
+        .unwrap();
+        envelope["latestPlanCheck"] = plan_check_event(&fp);
+        let got: Result<serde_json::Value, String> = Ok(envelope);
+        let out = super::assess_plan_freshness(&got, |_| Ok(COUNCIL_PLAN.as_bytes().to_vec()));
+        assert_eq!(out, super::PlanFreshness::Fresh);
+    }
+
+    #[test]
+    fn preflight_treats_a_null_latest_plan_check_as_authoritative() {
+        // A live F3 engine answering `latestPlanCheck: null` means "no
+        // successful check exists" — the capped-window fallback is for old
+        // engines that omit the key entirely, never for a live answer.
+        let fp = sha256_hex(COUNCIL_PLAN.as_bytes());
+        let mut envelope =
+            task_get_envelope(COUNCIL_PLAN, serde_json::json!([plan_check_event(&fp)])).unwrap();
+        envelope["latestPlanCheck"] = serde_json::Value::Null;
+        let got: Result<serde_json::Value, String> = Ok(envelope);
+        let out = super::assess_plan_freshness(&got, |_| Ok(COUNCIL_PLAN.as_bytes().to_vec()));
+        match out {
+            super::PlanFreshness::Warn(problems) => {
+                assert!(problems[0].contains("no successful `task plan-check` event"));
+            }
+            other => panic!("expected a missing-event warning, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn claim_preflight_warns_when_the_plan_check_event_is_missing() {
         let got = task_get_envelope(COUNCIL_PLAN, serde_json::json!([]));
         let out = super::assess_plan_freshness(&got, |_| Ok(COUNCIL_PLAN.as_bytes().to_vec()));
@@ -4646,15 +4738,19 @@ mod tests {
 
     #[test]
     fn claim_preflight_unverifiable_old_engine_warns_but_never_blocks() {
-        // Old engine / engine down: the read surface itself errors.
+        // Old engine / engine down / task absent: the read surface itself
+        // errors — `Unverifiable`, so the lane path can suppress it while a
+        // direct claim still warns (ruling be2e68d7 F1).
         let got: Result<serde_json::Value, String> = Err("unknown subcommand".to_string());
         match super::assess_plan_freshness(&got, |_| Ok(Vec::new())) {
-            super::PlanFreshness::Warn(problems) => {
+            super::PlanFreshness::Unverifiable(problems) => {
                 assert!(problems[0].contains("could not be verified"));
             }
-            other => panic!("expected an unverifiable warning, got {other:?}"),
+            other => panic!("expected an unverifiable outcome, got {other:?}"),
         }
-        // A response without the task object is unverifiable the same way.
+        // A malformed response from a LIVE engine stays a loud `Warn` — the
+        // lane claim that follows would NOT soft-fail, so nothing else would
+        // surface the problem.
         let malformed: Result<serde_json::Value, String> = Ok(serde_json::json!({ "ok": true }));
         match super::assess_plan_freshness(&malformed, |_| Ok(Vec::new())) {
             super::PlanFreshness::Warn(problems) => {
@@ -4662,6 +4758,41 @@ mod tests {
             }
             other => panic!("expected an unverifiable warning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lane_start_suppresses_only_the_unverifiable_outcome() {
+        let unverifiable = || super::PlanFreshness::Unverifiable(vec!["down".to_string()]);
+        let warn = || super::PlanFreshness::Warn(vec!["stale".to_string()]);
+        // Lane path (`suppress_unverifiable`): a soft-failed `task get` stays
+        // calm — the claim's own "skipping task claim" note covers it…
+        assert_eq!(
+            super::freshness_problems_to_print(unverifiable(), true),
+            None
+        );
+        // …but a REAL freshness problem still prints on the lane path.
+        assert_eq!(
+            super::freshness_problems_to_print(warn(), true),
+            Some(vec!["stale".to_string()])
+        );
+        // Direct claims print both.
+        assert_eq!(
+            super::freshness_problems_to_print(unverifiable(), false),
+            Some(vec!["down".to_string()])
+        );
+        assert_eq!(
+            super::freshness_problems_to_print(warn(), false),
+            Some(vec!["stale".to_string()])
+        );
+        // Silent outcomes stay silent everywhere.
+        assert_eq!(
+            super::freshness_problems_to_print(super::PlanFreshness::Fresh, false),
+            None
+        );
+        assert_eq!(
+            super::freshness_problems_to_print(super::PlanFreshness::NotCouncil, false),
+            None
+        );
     }
 
     #[test]

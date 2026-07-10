@@ -9,7 +9,9 @@
 //! convention as `BlackboardEntry.lastWriterId`), never emitted as `null`.
 //!
 //! `task.list` items are a `Task` plus `"eventCount"`. `task.get` returns
-//! `{"task": Task, "events": TaskEvent[]}` (last 20, newest-first).
+//! `{"task": Task, "events": TaskEvent[], "latestPlanCheck": TaskEvent|null}`
+//! (events: last 20, newest-first; latestPlanCheck: newest by kind,
+//! uncapped).
 //! `TaskEvent` = `{"id","taskId","kind","actorAgentId"?,"payload","createdAt"}`
 //! — `payload` is parsed from its stored TEXT column into a real JSON object;
 //! an unparseable/non-object payload becomes `{}` rather than erroring (a
@@ -757,6 +759,12 @@ struct GetReq {
 
 /// Fetch one task plus its last 20 events (newest-first). Returns
 /// [`AppError::NotFound`] when the task does not exist.
+///
+/// `latestPlanCheck` is an additive field found by KIND via a dedicated
+/// lookup, so it survives any number of newer events (ruling be2e68d7 F3:
+/// the CLI freshness preflight must never false-warn "no plan-check" just
+/// because 20+ events landed after the newest check). `null` when the task
+/// has no successful plan-check.
 pub async fn get(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: GetReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -766,10 +774,13 @@ pub async fn get(state: &AppState, payload: Value) -> Result<Value, AppError> {
         .await?
         .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", req.slug)))?;
     let events = repo::task::events_for(&state.db, &row.id, LAST_EVENTS_LIMIT).await?;
+    let latest_plan_check =
+        repo::task::latest_event_of_kind(&state.db, &row.id, "plan_check").await?;
 
     Ok(json!({
         "task": task_to_json(&row),
         "events": events.iter().map(task_event_to_json).collect::<Vec<_>>(),
+        "latestPlanCheck": latest_plan_check.as_ref().map(task_event_to_json),
     }))
 }
 
@@ -1950,6 +1961,35 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "an over-cap list must not leave a partial task behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_watchers_exactly_at_cap_is_accepted() {
+        // Ruling be2e68d7 F5: the cap needs BOTH sides pinned — cap+1
+        // rejection (test above) and exactly-at-cap acceptance, so an
+        // off-by-one toward strictness cannot false-pass.
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+        let mut watchers: Vec<String> = Vec::with_capacity(MAX_WATCHERS);
+        for i in 0..MAX_WATCHERS {
+            watchers.push(fixture_instance(&state, &ws, &format!("W{i}")).await);
+        }
+
+        let out = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": watchers
+            }),
+        )
+        .await
+        .expect("exactly MAX_WATCHERS watchers must be accepted");
+        // Owner first plus every requested watcher — all subscriptions landed.
+        assert_eq!(
+            out["watcherAgentIds"].as_array().expect("array").len(),
+            MAX_WATCHERS + 1
         );
     }
 
@@ -4358,6 +4398,63 @@ mod tests {
         assert_eq!(payload["planPath"], json!(PLAN_PATH));
         assert_eq!(payload["planFingerprint"], json!(fingerprint));
         assert_eq!(payload["baseSha"], json!(PLAN_SHA));
+    }
+
+    #[tokio::test]
+    async fn get_latest_plan_check_survives_the_capped_event_window() {
+        // Ruling be2e68d7 F3: the CLI preflight reads `latestPlanCheck`, a
+        // dedicated by-kind lookup — a council task that accrues 20+ events
+        // after its newest successful check must NOT look check-less just
+        // because the capped `events` window no longer holds the row.
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let m1 = fixture_instance(&state, &ws, "MemberA").await;
+        let m2 = fixture_instance(&state, &ws, "MemberB").await;
+        let plan = fixture_plan(&owner, &[m1, m2], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        // Before any check the field is an authoritative null, not absent.
+        let got = get(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("get failed");
+        assert!(got
+            .as_object()
+            .expect("object")
+            .contains_key("latestPlanCheck"));
+        assert!(got["latestPlanCheck"].is_null());
+
+        plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &plan, fixture_files()),
+        )
+        .await
+        .expect("plan_check failed");
+        for i in 0..=LAST_EVENTS_LIMIT {
+            note(
+                &state,
+                json!({ "workspaceId": ws, "slug": "t1", "actorId": owner, "text": format!("n{i}") }),
+            )
+            .await
+            .expect("note failed");
+        }
+
+        let got = get(&state, json!({ "workspaceId": ws, "slug": "t1" }))
+            .await
+            .expect("get failed");
+        let events = got["events"].as_array().expect("events array");
+        assert_eq!(events.len(), LAST_EVENTS_LIMIT as usize);
+        assert!(
+            events.iter().all(|e| e["kind"] != json!("plan_check")),
+            "precondition: the capped window must have lost the plan_check row"
+        );
+        let fingerprint = format!("{:x}", Sha256::digest(plan.as_bytes()));
+        assert_eq!(got["latestPlanCheck"]["kind"], json!("plan_check"));
+        assert_eq!(
+            got["latestPlanCheck"]["payload"]["planFingerprint"],
+            json!(fingerprint)
+        );
+        assert_eq!(got["latestPlanCheck"]["actorAgentId"], json!(owner));
     }
 
     #[tokio::test]

@@ -324,6 +324,33 @@ pub async fn events_for(
         .map_err(cb_err)
 }
 
+/// The newest event of one `kind` for a task, found by kind rather than by
+/// scanning a bounded window — the dedicated lookup behind `task.get`'s
+/// `latestPlanCheck` field (ruling be2e68d7 F3: the capped `events` window
+/// loses a `plan_check` once 20+ newer events land on the task).
+pub async fn latest_event_of_kind(
+    pool: &SqlitePool,
+    task_id: &str,
+    kind: &str,
+) -> sqlx::Result<Option<TaskEventRow>> {
+    QueryBuilder::<Sqlite>::table("task_event")
+        .select([
+            "id",
+            "task_id",
+            "kind",
+            "actor_agent_id",
+            "payload",
+            "created_at",
+        ])
+        .where_eq("task_id", task_id)
+        .where_eq("kind", kind)
+        .order_by("created_at", Order::Desc)
+        .limit(1)
+        .fetch_optional::<TaskEventRow, _>(pool)
+        .await
+        .map_err(cb_err)
+}
+
 /// Every `gate`/`challenge`/`ruling` event across a workspace's tasks,
 /// oldest-first. Backs `task.list`'s derived board fields (`lastGate`,
 /// `challenges`) with ONE query instead of one `task.get` per row (the plan's
