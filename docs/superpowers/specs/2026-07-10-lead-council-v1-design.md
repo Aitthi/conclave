@@ -31,7 +31,7 @@ The goal is not a new chat room. The goal is for three or more Lead agents to de
 - Deliberation must survive context clears. Shared context is pulled from `task brief`, not pushed as copied transcripts.
 - Implementers receive the settled work packet, not the council conversation.
 - V1 adds no council table, message room, voting state, task co-owner field, or frontend view.
-- V1 adds no database migration and no parsing dependency.
+- V1 adds no parsing dependency and exactly one database migration: `0018_task_event_plan_check.sql`, widening the `task_event.kind` CHECK set (see Storage; ruling 06a0c35b).
 - A new linter warns at the claim boundary before it is trusted enough to block work.
 - Any later `src/` follow-up remains subject to the standing UI pixel gate.
 
@@ -142,11 +142,12 @@ This additive command validates and fingerprints the canonical plan. It is regis
 
 ## Storage
 
-No migration is needed:
+One migration is required — nothing else changes shape (ruling 06a0c35b on challenge 731c8b3c, amending this section's original "no migration" claim, which assumed `task_event.kind` was open-ended and was disproven empirically at `0012_task_system.sql:20`):
 
+- migration `0018_task_event_plan_check.sql` rebuilds `task_event` to widen the `kind` CHECK set with `'plan_check'`, preserving all rows and `idx_task_event_task` (SQLite cannot alter a CHECK in place);
 - task ownership, plan snapshot, boundary, and canon remain on `task`;
 - council membership uses the plan header plus existing `task_watch` rows;
-- evidence, challenges, rulings, gate results, and plan fingerprints use existing append-only `task_event` rows;
+- evidence, challenges, rulings, gate results, and plan fingerprints use append-only `task_event` rows — `plan_check` as its own typed kind, because encoding it under `note`/`gate` would bake mistyped rows into the permanent ledger;
 - the repo plan named by `planPath` remains the only mutable plan.
 
 ## UI
@@ -184,4 +185,4 @@ V1 makes no `src/` changes. Multiple Lead definitions and supervisor forests alr
 - **False freshness:** hash exact bytes from the checkout the implementer will use.
 - **Brittle prose parsing:** validate the strict header and required headings; prose remains rationale rather than validator input.
 - **Watcher fan-out:** cap watcher count and deduplicate ids before insert.
-- **Context regression in skills:** keep the canonical protocol concise and point to this spec rather than copying it into every sidecar.
+- **Context regression in skills:** keep the canonical protocol in the sidecars concise and self-contained. Human directive 2026-07-10 (blackboard `directive:no-docs-paths-in-skills`): SKILL.md files must not reference `docs/superpowers/...` paths — skills are app-bundled templates regenerated per workspace. A council member finds this spec through the task header's `readingOrder`, never through a skill.

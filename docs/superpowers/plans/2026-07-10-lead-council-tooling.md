@@ -15,7 +15,7 @@ Add the minimum engine and CLI support that makes the composition-first Lead cou
 
 ## Non-goals
 
-- Do not add or migrate database tables.
+- Database changes are limited to exactly ONE ruled exception (ruling 06a0c35b on challenge 731c8b3c): additive migration `src-tauri/src/engine/migrations/0018_task_event_plan_check.sql` — rebuild `task_event` widening the `kind` CHECK with `'plan_check'`, preserving all rows and `idx_task_event_task` — plus its `version<18` gate in `src-tauri/src/engine/db.rs`. Both paths are OUTSIDE this task's immutable boundary and land at integration as a separate scoped commit attributed to the implementer (precedent b8c2e56). No other table is added or migrated.
 - Do not add a council domain object, room, broadcast message, vote, quorum, orchestrator, task co-owner, or mutable task-plan command.
 - Do not print full plans from `task brief`.
 - Do not modify `src/`, frontend IPC types, fixtures, or views.
@@ -84,7 +84,7 @@ Add the minimum engine and CLI support that makes the composition-first Lead cou
 
 ### 6. Tool documentation
 
-Update `src-tauri/skills/tool-map/SKILL.md` with the exact `task create --watchers` and `task plan-check` syntax, the dual event behavior when wrapped in `task gate`, the bounded-header invariant, and the warning-only v1 claim behavior. Point to the design spec instead of copying its full schema.
+Update `src-tauri/skills/tool-map/SKILL.md` with the exact `task create --watchers` and `task plan-check` syntax, the dual event behavior when wrapped in `task gate`, the bounded-header invariant, and the warning-only v1 claim behavior. The section must be self-contained and bounded: per the human directive of 2026-07-10 (blackboard `directive:no-docs-paths-in-skills`), SKILL.md files must NOT reference `docs/superpowers/...` paths — skills are app-bundled templates regenerated per workspace. Do not copy the full schema either; the command syntax and invariants above are the whole contract a tool user needs.
 
 ## Verification
 
@@ -122,7 +122,7 @@ The task must contain a successful typed `plan_check` event and a successful ord
 - A plan update command creates a second mutable plan copy and repeats the drift already observed in the `rtk` program.
 - Comparing only git HEAD misses uncommitted plan edits and can warn on unrelated commits.
 - Blocking claim in v1 gives a new validator authority to halt the workspace before dogfood calibrates it.
-- A schema migration is unnecessary because watchers and task events already store the required durable facts.
+- ~~A schema migration is unnecessary because watchers and task events already store the required durable facts.~~ Disproven by challenge 731c8b3c (`task_event.kind` is CHECK-pinned); superseded by the single ruled migration 0018 recorded in Non-goals. Encoding `plan_check` under an existing kind stays rejected — it bakes mistyped rows into the permanent ledger.
 
 ## Escalation
 

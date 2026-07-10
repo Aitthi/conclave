@@ -39,7 +39,7 @@ Encode the settled Lead council protocol in the two sidecars that every chair an
 5. In `src-tauri/skills/agent-loop/SKILL.md`, add `Council decisions stay on the task` beside the existing loop-record rules.
 6. Require every material position to use a challenge, every settled outcome to use a ruling plus a repo-plan amendment, and all members to stop after two no-new-evidence rounds.
 7. Prohibit copying the debate transcript into downstream plans or implementer messages.
-8. Point both concise sections to `docs/superpowers/specs/2026-07-10-lead-council-v1-design.md` for the full contract.
+8. ~~Point both concise sections to the design spec path for the full contract.~~ SUPERSEDED by human directive 2026-07-10 (blackboard `directive:no-docs-paths-in-skills`): skills must not reference `docs/superpowers/...` paths. The sections instead say the full contract is found via the council task's execution header/ledger. (Originally executed as written in cb62a58e; pointer lines corrected in the follow-up commit noted on the task ledger.)
 9. Remove or tighten any newly duplicated wording so the sidecars remain bounded.
 
 ## Verification
