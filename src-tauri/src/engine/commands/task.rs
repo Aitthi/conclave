@@ -1702,7 +1702,10 @@ mod tests {
         .expect_err("unknown watcher must fail");
         assert!(matches!(err, AppError::NotFound(_)));
         assert!(
-            repo::task::get(&state.db, &ws, "t1").await.unwrap().is_none(),
+            repo::task::get(&state.db, &ws, "t1")
+                .await
+                .unwrap()
+                .is_none(),
             "a rejected watcher must not leave a partial task behind"
         );
     }
@@ -1727,7 +1730,10 @@ mod tests {
         .expect_err("cross-workspace watcher must fail");
         assert!(matches!(err, AppError::Invalid(_)));
         assert!(
-            repo::task::get(&state.db, &ws, "t1").await.unwrap().is_none(),
+            repo::task::get(&state.db, &ws, "t1")
+                .await
+                .unwrap()
+                .is_none(),
             "a rejected watcher must not leave a partial task behind"
         );
     }
@@ -1750,7 +1756,10 @@ mod tests {
         .expect_err("over-cap watcher list must fail");
         assert!(matches!(err, AppError::Invalid(_)));
         assert!(
-            repo::task::get(&state.db, &ws, "t1").await.unwrap().is_none(),
+            repo::task::get(&state.db, &ws, "t1")
+                .await
+                .unwrap()
+                .is_none(),
             "an over-cap list must not leave a partial task behind"
         );
     }
@@ -2551,7 +2560,11 @@ mod tests {
             .await
             .expect("brief failed");
         let rows = brief["openChallenges"].as_array().expect("array");
-        assert_eq!(rows.len(), 1, "t2's challenge must not leak into t1's brief");
+        assert_eq!(
+            rows.len(),
+            1,
+            "t2's challenge must not leak into t1's brief"
+        );
         assert_eq!(rows[0]["claim"], json!("claim-t1"));
         assert_eq!(rows[0]["evidence"], json!("evidence-t1"));
     }
@@ -2581,9 +2594,12 @@ mod tests {
             .expect("challenge failed");
         }
 
-        let brief = brief(&state, json!({ "workspaceId": ws, "slug": "t1", "limit": 1 }))
-            .await
-            .expect("brief failed");
+        let brief = brief(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "limit": 1 }),
+        )
+        .await
+        .expect("brief failed");
         let rows = brief["openChallenges"].as_array().expect("array");
         assert_eq!(
             rows.len(),

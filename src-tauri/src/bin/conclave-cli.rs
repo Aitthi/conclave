@@ -3839,7 +3839,15 @@ mod tests {
         assert_eq!(
             out,
             v(&[
-                "task", "create", "ws1", "t1", "Title", "--watchers", "a,b", "--owner", "self1"
+                "task",
+                "create",
+                "ws1",
+                "t1",
+                "Title",
+                "--watchers",
+                "a,b",
+                "--owner",
+                "self1"
             ])
         );
     }
@@ -3847,10 +3855,21 @@ mod tests {
     #[test]
     fn task_create_watchers_survive_with_explicit_owner() {
         let argv = v(&[
-            "task", "create", "ws1", "t1", "Title", "--owner", "other", "--watchers", "a,b",
+            "task",
+            "create",
+            "ws1",
+            "t1",
+            "Title",
+            "--owner",
+            "other",
+            "--watchers",
+            "a,b",
         ]);
         let out = expand_self_args(argv.clone(), Some("self1")).unwrap();
-        assert_eq!(out, argv, "explicit owner + watchers must pass through as-is");
+        assert_eq!(
+            out, argv,
+            "explicit owner + watchers must pass through as-is"
+        );
     }
 
     #[test]
