@@ -106,7 +106,7 @@ dependencies = [
  "serde",
  "tree-sitter",
  "tree-sitter-bash",
- "tree-sitter-c",
+ "tree-sitter-c 0.24.2",
  "tree-sitter-c-sharp",
  "tree-sitter-cpp",
  "tree-sitter-css",
@@ -647,6 +647,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tree-sitter",
+ "tree-sitter-c 0.23.4",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-python",
  "tree-sitter-rust",
@@ -5615,6 +5619,16 @@ name = "tree-sitter-bash"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afd2b1bf1585dc2ef6d69e87d01db8adb059006649dd5f96f31aa789ee6e9c71"
 dependencies = [
  "cc",
  "tree-sitter-language",

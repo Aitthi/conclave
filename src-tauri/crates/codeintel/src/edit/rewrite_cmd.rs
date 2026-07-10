@@ -134,8 +134,12 @@ fn parse_lang_filter(lang: Option<&str>) -> Result<Option<CgLang>> {
             "tsx" => Ok(Some(CgLang::Tsx)),
             "javascript" => Ok(Some(CgLang::JavaScript)),
             "python" => Ok(Some(CgLang::Python)),
+            "go" => Ok(Some(CgLang::Go)),
+            "c" => Ok(Some(CgLang::C)),
+            "cpp" => Ok(Some(CgLang::Cpp)),
+            "java" => Ok(Some(CgLang::Java)),
             other => Err(anyhow::anyhow!(
-                "--lang {other:?} not supported; valid: rust, typescript, tsx, javascript, python"
+                "--lang {other:?} not supported; valid: rust, typescript, tsx, javascript, python, go, c, cpp, java"
             )),
         },
     }

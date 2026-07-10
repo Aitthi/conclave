@@ -7,6 +7,10 @@ pub enum Language {
     Tsx,
     JavaScript,
     Python,
+    Go,
+    C,
+    Cpp,
+    Java,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +28,10 @@ impl Language {
             Language::Tsx => "tsx",
             Language::JavaScript => "javascript",
             Language::Python => "python",
+            Language::Go => "go",
+            Language::C => "c",
+            Language::Cpp => "cpp",
+            Language::Java => "java",
         }
     }
 
@@ -34,6 +42,10 @@ impl Language {
             "tsx" => Some(Language::Tsx),
             "js" | "mjs" | "cjs" => Some(Language::JavaScript),
             "py" => Some(Language::Python),
+            "go" => Some(Language::Go),
+            "c" | "h" => Some(Language::C),
+            "cc" | "cpp" | "cxx" | "hpp" | "hh" => Some(Language::Cpp),
+            "java" => Some(Language::Java),
             _ => None,
         }
     }
@@ -45,6 +57,10 @@ impl Language {
             Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),
+            Language::Go => tree_sitter_go::LANGUAGE.into(),
+            Language::C => tree_sitter_c::LANGUAGE.into(),
+            Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Language::Java => tree_sitter_java::LANGUAGE.into(),
         }
     }
 
@@ -78,6 +94,18 @@ impl Language {
                 Some(include_str!("queries/python_imports.scm"))
             }
             (Language::Python, QueryKind::Refs) => Some(include_str!("queries/python_refs.scm")),
+            (Language::Go, QueryKind::Defs) => Some(include_str!("queries/go_defs.scm")),
+            (Language::Go, QueryKind::Imports) => Some(include_str!("queries/go_imports.scm")),
+            (Language::Go, QueryKind::Refs) => Some(include_str!("queries/go_refs.scm")),
+            (Language::C, QueryKind::Defs) => Some(include_str!("queries/c_defs.scm")),
+            (Language::C, QueryKind::Imports) => Some(include_str!("queries/c_imports.scm")),
+            (Language::C, QueryKind::Refs) => Some(include_str!("queries/c_refs.scm")),
+            (Language::Cpp, QueryKind::Defs) => Some(include_str!("queries/cpp_defs.scm")),
+            (Language::Cpp, QueryKind::Imports) => Some(include_str!("queries/cpp_imports.scm")),
+            (Language::Cpp, QueryKind::Refs) => Some(include_str!("queries/cpp_refs.scm")),
+            (Language::Java, QueryKind::Defs) => Some(include_str!("queries/java_defs.scm")),
+            (Language::Java, QueryKind::Imports) => Some(include_str!("queries/java_imports.scm")),
+            (Language::Java, QueryKind::Refs) => Some(include_str!("queries/java_refs.scm")),
         }
     }
 }

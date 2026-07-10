@@ -5,7 +5,7 @@
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::replacer::{Replacer, TemplateFix};
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, Visitor};
-use ast_grep_language::{JavaScript, Python, Rust, Tsx, TypeScript};
+use ast_grep_language::{C, Cpp, Go, Java, JavaScript, Python, Rust, Tsx, TypeScript};
 use crate::lang::Language as CgLang;
 
 use crate::edit::error::AstEditError;
@@ -37,6 +37,10 @@ pub fn rewrite_file(
         CgLang::Tsx => collect_sites(source, pattern, rewrite, Tsx, lang.name()),
         CgLang::JavaScript => collect_sites(source, pattern, rewrite, JavaScript, lang.name()),
         CgLang::Python => collect_sites(source, pattern, rewrite, Python, lang.name()),
+        CgLang::Go => collect_sites(source, pattern, rewrite, Go, lang.name()),
+        CgLang::C => collect_sites(source, pattern, rewrite, C, lang.name()),
+        CgLang::Cpp => collect_sites(source, pattern, rewrite, Cpp, lang.name()),
+        CgLang::Java => collect_sites(source, pattern, rewrite, Java, lang.name()),
     }
 }
 
