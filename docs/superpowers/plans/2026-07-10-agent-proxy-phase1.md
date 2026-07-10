@@ -293,7 +293,7 @@ Behavior this task: EVERY request (all methods/paths — including `/v1/messages
 
 **Files:** Modify `src-tauri/src/engine/runtime/ctx_proxy.rs`
 
-**Interfaces — Consumes:** all lane-A functions. **Produces:** internal `fn rewrite_body(rt: &ProxyRuntime, body: &[u8]) -> RewriteOutcome { body: Vec<u8>, elisions: usize, bytes_saved: usize, model: String, decision: &'static str }` and `struct UsageTotals { input_tokens, cache_read, cache_creation, output_tokens: Option<u64> }` extracted by the tee.
+**Interfaces — Consumes:** all lane-A functions. **Produces:** internal `fn rewrite_body(rt: &ProxyRuntime, body: &[u8]) -> RewriteOutcome { body: Vec<u8>, elisions: usize, bytes_saved: usize, model: String, decision: &'static str }` and `struct UsageTotals { input_tokens, cache_read, cache_creation, output_tokens: Option<u64> }` extracted by the tee. `decision` takes EXACTLY the Task 9 column domain — `passthrough | apply-frozen | reevaluate | parse-error | validate-reject` (Task 9's SQL comment is the single source of truth; amendment A3).
 
 Pipeline for `POST /v1/messages` (exact path only) when mode != off:
 1. Parse body → `Value`; on error: forward original (fail-open), `decision="parse-error"`.
@@ -303,7 +303,7 @@ Pipeline for `POST /v1/messages` (exact path only) when mode != off:
 5. mode `log` → forward ORIGINAL but still compute + report what WOULD be saved; mode `rewrite` → forward rewritten bytes.
 6. Response tee: wrap the upstream bytes stream; accumulate line fragments; on `data: ` JSON lines read `message_start.message.usage` (input/cache_read/cache_creation) and final `message_delta.usage.output_tokens`; when the stream ends, write `conv.last_input_tokens = Some(input + cache_read + cache_creation)` back through the ledger and hand `UsageTotals` to the metrics hook (Task 9 fills it in; this task leaves a `fn on_request_complete(...)` stub that only updates the ledger). The tee must forward each chunk BEFORE parsing it.
 
-- [ ] **Step 1: failing tests:** (a) unit-test `rewrite_body` with a >70%-of-window fixture containing one identical-read pair → `decision="rewrite"`, `elisions==1`, output smaller, output parses as JSON with the stub in place; (b) small request → `decision="passthrough"`, byte-identical output; (c) garbage body → original bytes back; (d) tee unit test over a canned SSE byte-stream split at awkward boundaries → correct `UsageTotals`.
+- [ ] **Step 1: failing tests:** (a) unit-test `rewrite_body` with a >70%-of-window fixture containing one identical-read pair → `decision="reevaluate"` (the first high-water crossing), `elisions==1`, output smaller, output parses as JSON with the stub in place; (b) small request → `decision="passthrough"`, byte-identical output; (c) garbage body → original bytes back with `decision="parse-error"`; (d) tee unit test over a canned SSE byte-stream split at awkward boundaries → correct `UsageTotals`.
 - [ ] **Steps 2–4:** FAIL → implement → PASS · **Step 5:** commit `feat(engine): ctx proxy rewrite pipeline + SSE usage tee`
 
 ### Task 9: Metrics — migration 0019 + repo + wiring
@@ -404,4 +404,5 @@ Sandbox: in `sandbox_config.rs`, wherever the Claude settings (`claude_sandbox_s
 ## Amendments
 
 - **A1 (2026-07-11, from Mellow's lane-A review note 2c042359, for Task 8):** a re-evaluation may produce stubs whose `kept_msg` pointers reference messages that a LATER re-evaluation also elides ("stale stub chains"). This is CORRECT and lossless (the chain always ends at surviving bytes or a re-readable file). Do NOT "fix" it by rewriting previously frozen stub text — frozen elisions are byte-immutable once applied (D5 prefix stability).
+- **A3 (2026-07-11, ruling on Dabin's challenge 6acd4a97):** Task 8's test (a) originally asserted `decision="rewrite"`, a value absent from Task 9's persisted domain — a plan defect (found by Dabin). Ruled: `decision` is the policy/rewrite-path outcome; its domain is exactly Task 9's SQL comment (`passthrough | apply-frozen | reevaluate | parse-error | validate-reject`); the first high-water rewrite asserts `reevaluate`. `mode` stays a separate column. Task 8 text amended in place.
 - **A2 (2026-07-11, same source):** the superseded-read rule does not check whether the later Edit/Write result had `is_error: true` (a failed Edit doesn't actually change the file, so the elided Read was not truly superseded — but the stub only says "re-read the file", which stays safe). Accepted for v1; do not change in Lane B/C. Candidate refinement for Phase 2.
