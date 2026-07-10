@@ -537,6 +537,14 @@ async fn uds_task_call(argv: Vec<String>, self_instance: Option<&str>) -> Result
 /// to `in_progress`. Any failure (Lane A not merged, task absent, app down) is
 /// a note, not an error — the worktree is already usable.
 async fn lane_task_wiring(ws: &str, slug: &str, self_instance: Option<&str>) {
+    // Same freshness preflight as a direct claim (lead-council v1, RULING
+    // 2987c0b6), but hashed against the plan INSIDE the just-created
+    // worktree — that is the checkout the implementer will read, so the
+    // fingerprint stays honest even when main has uncommitted plan edits
+    // (spec "Freshness Warning": lane start creates its worktree first,
+    // then hashes there). Warning-only; the claim below is sent unchanged.
+    claim_freshness_preflight(ws, slug, Some(&lane_worktree_root(slug)), self_instance).await;
+
     let claim = vec![
         "task".to_string(),
         "claim".to_string(),
@@ -2058,6 +2066,10 @@ struct MinPlanHeader {
     base_sha: Option<String>,
     consumes: Vec<String>,
     reading_order: Vec<String>,
+    /// Whether the header carries a `council` object. The claim-freshness
+    /// preflight (edit group 5) only speaks up for council-tagged tasks —
+    /// non-council claims stay noise-free.
+    has_council: bool,
 }
 
 /// Best-effort extraction from a `conclave-plan:v1` ten-line header. `None`
@@ -2096,6 +2108,7 @@ fn parse_min_plan_header(plan: &str) -> Option<MinPlanHeader> {
         base_sha: v.get("baseSha").and_then(Value::as_str).map(str::to_string),
         consumes: strings("consumes"),
         reading_order: strings("readingOrder"),
+        has_council: v.get("council").is_some(),
     })
 }
 
@@ -2283,6 +2296,230 @@ fn render_plan_check_result(result: &Value) -> String {
         n("anchorCount"),
         n("gateCount"),
     )
+}
+
+// ── task claim freshness preflight (lead-council v1, edit group 5) ─────────
+//
+// RULING 2987c0b6 (binding): freshness is a CLI-LOCAL preflight over the
+// EXISTING task read surface (`task get`) and the newest typed `plan_check`
+// event; the CLI then sends the existing five-word `task claim` argv
+// UNCHANGED — no fingerprint argv word, no new `ClaimReq` field. A missing or
+// unverifiable preflight WARNS (stderr only) and the claim proceeds; V1 never
+// refuses a claim. This preserves compatibility with the pinned `cli.exec`
+// allowlist and old running engines.
+//
+// INTEGRATION NOTE (release): after installing this build, restart the
+// Conclave app IMMEDIATELY before using `task plan-check` or task
+// create-with-watchers — both need the new engine surface (migration 0018 +
+// `task.planCheck`). The existing `task claim` verb keeps working across
+// version skew: against an old engine this preflight is merely unverifiable —
+// it warns and the ordinary claim still proceeds.
+
+/// Outcome of the claim-freshness preflight (spec "Freshness Warning").
+#[derive(Debug, PartialEq)]
+enum PlanFreshness {
+    /// Not a council-tagged task (no parseable `conclave-plan:v1` header, or
+    /// a header without a `council` object) — no preflight noise at all.
+    NotCouncil,
+    /// Council-tagged and everything matches — silent too.
+    Fresh,
+    /// Council-tagged with freshness problems, or the preflight itself could
+    /// not be verified — warn loudly on stderr, never block the claim.
+    Warn(Vec<String>),
+}
+
+/// The canonical ten-line header block (CR-stripped, `\n`-joined) — the
+/// minimal client-side mirror of `engine::plan_contract::canonical_header`
+/// (the bin cannot import it; same reasoning as [`parse_min_plan_header`],
+/// and this side only ever WARNS, so a disagreement can never wrongly pass
+/// the engine's validator of record). `None` under ten lines.
+fn min_canonical_header(plan: &str) -> Option<String> {
+    let lines: Vec<&str> = plan
+        .split('\n')
+        .take(10)
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    (lines.len() == 10).then(|| lines.join("\n"))
+}
+
+/// The newest successful `plan_check` fingerprint from a `task get`
+/// envelope. `task get` returns `events` newest-first, so the first
+/// `plan_check` row is the latest — and the engine appends the typed event
+/// ONLY on a successful check, so presence means success.
+fn latest_plan_check_fingerprint(envelope: &Value) -> Option<String> {
+    envelope
+        .get("events")?
+        .as_array()?
+        .iter()
+        .find(|e| e.get("kind").and_then(Value::as_str) == Some("plan_check"))?
+        .pointer("/payload/planFingerprint")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// First 12 hex chars of a fingerprint for one-line warning text.
+fn short_fp(fp: &str) -> &str {
+    fp.get(..12).unwrap_or(fp)
+}
+
+/// Assess plan freshness for a claim from a `task get` result and a plan
+/// reader bound to the checkout the implementer will READ (the invoking
+/// checkout for a direct claim; the fresh lane worktree for `lane start`).
+/// Pure given the reader, so every warning path is unit-testable.
+fn assess_plan_freshness(
+    task_get: &Result<Value, String>,
+    read_plan: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> PlanFreshness {
+    // Unverifiable read surface (engine down, old-engine error, malformed
+    // response): council status itself is unknowable, so warn rather than
+    // silently skip — the claim still proceeds (spec: "the preflight is
+    // unverifiable and warns, but the ordinary claim still proceeds").
+    let envelope = match task_get {
+        Ok(v) => v,
+        Err(e) => {
+            return PlanFreshness::Warn(vec![format!(
+                "the preflight could not be verified: reading the task failed ({e})"
+            )]);
+        }
+    };
+    let Some(task) = envelope.get("task") else {
+        return PlanFreshness::Warn(vec![
+            "the preflight could not be verified: malformed `task get` response (no task object)"
+                .to_string(),
+        ]);
+    };
+    let stored_plan = task.get("plan").and_then(Value::as_str).unwrap_or("");
+    // No parseable v1 header (incl. legacy free-text plans) or no `council`
+    // object: not council-tagged — stay silent.
+    let Some(stored) = parse_min_plan_header(stored_plan) else {
+        return PlanFreshness::NotCouncil;
+    };
+    if !stored.has_council {
+        return PlanFreshness::NotCouncil;
+    }
+
+    let mut problems = Vec::new();
+    let checked = latest_plan_check_fingerprint(envelope);
+    if checked.is_none() {
+        problems.push(
+            "no successful `task plan-check` event exists on this task — run \
+             `conclave task plan-check <ws> <slug>` before claiming"
+                .to_string(),
+        );
+    }
+    match &stored.plan_path {
+        None => problems.push(
+            "the stored plan header names no planPath; the canonical plan cannot be resolved"
+                .to_string(),
+        ),
+        Some(plan_path) => match read_plan(plan_path) {
+            Err(e) => {
+                problems.push(format!("cannot read the canonical plan `{plan_path}`: {e}"));
+            }
+            Ok(bytes) => {
+                let fingerprint = sha256_hex(&bytes);
+                if let Some(checked) = &checked {
+                    if *checked != fingerprint {
+                        problems.push(format!(
+                            "the plan changed since its last successful plan-check \
+                             (checked {}…, this checkout now hashes to {}…)",
+                            short_fp(checked),
+                            short_fp(&fingerprint)
+                        ));
+                    }
+                }
+                let current = String::from_utf8_lossy(&bytes);
+                if min_canonical_header(&current) != min_canonical_header(stored_plan) {
+                    problems.push(
+                        "the execution header in this checkout differs from the immutable \
+                         stored header"
+                            .to_string(),
+                    );
+                }
+            }
+        },
+    }
+    if problems.is_empty() {
+        PlanFreshness::Fresh
+    } else {
+        PlanFreshness::Warn(problems)
+    }
+}
+
+/// Print the loud stderr block for a stale/unverifiable preflight. Every line
+/// carries the `warning:` prefix (the bin's stderr convention is prefixed
+/// one-liners; a fenced multi-line block is what makes this unmissable in an
+/// agent transcript). stdout is untouched — scripts parse claim/lane-start
+/// stdout — and the claim itself is never blocked.
+fn print_plan_freshness_warning(ws: &str, slug: &str, problems: &[String]) {
+    eprintln!("warning: ================ PLAN FRESHNESS WARNING ================");
+    eprintln!("warning: task '{slug}' (workspace '{ws}'):");
+    for p in problems {
+        eprintln!("warning:   - {p}");
+    }
+    eprintln!("warning: The claim proceeds anyway. Verify you are reading the");
+    eprintln!("warning: canonical plan, then re-run `conclave task plan-check`");
+    eprintln!("warning: before implementing.");
+    eprintln!("warning: ========================================================");
+}
+
+/// `Some((ws, slug))` only for the exact public `task claim <ws> <slug>`
+/// form. Anything else (wrong arity, already-expanded wire forms, other
+/// verbs) skips the preflight and falls through to the ordinary paths
+/// untouched — the preflight must never change what gets sent or rejected.
+fn direct_claim_target(argv: &[String]) -> Option<(&str, &str)> {
+    match argv {
+        [cmd, sub, ws, slug] if cmd == "task" && sub == "claim" => {
+            Some((ws.as_str(), slug.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// The lane worktree directory `lane start` creates (relative to the
+/// invoking cwd, exactly like `lane_start`'s `git worktree add` path) — the
+/// checkout root the lane preflight hashes against.
+fn lane_worktree_root(slug: &str) -> PathBuf {
+    PathBuf::from(format!(".claude/worktrees/{slug}"))
+}
+
+/// Run the freshness preflight before a claim: load the task over the
+/// EXISTING `task get` surface, recompute the plan fingerprint in
+/// `checkout_root` (`None` = resolve the INVOKING checkout's git toplevel,
+/// for a direct claim; `Some` = an explicit root, the fresh worktree for
+/// `lane start`), and warn on stderr when anything is off. Infallible by
+/// design — whatever happens here, the caller sends the existing five-word
+/// claim argv unchanged afterwards.
+async fn claim_freshness_preflight(
+    ws: &str,
+    slug: &str,
+    checkout_root: Option<&std::path::Path>,
+    self_instance: Option<&str>,
+) {
+    let got = uds_task_call(
+        vec![
+            "task".to_string(),
+            "get".to_string(),
+            ws.to_string(),
+            slug.to_string(),
+        ],
+        self_instance,
+    )
+    .await;
+    let read_plan = |rel: &str| -> Result<Vec<u8>, String> {
+        let root = match checkout_root {
+            Some(r) => r.to_path_buf(),
+            None => {
+                let cwd =
+                    std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?;
+                plan_check_checkout_root(&cwd)?
+            }
+        };
+        read_checkout_file(&root, rel)
+    };
+    if let PlanFreshness::Warn(problems) = assess_plan_freshness(&got, read_plan) {
+        print_plan_freshness_warning(ws, slug, &problems);
+    }
 }
 
 // ── uishot (ADR 0008: capture runs caller-side) ────────────────────────────
@@ -3315,6 +3552,16 @@ async fn main() -> ExitCode {
     // response below.
     let task_boundary_workspace_id = memory_reminder_workspace_id(&argv);
 
+    // Freshness preflight before a direct `task claim` (lead-council v1,
+    // RULING 2987c0b6): CLI-local and warning-only, hashed against the
+    // INVOKING checkout. The claim argv below is sent UNCHANGED (the same
+    // five-word wire form after expansion), so the pinned allowlist and old
+    // running engines keep working. See `claim_freshness_preflight` for the
+    // release/version-skew integration note.
+    if let Some((ws, slug)) = direct_claim_target(&argv) {
+        claim_freshness_preflight(ws, slug, None, self_instance.as_deref()).await;
+    }
+
     // Expand the self-keyed forms (`tell`, `snapshot save`, `snapshot last`,
     // `task claim`/…) to their wire form, filling the instance id from
     // CONCLAVE_INSTANCE_ID (set on spawned agents).
@@ -4315,6 +4562,261 @@ mod tests {
             rendered,
             "plan-check OK: t1\n  plan: docs/plans/x.md\n  fingerprint: ba7816bf8f01\n  boundary=3 anchors=5 gates=2\n"
         );
+    }
+
+    // ── task claim freshness preflight (edit group 5) ──────────────────────
+
+    /// A council-tagged plan: identical shape to [`MIN_HEADER_PLAN`] plus the
+    /// `council` object on header line 4 (what tags a task for the preflight).
+    const COUNCIL_PLAN: &str = "# Council Task\n\
+        <!-- conclave-plan:v1\n\
+        {\n\
+        \"owner\":\"o-1\",\"authority\":\"in-loop\",\"council\":{\"chair\":\"o-1\",\"members\":[\"m-1\"]},\n\
+        \"planPath\":\"docs/plans/x.md\",\"baseSha\":\"abc\",\"escalation\":\"o-1\",\n\
+        \"readingOrder\":[\"docs/plans/x.md\"],\n\
+        \"boundary\":[\"docs/plans/x.md\"],\n\
+        \"consumes\":[],\n\
+        \"produces\":[],\"gates\":[\"git diff --check\"]\n\
+        } -->\n\nbody\n";
+
+    /// The `task get` envelope shape the engine returns (`{"task": {...},
+    /// "events": [...]}`, events newest-first), as the preflight's input.
+    fn task_get_envelope(
+        plan: &str,
+        events: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({ "task": { "plan": plan }, "events": events }))
+    }
+
+    /// A typed `plan_check` event row carrying `fp` (the engine appends this
+    /// payload shape only on a SUCCESSFUL check).
+    fn plan_check_event(fp: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "e1", "taskId": "t1", "kind": "plan_check",
+            "payload": {
+                "contractVersion": "conclave-plan:v1",
+                "planPath": "docs/plans/x.md",
+                "planFingerprint": fp,
+                "baseSha": "abc",
+            },
+            "createdAt": "2026-07-10T00:00:00Z",
+        })
+    }
+
+    #[test]
+    fn parse_min_plan_header_detects_the_council_tag() {
+        assert!(parse_min_plan_header(COUNCIL_PLAN).unwrap().has_council);
+        assert!(!parse_min_plan_header(MIN_HEADER_PLAN).unwrap().has_council);
+    }
+
+    #[test]
+    fn claim_preflight_fresh_council_plan_is_silent() {
+        let fp = sha256_hex(COUNCIL_PLAN.as_bytes());
+        let got = task_get_envelope(
+            COUNCIL_PLAN,
+            serde_json::json!([
+                { "id": "e2", "kind": "note", "payload": {} },
+                plan_check_event(&fp),
+            ]),
+        );
+        let out = super::assess_plan_freshness(&got, |_| Ok(COUNCIL_PLAN.as_bytes().to_vec()));
+        assert_eq!(out, super::PlanFreshness::Fresh);
+    }
+
+    #[test]
+    fn claim_preflight_warns_when_the_plan_check_event_is_missing() {
+        let got = task_get_envelope(COUNCIL_PLAN, serde_json::json!([]));
+        let out = super::assess_plan_freshness(&got, |_| Ok(COUNCIL_PLAN.as_bytes().to_vec()));
+        match out {
+            super::PlanFreshness::Warn(problems) => {
+                assert_eq!(problems.len(), 1);
+                assert!(problems[0].contains("no successful `task plan-check` event"));
+            }
+            other => panic!("expected a missing-event warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_preflight_unverifiable_old_engine_warns_but_never_blocks() {
+        // Old engine / engine down: the read surface itself errors.
+        let got: Result<serde_json::Value, String> = Err("unknown subcommand".to_string());
+        match super::assess_plan_freshness(&got, |_| Ok(Vec::new())) {
+            super::PlanFreshness::Warn(problems) => {
+                assert!(problems[0].contains("could not be verified"));
+            }
+            other => panic!("expected an unverifiable warning, got {other:?}"),
+        }
+        // A response without the task object is unverifiable the same way.
+        let malformed: Result<serde_json::Value, String> = Ok(serde_json::json!({ "ok": true }));
+        match super::assess_plan_freshness(&malformed, |_| Ok(Vec::new())) {
+            super::PlanFreshness::Warn(problems) => {
+                assert!(problems[0].contains("could not be verified"));
+            }
+            other => panic!("expected an unverifiable warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_preflight_warns_on_a_stale_fingerprint() {
+        let checked = sha256_hex(b"the plan as it was when plan-check ran");
+        let got = task_get_envelope(
+            COUNCIL_PLAN,
+            serde_json::json!([plan_check_event(&checked)]),
+        );
+        let out = super::assess_plan_freshness(&got, |_| Ok(COUNCIL_PLAN.as_bytes().to_vec()));
+        match out {
+            super::PlanFreshness::Warn(problems) => {
+                assert_eq!(problems.len(), 1);
+                assert!(problems[0].contains("changed since its last successful plan-check"));
+            }
+            other => panic!("expected a stale-fingerprint warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_preflight_warns_when_the_canonical_plan_is_unreadable() {
+        let fp = sha256_hex(COUNCIL_PLAN.as_bytes());
+        let got = task_get_envelope(COUNCIL_PLAN, serde_json::json!([plan_check_event(&fp)]));
+        let out = super::assess_plan_freshness(&got, |rel| {
+            Err(format!("cannot read `{rel}`: No such file or directory"))
+        });
+        match out {
+            super::PlanFreshness::Warn(problems) => {
+                assert_eq!(problems.len(), 1);
+                assert!(problems[0].contains("cannot read the canonical plan `docs/plans/x.md`"));
+            }
+            other => panic!("expected an unreadable-plan warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_preflight_warns_when_the_header_differs_from_the_stored_one() {
+        // The checkout file hashes to exactly what the event recorded, but
+        // its header no longer equals the immutable stored header.
+        let current = COUNCIL_PLAN.replace("# Council Task", "# Council Task v2");
+        let fp = sha256_hex(current.as_bytes());
+        let got = task_get_envelope(COUNCIL_PLAN, serde_json::json!([plan_check_event(&fp)]));
+        let out = super::assess_plan_freshness(&got, |_| Ok(current.as_bytes().to_vec()));
+        match out {
+            super::PlanFreshness::Warn(problems) => {
+                assert_eq!(problems.len(), 1);
+                assert!(problems[0].contains("differs from the immutable stored header"));
+            }
+            other => panic!("expected a header-mismatch warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_preflight_is_silent_for_non_council_tasks() {
+        // No council object → no preflight noise, even with no plan_check
+        // event and an unreadable checkout (the non-council path must stay
+        // byte-identical to today).
+        let got = task_get_envelope(MIN_HEADER_PLAN, serde_json::json!([]));
+        assert_eq!(
+            super::assess_plan_freshness(&got, |_| Err("unreadable".to_string())),
+            super::PlanFreshness::NotCouncil
+        );
+        // Legacy free-text plans (no v1 header) are not council-tagged either.
+        let legacy = task_get_envelope("just prose\nno header\n", serde_json::json!([]));
+        assert_eq!(
+            super::assess_plan_freshness(&legacy, |_| Err("unreadable".to_string())),
+            super::PlanFreshness::NotCouncil
+        );
+    }
+
+    #[test]
+    fn direct_claim_preflight_matches_only_the_public_claim_form() {
+        // The four-word public form is what main() preflights…
+        let argv = v(&["task", "claim", "ws1", "t1"]);
+        assert_eq!(super::direct_claim_target(&argv), Some(("ws1", "t1")));
+        // …and everything else passes by untouched: the expanded five-word
+        // wire form (pinned by `task_claim_injects_actor_from_env`), other
+        // verbs, and wrong arity all skip it.
+        assert_eq!(
+            super::direct_claim_target(&v(&["task", "claim", "self1", "ws1", "t1"])),
+            None
+        );
+        assert_eq!(
+            super::direct_claim_target(&v(&["task", "get", "ws1", "t1"])),
+            None
+        );
+        assert_eq!(
+            super::direct_claim_target(&v(&["task", "claim", "ws1"])),
+            None
+        );
+    }
+
+    #[test]
+    fn lane_preflight_hashes_the_worktree_plan_even_when_main_differs() {
+        let root =
+            std::env::temp_dir().join(format!("conclave-lane-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docs/plans")).expect("mkdir repo");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("docs/plans/x.md"), COUNCIL_PLAN).expect("write plan");
+        git(&["add", "."]);
+        git(&["commit", "-m", "plan"]);
+        // `lane start`'s exact order: the worktree exists FIRST, then the
+        // preflight roots at `.claude/worktrees/<slug>` inside it.
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "lane/t1",
+            ".claude/worktrees/t1",
+            "main",
+        ]);
+        assert_eq!(
+            super::lane_worktree_root("t1"),
+            PathBuf::from(".claude/worktrees/t1"),
+            "lane_task_wiring roots the preflight at the worktree lane start creates"
+        );
+        // Uncommitted plan edit on MAIN — the worktree still has the checked
+        // bytes; the two checkouts now genuinely differ.
+        std::fs::write(
+            root.join("docs/plans/x.md"),
+            format!("{COUNCIL_PLAN}\nmain-only uncommitted edit\n"),
+        )
+        .expect("edit main plan");
+
+        let fp = sha256_hex(COUNCIL_PLAN.as_bytes());
+        let got = task_get_envelope(COUNCIL_PLAN, serde_json::json!([plan_check_event(&fp)]));
+
+        // Rooted at the worktree (what lane_task_wiring passes): fresh — the
+        // WORKTREE fingerprint is the referent, not main's dirty copy.
+        let worktree = root.join(".claude/worktrees/t1");
+        assert_eq!(
+            super::assess_plan_freshness(&got, |rel| read_checkout_file(&worktree, rel)),
+            super::PlanFreshness::Fresh
+        );
+        // Rooted at main instead, the same task state would (correctly) warn —
+        // proving the root, not the event, decides what gets hashed.
+        match super::assess_plan_freshness(&got, |rel| read_checkout_file(&root, rel)) {
+            super::PlanFreshness::Warn(problems) => {
+                assert!(problems[0].contains("changed since its last successful plan-check"));
+            }
+            other => panic!("expected main's dirty plan to warn, got {other:?}"),
+        }
+
+        let _ = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["worktree", "remove", "--force", ".claude/worktrees/t1"])
+            .output();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── tail_bytes ────────────────────────────────────────────────────────
