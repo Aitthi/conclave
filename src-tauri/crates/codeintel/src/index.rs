@@ -759,7 +759,8 @@ fn is_exported(node: tree_sitter::Node<'_>, bytes: &[u8], lang: Language) -> boo
             // and refine in Task 15 if necessary.
             true
         }
-        Language::Go | Language::C | Language::Cpp | Language::Java => {
+        Language::Go | Language::C | Language::Cpp | Language::Java | Language::Swift
+        | Language::Kotlin => {
             // Go exports by capitalization, C/C++ by header placement, Java by
             // modifier — all finer-grained than v1 needs. Treat every definition
             // as visible so cross-file resolution errs toward finding matches.

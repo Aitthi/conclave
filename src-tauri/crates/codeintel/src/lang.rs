@@ -11,6 +11,8 @@ pub enum Language {
     C,
     Cpp,
     Java,
+    Swift,
+    Kotlin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +34,8 @@ impl Language {
             Language::C => "c",
             Language::Cpp => "cpp",
             Language::Java => "java",
+            Language::Swift => "swift",
+            Language::Kotlin => "kotlin",
         }
     }
 
@@ -46,6 +50,8 @@ impl Language {
             "c" | "h" => Some(Language::C),
             "cc" | "cpp" | "cxx" | "hpp" | "hh" => Some(Language::Cpp),
             "java" => Some(Language::Java),
+            "swift" => Some(Language::Swift),
+            "kt" | "kts" => Some(Language::Kotlin),
             _ => None,
         }
     }
@@ -61,6 +67,8 @@ impl Language {
             Language::C => tree_sitter_c::LANGUAGE.into(),
             Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Language::Java => tree_sitter_java::LANGUAGE.into(),
+            Language::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         }
     }
 
@@ -106,6 +114,16 @@ impl Language {
             (Language::Java, QueryKind::Defs) => Some(include_str!("queries/java_defs.scm")),
             (Language::Java, QueryKind::Imports) => Some(include_str!("queries/java_imports.scm")),
             (Language::Java, QueryKind::Refs) => Some(include_str!("queries/java_refs.scm")),
+            (Language::Swift, QueryKind::Defs) => Some(include_str!("queries/swift_defs.scm")),
+            (Language::Swift, QueryKind::Imports) => {
+                Some(include_str!("queries/swift_imports.scm"))
+            }
+            (Language::Swift, QueryKind::Refs) => Some(include_str!("queries/swift_refs.scm")),
+            (Language::Kotlin, QueryKind::Defs) => Some(include_str!("queries/kotlin_defs.scm")),
+            (Language::Kotlin, QueryKind::Imports) => {
+                Some(include_str!("queries/kotlin_imports.scm"))
+            }
+            (Language::Kotlin, QueryKind::Refs) => Some(include_str!("queries/kotlin_refs.scm")),
         }
     }
 }

@@ -64,6 +64,36 @@ fn cpp_class_method_and_call() {
 }
 
 #[test]
+fn swift_symbols_and_call_refs() {
+    let idx = build_index(Path::new("tests/fixtures/lang_new/swift")).unwrap();
+    assert!(
+        idx.definitions
+            .iter()
+            .any(|d| d.name == "greet" && d.file == "main.swift" && d.kind == DefKind::Fn),
+        "greet not found in defs: {:?}",
+        idx.definitions
+    );
+    let kinds = ref_kinds(&idx, "greet");
+    assert!(kinds.iter().any(|k| k == "definition"), "kinds: {kinds:?}");
+    assert!(kinds.iter().any(|k| k == "call"), "kinds: {kinds:?}");
+}
+
+#[test]
+fn kotlin_symbols_and_call_refs() {
+    let idx = build_index(Path::new("tests/fixtures/lang_new/kotlin")).unwrap();
+    assert!(
+        idx.definitions
+            .iter()
+            .any(|d| d.name == "add" && d.file == "App.kt" && d.kind == DefKind::Fn),
+        "add not found in defs: {:?}",
+        idx.definitions
+    );
+    let kinds = ref_kinds(&idx, "add");
+    assert!(kinds.iter().any(|k| k == "definition"), "kinds: {kinds:?}");
+    assert!(kinds.iter().any(|k| k == "call"), "kinds: {kinds:?}");
+}
+
+#[test]
 fn java_class_method_and_call() {
     let idx = build_index(Path::new("tests/fixtures/lang_new/java")).unwrap();
     assert!(
