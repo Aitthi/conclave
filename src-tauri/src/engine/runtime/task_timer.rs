@@ -6,7 +6,9 @@
 //!
 //! 1. **Stall check**: a `claimed`/`in_progress` task whose newest
 //!    `task_event` is [`STALL_MINUTES`]+ old gets its OWNER notified, at most
-//!    once per [`STALL_ALERT_COOLDOWN_MINUTES`] per task (tracked
+//!    once per [`STALL_ALERT_COOLDOWN_MINUTES`] per task — both per-workspace
+//!    overridable via the bb keys [`STALL_MINUTES_KEY`] /
+//!    [`STALL_COOLDOWN_KEY`], re-read every tick (tracked
 //!    in-process via [`Ticker`], not the DB — a missed alert across an app
 //!    restart is fine; a duplicate every tick is not).
 //! 2. **Challenge-default check**: a `challenge` event whose stored
@@ -42,7 +44,9 @@ use std::collections::{HashMap, HashSet};
 const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// A task counts as stalled once its newest `task_event` is this many
-/// minutes old. Chosen at 10 (plan `watch-filter`, decision 3): the human
+/// minutes old. This is the DEFAULT: a workspace overrides it via the bb key
+/// [`STALL_MINUTES_KEY`], read fresh on every tick (no restart needed).
+/// Chosen at 10 (plan `watch-filter`, decision 3): the human
 /// asked for 5-10, and 10 clears the 5-8 quiet minutes a full `cargo
 /// test`/`clippy` gate legitimately runs, so a normal build never false-pages.
 /// Since the watch fan-out now injects only decision-demanding events, this
@@ -50,8 +54,34 @@ const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60
 /// carrying an important-but-unmarked note.
 const STALL_MINUTES: i64 = 10;
 
-/// A stalled task's owner is alerted at most once per this many minutes.
+/// A stalled task's owner is alerted at most once per this many minutes
+/// (default; per-workspace override via [`STALL_COOLDOWN_KEY`]).
 const STALL_ALERT_COOLDOWN_MINUTES: i64 = 30;
+
+/// bb key overriding [`STALL_MINUTES`] per workspace: an integer minute
+/// count, as a bare number (`20`) or a JSON int string (`"20"`). Absent or
+/// malformed = the default; a parsed value is clamped to
+/// [`STALL_MINUTES_MIN`]..=[`STALL_MINUTES_MAX`].
+const STALL_MINUTES_KEY: &str = "config:stall-minutes";
+
+/// Clamp floor for [`STALL_MINUTES_KEY`] — below this the timer would page
+/// during any ordinary test/build gate.
+const STALL_MINUTES_MIN: i64 = 5;
+
+/// Clamp ceiling for [`STALL_MINUTES_KEY`] (4 h) — past this the stall page
+/// stops being a safety net at all.
+const STALL_MINUTES_MAX: i64 = 240;
+
+/// bb key overriding [`STALL_ALERT_COOLDOWN_MINUTES`] per workspace; same
+/// value format as [`STALL_MINUTES_KEY`], clamped to
+/// [`STALL_COOLDOWN_MIN`]..=[`STALL_COOLDOWN_MAX`].
+const STALL_COOLDOWN_KEY: &str = "config:stall-cooldown-minutes";
+
+/// Clamp floor for [`STALL_COOLDOWN_KEY`].
+const STALL_COOLDOWN_MIN: i64 = 10;
+
+/// Clamp ceiling for [`STALL_COOLDOWN_KEY`] (24 h).
+const STALL_COOLDOWN_MAX: i64 = 1440;
 
 /// bb key holding the per-workspace opt-in config for the distill-auto-nudge
 /// (distill phase 2 plan, decision 3): `{"distiller": "<id>", "reviewer":
@@ -174,10 +204,52 @@ async fn notify(state: &AppState, from_instance_id: &str, to_instance_id: &str, 
     .await;
 }
 
+/// Parse one bb override value: a bare integer (`20`) or a JSON int string
+/// (`"20"`). Malformed input falls back to `default` untouched (the defaults
+/// are authoritative, never clamped); a parsed value is clamped to
+/// `min..=max`.
+fn parse_minutes_override(raw: &str, default: i64, min: i64, max: i64) -> i64 {
+    let raw = raw.trim();
+    let parsed = raw.parse::<i64>().ok().or_else(|| {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+            })
+    });
+    parsed.map_or(default, |n| n.clamp(min, max))
+}
+
+/// Read one per-workspace minute override from the blackboard. Any failure
+/// mode — missing key, bb read error, NULL value, malformed text — degrades
+/// to `default` (same never-break-the-tick posture as the distill check).
+async fn stall_override(
+    state: &AppState,
+    workspace_id: &str,
+    key: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> i64 {
+    match repo::blackboard::get(&state.db, workspace_id, key, None).await {
+        Ok(Some(row)) => row
+            .value
+            .as_deref()
+            .map_or(default, |v| parse_minutes_override(v, default, min, max)),
+        _ => default,
+    }
+}
+
 async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker) {
     let Ok(candidates) = repo::task::stall_candidates(&state.db).await else {
         return;
     };
+
+    // Per-workspace (threshold, cooldown) pairs, read at most once per TICK —
+    // deliberately no longer-lived cache, so a `bb set` takes effect on the
+    // next 5-minute tick with no app restart (plan contract, item 3).
+    let mut ws_config: HashMap<String, (i64, i64)> = HashMap::new();
 
     for c in candidates {
         let Ok(last_event) = DateTime::parse_from_rfc3339(&c.last_event_at) else {
@@ -185,14 +257,41 @@ async fn check_stalls(state: &AppState, now: DateTime<Utc>, ticker: &mut Ticker)
         };
         let last_event = last_event.with_timezone(&Utc);
         let stale_for = now.signed_duration_since(last_event);
-        if stale_for < Duration::minutes(STALL_MINUTES) {
+
+        let (stall_minutes, cooldown_minutes) = match ws_config.get(&c.workspace_id) {
+            Some(pair) => *pair,
+            None => {
+                let pair = (
+                    stall_override(
+                        state,
+                        &c.workspace_id,
+                        STALL_MINUTES_KEY,
+                        STALL_MINUTES,
+                        STALL_MINUTES_MIN,
+                        STALL_MINUTES_MAX,
+                    )
+                    .await,
+                    stall_override(
+                        state,
+                        &c.workspace_id,
+                        STALL_COOLDOWN_KEY,
+                        STALL_ALERT_COOLDOWN_MINUTES,
+                        STALL_COOLDOWN_MIN,
+                        STALL_COOLDOWN_MAX,
+                    )
+                    .await,
+                );
+                ws_config.insert(c.workspace_id.clone(), pair);
+                pair
+            }
+        };
+
+        if stale_for < Duration::minutes(stall_minutes) {
             continue;
         }
 
         if let Some(last_alert) = ticker.last_stall_alert.get(&c.id) {
-            if now.signed_duration_since(*last_alert)
-                < Duration::minutes(STALL_ALERT_COOLDOWN_MINUTES)
-            {
+            if now.signed_duration_since(*last_alert) < Duration::minutes(cooldown_minutes) {
                 continue;
             }
         }
@@ -596,6 +695,55 @@ mod tests {
             .id
     }
 
+    /// Create an owner + implementer, a task claimed by the implementer, and
+    /// return `(owner, implementer, last_event_at)` — the stored claim-event
+    /// timestamp, so ticks can be derived deterministically (same trick as
+    /// `stall_alert_fires_after_threshold_and_notifies_owner`).
+    async fn fixture_claimed_task(
+        state: &AppState,
+        ws: &str,
+        slug: &str,
+    ) -> (String, String, DateTime<Utc>) {
+        let owner = fixture_instance(state, ws, &format!("Owner-{slug}")).await;
+        let implementer = fixture_instance(state, ws, &format!("Impl-{slug}")).await;
+        task::create(
+            state,
+            json!({ "workspaceId": ws, "slug": slug, "title": slug, "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+        task::claim(
+            state,
+            json!({ "workspaceId": ws, "slug": slug, "actorId": implementer }),
+        )
+        .await
+        .expect("claim failed");
+        let got = task::get(state, json!({ "workspaceId": ws, "slug": slug }))
+            .await
+            .expect("get failed");
+        let last_event_at = got["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                DateTime::parse_from_rfc3339(e["createdAt"].as_str().unwrap())
+                    .unwrap()
+                    .with_timezone(&Utc)
+            })
+            .max()
+            .expect("has an event");
+        (owner, implementer, last_event_at)
+    }
+
+    async fn owner_inbox_len(state: &AppState, owner: &str) -> usize {
+        crate::engine::commands::message::list(state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed")
+            .as_array()
+            .unwrap()
+            .len()
+    }
+
     // ── stall detection ─────────────────────────────────────────────────
 
     #[tokio::test]
@@ -682,6 +830,144 @@ mod tests {
             0,
             "the stall timer must not page a watcher"
         );
+    }
+
+    // ── stall threshold: per-workspace bb overrides ─────────────────────
+
+    #[tokio::test]
+    async fn stall_threshold_respects_bb_override() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        repo::blackboard::set(&state.db, &ws, STALL_MINUTES_KEY, "20", None)
+            .await
+            .expect("bb set failed");
+        let (owner, _implementer, last) = fixture_claimed_task(&state, &ws, "t1").await;
+        let mut ticker = Ticker::new();
+
+        // Past the 10-minute default but under the 20-minute override — silent.
+        tick(&state, last + Duration::minutes(11), &mut ticker).await;
+        assert_eq!(
+            owner_inbox_len(&state, &owner).await,
+            0,
+            "override of 20 must suppress the default 10-minute alert"
+        );
+
+        // Past the override — fires, and the rendered minute is the real one.
+        tick(&state, last + Duration::minutes(21), &mut ticker).await;
+        let inbox =
+            crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+                .await
+                .expect("list failed");
+        let arr = inbox.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "must fire once past the override");
+        assert_eq!(
+            arr[0]["text"],
+            json!("[task t1] AUTO stall alert — no activity for 21+ min (state=claimed)")
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_threshold_accepts_json_int_string() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        // The CLI may store the value JSON-encoded: `"20"` (quoted).
+        repo::blackboard::set(&state.db, &ws, STALL_MINUTES_KEY, "\"20\"", None)
+            .await
+            .expect("bb set failed");
+        let (owner, _implementer, last) = fixture_claimed_task(&state, &ws, "t1").await;
+        let mut ticker = Ticker::new();
+
+        tick(&state, last + Duration::minutes(11), &mut ticker).await;
+        assert_eq!(owner_inbox_len(&state, &owner).await, 0);
+        tick(&state, last + Duration::minutes(21), &mut ticker).await;
+        assert_eq!(owner_inbox_len(&state, &owner).await, 1);
+    }
+
+    #[tokio::test]
+    async fn stall_threshold_malformed_value_falls_back_to_default() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        repo::blackboard::set(&state.db, &ws, STALL_MINUTES_KEY, "soon-ish", None)
+            .await
+            .expect("bb set failed");
+        let (owner, _implementer, last) = fixture_claimed_task(&state, &ws, "t1").await;
+        let mut ticker = Ticker::new();
+
+        // Malformed value = default 10 — the 11-minute tick fires exactly as
+        // it does with no key at all.
+        tick(&state, last + Duration::minutes(11), &mut ticker).await;
+        assert_eq!(
+            owner_inbox_len(&state, &owner).await,
+            1,
+            "malformed override must fall back to the 10-minute default"
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_threshold_clamps_out_of_range_values() {
+        let state = AppState::for_tests().await;
+
+        // Value 1 clamps UP to 5: silent at 4 (raw 1 would fire), fires at 6
+        // (the untouched default 10 would stay silent).
+        let ws_low = fixture_workspace(&state).await;
+        repo::blackboard::set(&state.db, &ws_low, STALL_MINUTES_KEY, "1", None)
+            .await
+            .expect("bb set failed");
+        let (owner_low, _i1, last_low) = fixture_claimed_task(&state, &ws_low, "tlow").await;
+        let mut ticker = Ticker::new();
+        tick(&state, last_low + Duration::minutes(4), &mut ticker).await;
+        assert_eq!(
+            owner_inbox_len(&state, &owner_low).await,
+            0,
+            "value 1 must behave as the clamp floor 5"
+        );
+        tick(&state, last_low + Duration::minutes(6), &mut ticker).await;
+        assert_eq!(owner_inbox_len(&state, &owner_low).await, 1);
+
+        // Value 9999 clamps DOWN to 240: silent at 239 (raw 9999 parses fine,
+        // and an unclamped fallback-to-10 would fire), fires at 241.
+        let ws_high = fixture_workspace(&state).await;
+        repo::blackboard::set(&state.db, &ws_high, STALL_MINUTES_KEY, "9999", None)
+            .await
+            .expect("bb set failed");
+        let (owner_high, _i2, last_high) = fixture_claimed_task(&state, &ws_high, "thigh").await;
+        let mut ticker = Ticker::new();
+        tick(&state, last_high + Duration::minutes(239), &mut ticker).await;
+        assert_eq!(
+            owner_inbox_len(&state, &owner_high).await,
+            0,
+            "value 9999 must behave as the clamp ceiling 240"
+        );
+        tick(&state, last_high + Duration::minutes(241), &mut ticker).await;
+        assert_eq!(owner_inbox_len(&state, &owner_high).await, 1);
+    }
+
+    #[tokio::test]
+    async fn stall_cooldown_respects_bb_override() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        repo::blackboard::set(&state.db, &ws, STALL_COOLDOWN_KEY, "15", None)
+            .await
+            .expect("bb set failed");
+        let (owner, _implementer, last) = fixture_claimed_task(&state, &ws, "t1").await;
+        let mut ticker = Ticker::new();
+
+        // First alert at 11 minutes (threshold untouched: default 10).
+        tick(&state, last + Duration::minutes(11), &mut ticker).await;
+        assert_eq!(owner_inbox_len(&state, &owner).await, 1);
+
+        // 13 minutes after the first alert — under the 15-minute override.
+        tick(&state, last + Duration::minutes(24), &mut ticker).await;
+        assert_eq!(
+            owner_inbox_len(&state, &owner).await,
+            1,
+            "must stay quiet inside the overridden cooldown"
+        );
+
+        // 16 minutes after the first alert — past the override (the default
+        // 30 would still be suppressing here, proving the override is live).
+        tick(&state, last + Duration::minutes(27), &mut ticker).await;
+        assert_eq!(owner_inbox_len(&state, &owner).await, 2);
     }
 
     /// Position routing (spec §3.3): with the implementer reporting to a
