@@ -22,16 +22,24 @@ export function dayLabel(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-// Consecutive same-sender grouping (oldest-first input), matching the proto's
-// group() — a run of messages from the same instance shares one avatar/name
-// header, each message keeps its own recipient + timestamp line.
+// Consecutive same-sender grouping, matching the proto's group() — a run of
+// messages from the same instance shares one avatar/name header, each message
+// keeps its own recipient + timestamp line. Input order is NOT trusted: the
+// backend/fixture array is not guaranteed chronological, so the feed sorts by
+// parsed createdAt (never lexicographic string compare — fractional-second
+// widths vary) before grouping.
 export interface MsgGroup {
   fromInstanceId: string;
   items: InterAgentMessage[];
 }
 export function group(messages: InterAgentMessage[]): MsgGroup[] {
+  const sorted = [...messages].sort((a, b) => {
+    const ta = new Date(a.createdAt).getTime();
+    const tb = new Date(b.createdAt).getTime();
+    return (Number.isNaN(ta) ? 0 : ta) - (Number.isNaN(tb) ? 0 : tb);
+  });
   const out: MsgGroup[] = [];
-  for (const m of messages) {
+  for (const m of sorted) {
     const last = out[out.length - 1];
     if (last && last.fromInstanceId === m.fromInstanceId) last.items.push(m);
     else out.push({ fromInstanceId: m.fromInstanceId, items: [m] });

@@ -47,7 +47,11 @@ export const handlers: FixtureHandlers = {
     entries: blackboardEntries.filter((e) => e.workspaceId === workspaceId),
     activity: blackboardActivity,
   }),
-  "message.listForWorkspace": () => messages,
+  // Order intentionally shuffled (deterministic id sort ≠ chronological) — the
+  // feed must sort by createdAt itself, never render array order. Permanent
+  // regression tripwire from task chat-feed-order-check-v2.
+  "message.listForWorkspace": () =>
+    [...messages].sort((a, b) => a.id.localeCompare(b.id)),
   // A spawned session mounts the context/snapshot UI, which lists snapshots.
   "snapshot.list": ({ sessionId }) => [
     {
