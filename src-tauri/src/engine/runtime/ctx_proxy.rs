@@ -334,7 +334,8 @@ fn tee_response_stream(
             }
         }
         parser.finish();
-        on_request_complete(&state, &outcome, parser.usage);
+        drop(tx);
+        on_request_complete(&state, &outcome, parser.usage).await;
     });
     Body::from_stream(stream::unfold(rx, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
@@ -393,23 +394,41 @@ fn token_value(usage: &Value, key: &str) -> Option<u64> {
     usage.get(key).and_then(Value::as_u64)
 }
 
-fn on_request_complete(state: &AppState, outcome: &RewriteOutcome, usage: UsageTotals) {
-    let Some(conversation) = outcome.conversation.as_ref() else {
-        return;
+async fn on_request_complete(state: &AppState, outcome: &RewriteOutcome, usage: UsageTotals) {
+    if let (Some(conversation), Some(input)) = (outcome.conversation.as_ref(), usage.input_tokens) {
+        let total = input
+            .saturating_add(usage.cache_read.unwrap_or(0))
+            .saturating_add(usage.cache_creation.unwrap_or(0));
+        let mut ledger = state
+            .ctx_proxy
+            .ledger
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let conv_idx = ledger.observe(conversation);
+        ledger.conv_mut(conv_idx).last_input_tokens = Some(total);
+    }
+
+    let metric = crate::engine::repo::proxy_metric::MetricInsert {
+        created_at: chrono::Utc::now().to_rfc3339(),
+        model: outcome.model.clone(),
+        mode: outcome.mode.to_owned(),
+        decision: outcome.decision.to_owned(),
+        request_bytes_in: saturating_i64(outcome.request_bytes_in as u64),
+        request_bytes_out: saturating_i64(outcome.body.len() as u64),
+        elisions: saturating_i64(outcome.elisions as u64),
+        bytes_saved: saturating_i64(outcome.bytes_saved as u64),
+        input_tokens: usage.input_tokens.map(saturating_i64),
+        cache_read_tokens: usage.cache_read.map(saturating_i64),
+        cache_creation_tokens: usage.cache_creation.map(saturating_i64),
+        output_tokens: usage.output_tokens.map(saturating_i64),
     };
-    let Some(input) = usage.input_tokens else {
-        return;
-    };
-    let total = input
-        .saturating_add(usage.cache_read.unwrap_or(0))
-        .saturating_add(usage.cache_creation.unwrap_or(0));
-    let mut ledger = state
-        .ctx_proxy
-        .ledger
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let conv_idx = ledger.observe(conversation);
-    ledger.conv_mut(conv_idx).last_input_tokens = Some(total);
+    if let Err(error) = crate::engine::repo::proxy_metric::insert(&state.db, metric).await {
+        eprintln!("[ctx-proxy] failed to record request metric: {error}");
+    }
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn filtered_headers(
@@ -699,10 +718,18 @@ mod tests {
                 cache_creation: Some(5),
                 output_tokens: Some(42),
             },
-        );
+        )
+        .await;
 
         let mut ledger = runtime.ledger.lock().unwrap();
         let index = ledger.observe(&request["messages"]);
         assert_eq!(ledger.conv_mut(index).last_input_tokens, Some(125));
+        drop(ledger);
+        let report = crate::engine::repo::proxy_metric::report(&state.db, 24)
+            .await
+            .unwrap();
+        assert_eq!(report.requests, 1);
+        assert_eq!(report.input_tokens, 100);
+        assert_eq!(report.cache_read_tokens, 20);
     }
 }
