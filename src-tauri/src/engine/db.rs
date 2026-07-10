@@ -239,6 +239,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 20 {
+        sqlx::raw_sql(include_str!("migrations/0020_agent_proxy_enabled.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 20;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }

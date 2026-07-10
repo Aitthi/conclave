@@ -119,6 +119,11 @@ pub struct AgentDefRow {
     /// `Some(false)` = disabled. Nullable INTEGER column, NULL defaults ON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtk_enabled: Option<bool>,
+    /// Context-proxy opt-in (agent-proxy spec D8). `Some(true)` = enabled;
+    /// `None` OR `Some(false)` = disabled. Nullable INTEGER column, NULL
+    /// defaults OFF — deliberate asymmetry with `rtk_enabled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_enabled: Option<bool>,
     pub created_at: String,
 }
 
@@ -178,6 +183,11 @@ pub struct AgentDefListItem {
     /// `Some(false)` = disabled. Nullable INTEGER column, NULL defaults ON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtk_enabled: Option<bool>,
+    /// Context-proxy opt-in (agent-proxy spec D8). `Some(true)` = enabled;
+    /// `None` OR `Some(false)` = disabled. Nullable INTEGER column, NULL
+    /// defaults OFF — deliberate asymmetry with `rtk_enabled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_enabled: Option<bool>,
     pub created_at: String,
     /// How many workspaces this definition has been added to.
     pub in_workspaces: i64,
@@ -185,7 +195,7 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 22] = [
+const COLS: [&str; 23] = [
     "id",
     "name",
     "role",
@@ -207,6 +217,7 @@ const COLS: [&str; 22] = [
     "context_window",
     "selected_builtin_skill_ids",
     "rtk_enabled",
+    "proxy_enabled",
     "created_at",
 ];
 
@@ -250,6 +261,9 @@ pub struct AgentDefinitionInput {
     /// rtk (Claude Code hook) toggle. `None` OR `Some(true)` = enabled;
     /// `Some(false)` = disabled.
     pub rtk_enabled: Option<bool>,
+    /// Context-proxy opt-in (agent-proxy spec D8). `Some(true)` = enabled;
+    /// `None` OR `Some(false)` = disabled (default OFF).
+    pub proxy_enabled: Option<bool>,
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -282,7 +296,7 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
          d.provider_id, d.model, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
          d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
-         d.selected_builtin_skill_ids, d.rtk_enabled, \
+         d.selected_builtin_skill_ids, d.rtk_enabled, d.proxy_enabled, \
          d.created_at, \
          (SELECT COUNT(*) FROM workspace_agent wa WHERE wa.agent_def_id = d.id) AS in_workspaces \
          FROM agent_definition d \
@@ -434,6 +448,10 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
                 "rtk_enabled",
                 input.rtk_enabled.map(Bind::Bool).unwrap_or(Bind::Null),
             ),
+            (
+                "proxy_enabled",
+                input.proxy_enabled.map(Bind::Bool).unwrap_or(Bind::Null),
+            ),
             ("created_at", Bind::Text(created_at.clone())),
         ])
         .execute(pool)
@@ -462,6 +480,7 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         context_window: input.context_window,
         selected_builtin_skill_ids: input.selected_builtin_skill_ids,
         rtk_enabled: input.rtk_enabled,
+        proxy_enabled: input.proxy_enabled,
         created_at,
     })
 }
@@ -547,6 +566,10 @@ pub async fn update(
                 "rtk_enabled",
                 input.rtk_enabled.map(Bind::Bool).unwrap_or(Bind::Null),
             ),
+            (
+                "proxy_enabled",
+                input.proxy_enabled.map(Bind::Bool).unwrap_or(Bind::Null),
+            ),
         ])
         .where_eq("id", id)
         .execute(pool)
@@ -601,6 +624,7 @@ mod tests {
             context_window: None,
             selected_builtin_skill_ids: None,
             rtk_enabled: None,
+            proxy_enabled: None,
         }
     }
 
@@ -634,6 +658,7 @@ mod tests {
                 context_window: Some("1m".into()),
                 selected_builtin_skill_ids: None,
                 rtk_enabled: Some(false),
+                proxy_enabled: Some(true),
             },
         )
         .await
@@ -663,6 +688,7 @@ mod tests {
         assert_eq!(row.auto_submit_injected, Some(false));
         assert_eq!(row.allowed_senders.as_deref(), Some("all"));
         assert_eq!(row.rtk_enabled, Some(false), "explicit disable round-trips");
+        assert_eq!(row.proxy_enabled, Some(true), "explicit opt-in round-trips");
         assert!(!row.id.is_empty());
         assert!(!row.created_at.is_empty());
 
@@ -691,6 +717,10 @@ mod tests {
         assert!(
             minimal.rtk_enabled.is_none(),
             "unset rtk_enabled round-trips to None (means enabled)"
+        );
+        assert!(
+            minimal.proxy_enabled.is_none(),
+            "unset proxy_enabled round-trips to None (means disabled)"
         );
 
         let fetched2 = get(&pool, &minimal.id)
@@ -733,6 +763,7 @@ mod tests {
                 context_window: Some("200k".into()),
                 selected_builtin_skill_ids: None,
                 rtk_enabled: Some(true),
+                proxy_enabled: Some(true),
             },
         )
         .await
@@ -759,6 +790,11 @@ mod tests {
             updated.rtk_enabled,
             Some(true),
             "explicit enable round-trips through update"
+        );
+        assert_eq!(
+            updated.proxy_enabled,
+            Some(true),
+            "explicit proxy opt-in round-trips through update"
         );
         // created_at preserved
         assert_eq!(updated.created_at, row.created_at);
@@ -837,6 +873,7 @@ mod tests {
                 context_window: Some("1m".into()),
                 selected_builtin_skill_ids: None,
                 rtk_enabled: Some(false),
+                proxy_enabled: Some(true),
             },
         )
         .await
@@ -896,6 +933,11 @@ mod tests {
             Some(&serde_json::Value::Bool(false)),
             "must have rtkEnabled as a JSON bool"
         );
+        assert_eq!(
+            json.get("proxyEnabled"),
+            Some(&serde_json::Value::Bool(true)),
+            "must have proxyEnabled as a JSON bool"
+        );
 
         // snake_case must NOT appear
         assert!(
@@ -923,6 +965,10 @@ mod tests {
         assert!(
             json.get("rtk_enabled").is_none(),
             "must NOT have rtk_enabled"
+        );
+        assert!(
+            json.get("proxy_enabled").is_none(),
+            "must NOT have proxy_enabled"
         );
 
         // list item also serializes inWorkspaces in camelCase
@@ -1052,5 +1098,63 @@ mod tests {
             .expect("update failed")
             .expect("row should exist after update");
         assert_eq!(re_enabled.rtk_enabled, Some(true));
+    }
+
+    /// `proxy_enabled` tri-state round-trip (agent-proxy Task 11): unset stays
+    /// `None` (== DISABLED — deliberate asymmetry with `rtk_enabled`, spec D8),
+    /// an explicit `Some(true)` persists as enabled through create/update/get,
+    /// and the `list_with_counts` hardcoded column list carries it too.
+    #[tokio::test]
+    async fn proxy_enabled_tristate_roundtrip() {
+        let pool = connect_in_memory().await;
+
+        // Save without proxy_enabled -> None (means DISABLED by default).
+        let unset = create(&pool, &minimal_input("Unset", "cli", "own"))
+            .await
+            .expect("create failed");
+        assert!(unset.proxy_enabled.is_none());
+        let fetched_unset = get(&pool, &unset.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert!(fetched_unset.proxy_enabled.is_none());
+
+        // Save with proxy_enabled: Some(true) -> opted in, persists as such.
+        let enabled_input = AgentDefinitionInput {
+            name: "Opted".into(),
+            agent_type: "cli".into(),
+            harness_mode: "own".into(),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        let enabled = create(&pool, &enabled_input).await.expect("create failed");
+        assert_eq!(enabled.proxy_enabled, Some(true));
+        let fetched_enabled = get(&pool, &enabled.id)
+            .await
+            .expect("get failed")
+            .expect("row should exist");
+        assert_eq!(fetched_enabled.proxy_enabled, Some(true));
+
+        // update() can flip it back to explicit Some(false).
+        let re_disabled = update(
+            &pool,
+            &enabled.id,
+            &AgentDefinitionInput {
+                proxy_enabled: Some(false),
+                ..enabled_input
+            },
+        )
+        .await
+        .expect("update failed")
+        .expect("row should exist after update");
+        assert_eq!(re_disabled.proxy_enabled, Some(false));
+
+        // list_with_counts's hardcoded SELECT must carry the column as well.
+        let listed = list_with_counts(&pool).await.expect("list failed");
+        let opted = listed
+            .iter()
+            .find(|d| d.name == "Opted")
+            .expect("opted row listed");
+        assert_eq!(opted.proxy_enabled, Some(false));
     }
 }
