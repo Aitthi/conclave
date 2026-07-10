@@ -1001,21 +1001,64 @@ fn tmp_index_path() -> PathBuf {
 /// index (decision 2) — the shared index is never touched. `add -A` (not
 /// plain `add`) so a boundary deletion is captured, not just
 /// modifications/additions (test 7).
+///
+/// A boundary entry that exists neither in the working tree nor in `base` —
+/// a file the plan only creates in a LATER task, or a rename's old name
+/// already committed away — matches no pathspec at all, and one such entry
+/// used to abort the whole `git add` and with it every stage commit/snap for
+/// the lane (task stage-commit-missing-boundary-path; both failure shapes in
+/// memories ae4615e9 and 2e6ecaeb). Such entries can carry no changes, so
+/// they are SKIPPED and returned alongside the tree for the caller to
+/// surface; with nothing left to add the tree is simply `base`'s own.
 fn build_boundary_tree(
     repo: &std::path::Path,
     base: &str,
     boundary: &[String],
-) -> Result<String, String> {
+) -> Result<(String, Vec<String>), String> {
     let index_path = tmp_index_path();
     let result = (|| {
         git_with_index(repo, &index_path, &["read-tree", base])?;
-        let mut args: Vec<&str> = vec!["add", "-A", "--"];
-        args.extend(boundary.iter().map(String::as_str));
-        git_with_index(repo, &index_path, &args)?;
-        git_with_index(repo, &index_path, &["write-tree"])
+        let mut kept: Vec<&str> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for entry in boundary {
+            let trimmed = entry.strip_suffix('/').unwrap_or(entry.as_str());
+            // `symlink_metadata` (not `exists`): a dangling symlink is still
+            // content git can add. The private index holds `base` right now,
+            // so `ls-files` against it answers "tracked in base?" without
+            // ever reading the shared index.
+            let on_disk = !trimmed.is_empty() && repo.join(trimmed).symlink_metadata().is_ok();
+            if on_disk || !git_with_index(repo, &index_path, &["ls-files", "--", entry])?.is_empty()
+            {
+                kept.push(entry.as_str());
+            } else {
+                skipped.push(entry.clone());
+            }
+        }
+        // A pathspec-less `git add -A` would stage the ENTIRE tree — with
+        // every entry skipped there is nothing to layer, never everything.
+        if !kept.is_empty() {
+            let mut args: Vec<&str> = vec!["add", "-A", "--"];
+            args.extend(kept);
+            git_with_index(repo, &index_path, &args)?;
+        }
+        git_with_index(repo, &index_path, &["write-tree"]).map(|tree| (tree, skipped))
     })();
     let _ = std::fs::remove_file(&index_path);
     result
+}
+
+/// One-line stderr note for boundary entries [`build_boundary_tree`] skipped
+/// because they exist nowhere in this checkout. A note, not a warning: a
+/// plan legitimately declares files its later tasks will create.
+fn warn_skipped_boundary(verb: &str, skipped: &[String]) {
+    if !skipped.is_empty() {
+        eprintln!(
+            "conclave: stage {verb}: note — skipped {} declared boundary path(s) absent from \
+             this checkout: {}",
+            skipped.len(),
+            skipped.join(", ")
+        );
+    }
 }
 
 fn current_branch(repo: &std::path::Path) -> Result<String, String> {
@@ -1092,7 +1135,8 @@ fn update_ref_cas(
 /// on a stale CAS, refresh HEAD and rebuild the tree rather than failing
 /// outright, since a peer's unrelated commit landing between our read and
 /// write is expected in a shared checkout, not an error condition. Returns
-/// the new commit sha and the number of changed boundary files.
+/// the new commit sha, the number of changed boundary files, and any
+/// declared-but-absent boundary paths that were skipped.
 ///
 /// Synchronous and UDS-free (boundary/identity are resolved by the caller)
 /// so it is unit-testable against a throwaway repo — see
@@ -1105,7 +1149,7 @@ fn stage_commit_core(
     message: &str,
     author_name: &str,
     author_id: &str,
-) -> Result<(String, usize), String> {
+) -> Result<(String, usize, Vec<String>), String> {
     stage_commit_core_with_hook(
         repo,
         branch,
@@ -1134,7 +1178,7 @@ fn stage_commit_core_with_hook(
     author_name: &str,
     author_id: &str,
     race_hook: impl Fn(u32, &std::path::Path),
-) -> Result<(String, usize), String> {
+) -> Result<(String, usize, Vec<String>), String> {
     let branch_ref = format!("refs/heads/{branch}");
     let author_email = format!("{author_id}@agents.conclave.local");
     let full_message = format!("{message}\n\nConclave-Task: {slug}\nConclave-Agent: {author_id}");
@@ -1143,9 +1187,19 @@ fn stage_commit_core_with_hook(
         let old_head = head_sha(repo)?;
         race_hook(attempt, repo);
         let head_tree = tree_of(repo, &old_head)?;
-        let new_tree = build_boundary_tree(repo, &old_head, boundary)?;
+        let (new_tree, skipped) = build_boundary_tree(repo, &old_head, boundary)?;
         if new_tree == head_tree {
-            return Err(format!("nothing to commit in boundary for '{slug}'"));
+            // Name the skipped paths here: when the ONLY expected change
+            // lived in an absent path, this is the line that explains why
+            // the commit found nothing.
+            let skipped_hint = if skipped.is_empty() {
+                String::new()
+            } else {
+                format!(" (skipped absent boundary path(s): {})", skipped.join(", "))
+            };
+            return Err(format!(
+                "nothing to commit in boundary for '{slug}'{skipped_hint}"
+            ));
         }
         let new_commit = commit_tree(
             repo,
@@ -1160,7 +1214,7 @@ fn stage_commit_core_with_hook(
                 let n_files = git_output(repo, &["diff", "--name-only", &old_head, &new_commit])
                     .map(|s| s.lines().filter(|l| !l.is_empty()).count())
                     .unwrap_or(0);
-                return Ok((new_commit, n_files));
+                return Ok((new_commit, n_files, skipped));
             }
             Err(e) if attempt < 3 => {
                 let _ = e; // refresh-and-retry: the loop re-reads HEAD from the top
@@ -1177,7 +1231,8 @@ fn stage_commit_core_with_hook(
 /// tip (or an orphan first snapshot if the ref doesn't exist yet). Skips the
 /// ref update entirely when the new tree is identical to the previous
 /// snapshot's — the op log stays noise-free (test 9). `reason` becomes the
-/// `<label|auto-...>` segment of the commit message.
+/// `<label|auto-...>` segment of the commit message. Returns the snapshot
+/// sha (`None` when unchanged) plus any skipped absent boundary paths.
 fn snapshot(
     repo: &std::path::Path,
     slug: &str,
@@ -1185,17 +1240,17 @@ fn snapshot(
     reason: &str,
     author_name: &str,
     author_email: &str,
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, Vec<String>), String> {
     let snap_ref = stage_snapshot_ref(slug);
     let prev = git_output(repo, &["rev-parse", "--verify", "-q", &snap_ref]).ok();
 
     let base = prev.clone().unwrap_or_else(|| "HEAD".to_string());
-    let new_tree = build_boundary_tree(repo, &base, boundary)?;
+    let (new_tree, skipped) = build_boundary_tree(repo, &base, boundary)?;
 
     if let Some(prev_sha) = &prev {
         let prev_tree = tree_of(repo, prev_sha)?;
         if new_tree == prev_tree {
-            return Ok(None);
+            return Ok((None, skipped));
         }
     }
 
@@ -1213,7 +1268,7 @@ fn snapshot(
 
     let expected = prev.unwrap_or_else(|| "0".repeat(40));
     update_ref_cas(repo, &snap_ref, &new_commit, &expected)?;
-    Ok(Some(new_commit))
+    Ok((Some(new_commit), skipped))
 }
 
 fn stage_status_entries(
@@ -1395,7 +1450,8 @@ async fn stage_commit(
         &author_name,
         &author_id,
     ) {
-        Ok((sha, n_files)) => {
+        Ok((sha, n_files, skipped)) => {
+            warn_skipped_boundary("commit", &skipped);
             let short = &sha[..12.min(sha.len())];
             println!("stage commit: {short} — {message} ({n_files} files)");
             let note_text = format!("stage commit {short} — {message} ({n_files} files)");
@@ -1457,11 +1513,13 @@ async fn stage_snap(
     let reason = label.unwrap_or("manual");
     let author_email = format!("{author_id}@agents.conclave.local");
     match snapshot(&repo, slug, &boundary, reason, &author_name, &author_email) {
-        Ok(Some(sha)) => {
+        Ok((Some(sha), skipped)) => {
+            warn_skipped_boundary("snap", &skipped);
             println!("stage snap: {} ({reason})", &sha[..12.min(sha.len())]);
             ExitCode::SUCCESS
         }
-        Ok(None) => {
+        Ok((None, skipped)) => {
+            warn_skipped_boundary("snap", &skipped);
             println!("stage snap: no change since the last snapshot — skipped");
             ExitCode::SUCCESS
         }
@@ -1583,11 +1641,11 @@ async fn stage_restore(
         &author_name,
         &author_email,
     ) {
-        Ok(Some(sha)) => println!(
+        Ok((Some(sha), _)) => println!(
             "stage restore: auto-snapshotted current state as {}",
             &sha[..12.min(sha.len())]
         ),
-        Ok(None) => {}
+        Ok((None, _)) => {}
         Err(e) => {
             eprintln!("conclave: stage restore: auto-snapshot failed: {e}");
             return ExitCode::FAILURE;
@@ -5813,7 +5871,7 @@ mod tests {
         let index_before = std::fs::read(&index_path).expect("read shared index");
 
         let boundary = vec!["in-scope.txt".to_string()];
-        let (sha, n_files) = super::stage_commit_core(
+        let (sha, n_files, _) = super::stage_commit_core(
             &dir,
             "main",
             "t1",
@@ -5862,7 +5920,7 @@ mod tests {
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
         let boundary = vec!["in-scope.txt".to_string()];
 
-        let (sha, _) = super::stage_commit_core(
+        let (sha, _, _) = super::stage_commit_core(
             &dir,
             "main",
             "t1",
@@ -5896,7 +5954,7 @@ mod tests {
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
         let boundary = vec!["in-scope.txt".to_string()];
 
-        let (sha, _) = super::stage_commit_core_with_hook(
+        let (sha, _, _) = super::stage_commit_core_with_hook(
             &dir,
             "main",
             "t1",
@@ -5958,7 +6016,7 @@ mod tests {
         std::fs::remove_file(dir.join("in-scope.txt")).unwrap();
         let boundary = vec!["in-scope.txt".to_string()];
 
-        let (sha, n_files) =
+        let (sha, n_files, _) =
             super::stage_commit_core(&dir, "main", "t1", &boundary, "delete it", "Dew", "dew")
                 .unwrap();
         assert_eq!(n_files, 1);
@@ -5977,6 +6035,125 @@ mod tests {
     }
 
     #[test]
+    fn stage_commit_skips_a_boundary_path_that_never_existed() {
+        // Failure shape 1 (memory ae4615e9): the boundary declares a file a
+        // LATER task will create (e.g. a future migration). `git add` used to
+        // abort the whole commit over the non-matching pathspec.
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let boundary = vec![
+            "in-scope.txt".to_string(),
+            "migrations/0017_not_written_yet.sql".to_string(),
+        ];
+
+        let (sha, n_files, skipped) =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "real change", "Dew", "dew")
+                .expect("an absent boundary path must not abort the commit");
+        assert_eq!(n_files, 1);
+        assert_eq!(
+            skipped,
+            vec!["migrations/0017_not_written_yet.sql".to_string()]
+        );
+        let show = super::git_output(&dir, &["show", "--stat", "--format=", &sha]).unwrap();
+        assert!(show.contains("in-scope.txt"), "{show}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_skips_a_renamed_away_boundary_path() {
+        // Failure shape 2 (memory 2e6ecaeb): a rename's OLD path, deleted
+        // from both the working tree and HEAD, matches nothing anywhere —
+        // permanently. It must be skipped, not abort every later commit.
+        let dir = init_repo();
+        std::fs::write(dir.join("old-name.rs"), "content\n").unwrap();
+        run_git(&dir, &["add", "old-name.rs"]);
+        run_git(&dir, &["commit", "-q", "-m", "add old name"]);
+        run_git(&dir, &["rm", "-q", "old-name.rs"]);
+        run_git(&dir, &["commit", "-q", "-m", "rename away"]);
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let boundary = vec!["in-scope.txt".to_string(), "old-name.rs".to_string()];
+
+        let (_, n_files, skipped) =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "later work", "Dew", "dew")
+                .expect("a renamed-away boundary path must not abort the commit");
+        assert_eq!(n_files, 1);
+        assert_eq!(skipped, vec!["old-name.rs".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_deleted_but_tracked_path_is_kept_not_skipped() {
+        // The skip must never swallow a REAL deletion: absent from the
+        // working tree but still tracked in HEAD means "commit the deletion"
+        // (the add -A semantics test 7 pins), not "skip".
+        let dir = init_repo();
+        std::fs::remove_file(dir.join("in-scope.txt")).unwrap();
+        let boundary = vec!["in-scope.txt".to_string()];
+
+        let (sha, n_files, skipped) =
+            super::stage_commit_core(&dir, "main", "t1", &boundary, "delete it", "Dew", "dew")
+                .expect("a tracked deletion must still commit");
+        assert_eq!(n_files, 1);
+        assert!(
+            skipped.is_empty(),
+            "tracked deletion wrongly skipped: {skipped:?}"
+        );
+        let ls = super::git_output(&dir, &["ls-tree", "--name-only", &sha]).unwrap();
+        assert!(!ls.contains("in-scope.txt"), "{ls}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stage_commit_with_every_boundary_path_absent_reports_nothing_to_commit() {
+        // With ALL entries skipped nothing must be staged (a pathspec-less
+        // `add -A` would sweep the whole tree) — the outcome is the ordinary
+        // "nothing to commit" error, now naming the skipped paths.
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap(); // outside boundary here
+        let boundary = vec!["ghost-a.rs".to_string(), "ghost-b.rs".to_string()];
+
+        let err = super::stage_commit_core(&dir, "main", "t1", &boundary, "msg", "Dew", "dew")
+            .expect_err("nothing stageable must stay an error");
+        assert!(err.contains("nothing to commit"), "{err}");
+        assert!(
+            err.contains("ghost-a.rs") && err.contains("ghost-b.rs"),
+            "{err}"
+        );
+        // And nothing outside the boundary leaked into any new commit: the
+        // branch tip is untouched.
+        let head = super::git_output(&dir, &["log", "--oneline", "main"]).unwrap();
+        assert_eq!(head.lines().count(), 1, "no commit may have landed: {head}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_skips_absent_boundary_paths_instead_of_aborting() {
+        // The auto-snapshot before a commit runs the same tree build (memory
+        // 2e6ecaeb saw the abort there first) — it must skip and report too.
+        let dir = init_repo();
+        std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
+        let boundary = vec!["in-scope.txt".to_string(), "ghost.rs".to_string()];
+
+        let (sha, skipped) = super::snapshot(
+            &dir,
+            "t1",
+            &boundary,
+            "manual",
+            "Dew",
+            "dew@agents.conclave.local",
+        )
+        .expect("an absent boundary path must not abort the snapshot");
+        assert!(sha.is_some(), "changed boundary content must snapshot");
+        assert_eq!(skipped, vec!["ghost.rs".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn stage_restore_source_must_be_reachable_from_the_task_snapshot_ref() {
         let dir = init_repo();
         let boundary = vec!["in-scope.txt".to_string()];
@@ -5990,6 +6167,7 @@ mod tests {
             "dabin@agents.conclave.local",
         )
         .unwrap()
+        .0
         .expect("snapshot must be created");
         std::fs::write(dir.join("in-scope.txt"), "v2\n").unwrap();
         let snapshot_tip = super::snapshot(
@@ -6001,6 +6179,7 @@ mod tests {
             "dabin@agents.conclave.local",
         )
         .unwrap()
+        .0
         .expect("second snapshot must be created");
 
         let err = super::validate_stage_restore_source(&dir, "ws-1", "t1", &outside_sha)
@@ -6043,6 +6222,7 @@ mod tests {
             "dew@agents.conclave.local",
         )
         .unwrap()
+        .0
         .expect("first snapshot must be created");
 
         std::fs::write(dir.join("in-scope.txt"), "modified\n").unwrap();
@@ -6056,6 +6236,7 @@ mod tests {
             "dew@agents.conclave.local",
         )
         .unwrap()
+        .0
         .expect("auto-snap of modified state must be created");
         assert_ne!(auto_snap, snap1);
 
@@ -6145,6 +6326,7 @@ mod tests {
             "dew@agents.conclave.local",
         )
         .unwrap()
+        .0
         .expect("first snapshot created");
 
         let second = super::snapshot(
@@ -6156,7 +6338,10 @@ mod tests {
             "dew@agents.conclave.local",
         )
         .unwrap();
-        assert!(second.is_none(), "identical tree must skip the ref update");
+        assert!(
+            second.0.is_none(),
+            "identical tree must skip the ref update"
+        );
 
         let tip =
             super::git_output(&dir, &["rev-parse", &super::stage_snapshot_ref("t1")]).unwrap();
