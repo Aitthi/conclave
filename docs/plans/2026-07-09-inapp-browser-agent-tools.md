@@ -22,6 +22,20 @@ Tiësto. Stale worktree from the FIRST slug (no diff, no commits) removed at
 recreate time. Plan content below is otherwise unchanged and remains the
 source of truth.
 
+Amendment 2026-07-10 #2 (Detoro ruling on challenge 8d38d6ad, UPHELD —
+independently verified): the ENTIRE V1 scope below was already delivered on
+main by the tab-embed lane series (1bd22bd/4cee3d9/0fd38dd/02da6b3), the
+screenshot lane (43d52db/d1ce4ae — beyond V1 scope), and the close fix
+(6342de0); a live probe of the running app answers `conclave browser status`.
+This task ran as VERIFICATION + CLOSURE, not implementation: add the missing
+browser.open fixture handler, record all plan gates on the ledger, live-verify
+the verb set. The V1 spec below stays as the acceptance contract the
+verification ran against. Lesson recorded: a backlog task recreated from an
+old plan must be premise-checked against CURRENT main before dispatch — the
+lead's recreate note asserted contention sequencing but never re-verified the
+work still needed doing; the implementer's pre-code premise challenge is the
+correct tripwire and cost only minutes.
+
 ## Decision
 
 Ship a V1 Conclave-managed browser session that agents can drive through the
