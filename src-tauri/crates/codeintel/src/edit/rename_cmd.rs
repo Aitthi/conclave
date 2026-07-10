@@ -232,8 +232,33 @@ pub fn rename(
         by_file.entry(r.reference.file.clone()).or_default().push(r);
     }
 
-    for (file, refs) in by_file {
-        match build_edits(&file, &refs, old, new, apply, root, idx) {
+    // Definition-site edits (ruling 77b4ae3d): the resolver yields references
+    // only, so a definition whose name token is not itself captured as a
+    // reference (fn/method defs; struct defs DO arrive as type_identifier
+    // references) would survive an --apply untouched. Rename the chosen
+    // definition's name token too — or every definition in the same-file
+    // multi-def case, which runs unanchored. build_edits dedupes by
+    // start_byte, so struct-style defs already present as references are not
+    // edited twice.
+    let defs_to_edit: Vec<&Definition> = match chosen_def {
+        Some(d) => vec![d],
+        None => defs.clone(),
+    };
+    let mut defs_by_file: std::collections::BTreeMap<String, Vec<&Definition>> =
+        Default::default();
+    for d in defs_to_edit {
+        defs_by_file.entry(d.file.clone()).or_default().push(d);
+    }
+
+    // Union of files touched by reference edits and definition-site edits — a
+    // definition in a file with no resolvable references must still be edited.
+    let mut files: std::collections::BTreeSet<String> = by_file.keys().cloned().collect();
+    files.extend(defs_by_file.keys().cloned());
+
+    for file in files {
+        let refs = by_file.get(&file).map(|v| v.as_slice()).unwrap_or(&[]);
+        let def_sites = defs_by_file.get(&file).map(|v| v.as_slice()).unwrap_or(&[]);
+        match build_edits(&file, refs, def_sites, old, new, apply, root, idx) {
             Ok(entry) => {
                 if apply {
                     written_files.push(file.clone());
@@ -261,6 +286,7 @@ pub fn rename(
 fn build_edits(
     file: &str,
     refs: &[&Resolved<'_>],
+    def_sites: &[&Definition],
     old: &str,
     new: &str,
     apply: bool,
@@ -280,6 +306,25 @@ fn build_edits(
             new: new.to_string(),
             confidence: r.confidence.as_str(),
             reason: r.reason.as_str(),
+        });
+    }
+    // Definition name tokens, deduped by start_byte against the reference
+    // edits: struct-style defs arrive as type_identifier references at the
+    // exact same byte offset, and editing the span twice would corrupt the
+    // splice.
+    for d in def_sites {
+        if edits.iter().any(|e| e.start_byte == d.name_start_byte) {
+            continue;
+        }
+        edits.push(AppliedEdit {
+            line: d.line,
+            col: d.column,
+            start_byte: d.name_start_byte,
+            end_byte: d.name_end_byte,
+            old: old.to_string(),
+            new: new.to_string(),
+            confidence: "high",
+            reason: "definition",
         });
     }
     edits.sort_by_key(|e| std::cmp::Reverse(e.start_byte));

@@ -30,6 +30,11 @@ pub struct Definition {
     pub exported: bool,
     /// 1-based line number of the definition node's last line.
     pub end_line: usize,
+    /// Byte range of the definition's *name token* (the `@name` capture) —
+    /// the span `rename` edits at the definition site. Distinct from
+    /// `body_start_byte`/`body_end_byte`, which span the whole definition node.
+    pub name_start_byte: usize,
+    pub name_end_byte: usize,
     /// The definition's first source line, trimmed and truncated to 120 chars.
     /// Always `Some` for defs (codemap's rule for building `Symbol.signature`).
     pub signature: Option<String>,
@@ -409,16 +414,20 @@ fn index_defs(
         let mut def_node = None;
         let mut def_kind = None;
         let mut name = None;
+        let mut name_node = None;
         for cap in m.captures {
             let cname = names[cap.index as usize];
             if cname == "name" {
                 name = Some(cap.node.utf8_text(bytes).unwrap_or("").to_string());
+                name_node = Some(cap.node);
             } else if let Some(k) = DefKind::from_capture_suffix(cname) {
                 def_node = Some(cap.node);
                 def_kind = Some(k);
             }
         }
-        let (Some(n), Some(node), Some(kind)) = (name, def_node, def_kind) else {
+        let (Some(n), Some(name_node), Some(node), Some(kind)) =
+            (name, name_node, def_node, def_kind)
+        else {
             continue;
         };
         let exported = is_exported(node, bytes, lang);
@@ -436,6 +445,8 @@ fn index_defs(
             body_end_byte: node.end_byte(),
             exported,
             end_line: node.end_position().row + 1,
+            name_start_byte: name_node.start_byte(),
+            name_end_byte: name_node.end_byte(),
             signature,
         });
     }

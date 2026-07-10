@@ -444,6 +444,83 @@ fn rename_apply_writes_changes_to_disk() {
 }
 
 #[test]
+fn rename_fn_apply_edits_definition_site() {
+    // Regression for ruling 77b4ae3d: fn definitions are not captured as
+    // references (unlike struct type_identifiers), so --apply used to rename
+    // the call sites but leave `fn old_name` behind — broken code.
+    let tmp = copy_fixture("fn_rename");
+    let target = tmp.path().join("main.rs");
+    let before = fs::read_to_string(&target).unwrap();
+    assert!(before.contains("fn old_name"));
+
+    let idx = build_index(tmp.path()).unwrap();
+    let (data, written) =
+        edit::rename(tmp.path(), &idx, "old_name", "new_name", true, None, None).unwrap();
+
+    assert!(
+        data["errors"].as_array().unwrap().is_empty(),
+        "errors: {:?}",
+        data["errors"]
+    );
+    assert!(
+        written.iter().any(|f| f.ends_with("main.rs")),
+        "expected main.rs among written files: {written:?}"
+    );
+
+    let after = fs::read_to_string(&target).unwrap();
+    assert!(
+        after.contains("fn new_name"),
+        "definition site not renamed: {after}"
+    );
+    assert!(
+        after.contains("new_name()"),
+        "call site not renamed: {after}"
+    );
+    assert!(
+        !after.contains("old_name"),
+        "old_name must not survive anywhere: {after}"
+    );
+}
+
+#[test]
+fn rename_fn_dry_run_reports_def_site_edit() {
+    let tmp = copy_fixture("fn_rename");
+    let idx = build_index(tmp.path()).unwrap();
+
+    let (data, written) =
+        edit::rename(tmp.path(), &idx, "old_name", "new_name", false, None, None).unwrap();
+    assert!(written.is_empty(), "dry-run must not write");
+
+    let applied = data["applied"].as_array().expect("applied array");
+    let entry = applied
+        .iter()
+        .find(|f| f["file"].as_str().unwrap().ends_with("main.rs"))
+        .expect("main.rs in applied");
+    let edits = entry["edits"].as_array().unwrap();
+
+    // `fn old_name` starts the file, so the name token spans bytes 3..11.
+    let def_edit = edits
+        .iter()
+        .find(|e| e["reason"] == "definition")
+        .unwrap_or_else(|| panic!("no definition-site edit reported: {edits:?}"));
+    assert_eq!(def_edit["start_byte"], 3, "got {def_edit:?}");
+    assert_eq!(def_edit["end_byte"], 11, "got {def_edit:?}");
+    assert_eq!(def_edit["old"], "old_name");
+    assert_eq!(def_edit["new"], "new_name");
+    assert_eq!(def_edit["confidence"], "high");
+
+    // The same-file call site is still reported alongside it.
+    assert!(
+        edits.iter().any(|e| e["reason"] == "same-file-scope"),
+        "call-site edit missing: {edits:?}"
+    );
+
+    // Dry-run must not mutate the fixture copy.
+    let after = fs::read_to_string(tmp.path().join("main.rs")).unwrap();
+    assert!(after.contains("fn old_name"), "dry-run modified the file");
+}
+
+#[test]
 fn drift_between_index_and_apply_emits_hash_mismatch() {
     let tmp = copy_fixture("apply_write");
 
