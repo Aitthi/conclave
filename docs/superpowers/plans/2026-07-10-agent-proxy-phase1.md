@@ -403,4 +403,5 @@ Sandbox: in `sandbox_config.rs`, wherever the Claude settings (`claude_sandbox_s
 
 ## Amendments
 
-(none yet)
+- **A1 (2026-07-11, from Mellow's lane-A review note 2c042359, for Task 8):** a re-evaluation may produce stubs whose `kept_msg` pointers reference messages that a LATER re-evaluation also elides ("stale stub chains"). This is CORRECT and lossless (the chain always ends at surviving bytes or a re-readable file). Do NOT "fix" it by rewriting previously frozen stub text — frozen elisions are byte-immutable once applied (D5 prefix stability).
+- **A2 (2026-07-11, same source):** the superseded-read rule does not check whether the later Edit/Write result had `is_error: true` (a failed Edit doesn't actually change the file, so the elided Read was not truly superseded — but the stub only says "re-read the file", which stays safe). Accepted for v1; do not change in Lane B/C. Candidate refinement for Phase 2.
