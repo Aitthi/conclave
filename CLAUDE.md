@@ -30,7 +30,8 @@ The human's manual checklist remains the final acceptance; this gate catches bro
 ### Known caveats
 
 - PTY/terminal panes render empty in fixture mode — accepted, not a bug.
-- `uishot` exit code does NOT yet catch console-level `[fixture]` errors that components swallow (open task `uishot-console-fail`). If your view calls IPC commands, grep the uishot console output for `[fixture]` before claiming green.
+- `uishot` exits 1 on any error-type console message or any message containing `[fixture]`, even when a component catches the throw (closed by task `uishot-console-fail-v2`, commit 78d4b2c). The PNG is still written on failure so you can inspect it; offending lines print as `[uishot] console-fail:`.
+- A stale vite dev server on :1420 from ANOTHER checkout/worktree silently serves that checkout's code and uishot reuses it — always `lsof -nP -iTCP:1420 -sTCP:LISTEN` and kill foreign servers before trusting a shot (three incidents on 2026-07-10 alone).
 - Any `@tauri-apps/api` getter on the render path can throw **synchronously** in plain Chrome (`__TAURI_INTERNALS__` missing). A promise `.catch()` will not save you — wrap the getter call itself in try/catch (see `src/lib/fileDrop.ts`).
 
 ## Pointers
