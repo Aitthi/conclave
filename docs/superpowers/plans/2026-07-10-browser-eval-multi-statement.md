@@ -24,7 +24,16 @@ contract (module doc line 14-16) is bypassed entirely.
 1. Rewrite `eval_js` to construct the function INSIDE the page, source passed as
    a JS string literal via the existing `js_literal` helper:
    - expression-first: `new Function('return (' + src + '\n)')`
-   - on SyntaxError fall back to statement body: `new Function(src)`
+   - on SyntaxError fall back to indirect eval — `(0, eval)(src)` — because only
+     `eval()` has completion-value semantics; a `new Function(src)` body without
+     an explicit `return` always yields `undefined`, which fails this plan's own
+     acceptance matrix (`document.title; 42` → 42). Construction and execution
+     stay SEPARATED: `new Function(src)` is used purely as a parse check before
+     the eval runs, so a RUNTIME throw on the expression path can never fall
+     through and re-execute side effects via eval.
+     [Amended 2026-07-10 per challenge 92aa7d2b (Tiësto) — the original fallback
+     `new Function(src)` was proven wrong by a node harness running the
+     byte-identical wrapper template; upheld verbatim.]
    - call it inside the existing try/catch; normalize `undefined` results to
      `null` before returning (`var r = fn(); return r === undefined ? null : r;`)
    - any construction/execution error still returns `{ __error: String(...) }` —
@@ -36,7 +45,11 @@ contract (module doc line 14-16) is bypassed entirely.
    - single expression still produces the expression-first wrapper
    - multi-statement source survives `js_literal` embedding (quotes, newlines)
    - (rust-side string tests only; live behavior verified at the gate below)
-4. Live-verify against the running app and record in a task note:
+4. Live-verify matrix — INTEGRATOR step, not implementer: the running app
+   carries the pre-fix engine, so this can only run after the next app
+   rebuild/relaunch (flagged by Tiësto with challenge 92aa7d2b). Implementer
+   substitutes a node harness against the byte-identical wrapper template and
+   records it as a gate. Matrix to run post-rebuild:
    - `conclave browser eval "1+1"` → 2 (regression)
    - multi-statement: `conclave browser eval "document.title; 42"` → 42
    - statement-only: `conclave browser eval "var x = 5; x * 2"` → 10
