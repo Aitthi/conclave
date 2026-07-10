@@ -367,22 +367,26 @@ fn type_js(selector: &str, text: &str) -> String {
 
 /// Wrap raw agent-supplied JS so a thrown exception becomes a returned
 /// `{ __error }` instead of a swallowed callback (see module doc). The source
-/// is embedded as a string literal and compiled INSIDE the page via
-/// `new Function` — expression-first, falling back to a statement body — so
+/// is embedded as a string literal and compiled INSIDE the page — so
 /// multi-statement input can never turn the whole wrapper into a parse-time
-/// SyntaxError (which would bypass the try/catch entirely).
+/// SyntaxError (which would bypass the try/catch entirely). Expression-first
+/// via `new Function("return (…)")` (so `{a:1}` stays an object literal, not a
+/// block); multi-statement input falls back to indirect `eval`, the only form
+/// with completion-value semantics — a plain `Function` body without `return`
+/// would run the statements but answer `undefined` (challenge 92aa7d2b).
+/// Construction and execution are separated so a RUNTIME throw from the
+/// expression path propagates to the outer catch instead of re-running the
+/// source's side effects through the fallback.
 fn eval_js(js: &str) -> String {
     format!(
         r#"(function () {{
   try {{
     var src = {src};
-    var fn;
+    var fn = null;
     try {{
       fn = new Function("return (" + src + "\n)");
-    }} catch (e) {{
-      fn = new Function(src);
-    }}
-    var r = fn();
+    }} catch (e) {{}}
+    var r = fn ? fn() : (0, eval)(src);
     return r === undefined ? null : r;
   }} catch (e) {{
     return {{ __error: String(e && e.message ? e.message : e) }};
@@ -863,15 +867,22 @@ mod tests {
     }
 
     #[test]
-    fn eval_js_compiles_expression_first_with_statement_fallback() {
+    fn eval_js_compiles_expression_first_with_eval_fallback() {
         let js = eval_js("1+1");
         assert!(
             js.contains(r#"new Function("return (" + src + "\n)")"#),
             "expression-first construction must be tried before the fallback"
         );
         assert!(
-            js.contains("new Function(src)"),
-            "statement-body fallback must exist for multi-statement input"
+            js.contains("(0, eval)(src)"),
+            "fallback must be indirect eval — the only form with completion-value \
+             semantics, so multi-statement input answers its last expression \
+             (challenge 92aa7d2b: a Function body without return answers undefined)"
+        );
+        assert!(
+            js.contains("fn ? fn() : "),
+            "construction and execution must be separate: a runtime throw from the \
+             expression path must NOT re-run the source through the fallback"
         );
         assert!(
             js.contains("r === undefined ? null : r"),
