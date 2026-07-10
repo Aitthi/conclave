@@ -451,6 +451,145 @@ mod tests {
         );
     }
 
+    /// Build an in-memory DB at schema **v17** — the state just before 0018 —
+    /// mirroring [`connect_at_v13`]: apply 0001..0017 exactly as [`migrate`]
+    /// would, then stop. Lets a test exercise the REAL 0018 `task_event`
+    /// rebuild against populated v17 data, which fresh-schema tests cannot.
+    async fn connect_at_v17() -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("invalid in-memory connection string")
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("failed to open in-memory pool");
+        let mut tx = pool.begin().await.expect("begin v17 setup");
+        for sql in [
+            include_str!("migrations/0001_init.sql"),
+            include_str!("migrations/0002_seed_core_tools.sql"),
+            include_str!("migrations/0003_agent_cli_config.sql"),
+            include_str!("migrations/0004_skill_system.sql"),
+            include_str!("migrations/0005_drop_skill_kind.sql"),
+            include_str!("migrations/0006_selected_builtin_skills.sql"),
+            include_str!("migrations/0007_workspace_hidden.sql"),
+            include_str!("migrations/0008_role_system.sql"),
+            include_str!("migrations/0009_memory_system.sql"),
+            include_str!("migrations/0010_memory_search_index.sql"),
+            include_str!("migrations/0011_seed_memory_tool.sql"),
+            include_str!("migrations/0012_task_system.sql"),
+            include_str!("migrations/0013_memory_proposal.sql"),
+            include_str!("migrations/0014_artifact_workspace.sql"),
+            include_str!("migrations/0015_position_system.sql"),
+            include_str!("migrations/0016_agent_default_level.sql"),
+            include_str!("migrations/0017_agent_rtk_enabled.sql"),
+        ] {
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .expect("apply pre-0018 migration");
+        }
+        sqlx::raw_sql("PRAGMA user_version = 17;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 17");
+        tx.commit().await.expect("commit v17 setup");
+        pool
+    }
+
+    /// The 0018 upgrade path itself (ruling on challenge 15d636ab): the
+    /// `task_event` rebuild must preserve every existing row byte-for-byte
+    /// and keep `idx_task_event_task`, while admitting the new `plan_check`
+    /// kind and still rejecting unknown kinds. Fresh-schema tests exercise
+    /// only the post-0018 shape and could not catch a lossy copy or a
+    /// dropped index.
+    #[tokio::test]
+    async fn migrate_0018_preserves_task_event_rows_and_index() {
+        let pool = connect_at_v17().await;
+
+        // Seed a v17 task + one event per legacy kind (task_event has no FK,
+        // and the task row itself is untouched by 0018).
+        sqlx::query(
+            "INSERT INTO task (id, workspace_id, slug, title, owner_agent_id, \
+             created_at, updated_at) \
+             VALUES ('task-v17', 'ws-v17', 't1', 'T1', 'agent-1', \
+             '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed v17 task");
+        for (n, kind) in ["note", "state", "gate", "challenge", "ruling"]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO task_event (id, task_id, kind, actor_agent_id, payload, created_at) \
+                 VALUES (?1, 'task-v17', ?2, 'agent-1', ?3, ?4)",
+            )
+            .bind(format!("ev-{kind}"))
+            .bind(kind)
+            .bind(format!("{{\"n\":{n}}}"))
+            .bind(format!("2020-01-01T00:00:0{n}+00:00"))
+            .execute(&pool)
+            .await
+            .expect("seed v17 task_event");
+        }
+
+        migrate(&pool).await.expect("0018 migration failed");
+
+        // Every legacy row survived with payload/actor/timestamps intact.
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT id, kind, actor_agent_id, payload, created_at \
+             FROM task_event WHERE task_id = 'task-v17' ORDER BY created_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read migrated task_event rows");
+        assert_eq!(rows.len(), 5, "all five legacy rows must survive");
+        for (n, kind) in ["note", "state", "gate", "challenge", "ruling"]
+            .iter()
+            .enumerate()
+        {
+            let (id, k, actor, payload, created_at) = &rows[n];
+            assert_eq!(id, &format!("ev-{kind}"));
+            assert_eq!(k, kind);
+            assert_eq!(actor, "agent-1");
+            assert_eq!(payload, &format!("{{\"n\":{n}}}"));
+            assert_eq!(created_at, &format!("2020-01-01T00:00:0{n}+00:00"));
+        }
+
+        // The covering index survived the DROP/RENAME rebuild.
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master \
+             WHERE type='index' AND name='idx_task_event_task' AND tbl_name='task_event'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("index existence query failed");
+        assert_eq!(index_count, 1, "idx_task_event_task must survive 0018");
+
+        // Old kinds still insert, the new plan_check kind now inserts, and an
+        // unknown kind is still rejected by the rebuilt CHECK.
+        for kind in ["note", "plan_check"] {
+            sqlx::query(
+                "INSERT INTO task_event (id, task_id, kind, payload, created_at) \
+                 VALUES (?1, 'task-v17', ?2, '{}', '2020-01-02T00:00:00+00:00')",
+            )
+            .bind(format!("ev-new-{kind}"))
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("kind `{kind}` must insert post-0018: {e}"));
+        }
+        let bogus = sqlx::query(
+            "INSERT INTO task_event (id, task_id, kind, payload, created_at) \
+             VALUES ('ev-bogus', 'task-v17', 'bogus', '{}', '2020-01-02T00:00:00+00:00')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(bogus.is_err(), "unknown kinds must still violate the CHECK");
+    }
+
     /// All entity tables must exist after migration.
     #[tokio::test]
     async fn migrate_creates_all_tables() {

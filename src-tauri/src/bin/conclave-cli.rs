@@ -2328,18 +2328,26 @@ enum PlanFreshness {
     Warn(Vec<String>),
 }
 
-/// The canonical ten-line header block (CR-stripped, `\n`-joined) — the
-/// minimal client-side mirror of `engine::plan_contract::canonical_header`
-/// (the bin cannot import it; same reasoning as [`parse_min_plan_header`],
-/// and this side only ever WARNS, so a disagreement can never wrongly pass
-/// the engine's validator of record). `None` under ten lines.
-fn min_canonical_header(plan: &str) -> Option<String> {
-    let lines: Vec<&str> = plan
-        .split('\n')
-        .take(10)
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect();
-    (lines.len() == 10).then(|| lines.join("\n"))
+/// The canonical ten-line header block: the RAW BYTES up to (not including)
+/// the newline terminating line 10 — the minimal client-side mirror of
+/// `engine::plan_contract::canonical_header` (the bin cannot import it; same
+/// reasoning as [`parse_min_plan_header`], and this side only ever WARNS, so
+/// a disagreement can never wrongly pass the engine's validator of record).
+/// NO normalization: the header contract is byte-for-byte (ruling on
+/// challenge d4bf5714), so a CRLF header differs from its LF twin here too.
+/// `None` under ten lines.
+fn min_canonical_header(plan: &str) -> Option<&str> {
+    let mut newlines = 0usize;
+    for (i, b) in plan.bytes().enumerate() {
+        if b == b'\n' {
+            newlines += 1;
+            if newlines == 10 {
+                return Some(&plan[..i]);
+            }
+        }
+    }
+    // Exactly ten lines with an unterminated tenth still counts.
+    (newlines == 9 && !plan.is_empty()).then_some(plan)
 }
 
 /// The newest successful `plan_check` fingerprint from a `task get`

@@ -1054,10 +1054,13 @@ pub async fn plan_check(state: &AppState, payload: Value) -> Result<Value, AppEr
             task.owner_agent_id.as_deref().unwrap_or("<none>")
         )));
     }
+    // The owner (and thereby the council chair, which structurally equals it)
+    // must belong to the workspace AT CHECK TIME, not merely at creation:
+    // task.owner_agent_id has no FK and workspace_agent::remove can delete
+    // the row after the task was created (ruling on challenge bd224351).
+    enforce_scope(state, &req.workspace_id, &header.owner, "owner").await?;
     enforce_scope(state, &req.workspace_id, &header.escalation, "escalation").await?;
     if let Some(council) = &header.council {
-        // chair == owner is already enforced structurally; owner belongs to the
-        // workspace by the task-create invariant. Members are checked here.
         for member in &council.members {
             enforce_scope(state, &req.workspace_id, member, "council member").await?;
         }
@@ -4390,6 +4393,40 @@ mod tests {
         )
         .await;
         assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("owner")));
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_owner_removed_from_workspace_after_creation() {
+        // Ruling on challenge bd224351: task.owner_agent_id has no FK, so the
+        // chair/owner can be deleted from the workspace AFTER the task was
+        // created — plan_check must verify membership at CHECK time, fail,
+        // and append nothing.
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let actor = fixture_instance(&state, &ws, "Member").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        sqlx::query("DELETE FROM workspace_agent WHERE id = ?1")
+            .bind(&owner)
+            .execute(&state.db)
+            .await
+            .expect("delete owner workspace_agent row");
+
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &actor, &plan, fixture_files()),
+        )
+        .await;
+        assert!(
+            matches!(err, Err(AppError::NotFound(ref msg)) if msg.contains("owner")),
+            "got {err:?}"
+        );
+        assert!(
+            event_kinds(&state, &ws, "t1").await.is_empty(),
+            "a validation failure must append nothing"
+        );
     }
 
     #[tokio::test]

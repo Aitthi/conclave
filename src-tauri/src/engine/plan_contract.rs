@@ -157,19 +157,17 @@ pub struct ExecutionHeader {
 }
 
 /// Extract exactly the first ten lines, scanning at most
-/// [`HEADER_MAX_BYTES`]. Trailing `\r` is stripped per line so CRLF and LF
-/// plans canonicalize identically.
+/// [`HEADER_MAX_BYTES`]. Lines are split on `\n` with NO normalization: the
+/// header contract is byte-for-byte (ruling on challenge d4bf5714 — a CRLF
+/// line ending or a trailing space on the opener/closer is a different
+/// header, and must parse-fail rather than silently canonicalize equal).
 fn header_lines(plan: &str) -> Result<Vec<&str>, PlanContractError> {
     let mut end = plan.len().min(HEADER_MAX_BYTES);
     while !plan.is_char_boundary(end) {
         end -= 1;
     }
     let prefix = &plan[..end];
-    let lines: Vec<&str> = prefix
-        .split('\n')
-        .take(HEADER_LINE_COUNT)
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect();
+    let lines: Vec<&str> = prefix.split('\n').take(HEADER_LINE_COUNT).collect();
     if lines.len() < HEADER_LINE_COUNT {
         return Err(PlanContractError::Structure(format!(
             "expected at least {HEADER_LINE_COUNT} lines within the first {HEADER_MAX_BYTES} bytes, found {}",
@@ -180,19 +178,19 @@ fn header_lines(plan: &str) -> Result<Vec<&str>, PlanContractError> {
         .strip_prefix("# ")
         .map(str::trim)
         .unwrap_or_default();
-    if title.is_empty() {
+    if title.is_empty() || lines[0].ends_with('\r') {
         return Err(PlanContractError::Structure(
-            "line 1 must be a non-empty Markdown title (`# <title>`)".into(),
+            "line 1 must be a non-empty Markdown title (`# <title>`) with LF line endings".into(),
         ));
     }
-    if lines[1].trim_end() != VERSION_OPENER {
+    if lines[1] != VERSION_OPENER {
         return Err(PlanContractError::Structure(format!(
-            "line 2 must be exactly `{VERSION_OPENER}`"
+            "line 2 must be exactly `{VERSION_OPENER}` (no trailing whitespace, LF line endings)"
         )));
     }
-    if lines[HEADER_LINE_COUNT - 1].trim_end() != CLOSING_DELIMITER {
+    if lines[HEADER_LINE_COUNT - 1] != CLOSING_DELIMITER {
         return Err(PlanContractError::Structure(format!(
-            "line {HEADER_LINE_COUNT} must be exactly `{CLOSING_DELIMITER}`"
+            "line {HEADER_LINE_COUNT} must be exactly `{CLOSING_DELIMITER}` (no trailing whitespace, LF line endings)"
         )));
     }
     Ok(lines)
@@ -216,10 +214,27 @@ pub fn parse_and_validate_header(plan: &str) -> Result<ExecutionHeader, PlanCont
     Ok(header)
 }
 
-/// The canonical header text: the exact first ten lines (CR-stripped),
-/// joined with `\n`. This is the unit of the snapshot-equality rule.
-pub fn canonical_header(plan: &str) -> Result<String, PlanContractError> {
-    Ok(header_lines(plan)?.join("\n"))
+/// The canonical header text: the RAW BYTES of the plan up to (not
+/// including) the newline that terminates line 10. No normalization of any
+/// kind — this is the unit of the snapshot-equality rule, and the frozen
+/// contract says byte-for-byte (ruling on challenge d4bf5714), so a CR, a
+/// trailing space, or any other byte difference is a different header.
+/// Still envelope-validates first so equality is only ever computed over a
+/// well-formed header.
+pub fn canonical_header(plan: &str) -> Result<&str, PlanContractError> {
+    header_lines(plan)?;
+    let mut newlines = 0usize;
+    for (i, b) in plan.bytes().enumerate() {
+        if b == b'\n' {
+            newlines += 1;
+            if newlines == HEADER_LINE_COUNT {
+                return Ok(&plan[..i]);
+            }
+        }
+    }
+    // Fewer than ten `\n`s: the tenth line runs to EOF (header_lines already
+    // proved ten lines exist, so line 10 is simply unterminated).
+    Ok(plan)
 }
 
 /// Require canonical header equality between the immutable stored plan
@@ -726,12 +741,61 @@ mod tests {
         assert_eq!(back, header);
     }
 
+    // Byte-for-byte contract (ruling on challenge d4bf5714): ANY header byte
+    // difference — line endings included — must fail, not canonicalize away.
+
     #[test]
-    fn crlf_plan_canonicalizes_like_lf() {
-        let lf = protocol_plan();
-        let crlf = lf.replace('\n', "\r\n");
-        assert_valid(&crlf);
-        check_header_equality(&lf, &crlf).expect("CRLF and LF headers are canonically equal");
+    fn crlf_plan_is_rejected_not_normalized() {
+        let crlf = protocol_plan().replace('\n', "\r\n");
+        assert!(matches!(
+            parse_header(&crlf),
+            Err(PlanContractError::Structure(_))
+        ));
+    }
+
+    #[test]
+    fn trailing_whitespace_on_opener_or_closer_is_rejected() {
+        let opener_ws =
+            protocol_plan().replacen("<!-- conclave-plan:v1\n", "<!-- conclave-plan:v1 \n", 1);
+        assert!(matches!(
+            parse_header(&opener_ws),
+            Err(PlanContractError::Structure(_))
+        ));
+        let closer_ws = protocol_plan().replacen("} -->\n", "} --> \n", 1);
+        assert!(matches!(
+            parse_header(&closer_ws),
+            Err(PlanContractError::Structure(_))
+        ));
+    }
+
+    #[test]
+    fn any_single_header_byte_change_breaks_equality() {
+        let stored = protocol_plan();
+        // A one-byte JSON edit inside line 4 (maxRounds 2 -> 3).
+        let edited = stored.replacen("\"maxRounds\":2", "\"maxRounds\":3", 1);
+        assert_ne!(stored, edited, "the edit must land inside the header");
+        assert!(matches!(
+            check_header_equality(&stored, &edited),
+            Err(PlanContractError::HeaderMismatch)
+        ));
+        // Prose edits BELOW line 10 keep equality (the amendable half).
+        let body_edit = format!("{stored}\nAmended prose paragraph.\n");
+        check_header_equality(&stored, &body_edit)
+            .expect("body-only edits never break header equality");
+    }
+
+    #[test]
+    fn canonical_header_returns_exact_raw_bytes() {
+        let plan = protocol_plan();
+        let canon = canonical_header(&plan).expect("valid plan");
+        // Exactly the prefix up to (not including) the 10th newline.
+        let nth = plan
+            .match_indices('\n')
+            .nth(9)
+            .map(|(i, _)| i)
+            .expect("ten lines");
+        assert_eq!(canon, &plan[..nth]);
+        assert!(canon.ends_with(CLOSING_DELIMITER));
     }
 
     // ---- envelope rejections -------------------------------------------
