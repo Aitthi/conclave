@@ -81,6 +81,22 @@ fn append_codex_context_window_config(launch: &mut String, context_window: Optio
     }
 }
 
+/// The `ANTHROPIC_BASE_URL` override routing an agent through the loopback
+/// context proxy — only when the agent explicitly opted in (`proxy_enabled`,
+/// NULL/absent = OFF per spec D8's double opt-in, deliberately asymmetric with
+/// `rtk_enabled`) AND the listener is actually bound. Fail-open: a down
+/// listener means a plain direct-to-Anthropic spawn, never a broken one.
+fn proxy_env(proxy_enabled: Option<bool>, active_port: Option<u16>) -> Option<(String, String)> {
+    if !proxy_enabled.unwrap_or(false) {
+        return None;
+    }
+    let port = active_port?;
+    Some((
+        "ANTHROPIC_BASE_URL".to_string(),
+        format!("http://127.0.0.1:{port}"),
+    ))
+}
+
 // ── Request types ────────────────────────────────────────────────────────────
 
 /// Payload for `instance.list` — filter by workspace.
@@ -625,6 +641,14 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     None
                 };
 
+            // Context-proxy routing (agent-proxy spec D8, double opt-in):
+            // decided ONCE here and threaded through both the launch-branch
+            // sandbox allowlists and the env block below, so the base-URL
+            // override and its loopback sandbox hole fire together or not at
+            // all. `proxy_port` is Some only when the injection fired.
+            let proxy_env_var = proxy_env(def.proxy_enabled, state.ctx_proxy.active_port());
+            let proxy_port = proxy_env_var.is_some().then(|| state.ctx_proxy.port);
+
             let mut launch = String::from(base);
             if base == "claude" {
                 // Resolve the rtk PreToolUse hook (A5): only when the agent
@@ -691,6 +715,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     &id,
                     socket_path.as_deref(),
                     rtk_hook.as_ref(),
+                    proxy_port,
                 ) {
                     Ok(path) => launch.push_str(&format!(
                         " --settings {}",
@@ -727,7 +752,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 // overrides ([permissions.conclave] profile proven in Guetta's
                 // research, test J). Never writes the user's ~/.codex/config.toml.
                 if let Some(sock) = &socket_path {
-                    for ov in runtime::sandbox_config::codex_socket_overrides(sock) {
+                    for ov in runtime::sandbox_config::codex_socket_overrides(sock, proxy_port) {
                         launch.push_str(&format!(" -c {}", shell_quote(&ov)));
                     }
                 }
@@ -782,6 +807,12 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                         }
                     }
                 }
+            }
+            // Context-proxy base URL, pushed LAST so it wins over any
+            // `custom_env` value of the same name (spec D8; the decision was
+            // made above, beside the sandbox allowlist threading).
+            if let Some(kv) = proxy_env_var {
+                extra_env.push(kv);
             }
 
             // Launch the CLI INSIDE the user's login + interactive shell, the way
@@ -1583,6 +1614,26 @@ mod tests {
                 "sentinel/invalid value must not become a Codex auto-compact override: {launch}"
             );
         }
+    }
+
+    /// Env injection for the context proxy (agent-proxy Task 11): only the
+    /// combination "agent explicitly opted in AND listener actually bound"
+    /// yields the base-URL override — spec D8's per-agent half of the double
+    /// opt-in, defaulting OFF (asymmetric with rtk_enabled by design).
+    #[test]
+    fn proxy_env_requires_opt_in_and_active_listener() {
+        assert_eq!(
+            proxy_env(Some(true), Some(18787)),
+            Some((
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:18787".to_string()
+            ))
+        );
+        // Opted in but listener down → no injection (fail-open).
+        assert_eq!(proxy_env(Some(true), None), None);
+        // Unset or explicit false → never, even with the listener up.
+        assert_eq!(proxy_env(None, Some(18787)), None);
+        assert_eq!(proxy_env(Some(false), Some(18787)), None);
     }
 
     #[test]
