@@ -137,7 +137,7 @@ impl Index {
 }
 
 use crate::lang::{Language, QueryKind};
-use crate::walk::walk_sources;
+use crate::walk::{walk_sources, SourceFile};
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use std::fs;
@@ -145,8 +145,28 @@ use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 /// Compiled queries for every language present in a walk, shared by reference
-/// across the parallel indexing pass.
-type QueryCache = std::collections::HashMap<Language, LangQueries>;
+/// across the parallel indexing pass. `pub(crate)` so `cache.rs` can hold its
+/// own per-root instance (its refresh pass compiles queries only for the
+/// languages of the files that actually changed).
+pub(crate) type QueryCache = std::collections::HashMap<Language, LangQueries>;
+
+/// One file's worth of indexing output, produced by [`index_one_file`]. The
+/// per-root cache stores these directly (keyed by relative path) so an
+/// unchanged file's data can be reused across refreshes without re-parsing.
+/// Field names intentionally differ from [`Index`]'s (`defs`/`refs`/`meta`
+/// vs. `definitions`/`references`/`file_meta`) and the re-export sites are
+/// flat `Vec`s here (vs. `Index`'s name-keyed `HashMap`s) because a
+/// single-file partial has no use for `Index`'s multi-file bucketing —
+/// [`assemble_index`] reconstructs it when merging partials back together.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FilePartial {
+    pub defs: Vec<Definition>,
+    pub imports: Vec<Import>,
+    pub refs: Vec<Reference>,
+    pub meta: FileMeta,
+    pub alias_sites: Vec<AliasSite>,
+    pub wildcard_sites: Vec<WildcardSite>,
+}
 
 impl DefKind {
     fn from_capture_suffix(s: &str) -> Option<Self> {
@@ -173,7 +193,7 @@ impl DefKind {
 /// paid once *per file* (defs+imports+refs ≈ 11k compilations). Compiling each
 /// query once per language and reusing it across every file of that language
 /// turns that O(files) cost into O(languages).
-struct LangQueries {
+pub(crate) struct LangQueries {
     ts: tree_sitter::Language,
     defs: Option<Query>,
     imports: Option<Query>,
@@ -225,6 +245,14 @@ impl LangQueries {
     }
 }
 
+/// Compile one language's queries. `pub(crate)` wrapper around
+/// `LangQueries::compile` so `cache.rs` can build its own (possibly partial,
+/// only-the-languages-that-changed) `QueryCache` on a refresh without
+/// reaching into `LangQueries`'s private constructor.
+pub(crate) fn compile_queries(lang: Language) -> Result<LangQueries> {
+    LangQueries::compile(lang)
+}
+
 pub fn build_index(root: &Path) -> Result<Index> {
     let files = walk_sources(root)?;
 
@@ -233,22 +261,21 @@ pub fn build_index(root: &Path) -> Result<Index> {
     // lets every worker thread share the compiled queries by reference — `Query` is
     // `Sync`. A defs-query compile failure is a hard error here, matching the
     // pre-refactor `?` behaviour.
-    let mut qcache: std::collections::HashMap<Language, LangQueries> =
-        std::collections::HashMap::new();
+    let mut qcache: QueryCache = std::collections::HashMap::new();
     for f in &files {
         if let std::collections::hash_map::Entry::Vacant(e) = qcache.entry(f.language) {
-            e.insert(LangQueries::compile(f.language)?);
+            e.insert(compile_queries(f.language)?);
         }
     }
 
     // Index files in parallel. Each file is independent: its own `Parser`, its own
-    // tree, its own partial `Index`. rayon's `collect` into a `Vec` preserves input
-    // order, so merging the partials below reproduces exactly the sequential index —
-    // definitions/references land in the same order, keeping output byte-identical.
-    // A `None` partial means the file was skipped (unreadable/unparseable) — carry
-    // the relative path along so the miss can be surfaced as a warning instead of
-    // silently vanishing.
-    let partials: Vec<(String, Option<Index>)> = files
+    // tree, its own partial `FilePartial`. rayon's `collect` into a `Vec` preserves
+    // input order, so merging the partials below reproduces exactly the sequential
+    // index — definitions/references land in the same order, keeping output
+    // byte-identical. A `None` partial means the file was skipped
+    // (unreadable/unparseable) — carry the relative path along so the miss can be
+    // surfaced as a warning instead of silently vanishing.
+    let partials: Vec<(String, Option<FilePartial>)> = files
         .par_iter()
         .map(|f| {
             let rel = f
@@ -257,24 +284,41 @@ pub fn build_index(root: &Path) -> Result<Index> {
                 .unwrap_or(&f.path)
                 .to_string_lossy()
                 .into_owned();
-            (rel, index_file(root, f, &qcache))
+            let partial = qcache
+                .get(&f.language)
+                .and_then(|q| index_one_file(f, root, q));
+            (rel, partial)
         })
         .collect();
 
-    // Merge partials in file order. Vecs concatenate; re-export maps merge per key.
+    Ok(assemble_index(partials))
+}
+
+/// Merge per-file partials into one `Index`, in sorted-relative-path order —
+/// this is what keeps a cache-assembled `Index` (built from a `HashMap` of
+/// per-root file entries, no inherent order) byte-identical to a fresh
+/// `build_index` one (already sorted, since `walk_sources` sorts). `None`
+/// entries (parse failures) surface as a `warnings` entry instead of
+/// contributing data.
+pub(crate) fn assemble_index(mut partials: Vec<(String, Option<FilePartial>)>) -> Index {
+    partials.sort_by(|a, b| a.0.cmp(&b.0));
     let mut idx = Index::default();
     for (rel, p) in partials {
         match p {
             Some(p) => {
-                idx.definitions.extend(p.definitions);
+                idx.definitions.extend(p.defs);
                 idx.imports.extend(p.imports);
-                idx.references.extend(p.references);
-                idx.file_meta.extend(p.file_meta);
-                for (k, v) in p.alias_reexports {
-                    idx.alias_reexports.entry(k).or_default().extend(v);
+                idx.references.extend(p.refs);
+                idx.file_meta.insert(rel, p.meta);
+                for a in p.alias_sites {
+                    idx.alias_reexports
+                        .entry(a.alias.clone())
+                        .or_default()
+                        .push(a);
                 }
-                for (k, v) in p.wildcard_reexports {
-                    idx.wildcard_reexports.entry(k).or_default().extend(v);
+                for w in p.wildcard_sites {
+                    let key = wildcard_key(&w.module_path);
+                    idx.wildcard_reexports.entry(key).or_default().push(w);
                 }
             }
             None => {
@@ -282,22 +326,38 @@ pub fn build_index(root: &Path) -> Result<Index> {
             }
         }
     }
-    Ok(idx)
+    idx
+}
+
+/// The wildcard re-export bucketing key: TS/JS paths are slash-separated
+/// (e.g. `"./widgets"`), Rust paths use `::`. Key on the last non-empty
+/// segment regardless of separator. Mirrors the key `index_imports` used to
+/// compute inline before `FilePartial` made re-export sites flat per-file
+/// `Vec`s that get bucketed at assembly time instead.
+fn wildcard_key(module_path: &str) -> String {
+    module_path
+        .rsplit(['/', ':'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(module_path)
+        .to_string()
 }
 
 /// Parse one source file and run all three queries against it, returning a
-/// single-file partial `Index`. Returns `None` for unreadable files, grammar
+/// single-file `FilePartial`. Returns `None` for unreadable files, grammar
 /// configuration failures, or parse failures — the caller drops them, matching
 /// the sequential loop's `continue`.
-fn index_file(root: &Path, f: &crate::walk::SourceFile, qcache: &QueryCache) -> Option<Index> {
-    let source = fs::read_to_string(&f.path).ok()?;
-    let rel = f
+pub(crate) fn index_one_file(
+    file: &SourceFile,
+    root: &Path,
+    queries: &LangQueries,
+) -> Option<FilePartial> {
+    let source = fs::read_to_string(&file.path).ok()?;
+    let rel = file
         .path
         .strip_prefix(root)
-        .unwrap_or(&f.path)
+        .unwrap_or(&file.path)
         .to_string_lossy()
         .into_owned();
-    let queries = qcache.get(&f.language)?;
 
     let mut parser = Parser::new();
     if parser.set_language(&queries.ts).is_err() {
@@ -306,29 +366,28 @@ fn index_file(root: &Path, f: &crate::walk::SourceFile, qcache: &QueryCache) -> 
     }
     let tree = parser.parse(&source, None)?;
 
-    let mut local = Index::default();
-    local.file_meta.insert(
-        rel.clone(),
-        FileMeta {
+    let mut partial = FilePartial {
+        meta: FileMeta {
             len: source.len() as u64,
             lines: source.lines().count(),
-            language: f.language.name(),
+            language: file.language.name(),
         },
-    );
+        ..FilePartial::default()
+    };
     if let Some(q) = &queries.defs {
-        index_defs(&mut local, &source, &rel, f.language, &tree, q);
+        index_defs(&mut partial, &source, &rel, file.language, &tree, q);
     }
     if let Some(q) = &queries.imports {
-        index_imports(&mut local, &source, &rel, f.language, &tree, q);
+        index_imports(&mut partial, &source, &rel, file.language, &tree, q);
     }
     if let Some(q) = &queries.refs {
-        index_refs(&mut local, &source, &rel, &tree, q);
+        index_refs(&mut partial, &source, &rel, &tree, q);
     }
-    Some(local)
+    Some(partial)
 }
 
 fn index_defs(
-    idx: &mut Index,
+    idx: &mut FilePartial,
     source: &str,
     rel: &str,
     lang: Language,
@@ -360,7 +419,7 @@ fn index_defs(
             .lines()
             .next()
             .map(|l| l.trim().chars().take(120).collect::<String>());
-        idx.definitions.push(Definition {
+        idx.defs.push(Definition {
             file: rel.to_string(),
             name: n,
             kind,
@@ -376,7 +435,7 @@ fn index_defs(
 }
 
 fn index_imports(
-    idx: &mut Index,
+    idx: &mut FilePartial,
     source: &str,
     rel: &str,
     lang: Language,
@@ -488,35 +547,22 @@ fn index_imports(
                         .unwrap_or(&module_path)
                         .to_string()
                 };
-                idx.alias_reexports
-                    .entry(a.clone())
-                    .or_default()
-                    .push(AliasSite {
-                        file: rel.to_string(),
-                        line,
-                        alias: a,
-                        original,
-                        module_path,
-                    });
+                idx.alias_sites.push(AliasSite {
+                    file: rel.to_string(),
+                    line,
+                    alias: a,
+                    original,
+                    module_path,
+                });
             }
             continue;
         }
         if is_reexport_wildcard {
-            // TS/JS paths are slash-separated (e.g. "./widgets"), Rust paths use `::`.
-            // Key on the last segment regardless of separator.
-            let key = module_path
-                .rsplit(['/', ':'])
-                .find(|s| !s.is_empty())
-                .unwrap_or(&module_path)
-                .to_string();
-            idx.wildcard_reexports
-                .entry(key)
-                .or_default()
-                .push(WildcardSite {
-                    file: rel.to_string(),
-                    line,
-                    module_path,
-                });
+            idx.wildcard_sites.push(WildcardSite {
+                file: rel.to_string(),
+                line,
+                module_path,
+            });
             continue;
         }
 
@@ -610,7 +656,13 @@ impl RefKind {
     }
 }
 
-fn index_refs(idx: &mut Index, source: &str, rel: &str, tree: &tree_sitter::Tree, query: &Query) {
+fn index_refs(
+    idx: &mut FilePartial,
+    source: &str,
+    rel: &str,
+    tree: &tree_sitter::Tree,
+    query: &Query,
+) {
     let names = query.capture_names();
     let bytes = source.as_bytes();
     let mut cursor = QueryCursor::new();
@@ -642,7 +694,7 @@ fn index_refs(idx: &mut Index, source: &str, rel: &str, tree: &tree_sitter::Tree
         let line = node.start_position().row + 1;
         let column = node.start_position().column + 1;
         let context = line_at(source, line);
-        idx.references.push(Reference {
+        idx.refs.push(Reference {
             file: rel.to_string(),
             name,
             kind,
