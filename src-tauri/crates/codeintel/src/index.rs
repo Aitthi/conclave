@@ -28,6 +28,11 @@ pub struct Definition {
     /// True if the definition is module-public (Rust `pub`, TS `export`, Python module-level).
     /// Cross-file resolution only matches against exported definitions.
     pub exported: bool,
+    /// 1-based line number of the definition node's last line.
+    pub end_line: usize,
+    /// The definition's first source line, trimmed and truncated to 120 chars.
+    /// Always `Some` for defs (codemap's rule for building `Symbol.signature`).
+    pub signature: Option<String>,
 }
 
 /// One concrete "this name in this file refers to that other module's symbol".
@@ -72,6 +77,11 @@ pub struct Reference {
 #[non_exhaustive]
 pub struct FileMeta {
     pub len: u64,
+    /// Number of lines in the file (`source.lines().count()`).
+    pub lines: usize,
+    /// The language name as returned by `Language::name()` (e.g. `"rust"`).
+    /// `&'static str` defaults to `""`.
+    pub language: &'static str,
 }
 
 /// One `pub use foo::Bar as Baz;` style alias re-export. Records both names
@@ -108,6 +118,9 @@ pub struct Index {
     pub file_meta: std::collections::HashMap<String, FileMeta>,
     pub alias_reexports: std::collections::HashMap<String, Vec<AliasSite>>,
     pub wildcard_reexports: std::collections::HashMap<String, Vec<WildcardSite>>,
+    /// One entry `"failed to parse <rel_path>"` per source file the indexer
+    /// skipped (unreadable, grammar-configuration failure, or parse failure).
+    pub warnings: Vec<String>,
 }
 
 impl Index {
@@ -232,23 +245,41 @@ pub fn build_index(root: &Path) -> Result<Index> {
     // tree, its own partial `Index`. rayon's `collect` into a `Vec` preserves input
     // order, so merging the partials below reproduces exactly the sequential index —
     // definitions/references land in the same order, keeping output byte-identical.
-    let partials: Vec<Index> = files
+    // A `None` partial means the file was skipped (unreadable/unparseable) — carry
+    // the relative path along so the miss can be surfaced as a warning instead of
+    // silently vanishing.
+    let partials: Vec<(String, Option<Index>)> = files
         .par_iter()
-        .filter_map(|f| index_file(root, f, &qcache))
+        .map(|f| {
+            let rel = f
+                .path
+                .strip_prefix(root)
+                .unwrap_or(&f.path)
+                .to_string_lossy()
+                .into_owned();
+            (rel, index_file(root, f, &qcache))
+        })
         .collect();
 
     // Merge partials in file order. Vecs concatenate; re-export maps merge per key.
     let mut idx = Index::default();
-    for p in partials {
-        idx.definitions.extend(p.definitions);
-        idx.imports.extend(p.imports);
-        idx.references.extend(p.references);
-        idx.file_meta.extend(p.file_meta);
-        for (k, v) in p.alias_reexports {
-            idx.alias_reexports.entry(k).or_default().extend(v);
-        }
-        for (k, v) in p.wildcard_reexports {
-            idx.wildcard_reexports.entry(k).or_default().extend(v);
+    for (rel, p) in partials {
+        match p {
+            Some(p) => {
+                idx.definitions.extend(p.definitions);
+                idx.imports.extend(p.imports);
+                idx.references.extend(p.references);
+                idx.file_meta.extend(p.file_meta);
+                for (k, v) in p.alias_reexports {
+                    idx.alias_reexports.entry(k).or_default().extend(v);
+                }
+                for (k, v) in p.wildcard_reexports {
+                    idx.wildcard_reexports.entry(k).or_default().extend(v);
+                }
+            }
+            None => {
+                idx.warnings.push(format!("failed to parse {rel}"));
+            }
         }
     }
     Ok(idx)
@@ -280,6 +311,8 @@ fn index_file(root: &Path, f: &crate::walk::SourceFile, qcache: &QueryCache) -> 
         rel.clone(),
         FileMeta {
             len: source.len() as u64,
+            lines: source.lines().count(),
+            language: f.language.name(),
         },
     );
     if let Some(q) = &queries.defs {
@@ -323,6 +356,10 @@ fn index_defs(
             continue;
         };
         let exported = is_exported(node, bytes, lang);
+        let signature = source[node.start_byte()..]
+            .lines()
+            .next()
+            .map(|l| l.trim().chars().take(120).collect::<String>());
         idx.definitions.push(Definition {
             file: rel.to_string(),
             name: n,
@@ -332,6 +369,8 @@ fn index_defs(
             body_start_byte: node.start_byte(),
             body_end_byte: node.end_byte(),
             exported,
+            end_line: node.end_position().row + 1,
+            signature,
         });
     }
 }
