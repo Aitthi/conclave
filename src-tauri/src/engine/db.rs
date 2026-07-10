@@ -344,6 +344,8 @@ mod tests {
         )
         .bind(sid)
         .bind(wa_id)
+        // v13 seed for a chat definition (cli_kind NULL) — the resolver's
+        // conservative branch, so the constant is the correct stamp here.
         .bind(crate::engine::repo::session::DEFAULT_CONTEXT_LIMIT)
         .execute(&pool)
         .await

@@ -828,7 +828,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 started_at,
                 session
                     .context_limit
-                    .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
+                    .unwrap_or_else(|| repo::session::default_context_limit_for(&cli_kind)),
             );
             Some((backend.output_rx, epoch, Some(transcript_ctx)))
         }
@@ -905,6 +905,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             state.app().cloned(),
             id.clone(),
             session.id.clone(),
+            def.cli_kind.clone(),
             output_rx,
             track_context,
             transcript_ctx,
@@ -976,6 +977,7 @@ async fn forward_session_output(
     app: Option<tauri::AppHandle>,
     instance_id: String,
     session_id: String,
+    cli_kind: Option<String>,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
     track_context: bool,
     transcript_ctx: Option<TranscriptPollContext>,
@@ -985,7 +987,9 @@ async fn forward_session_output(
     let limit = session_row
         .as_ref()
         .and_then(|s| s.context_limit)
-        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT);
+        .unwrap_or_else(|| {
+            repo::session::default_context_limit_for(cli_kind.as_deref().unwrap_or(""))
+        });
     if track_context {
         // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
         // is the baseline at the previous persist, so we only write every
@@ -1753,6 +1757,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             rx,
             true, // chat backend — context tracking enabled.
             None,
@@ -1797,6 +1802,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             rx,
             true, // chat backend — context tracking enabled.
             None,
@@ -1851,6 +1857,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             rx,
             true, // chat backend — context tracking enabled.
             None,
@@ -1920,6 +1927,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             rx,
             false, // CLI/PTY backend — context tracking disabled.
             None,
@@ -2026,7 +2034,7 @@ mod tests {
                     codex_sessions_root: codex_root.clone(),
                     fallback_limit: session
                         .context_limit
-                        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT),
+                        .unwrap_or_else(|| repo::session::default_context_limit_for("codex")),
                 },
             ),
             &workspace_row.folder_path,
@@ -2049,6 +2057,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            Some("codex".into()),
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
             Some(transcript_ctx),

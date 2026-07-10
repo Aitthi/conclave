@@ -9,11 +9,13 @@
 //! Both `create_for_instance` and `get_by_instance` use chain-builder.
 //! No raw sqlx is needed: queries are single-table / single-condition.
 //!
-//! # Context limit constant
+//! # Context limit constants
 //!
-//! [`DEFAULT_CONTEXT_LIMIT`] (200 000 tokens) is the compile-time default applied
-//! to every new session. The `add_to_workspace` handler mirrors this value in its
-//! raw-sqlx transaction INSERT (kept in sync via a comment there).
+//! [`default_context_limit_for`] resolves the pre-detection fallback context
+//! limit per `cli_kind`: 1 000 000 tokens for `claude-code`, otherwise the
+//! conservative [`DEFAULT_CONTEXT_LIMIT`] (200 000 tokens). Every site that
+//! stamps or falls back to a default limit goes through the resolver —
+//! including the raw-sqlx INSERT in `workspace_agent::instantiate`.
 
 use super::cb_err;
 use chain_builder::{QueryBuilder, Sqlite, Value as Bind};
@@ -37,12 +39,26 @@ where
     }
 }
 
-/// Default context-window limit for new sessions (200 000 tokens).
-///
-/// Mirrored as the literal `200000` in the raw-sqlx INSERT inside
-/// `commands::agent::add_to_workspace` — keep both in sync if changed.
+/// Conservative default context-window limit (200 000 tokens) for sessions
+/// whose `cli_kind` gives no better information (codex, chat, custom, unknown).
+/// Under-warning costs an agent its context; over-warning is recoverable —
+/// so the unknown case stays low. Resolve via [`default_context_limit_for`].
 #[allow(dead_code)] // referenced by session tests and future runtime handlers
 pub const DEFAULT_CONTEXT_LIMIT: i64 = 200_000;
+
+/// Pre-detection fallback context limit for a session, by its definition's
+/// `cli_kind`. `claude-code` sessions default to 1 000 000 tokens (human
+/// directive 2026-07-10: no claude-code model in this environment runs a
+/// 200k window); everything else keeps the conservative
+/// [`DEFAULT_CONTEXT_LIMIT`]. The detected-limit path
+/// (`runtime::transcript_context`, `last_model_window`) still takes
+/// precedence once a transcript reports a real window.
+pub fn default_context_limit_for(cli_kind: &str) -> i64 {
+    match cli_kind {
+        "claude-code" => 1_000_000,
+        _ => DEFAULT_CONTEXT_LIMIT,
+    }
+}
 
 // ── Row struct ──────────────────────────────────────────────────────────────
 
@@ -97,7 +113,7 @@ const COLS: [&str; 7] = [
 /// - `id`: UUID v4
 /// - `started_at`: now (UTC ISO-8601)
 /// - `context_tokens`: 0 (fresh session, no tokens consumed)
-/// - `context_limit`: [`DEFAULT_CONTEXT_LIMIT`]
+/// - `context_limit`: [`default_context_limit_for`] the definition's `cli_kind`
 /// - `last_active_at`: NULL (no activity yet)
 ///
 /// The UNIQUE(workspace_agent_id) constraint means calling this twice for
@@ -115,13 +131,15 @@ pub async fn create_for_instance(
     let id = Uuid::new_v4().to_string();
     let started_at = Utc::now().to_rfc3339();
     let workspace_agent_id = workspace_agent_id.to_owned();
+    let cli_kind = super::workspace_agent::cli_kind_for(pool, &workspace_agent_id).await?;
+    let context_limit = default_context_limit_for(cli_kind.as_deref().unwrap_or(""));
 
     QueryBuilder::<Sqlite>::table("session")
         .insert([
             ("id", Bind::Text(id.clone())),
             ("workspace_agent_id", Bind::Text(workspace_agent_id.clone())),
             ("context_tokens", Bind::I64(0)),
-            ("context_limit", Bind::I64(DEFAULT_CONTEXT_LIMIT)),
+            ("context_limit", Bind::I64(context_limit)),
             ("started_at", Bind::Text(started_at.clone())),
             ("last_active_at", Bind::Null),
             ("launched_skill_ids", Bind::Null),
@@ -134,7 +152,7 @@ pub async fn create_for_instance(
         id,
         workspace_agent_id,
         context_tokens: Some(0),
-        context_limit: Some(DEFAULT_CONTEXT_LIMIT),
+        context_limit: Some(context_limit),
         started_at,
         last_active_at: None,
         launched_skill_ids: None,
@@ -283,6 +301,16 @@ mod tests {
             .await
             .expect("create workspace_agent failed")
             .id
+    }
+
+    /// Resolver: claude-code gets the 1M fallback; codex and unknown kinds
+    /// keep the conservative default.
+    #[test]
+    fn default_context_limit_for_resolves_per_cli_kind() {
+        assert_eq!(default_context_limit_for("claude-code"), 1_000_000);
+        assert_eq!(default_context_limit_for("codex"), DEFAULT_CONTEXT_LIMIT);
+        assert_eq!(default_context_limit_for("custom"), DEFAULT_CONTEXT_LIMIT);
+        assert_eq!(default_context_limit_for(""), DEFAULT_CONTEXT_LIMIT);
     }
 
     /// create_for_instance → get_by_instance round-trip: all fields preserved.

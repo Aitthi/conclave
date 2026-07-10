@@ -165,9 +165,14 @@ pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError>
         .ok_or_else(|| AppError::NotFound(format!("session id={} not found", req.session_id)))?;
 
     let tokens = session.context_tokens;
-    let limit = session
-        .context_limit
-        .unwrap_or(repo::session::DEFAULT_CONTEXT_LIMIT);
+    let limit = match session.context_limit {
+        Some(limit) => limit,
+        None => {
+            let cli_kind =
+                repo::workspace_agent::cli_kind_for(&state.db, &session.workspace_agent_id).await?;
+            repo::session::default_context_limit_for(cli_kind.as_deref().unwrap_or(""))
+        }
+    };
     let trigger_pct = tokens.and_then(|t| pct_of(t, limit));
     let summary = Some(honest_summary(&req.kind, tokens.unwrap_or(0), limit));
 

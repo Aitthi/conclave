@@ -766,6 +766,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
+    /// Incident regression (task context-meter-stale-model-limit): a fresh
+    /// claude-code transcript that reports usage but no model window must read
+    /// against the claude-code fallback (1M) — 140k tokens is 14%, not the 70%
+    /// the old global 200k default produced.
+    #[test]
+    fn claude_no_model_window_reads_claude_code_fallback_not_global_default() {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-claude-1m";
+        let file = claude_root.join("session.jsonl");
+
+        write_jsonl(
+            &file,
+            &[
+                json!({
+                    "type": "attachment",
+                    "cwd": workspace.to_string_lossy(),
+                    "text": format!("your own agent id is {instance_id}"),
+                }),
+                claude_usage_line(140_000),
+            ],
+        );
+
+        let fallback = crate::engine::repo::session::default_context_limit_for("claude-code");
+        let reading = scan_claude_file(
+            &file,
+            instance_id,
+            &workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            fallback,
+        )
+        .expect("usage line must yield a reading");
+
+        assert_eq!(reading.tokens, 140_000);
+        assert_eq!(reading.limit, 1_000_000);
+        assert_eq!(reading.tokens * 100 / reading.limit, 14);
+        // The pre-fix shape: the same tokens against the conservative default
+        // read as 70% — the false warning this lane removes for claude-code.
+        assert_eq!(
+            reading.tokens * 100 / crate::engine::repo::session::DEFAULT_CONTEXT_LIMIT,
+            70
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn claude_dedupes_duplicate_assistant_usage() {
         let claude_root = tmp_root("claude-root");

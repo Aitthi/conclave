@@ -708,8 +708,17 @@ pub async fn instantiate(
     // ── Atomically create workspace_agent + session ──────────────────────
     //
     // Raw sqlx inside a transaction — mirrors the pattern in db::migrate.
-    // `super::session::DEFAULT_CONTEXT_LIMIT` is the single source of truth
-    // for the initial context window size.
+    // `super::session::default_context_limit_for` is the single source of
+    // truth for the initial context window size, resolved per the
+    // definition's `cli_kind` (claude-code → 1M, everything else 200k).
+    let cli_kind: Option<String> =
+        sqlx::query_scalar("SELECT cli_kind FROM agent_definition WHERE id = ?")
+            .bind(agent_def_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let context_limit =
+        super::session::default_context_limit_for(cli_kind.as_deref().unwrap_or(""));
     let wa_id = Uuid::new_v4().to_string();
     let added_at = Utc::now().to_rfc3339();
     let session_id = Uuid::new_v4().to_string();
@@ -737,7 +746,7 @@ pub async fn instantiate(
     )
     .bind(&session_id)
     .bind(&wa_id)
-    .bind(super::session::DEFAULT_CONTEXT_LIMIT)
+    .bind(context_limit)
     .bind(&started_at)
     .execute(&mut *tx)
     .await?;
@@ -751,6 +760,25 @@ pub async fn instantiate(
         status: "idle".to_owned(),
         added_at,
     })
+}
+
+/// `cli_kind` of the agent_definition behind a workspace_agent (`None` for
+/// chat/custom definitions or an unknown id). Feeds
+/// `session::default_context_limit_for` at call sites that only hold a
+/// session/workspace_agent id.
+pub async fn cli_kind_for(
+    pool: &SqlitePool,
+    workspace_agent_id: &str,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT ad.cli_kind FROM workspace_agent wa \
+         JOIN agent_definition ad ON ad.id = wa.agent_def_id \
+         WHERE wa.id = ?",
+    )
+    .bind(workspace_agent_id)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
 }
 
 /// Update the status of a workspace_agent. status must be one of
@@ -1437,6 +1465,57 @@ mod tests {
         assert_eq!(
             session.context_limit,
             Some(crate::engine::repo::session::DEFAULT_CONTEXT_LIMIT)
+        );
+    }
+
+    /// instantiate() stamps the claude-code fallback (1M) so a fresh claude
+    /// session never reads 70% at a real 14% (incident
+    /// context-meter-stale-model-limit: 140k tokens against the old global
+    /// 200k default while the true window was 1M).
+    #[tokio::test]
+    async fn instantiate_claude_code_stamps_one_million_limit() {
+        let pool = connect_in_memory().await;
+        let ws = workspace::create(&pool, "WS-claude", "/tmp/ws-claude", None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "ClaudeAgent".into(),
+                agent_type: "cli".into(),
+                cli_kind: Some("claude-code".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+
+        let row = instantiate(&pool, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed");
+        let session = crate::engine::repo::session::get_by_instance(&pool, &row.id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session should exist after instantiate");
+        let limit = session.context_limit.expect("context_limit stamped");
+        assert_eq!(limit, 1_000_000);
+        // Incident shape: 140k tokens reads as 14% of the claude window.
+        assert_eq!(140_000 * 100 / limit, 14);
+
+        // cli_kind_for resolves the definition kind behind the instance.
+        assert_eq!(
+            cli_kind_for(&pool, &row.id)
+                .await
+                .expect("cli_kind_for failed")
+                .as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            cli_kind_for(&pool, "no-such-instance")
+                .await
+                .expect("cli_kind_for missing id failed"),
+            None
         );
     }
 

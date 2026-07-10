@@ -246,8 +246,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("session missing for workspace_agent {}", wa.id));
             assert_eq!(
                 sess.context_limit,
-                Some(session::DEFAULT_CONTEXT_LIMIT),
-                "session context_limit must match DEFAULT_CONTEXT_LIMIT"
+                // agent_input sets no cli_kind, so the resolver's conservative
+                // branch is the expected stamp.
+                Some(session::default_context_limit_for("")),
+                "session context_limit must match the resolver default for its cli_kind"
             );
         }
     }
