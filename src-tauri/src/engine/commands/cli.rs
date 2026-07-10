@@ -885,9 +885,12 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         // ── code (tree-sitter code intelligence) ──────────────────────────
         "code" => map_code_argv(argv),
 
+        // ── proxy (context optimizer) ─────────────────────────────────────
+        "proxy" => map_proxy_argv(argv),
+
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart, design, browser, code)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart, design, browser, code, proxy)"
         ))),
     }
 }
@@ -917,6 +920,39 @@ fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
         return (true, rest);
     }
     (false, words.to_vec())
+}
+
+fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
+    let usage = "cli: proxy <status|mode <off|log|rewrite>|report [--since-hours N]>";
+    match argv.get(1).map(String::as_str) {
+        Some("status") if argv.len() == 2 => Ok(("proxy.status", Value::Null)),
+        Some("mode") if argv.len() == 3 => match argv[2].as_str() {
+            "off" | "log" | "rewrite" => Ok(("proxy.mode", json!({ "mode": argv[2] }))),
+            _ => Err(AppError::Invalid(usage.into())),
+        },
+        Some("report") => {
+            let (since_hours, rest) = take_flag(&argv[2..], "--since-hours");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let mut params = json!({});
+            if let Some(raw) = since_hours {
+                let value = raw.parse::<i64>().map_err(|_| {
+                    AppError::Invalid(
+                        "cli: proxy report: --since-hours expects a non-negative integer".into(),
+                    )
+                })?;
+                if value < 0 {
+                    return Err(AppError::Invalid(
+                        "cli: proxy report: --since-hours expects a non-negative integer".into(),
+                    ));
+                }
+                params["sinceHours"] = json!(value);
+            }
+            Ok(("proxy.report", params))
+        }
+        _ => Err(AppError::Invalid(usage.into())),
+    }
 }
 
 const CODE_USAGE: &str =
@@ -3413,6 +3449,37 @@ mod tests {
     fn code_rejects_unknown_verb() {
         let err = map_argv(&argv(&["code", "dance", "--path", "/tmp/x"])).unwrap_err();
         assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    // ── proxy ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn proxy_verbs_map_to_allowlisted_router_methods() {
+        assert_eq!(ok_method(&["proxy", "status"]), "proxy.status");
+        assert_eq!(ok_params(&["proxy", "status"]), Value::Null);
+        assert_eq!(ok_method(&["proxy", "mode", "rewrite"]), "proxy.mode");
+        assert_eq!(
+            ok_params(&["proxy", "mode", "rewrite"]),
+            json!({ "mode": "rewrite" })
+        );
+        assert_eq!(ok_method(&["proxy", "report"]), "proxy.report");
+        assert_eq!(
+            ok_params(&["proxy", "report", "--since-hours", "48"]),
+            json!({ "sinceHours": 48 })
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_unknown_or_malformed_verbs() {
+        assert!(is_invalid(&["proxy", "nuke"]));
+        assert!(is_invalid(&["proxy", "mode", "turbo"]));
+        assert!(is_invalid(&[
+            "proxy",
+            "report",
+            "--since-hours",
+            "yesterday"
+        ]));
+        assert!(is_invalid(&["proxy", "report", "--since-hours", "-1"]));
     }
 
     #[test]

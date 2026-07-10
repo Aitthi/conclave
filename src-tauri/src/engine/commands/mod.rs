@@ -13,6 +13,7 @@ mod memory_bench;
 pub mod message;
 pub mod orient;
 pub mod provider;
+pub mod proxy;
 pub mod role;
 pub mod skill;
 pub mod skill_draft;
