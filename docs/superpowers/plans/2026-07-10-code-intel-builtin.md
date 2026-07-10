@@ -938,6 +938,12 @@ exec "$(dirname "$0")/codegraph-bin" "$@"
 
 ---
 
+## Amendments (post-planning defects, owned by the plan)
+
+- **Rename def-site defect (challenge 4f99e542 by Dabin, ruling 77b4ae3d):** inherited from astedit upstream — `rename --apply` edits references only; a `fn` definition's own identifier is never edited (structs pass by accident: `rust_refs.scm` captures every `type_identifier`, the def's name token included). Task 11's fn-based test correctly exposes it. Fix = task `codeintel-rename-def-site` (def-site edit + additive `Definition.name_start_byte`/`name_end_byte` + fn-based regression), landing after the grammars lane merges.
+- **Task 7/8 test-template gap (challenge 18c27878 by Mellow, ruling 5359d396):** the plan's own Step 2 fixtures contained no import statements, leaving all six new `*_imports.scm` files untested while the heading promised cross-file coverage — a plan defect. Coverage ruling: every new language asserts `idx.imports` extraction; Go+Java get true cross-file fixtures (quoted-path + dotted-path).
+- **Risk ledger addition:** cross-file call RESOLUTION (module_matches conventions) for Swift/C/C++/Kotlin — and possibly Go/Java, pending Dew's findings — is not exercised in v1; `resolve.rs` generalization beyond rust/TS/JS/py conventions is a recorded follow-up, deliberately out of every current lane's scope.
+
 ## Verification (whole feature)
 
 1. `cargo test -p codeintel && cargo test` (src-tauri) — all green.

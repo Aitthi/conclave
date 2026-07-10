@@ -691,6 +691,7 @@ pub async fn watchers(pool: &SqlitePool, task_id: &str) -> sqlx::Result<Vec<Stri
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct StallCandidate {
     pub id: String,
+    pub workspace_id: String,
     pub slug: String,
     pub state: String,
     pub owner_agent_id: Option<String>,
@@ -705,7 +706,7 @@ pub struct StallCandidate {
 /// app-wide background loop, not scoped to one workspace.
 pub async fn stall_candidates(pool: &SqlitePool) -> sqlx::Result<Vec<StallCandidate>> {
     sqlx::query_as::<_, StallCandidate>(
-        "SELECT t.id, t.slug, t.state, t.owner_agent_id, t.implementer_agent_id, \
+        "SELECT t.id, t.workspace_id, t.slug, t.state, t.owner_agent_id, t.implementer_agent_id, \
          MAX(e.created_at) AS last_event_at \
          FROM task t JOIN task_event e ON e.task_id = t.id \
          WHERE t.state IN ('claimed', 'in_progress') \
