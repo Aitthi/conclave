@@ -12,7 +12,7 @@
 //! Usage is printed when the binary is run with no arguments, `help`,
 //! `--help`, or `-h`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
@@ -125,6 +125,9 @@ Subcommands:
   browser status | snapshot [--max-text N] | close   (status/snapshot print JSON)
   browser click|type <selector> [text...] | eval <js...>   (selectors come from snapshot; eval is local-only)
   browser screenshot [path] [--width N] [--height N]   (path defaults to ./browser-screenshot.png, resolved to an absolute path in this shell's cwd)
+  code stats|files|tree|symbols|find <args>   survey a codebase (tree-sitter)
+  code callers|callees|refs|impact <name>     semantic cross-references
+  code rename|rewrite [--apply]               AST-validated edits (dry-run default)
   rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
@@ -531,6 +534,72 @@ async fn uds_task_call(argv: Vec<String>, self_instance: Option<&str>) -> Result
         .get("result")
         .cloned()
         .ok_or_else(|| "malformed response (no result)".to_string())
+}
+
+/// Inject the caller's cwd as `--path`, or resolve an explicitly relative
+/// path against it. Filesystem canonicalization stays in [`run_code`] so this
+/// transformation remains pure and unit-testable.
+fn inject_code_path(mut argv: Vec<String>, cwd: &Path) -> Vec<String> {
+    if let Some(pos) = argv.iter().position(|word| word == "--path") {
+        if let Some(raw) = argv.get_mut(pos + 1) {
+            let path = Path::new(raw);
+            if path.is_relative() {
+                *raw = cwd.join(path).to_string_lossy().into_owned();
+            }
+        }
+    } else {
+        argv.push("--path".to_string());
+        argv.push(cwd.to_string_lossy().into_owned());
+    }
+    argv
+}
+
+/// Execute `conclave code` through `cli.exec` after resolving the caller's
+/// root locally. Only the absolute `--path` is sent; the cwd itself is never a
+/// UDS field, preserving the generic thin-client wire contract.
+async fn run_code(argv: &[String], self_instance: Option<&str>) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("conclave: code: cannot read cwd: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut wire_argv = inject_code_path(argv.to_vec(), &cwd);
+    let Some(path_pos) = wire_argv.iter().position(|word| word == "--path") else {
+        eprintln!("conclave: code: internal error: --path was not injected");
+        return ExitCode::FAILURE;
+    };
+    let Some(raw_path) = wire_argv.get(path_pos + 1).cloned() else {
+        eprintln!("conclave: code: --path requires a directory");
+        return ExitCode::FAILURE;
+    };
+    if raw_path.starts_with("--") {
+        eprintln!("conclave: code: --path requires a directory");
+        return ExitCode::FAILURE;
+    }
+    let canonical = match std::fs::canonicalize(&raw_path) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("conclave: code: cannot resolve --path '{raw_path}': {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    wire_argv[path_pos + 1] = canonical.to_string_lossy().into_owned();
+
+    let label = verb_label(&wire_argv);
+    match uds_task_call(wire_argv, self_instance).await {
+        Ok(result) => {
+            let pretty =
+                serde_json::to_string_pretty(&result).expect("serialize code result cannot fail");
+            emit_capped(&label, &format!("{pretty}\n"), cap_disabled());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("conclave: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// After the worktree exists, best-effort claim the matching task and move it
@@ -3661,6 +3730,12 @@ async fn main() -> ExitCode {
         return run_stage(&argv, self_instance.as_deref()).await;
     }
 
+    // `code` resolves the caller's cwd locally and injects only an absolute
+    // `--path` before the ordinary `cli.exec` UDS round-trip.
+    if argv[0] == "code" {
+        return run_code(&argv, self_instance.as_deref()).await;
+    }
+
     // `rtk-hook` is fully LOCAL (Claude Code PreToolUse hook body): it must
     // keep working while the engine is busy or restarting, so it never
     // touches the socket at all.
@@ -4047,13 +4122,38 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_self_args, parse_min_plan_header, plan_check_files_and_total, read_checkout_file,
-        render_plan_check_result, sha256_hex, validate_slug, GUARD_HOOK, GUARD_MARKER,
+        expand_self_args, inject_code_path, parse_min_plan_header, plan_check_files_and_total,
+        read_checkout_file, render_plan_check_result, sha256_hex, validate_slug, GUARD_HOOK,
+        GUARD_MARKER,
     };
     use std::path::{Path, PathBuf};
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn inject_code_path_appends_cwd_when_absent() {
+        let out = inject_code_path(v(&["code", "stats"]), Path::new("/workspace"));
+        assert_eq!(out, v(&["code", "stats", "--path", "/workspace"]));
+    }
+
+    #[test]
+    fn inject_code_path_resolves_relative_path_against_cwd() {
+        let out = inject_code_path(
+            v(&["code", "stats", "--path", "src"]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(out, v(&["code", "stats", "--path", "/workspace/src"]));
+    }
+
+    #[test]
+    fn inject_code_path_leaves_absolute_path_unchanged() {
+        let out = inject_code_path(
+            v(&["code", "stats", "--path", "/tmp/project"]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(out, v(&["code", "stats", "--path", "/tmp/project"]));
     }
 
     // ── output economy (task cli-output-economy) ────────────────────────────
