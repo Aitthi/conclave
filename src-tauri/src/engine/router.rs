@@ -1,6 +1,6 @@
 use crate::engine::commands::{
-    agent, artifact, blackboard, browser, cli, design, fusion, instance, memory, message, orient,
-    provider, role, skill, skill_draft, snapshot, task, tool, workspace,
+    agent, artifact, blackboard, browser, cli, code, design, fusion, instance, memory, message,
+    orient, provider, role, skill, skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -135,6 +135,19 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "browser.setBounds" => browser::set_bounds(state, payload).await,
         "browser.setVisible" => browser::set_visible(state, payload).await,
         "browser.screenshot" => browser::screenshot(state, payload).await,
+
+        // ── code (code intelligence) ──────────────────────────────────────
+        "code.stats" => code::stats(state, payload).await,
+        "code.files" => code::files(state, payload).await,
+        "code.tree" => code::tree(state, payload).await,
+        "code.symbols" => code::symbols(state, payload).await,
+        "code.find" => code::find(state, payload).await,
+        "code.callers" => code::callers(state, payload).await,
+        "code.callees" => code::callees(state, payload).await,
+        "code.refs" => code::refs(state, payload).await,
+        "code.impact" => code::impact(state, payload).await,
+        "code.rename" => code::rename(state, payload).await,
+        "code.rewrite" => code::rewrite(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

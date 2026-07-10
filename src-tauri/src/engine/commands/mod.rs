@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod blackboard;
 pub mod browser;
 pub mod cli;
+pub mod code;
 pub mod design;
 pub mod fusion;
 pub mod instance;
