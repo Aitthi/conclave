@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Search, X } from "lucide-react";
 import { timeHint } from "../lib/timeHint";
 import { ClampText } from "./ClampText";
-import { derivePairs, pairKeyOf } from "../lib/chatPairs";
+import { createdAtMs, derivePairs, pairKeyOf } from "../lib/chatPairs";
 import { clockLabel, dayLabel, group } from "../lib/chatFeed";
 import { useWorkspaceChat, type AgentIdentity } from "../lib/useWorkspaceChat";
 
@@ -56,9 +56,15 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
     if (selectedPair && !pairs.some((p) => p.key === selectedPair)) setSelectedPair(null);
   }, [pairs, selectedPair]);
 
-  // Oldest→newest for reading; narrowed by pair, then by search.
+  // Oldest→newest for reading; narrowed by pair, then by search. Sorted by
+  // parsed createdAt — the raw window's array order is untrusted (the default
+  // fixture deliberately shuffles it), so a blind reverse() would make
+  // `newest` (last element) point at an arbitrary message. Stable sort:
+  // createdAt ties keep window order, so the later array element stays newest.
   const visible = useMemo(() => {
-    const oldestFirst = [...messages].reverse();
+    const oldestFirst = [...messages].sort(
+      (a, b) => createdAtMs(a.createdAt) - createdAtMs(b.createdAt),
+    );
     const inPair = selectedPair
       ? oldestFirst.filter((m) => pairKeyOf(m.fromInstanceId, m.toInstanceId) === selectedPair)
       : oldestFirst;

@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import type { WorkspaceAgent } from "../ipc";
 import { ClampText } from "./ClampText";
-import { pairKeyOf } from "../lib/chatPairs";
+import { createdAtMs, pairKeyOf } from "../lib/chatPairs";
 import { deriveRooms, type Room } from "../lib/chatRooms";
 import { clockLabel, dayLabel, group } from "../lib/chatFeed";
 import { useWorkspaceChat, type AgentIdentity } from "../lib/useWorkspaceChat";
@@ -99,7 +99,15 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
     if (selectedKey === "workspace") return messages;
     return messages.filter((m) => pairKeyOf(m.fromInstanceId, m.toInstanceId) === selectedKey);
   }, [messages, selectedKey]);
-  const oldestFirst = useMemo(() => [...roomMessages].reverse(), [roomMessages]);
+  // Sorted by parsed createdAt — the raw window's array order is untrusted
+  // (the default fixture deliberately shuffles it), so a blind reverse() would
+  // make `newest` (last element) point at an arbitrary message. Stable sort:
+  // createdAt ties keep window order, so the later array element stays newest.
+  const oldestFirst = useMemo(
+    () =>
+      [...roomMessages].sort((a, b) => createdAtMs(a.createdAt) - createdAtMs(b.createdAt)),
+    [roomMessages],
+  );
   const groups = useMemo(() => group(oldestFirst), [oldestFirst]);
 
   const activeRoom = rooms.find((r) => r.key === selectedKey) ?? rooms[0];
