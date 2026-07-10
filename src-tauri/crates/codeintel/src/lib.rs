@@ -4,6 +4,7 @@ pub mod error;
 pub mod hash;
 pub mod index;
 pub mod lang;
+pub mod map;
 pub mod output;
 pub mod resolve;
 pub mod walk;
