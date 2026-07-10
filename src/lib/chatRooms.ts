@@ -1,5 +1,5 @@
 import type { InterAgentMessage } from "../ipc";
-import { derivePairs, pairKeyOf } from "./chatPairs";
+import { createdAtMs, derivePairs, pairKeyOf } from "./chatPairs";
 
 export type RoomKind = "channel" | "dm";
 
@@ -29,22 +29,35 @@ const WORKSPACE_ROOM_KEY = "workspace";
  * timestamp the caller captures once when the rail mounts — so a room that
  * first appears mid-session still badges its new messages (plan-review F4;
  * without this a fresh pair room reads as fully-read history and never
- * badges).
+ * badges). Comparison is parse-then-compare (`createdAtMs`), never
+ * lexicographic string compare.
  */
 function countUnread(
   roomMessages: InterAgentMessage[],
   seenMarker: string | undefined,
   mountedAt: string,
 ): number {
-  const threshold = seenMarker ?? mountedAt;
-  return roomMessages.filter((m) => m.createdAt > threshold).length;
+  const thresholdMs = createdAtMs(seenMarker ?? mountedAt);
+  return roomMessages.filter((m) => createdAtMs(m.createdAt) > thresholdMs).length;
+}
+
+/** `createdAt` of the chronologically newest message in the window, by
+ *  parsed comparison — the window's array order is NOT trusted (the default
+ *  fixture deliberately shuffles it). Empty/unparseable window → "". */
+function newestCreatedAt(messages: InterAgentMessage[]): string {
+  let newest = "";
+  for (const m of messages) {
+    if (createdAtMs(m.createdAt) > createdAtMs(newest)) newest = m.createdAt;
+  }
+  return newest;
 }
 
 /**
  * Derive Phase-1 rooms (R1: #workspace channel + one DM room per pair —
  * there is no channel/group/thread entity backing this, it's a view over
- * pairwise messages) from a newest-first message window plus a client-side
- * last-seen map. `mountedAt` is the rail's own mount timestamp (ISO), used as
+ * pairwise messages) from a message window of ANY order plus a client-side
+ * last-seen map. `lastAt` values are derived from parsed `createdAt`, never
+ * array position. `mountedAt` is the rail's own mount timestamp (ISO), used as
  * the unread baseline for any room with no explicit `lastSeen` entry yet.
  * Pure — no React, no identity resolution.
  */
@@ -58,7 +71,7 @@ export function deriveRooms(
     kind: "channel",
     title: "workspace",
     memberIds: [],
-    lastAt: messages[0]?.createdAt ?? "",
+    lastAt: newestCreatedAt(messages),
     unread: countUnread(messages, lastSeen[WORKSPACE_ROOM_KEY], mountedAt),
   };
 

@@ -494,7 +494,10 @@ export const memoryGraph: { nodes: MemoryGraphNode[]; edges: MemoryGraphEdge[] }
   ],
 };
 
-// ── Inter-agent messages (message.listForWorkspace) — newest-first ──────────
+// ── Inter-agent messages (message.listForWorkspace) — deliberately NOT ──────
+// chronological: entry order here (and the id-sort shuffle in default.ts's
+// message.listForWorkspace handler) is a standing regression tripwire, so
+// consumers MUST order by parsed createdAt. Never reorder these entries.
 export const messages: InterAgentMessage[] = [
   {
     id: "fx-msg-10",
