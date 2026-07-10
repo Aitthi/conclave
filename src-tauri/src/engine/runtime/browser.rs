@@ -365,17 +365,30 @@ fn type_js(selector: &str, text: &str) -> String {
     )
 }
 
-/// Wrap a raw agent-supplied JS expression so a thrown exception becomes a
-/// returned `{ __error }` instead of a swallowed callback (see module doc).
+/// Wrap raw agent-supplied JS so a thrown exception becomes a returned
+/// `{ __error }` instead of a swallowed callback (see module doc). The source
+/// is embedded as a string literal and compiled INSIDE the page via
+/// `new Function` — expression-first, falling back to a statement body — so
+/// multi-statement input can never turn the whole wrapper into a parse-time
+/// SyntaxError (which would bypass the try/catch entirely).
 fn eval_js(js: &str) -> String {
     format!(
         r#"(function () {{
   try {{
-    return (function () {{ return ({js}); }})();
+    var src = {src};
+    var fn;
+    try {{
+      fn = new Function("return (" + src + "\n)");
+    }} catch (e) {{
+      fn = new Function(src);
+    }}
+    var r = fn();
+    return r === undefined ? null : r;
   }} catch (e) {{
     return {{ __error: String(e && e.message ? e.message : e) }};
   }}
-}})()"#
+}})()"#,
+        src = js_literal(js)
     )
 }
 
@@ -423,6 +436,14 @@ async fn eval_value(view: &Webview, js: String) -> Result<serde_json::Value, Bro
         .map_err(|_| BrowserError::Timeout)?
         .map_err(|_| BrowserError::Webview("eval callback was dropped".into()))?;
 
+    // Defense in depth: an empty callback payload means the injected script
+    // itself failed to run (e.g. a wrapper-level parse error) — say so instead
+    // of surfacing serde's bare EOF text.
+    if raw.trim().is_empty() {
+        return Err(BrowserError::Webview(
+            "eval produced no result (script failed to parse?)".into(),
+        ));
+    }
     serde_json::from_str(&raw)
         .map_err(|e| BrowserError::Webview(format!("eval result was not JSON ({e}): {raw}")))
 }
@@ -831,10 +852,42 @@ mod tests {
     #[test]
     fn eval_js_wraps_expression_in_try_catch() {
         let js = eval_js("document.title");
-        assert!(js.contains("document.title"));
+        assert!(
+            js.contains(r#""document.title""#),
+            "source is embedded as a JS string literal"
+        );
         assert!(
             js.contains("__error"),
             "raw eval must not throw past the callback"
+        );
+    }
+
+    #[test]
+    fn eval_js_compiles_expression_first_with_statement_fallback() {
+        let js = eval_js("1+1");
+        assert!(
+            js.contains(r#"new Function("return (" + src + "\n)")"#),
+            "expression-first construction must be tried before the fallback"
+        );
+        assert!(
+            js.contains("new Function(src)"),
+            "statement-body fallback must exist for multi-statement input"
+        );
+        assert!(
+            js.contains("r === undefined ? null : r"),
+            "undefined results must normalize to null (JSON-serializable)"
+        );
+    }
+
+    #[test]
+    fn eval_js_escapes_multi_statement_source_with_quotes_and_newlines() {
+        let js = eval_js("var x = \"a;b\";\nx + '!'");
+        // The whole source — semicolons, quotes, newline — must survive as ONE
+        // JSON-escaped string literal so it can never break out of the wrapper.
+        assert!(js.contains(r#""var x = \"a;b\";\nx + '!'""#));
+        assert!(
+            js.contains("__error"),
+            "multi-statement eval must not throw past the callback"
         );
     }
 
