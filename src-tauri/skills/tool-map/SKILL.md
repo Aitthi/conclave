@@ -23,11 +23,12 @@ gate` likewise shows only a bounded log excerpt — the full log lands in
 - **Stage** — `stage status · diff · commit · snap · log · restore · clear`.
 - **Peers** — `agent list` (roster: ids, roles, skills, model, `working` flag), `tell <id>` (the ONLY channel that reaches a peer), `msg list/all`, `send`, `run`.
 - **Workspaces** — `ws list · use`.
-- **Blackboard** — `bb list · get · set · delete`. Key `config:distill-auto` opts a workspace into the timer-driven distiller nudge (`{distiller, reviewer, cooldownHours}`); absent = OFF, `bb delete` is the kill switch.
+- **Blackboard** — `bb list · get · set · delete`. Key `config:distill-auto` opts a workspace into the timer-driven distiller nudge (`{distiller, reviewer, cooldownHours}`); absent = OFF, `bb delete` is the kill switch. Keys `config:stall-minutes` / `config:stall-cooldown-minutes` override the stall-alert threshold/cooldown per workspace (defaults 10/30, clamped 5–240/10–1440).
 - **Memory** — `memory search · remember · delete · status · propose · queue · approve · reject`.
 - **Orient** — `orient <ws>`: ONE bounded fresh-context packet — slim live tasks, roster, your latest messages, blackboard heads, your watches, self — the first command after any restore/clear, replacing the old task-list + agent-list + msg-list + bb-list fan-out.
 - **Context** — `snapshot save · last · list · read · create`; `restart` (self-triggered save-then-die).
 - **Browser** — `browser open · goto · status · snapshot · click · type · eval · screenshot · close`: drive a page without Playwright/Puppeteer.
+- **Code intel** — `code stats · files · tree · symbols · find · callers · callees · refs · impact · rename · rewrite`: tree-sitter survey/cross-reference/AST-edit of a checkout (11 languages, engine-cached index; defaults to your cwd, `--path <DIR>` overrides). PREFER these over grep/find for symbol questions. `rename`/`rewrite` are dry-run by default — `--apply` writes and refreshes the cache; `needs_anchor`/`pattern-compile` come back as exit-0 JSON, read the payload.
 
 ## Council plan contract (conclave-plan:v1)
 
