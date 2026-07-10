@@ -337,6 +337,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn code_verbs_round_trip_through_cli_exec() {
+        let state = AppState::for_tests().await;
+        let dir = tempfile::tempdir().expect("temp code root");
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn greet() {}\nfn caller() { greet(); }\n",
+        )
+        .expect("write fixture");
+        let root = dir.path().to_string_lossy();
+
+        async fn call(state: &AppState, id: i64, argv: Value) -> Value {
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "cli.exec",
+                "params": { "argv": argv },
+            });
+            let line = serde_json::to_string(&request).expect("serialize request");
+            let response = handle_line(state, &line).await;
+            let value: Value = serde_json::from_str(&response).expect("response is JSON");
+            assert!(value.get("error").is_none(), "unexpected error: {value}");
+            value["result"].clone()
+        }
+
+        let found = call(&state, 1, json!(["code", "find", "greet", "--path", root])).await;
+        assert_eq!(found["schema_version"], json!(1));
+        assert_eq!(found["data"][0]["name"], json!("greet"));
+
+        let refs = call(&state, 2, json!(["code", "refs", "greet", "--path", root])).await;
+        assert!(
+            refs["data"]
+                .as_array()
+                .expect("refs data array")
+                .iter()
+                .any(|hit| hit["kind"] == "call"),
+            "refs should include the call site: {refs}"
+        );
+    }
+
     /// One real socket round-trip: bind, connect, send a request, read the
     /// response, and assert the socket file is 0600.
     #[tokio::test]

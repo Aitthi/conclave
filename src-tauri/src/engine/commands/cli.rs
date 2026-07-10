@@ -882,9 +882,12 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             )),
         },
 
+        // ── code (tree-sitter code intelligence) ──────────────────────────
+        "code" => map_code_argv(argv),
+
         // ── unknown — security catch-all ──────────────────────────────────
         other => Err(AppError::Invalid(format!(
-            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart, design, browser)"
+            "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart, design, browser, code)"
         ))),
     }
 }
@@ -914,6 +917,194 @@ fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
         return (true, rest);
     }
     (false, words.to_vec())
+}
+
+const CODE_USAGE: &str =
+    "cli: code <stats|files|tree|symbols|find|callers|callees|refs|impact|rename|rewrite> …";
+
+fn code_usage() -> AppError {
+    AppError::Invalid(CODE_USAGE.into())
+}
+
+fn code_path(words: &[String]) -> Result<(String, Vec<String>), AppError> {
+    let (_, words) = take_switch(words, "--json");
+    let (path, rest) = take_flag(&words, "--path");
+    match path {
+        Some(path) if !path.starts_with("--") => Ok((path, rest)),
+        _ => Err(code_usage()),
+    }
+}
+
+fn code_number(raw: String, flag: &str) -> Result<i64, AppError> {
+    raw.parse::<i64>()
+        .map_err(|_| AppError::Invalid(format!("cli: code: {flag} expects a non-negative integer")))
+        .and_then(|value| {
+            if value < 0 {
+                Err(AppError::Invalid(format!(
+                    "cli: code: {flag} expects a non-negative integer"
+                )))
+            } else {
+                Ok(value)
+            }
+        })
+}
+
+/// `code <verb> …` allowlist. `run_code` has already resolved and injected an
+/// absolute `--path`; this layer only validates argv and maps it to camelCase
+/// router params. `--json` is accepted for compatibility and ignored because
+/// every code response is JSON.
+fn map_code_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
+    let verb = argv.get(1).map(String::as_str);
+    let (path, words) = code_path(argv.get(2..).unwrap_or(&[]))?;
+
+    match verb {
+        Some("stats") | Some("tree") => {
+            if !words.is_empty() {
+                return Err(code_usage());
+            }
+            let method = if verb == Some("stats") {
+                "code.stats"
+            } else {
+                "code.tree"
+            };
+            Ok((method, json!({ "path": path })))
+        }
+        Some("files") => {
+            let (limit, rest) = take_flag(&words, "--limit");
+            if !rest.is_empty() {
+                return Err(code_usage());
+            }
+            let mut params = json!({ "path": path });
+            if let Some(raw) = limit {
+                params["limit"] = json!(code_number(raw, "--limit")?);
+            }
+            Ok(("code.files", params))
+        }
+        Some("symbols") => {
+            let (all, words) = take_switch(&words, "--all");
+            let (kind, words) = take_flag(&words, "--kind");
+            let (limit, rest) = take_flag(&words, "--limit");
+            if rest.len() > 1 || rest.first().is_some_and(|word| word.starts_with("--")) {
+                return Err(code_usage());
+            }
+            let mut params = json!({ "path": path });
+            if let Some(target) = rest.first() {
+                params["target"] = json!(target);
+            }
+            if all {
+                params["all"] = json!(true);
+            }
+            if let Some(raw) = kind {
+                let kinds: Vec<&str> = raw.split(',').filter(|kind| !kind.is_empty()).collect();
+                if kinds.is_empty() {
+                    return Err(code_usage());
+                }
+                params["kind"] = json!(kinds);
+            }
+            if let Some(raw) = limit {
+                params["limit"] = json!(code_number(raw, "--limit")?);
+            }
+            Ok(("code.symbols", params))
+        }
+        Some("find") => {
+            let (exact, words) = take_switch(&words, "--exact");
+            let (limit, rest) = take_flag(&words, "--limit");
+            if rest.len() != 1 || rest[0].starts_with("--") {
+                return Err(code_usage());
+            }
+            let mut params = json!({ "path": path, "name": rest[0] });
+            if exact {
+                params["exact"] = json!(true);
+            }
+            if let Some(raw) = limit {
+                params["limit"] = json!(code_number(raw, "--limit")?);
+            }
+            Ok(("code.find", params))
+        }
+        Some("callers") | Some("callees") => {
+            let (depth, rest) = take_flag(&words, "--depth");
+            if rest.len() != 1 || rest[0].starts_with("--") {
+                return Err(code_usage());
+            }
+            let mut params = json!({ "path": path, "name": rest[0] });
+            if let Some(raw) = depth {
+                params["depth"] = json!(code_number(raw, "--depth")?);
+            }
+            let method = if verb == Some("callers") {
+                "code.callers"
+            } else {
+                "code.callees"
+            };
+            Ok((method, params))
+        }
+        Some("refs") => {
+            let (limit, rest) = take_flag(&words, "--limit");
+            if rest.len() != 1 || rest[0].starts_with("--") {
+                return Err(code_usage());
+            }
+            let mut params = json!({ "path": path, "name": rest[0] });
+            if let Some(raw) = limit {
+                params["limit"] = json!(code_number(raw, "--limit")?);
+            }
+            Ok(("code.refs", params))
+        }
+        Some("impact") => {
+            if words.len() != 1 || words[0].starts_with("--") {
+                return Err(code_usage());
+            }
+            Ok(("code.impact", json!({ "path": path, "name": words[0] })))
+        }
+        Some("rename") => {
+            let (apply, words) = take_switch(&words, "--apply");
+            let (lang, words) = take_flag(&words, "--lang");
+            let (anchor, rest) = take_flag(&words, "--anchor");
+            if rest.len() != 2 || rest.iter().any(|word| word.starts_with("--")) {
+                return Err(code_usage());
+            }
+            let mut params = json!({
+                "path": path,
+                "old": rest[0],
+                "new": rest[1],
+            });
+            if apply {
+                params["apply"] = json!(true);
+            }
+            if let Some(lang) = lang {
+                params["lang"] = json!(lang);
+            }
+            if let Some(anchor) = anchor {
+                params["anchor"] = json!(anchor);
+            }
+            Ok(("code.rename", params))
+        }
+        Some("rewrite") => {
+            let (pattern, words) = take_flag(&words, "--pattern");
+            let (rewrite, words) = take_flag(&words, "--rewrite");
+            let (apply, words) = take_switch(&words, "--apply");
+            let (lang, rest) = take_flag(&words, "--lang");
+            if !rest.is_empty() {
+                return Err(code_usage());
+            }
+            let pattern = pattern.filter(|value| !value.starts_with("--"));
+            let rewrite = rewrite.filter(|value| !value.starts_with("--"));
+            let (Some(pattern), Some(rewrite)) = (pattern, rewrite) else {
+                return Err(code_usage());
+            };
+            let mut params = json!({
+                "path": path,
+                "pattern": pattern,
+                "rewrite": rewrite,
+            });
+            if apply {
+                params["apply"] = json!(true);
+            }
+            if let Some(lang) = lang {
+                params["lang"] = json!(lang);
+            }
+            Ok(("code.rewrite", params))
+        }
+        _ => Err(code_usage()),
+    }
 }
 
 /// `task <verb> …` — the ADR 0008 allowlist. Self-keyed verbs (everything but
@@ -3195,5 +3386,147 @@ mod tests {
     fn browser_unknown_subcommand_is_invalid() {
         assert!(is_invalid(&["browser"]));
         assert!(is_invalid(&["browser", "frobnicate"]));
+    }
+
+    // ── code ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn code_find_maps_to_router_method() {
+        let (method, params) = map_argv(&argv(&[
+            "code", "find", "greet", "--exact", "--path", "/tmp/x",
+        ]))
+        .unwrap();
+        assert_eq!(method, "code.find");
+        assert_eq!(
+            params,
+            serde_json::json!({"name": "greet", "exact": true, "path": "/tmp/x"})
+        );
+    }
+
+    #[test]
+    fn code_rename_requires_old_and_new() {
+        let err = map_argv(&argv(&["code", "rename", "onlyone", "--path", "/tmp/x"])).unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    #[test]
+    fn code_rejects_unknown_verb() {
+        let err = map_argv(&argv(&["code", "dance", "--path", "/tmp/x"])).unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    #[test]
+    fn code_all_verbs_map_flags_to_camel_case_params() {
+        assert_eq!(
+            ok_params(&["code", "stats", "--json", "--path", "/x"]),
+            json!({"path": "/x"})
+        );
+        assert_eq!(
+            ok_params(&["code", "files", "--limit", "4", "--path", "/x"]),
+            json!({"path": "/x", "limit": 4})
+        );
+        assert_eq!(
+            ok_params(&[
+                "code",
+                "symbols",
+                "src/lib.rs",
+                "--all",
+                "--kind",
+                "fn,struct",
+                "--limit",
+                "8",
+                "--path",
+                "/x"
+            ]),
+            json!({
+                "path": "/x",
+                "target": "src/lib.rs",
+                "all": true,
+                "kind": ["fn", "struct"],
+                "limit": 8,
+            })
+        );
+        assert_eq!(
+            ok_params(&["code", "callers", "greet", "--depth", "2", "--path", "/x"]),
+            json!({"path": "/x", "name": "greet", "depth": 2})
+        );
+        assert_eq!(
+            ok_params(&["code", "callees", "greet", "--path", "/x"]),
+            json!({"path": "/x", "name": "greet"})
+        );
+        assert_eq!(
+            ok_params(&["code", "refs", "greet", "--limit", "3", "--path", "/x"]),
+            json!({"path": "/x", "name": "greet", "limit": 3})
+        );
+        assert_eq!(
+            ok_params(&["code", "impact", "greet", "--path", "/x"]),
+            json!({"path": "/x", "name": "greet"})
+        );
+        assert_eq!(
+            ok_params(&[
+                "code",
+                "rename",
+                "old",
+                "new",
+                "--apply",
+                "--lang",
+                "rust",
+                "--anchor",
+                "src/lib.rs:1",
+                "--path",
+                "/x"
+            ]),
+            json!({
+                "path": "/x",
+                "old": "old",
+                "new": "new",
+                "apply": true,
+                "lang": "rust",
+                "anchor": "src/lib.rs:1",
+            })
+        );
+        assert_eq!(
+            ok_params(&[
+                "code",
+                "rewrite",
+                "--pattern",
+                "old($A)",
+                "--rewrite",
+                "new($A)",
+                "--apply",
+                "--lang",
+                "rust",
+                "--path",
+                "/x"
+            ]),
+            json!({
+                "path": "/x",
+                "pattern": "old($A)",
+                "rewrite": "new($A)",
+                "apply": true,
+                "lang": "rust",
+            })
+        );
+        assert_eq!(ok_method(&["code", "tree", "--path", "/x"]), "code.tree");
+    }
+
+    #[test]
+    fn code_rejects_missing_path_bad_numbers_and_stray_words() {
+        assert!(is_invalid(&["code", "stats"]));
+        assert!(is_invalid(&[
+            "code", "files", "--limit", "many", "--path", "/x"
+        ]));
+        assert!(is_invalid(&[
+            "code", "callers", "greet", "--depth", "-1", "--path", "/x"
+        ]));
+        assert!(is_invalid(&[
+            "code",
+            "rewrite",
+            "--pattern",
+            "old($A)",
+            "--path",
+            "/x"
+        ]));
+        assert!(is_invalid(&["code", "tree", "extra", "--path", "/x"]));
     }
 }

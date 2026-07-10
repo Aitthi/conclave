@@ -58,6 +58,10 @@ pub struct AppState {
     /// four workspaces and invalidated by every completed memory write.
     pub memory_search_cache: std::sync::Arc<crate::engine::commands::memory::MemorySearchCache>,
 
+    /// Per-root incremental tree-sitter index cache shared by all `code.*`
+    /// handlers.
+    pub code_cache: std::sync::Arc<codeintel::cache::CodeIntelCache>,
+
     /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
     /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
     /// time. This is what makes `/clear` run strictly AFTER the save completes
@@ -93,6 +97,7 @@ impl AppState {
             memory_search_cache: std::sync::Arc::new(
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),
+            code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
@@ -208,6 +213,7 @@ impl AppState {
             memory_search_cache: std::sync::Arc::new(
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),
+            code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
