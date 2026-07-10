@@ -25,6 +25,10 @@ falls short.)
   brief <ws> <slug>`: metadata, boundary, design canon, capped plan excerpt,
   open challenges, latest gates/events, memory hits. The global-constraints
   section binds every task.
+- Orient in the code with `conclave code` (`symbols · find · callers · refs ·
+  impact` — engine-cached index, defaults to your cwd): a symbol question costs
+  one command, not a grep sweep. `rename`/`rewrite` are dry-run by default;
+  `needs_anchor`/`pattern-compile` come back as exit-0 JSON — read the payload.
 - Work isolated (the lane worktree). Main stays clean until integration is an
   explicit decision, not a side effect — and in a SHARED checkout the commit
   guard (`conclave lane guard install`, scope from `$CONCLAVE_COMMIT_SCOPE`)

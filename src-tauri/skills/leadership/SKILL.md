@@ -14,6 +14,10 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   carrying YOUR recommended answer and reasoning.
 - Before asking, explore (code, docs, history). Never ask what the workspace can
   already answer, nor two questions when the first answer changes the second.
+- For symbol questions, explore with `conclave code`, not grep: `find <NAME>
+  --exact` locates the DEFINING file before you cut a `--boundary` (the classic
+  boundary mistake is pinning the importer), `refs`/`impact` show what a change
+  actually touches before you size or split the work.
 - Stop when the remaining choices are consequences, not forks.
 
 ## Write decisions down where they outlive the conversation
