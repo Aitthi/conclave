@@ -301,7 +301,14 @@ pub fn build_index(root: &Path) -> Result<Index> {
 /// entries (parse failures) surface as a `warnings` entry instead of
 /// contributing data.
 pub(crate) fn assemble_index(mut partials: Vec<(String, Option<FilePartial>)>) -> Index {
-    partials.sort_by(|a, b| a.0.cmp(&b.0));
+    // Sort by path components (not raw byte comparison) to match the order
+    // `walk_sources` produces via `PathBuf::cmp`. Byte-wise `String` comparison
+    // diverges from component-wise comparison for names like `a-b/x.rs` vs
+    // `a/y.rs` (`-` is 0x2D, `/` is 0x2F, so `-` sorts before `/` byte-wise, but
+    // `a` sorts before `a-b` component-wise). Keeping the two orderings in sync
+    // keeps `build_index`'s output order stable regardless of whether it went
+    // through `assemble_index` directly or via the cache's reassembly path.
+    partials.sort_by(|a, b| std::path::Path::new(&a.0).cmp(std::path::Path::new(&b.0)));
     let mut idx = Index::default();
     for (rel, p) in partials {
         match p {

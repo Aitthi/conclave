@@ -132,21 +132,40 @@ impl CodeIntelCache {
                     .unwrap_or(&f.path)
                     .to_string_lossy()
                     .into_owned();
-                seen_rels.insert(rel.clone());
-
-                let meta = fs::metadata(&f.path)?;
-                let mtime = meta.modified()?;
+                // Stat (and, if needed, hash) failures here are treated as "the
+                // file is gone" rather than propagated: `walk_sources` already
+                // ran and listed this file, but under a TOCTOU race (deleted or
+                // replaced between the walk and this stat) the I/O can fail even
+                // though nothing is actually wrong with the cache or the rest of
+                // the walk. Matching `build_index`'s per-file graceful-degrade
+                // behaviour, we simply don't mark this file "seen" — the
+                // deletion pass below (which drops any stored entry not in
+                // `seen_rels`) then removes it like any other vanished file,
+                // instead of discarding the whole refresh (and a good cached
+                // `Arc`) over one file's benign disappearance. Errors from the
+                // walk itself (above, `walk_sources(root)?`) are NOT covered by
+                // this and remain hard errors.
+                let Ok(meta) = fs::metadata(&f.path) else {
+                    continue;
+                };
+                let Ok(mtime) = meta.modified() else {
+                    continue;
+                };
                 let size = meta.len();
 
                 let stored = existing.and_then(|r| r.files.get(&rel));
                 if let Some(e) = stored {
                     if e.mtime == mtime && e.size == size {
                         // Fast path: stat identical, nothing to do.
+                        seen_rels.insert(rel.clone());
                         continue;
                     }
                 }
 
-                let hash = compute_file_hash(&f.path)?;
+                let Ok(hash) = compute_file_hash(&f.path) else {
+                    continue;
+                };
+                seen_rels.insert(rel.clone());
                 if let Some(e) = stored {
                     if e.hash == hash {
                         // Content round-tripped to the same bytes — stat moved
