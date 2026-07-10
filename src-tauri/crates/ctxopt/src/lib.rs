@@ -9,3 +9,4 @@ pub const MIN_ELIDE_BYTES: usize = 600; // never elide small results
 pub const LEDGER_CAP: usize = 64; // LRU conversation cap
 
 pub mod estimate;
+pub mod request;
