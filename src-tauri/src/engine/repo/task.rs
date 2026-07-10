@@ -153,16 +153,27 @@ pub struct NewTask<'a> {
     pub file_boundary_json: &'a str, // pre-serialized JSON array text, e.g. "[]"
     pub design_canon: Option<&'a str>,
     pub plan: &'a str,
+    /// Agent ids to subscribe into `task_watch` in the SAME transaction as the
+    /// task insert (empty for the ordinary flag-less create, which leaves the
+    /// wire shape untouched). The command layer supplies the already-validated,
+    /// already-deduplicated owner-plus-watchers set; `INSERT OR IGNORE` guards
+    /// against any residual duplicate so a repeated id can never abort the tx.
+    pub watcher_agent_ids: &'a [String],
 }
 
 /// Insert a new task and return the constructed row. Does NOT check
 /// `(workspace_id, slug)` uniqueness itself — the `UNIQUE` constraint raises a
 /// `sqlx::Error` the command layer maps to a friendly `AppError::Invalid`
 /// (mirrors `memory_chunk`'s content-hash uniqueness handling).
+///
+/// The task row and every `watcher_agent_ids` subscription land in ONE
+/// transaction: if any `task_watch` insert fails the whole create rolls back,
+/// so a rejected watcher never leaves a partial task behind.
 pub async fn create(pool: &SqlitePool, input: NewTask<'_>) -> sqlx::Result<TaskRow> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO task \
          (id, workspace_id, slug, title, state, owner_agent_id, implementer_agent_id, \
@@ -178,8 +189,17 @@ pub async fn create(pool: &SqlitePool, input: NewTask<'_>) -> sqlx::Result<TaskR
     .bind(input.design_canon)
     .bind(input.plan)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    for agent_id in input.watcher_agent_ids {
+        sqlx::query("INSERT OR IGNORE INTO task_watch (task_id, agent_id) VALUES (?1, ?2)")
+            .bind(&id)
+            .bind(agent_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
 
     Ok(TaskRow {
         id,
@@ -737,6 +757,7 @@ mod tests {
                 file_boundary_json: "[]",
                 design_canon: None,
                 plan: "",
+                watcher_agent_ids: &[],
             },
         )
         .await
@@ -809,6 +830,7 @@ mod tests {
                 file_boundary_json: "[]",
                 design_canon: None,
                 plan: "",
+                watcher_agent_ids: &[],
             },
         )
         .await;
@@ -831,6 +853,7 @@ mod tests {
                 file_boundary_json: "[]",
                 design_canon: None,
                 plan: "",
+                watcher_agent_ids: &[],
             },
         )
         .await;

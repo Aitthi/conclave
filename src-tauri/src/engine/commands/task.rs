@@ -482,6 +482,12 @@ fn emit_changed(state: &AppState, task: &TaskRow) {
 
 // ── task.create ───────────────────────────────────────────────────────────
 
+/// Upper bound on `--watchers` fan-out, applied before any insert (design-spec
+/// risk "Watcher fan-out: cap watcher count and deduplicate ids before
+/// insert"). A council rarely exceeds a handful; this is a generous guard
+/// against a runaway or malformed list, not a product limit.
+const MAX_WATCHERS: usize = 64;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateReq {
@@ -494,6 +500,12 @@ struct CreateReq {
     design_canon: Option<String>,
     #[serde(default)]
     plan: String,
+    /// Optional `--watchers` list. When non-empty, the owner plus these agents
+    /// are subscribed into `task_watch` atomically with the task insert; when
+    /// empty (the ordinary create) the wire shape is left byte-for-byte
+    /// unchanged and no subscriptions are written.
+    #[serde(default)]
+    watcher_agent_ids: Vec<String>,
 }
 
 /// Create a task. `ownerAgentId`, when supplied, must belong to `workspaceId`.
@@ -505,6 +517,36 @@ pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError>
     if let Some(owner) = &req.owner_agent_id {
         enforce_scope(state, &req.workspace_id, owner, "owner").await?;
     }
+
+    // Resolve the atomic watch set BEFORE any insert: an unknown or
+    // cross-workspace watcher must fail the create with no partial task left
+    // behind (design spec `task create --watchers`). When no watchers are
+    // supplied this stays empty and the create is byte-for-byte unchanged.
+    let watch_ids = if req.watcher_agent_ids.is_empty() {
+        Vec::new()
+    } else {
+        if req.watcher_agent_ids.len() > MAX_WATCHERS {
+            return Err(AppError::Invalid(format!(
+                "too many watchers: {} (max {MAX_WATCHERS})",
+                req.watcher_agent_ids.len()
+            )));
+        }
+        // Owner first, then the supplied agents, deduplicated in order. Each
+        // watcher must belong to this workspace (rejects both unknown ids and
+        // cross-workspace ids, mirroring the owner check).
+        let mut ids: Vec<String> = Vec::with_capacity(req.watcher_agent_ids.len() + 1);
+        if let Some(owner) = &req.owner_agent_id {
+            ids.push(owner.clone());
+        }
+        for watcher in &req.watcher_agent_ids {
+            enforce_scope(state, &req.workspace_id, watcher, "watcher").await?;
+            if !ids.contains(watcher) {
+                ids.push(watcher.clone());
+            }
+        }
+        ids
+    };
+
     if repo::task::get(&state.db, &req.workspace_id, &req.slug)
         .await?
         .is_some()
@@ -527,12 +569,19 @@ pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError>
             file_boundary_json: &file_boundary_json,
             design_canon: req.design_canon.as_deref(),
             plan: &req.plan,
+            watcher_agent_ids: &watch_ids,
         },
     )
     .await?;
 
     emit_changed(state, &row);
-    Ok(task_to_json(&row))
+    // Additive confirmation of the requested subscriptions, only when watchers
+    // were requested — the flag-less create keeps its frozen wire shape.
+    let mut out = task_to_json(&row);
+    if !watch_ids.is_empty() {
+        out["watcherAgentIds"] = json!(watch_ids);
+    }
+    Ok(out)
 }
 
 // ── task.list ─────────────────────────────────────────────────────────────
@@ -1525,6 +1574,159 @@ mod tests {
         .await
         .expect_err("unknown workspace must fail");
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_without_watchers_omits_watcher_field_and_writes_no_subscription() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+
+        let created = create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "t1", "title": "T1", "ownerAgentId": owner }),
+        )
+        .await
+        .expect("create failed");
+
+        assert!(
+            created.get("watcherAgentIds").is_none(),
+            "flag-less create must keep its frozen wire shape"
+        );
+        let task_id = created["id"].as_str().unwrap();
+        assert!(
+            repo::task::watchers(&state.db, task_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no --watchers ⇒ no task_watch rows (owner is not auto-subscribed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_watchers_subscribes_owner_plus_watchers_atomically() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+        let w1 = fixture_instance(&state, &ws, "Council-A").await;
+        let w2 = fixture_instance(&state, &ws, "Council-B").await;
+
+        let created = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": [w1, w2]
+            }),
+        )
+        .await
+        .expect("create failed");
+
+        // Additive confirmation array: owner first, then watchers, in order.
+        assert_eq!(
+            created["watcherAgentIds"],
+            json!([owner, w1, w2]),
+            "watcherAgentIds confirms the requested subscriptions"
+        );
+        let task_id = created["id"].as_str().unwrap();
+        let mut watchers = repo::task::watchers(&state.db, task_id).await.unwrap();
+        watchers.sort();
+        let mut expected = vec![owner.clone(), w1.clone(), w2.clone()];
+        expected.sort();
+        assert_eq!(watchers, expected, "owner + watchers land in task_watch");
+    }
+
+    #[tokio::test]
+    async fn create_with_watchers_deduplicates_owner_and_repeats() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+        let w1 = fixture_instance(&state, &ws, "Council-A").await;
+
+        // Owner repeated in the list, plus w1 twice — must collapse to two rows.
+        let created = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": [owner, w1, w1]
+            }),
+        )
+        .await
+        .expect("create failed");
+
+        assert_eq!(created["watcherAgentIds"], json!([owner, w1]));
+        let task_id = created["id"].as_str().unwrap();
+        let watchers = repo::task::watchers(&state.db, task_id).await.unwrap();
+        assert_eq!(watchers.len(), 2, "duplicates collapse to distinct rows");
+    }
+
+    #[tokio::test]
+    async fn create_unknown_watcher_fails_and_leaves_no_task() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+
+        let err = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": ["ghost"]
+            }),
+        )
+        .await
+        .expect_err("unknown watcher must fail");
+        assert!(matches!(err, AppError::NotFound(_)));
+        assert!(
+            repo::task::get(&state.db, &ws, "t1").await.unwrap().is_none(),
+            "a rejected watcher must not leave a partial task behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_cross_workspace_watcher_fails_and_leaves_no_task() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+        // An agent that exists, but in a DIFFERENT workspace.
+        let other_ws = fixture_workspace(&state).await;
+        let foreign = fixture_instance(&state, &other_ws, "Outsider").await;
+
+        let err = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": [foreign]
+            }),
+        )
+        .await
+        .expect_err("cross-workspace watcher must fail");
+        assert!(matches!(err, AppError::Invalid(_)));
+        assert!(
+            repo::task::get(&state.db, &ws, "t1").await.unwrap().is_none(),
+            "a rejected watcher must not leave a partial task behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_too_many_watchers_is_invalid() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+        let overflow: Vec<String> = (0..=MAX_WATCHERS).map(|i| format!("w{i}")).collect();
+
+        let err = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": overflow
+            }),
+        )
+        .await
+        .expect_err("over-cap watcher list must fail");
+        assert!(matches!(err, AppError::Invalid(_)));
+        assert!(
+            repo::task::get(&state.db, &ws, "t1").await.unwrap().is_none(),
+            "an over-cap list must not leave a partial task behind"
+        );
     }
 
     // ── task.list ─────────────────────────────────────────────────────────

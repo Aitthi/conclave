@@ -1009,12 +1009,12 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         Some("create") => {
             let workspace_id = argv.get(2).ok_or_else(|| {
                 AppError::Invalid(
-                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text]".into(),
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id]".into(),
                 )
             })?;
             let slug = argv.get(3).ok_or_else(|| {
                 AppError::Invalid(
-                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text]".into(),
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id]".into(),
                 )
             })?;
             let rest = argv.get(4..).unwrap_or(&[]).to_vec();
@@ -1022,9 +1022,10 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             let (canon, rest) = take_flag(&rest, "--canon");
             let (owner, rest) = take_flag(&rest, "--owner");
             let (plan, rest) = take_flag(&rest, "--plan");
+            let (watchers, rest) = take_flag(&rest, "--watchers");
             if rest.is_empty() {
                 return Err(AppError::Invalid(
-                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text]".into(),
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id]".into(),
                 ));
             }
             let title = rest.join(" ");
@@ -1041,6 +1042,12 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             }
             if let Some(plan) = plan {
                 params["plan"] = json!(plan);
+            }
+            if let Some(watchers) = watchers {
+                // Same comma-split-and-drop-empties shape as `--boundary`; the
+                // engine caps and deduplicates before touching `task_watch`.
+                let ids: Vec<&str> = watchers.split(',').filter(|s| !s.is_empty()).collect();
+                params["watcherAgentIds"] = json!(ids);
             }
             Ok(("task.create", params))
         }
@@ -2067,6 +2074,36 @@ mod tests {
         assert_eq!(params["fileBoundary"], json!(["a.rs", "b.rs"]));
         assert_eq!(params["designCanon"], json!("canon-x"));
         assert_eq!(params["plan"], json!("do it"));
+    }
+
+    #[test]
+    fn task_create_watchers_maps_to_watcher_agent_ids_and_drops_empties() {
+        let params = ok_params(&[
+            "task",
+            "create",
+            "ws1",
+            "t1",
+            "Title",
+            "--watchers",
+            "a,,b,",
+            "--owner",
+            "agent-1",
+        ]);
+        // Comma-split, empties dropped — mirrors `--boundary`.
+        assert_eq!(params["watcherAgentIds"], json!(["a", "b"]));
+        assert_eq!(params["title"], json!("Title"));
+        assert_eq!(params["ownerAgentId"], json!("agent-1"));
+    }
+
+    #[test]
+    fn task_create_without_watchers_omits_the_field() {
+        // Byte-for-byte: the flag-less create must not carry watcherAgentIds.
+        let params = ok_params(&["task", "create", "ws1", "t1", "My", "Title"]);
+        assert_eq!(
+            params,
+            json!({ "workspaceId": "ws1", "slug": "t1", "title": "My Title" })
+        );
+        assert!(params.get("watcherAgentIds").is_none());
     }
 
     #[test]

@@ -99,7 +99,7 @@ Subcommands:
   stage log     <workspaceId> <slug>                    (list snapshots, newest first)
   stage restore <workspaceId> <slug> <snapSha>           (restore boundary paths from a snapshot; auto-snaps first; inside a spawned agent)
   stage clear   <workspaceId> <slug>                    (delete the snapshot ref)
-  task create   <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path]
+  task create   <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--plan-file path] [--watchers id,id]  (--watchers subscribes the owner + listed workspace agents to the task in one transaction)
   task list     <workspaceId> [--state s] [--full | --all]  (slim open-task rows by default; --full = full rows incl plan; --all = slim rows incl merged/abandoned)
   task get      <workspaceId> <slug>
   task brief    <workspaceId> <slug> [--limit N]
@@ -3811,6 +3811,31 @@ mod tests {
         let argv = v(&["task", "create", "ws1", "t1", "Title"]);
         let out = expand_self_args(argv.clone(), None).unwrap();
         assert_eq!(out, argv, "create must not require self");
+    }
+
+    #[test]
+    fn task_create_watchers_survive_owner_default_expansion() {
+        // --watchers passes through untouched; --owner self is still appended.
+        let out = expand_self_args(
+            v(&["task", "create", "ws1", "t1", "Title", "--watchers", "a,b"]),
+            Some("self1"),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            v(&[
+                "task", "create", "ws1", "t1", "Title", "--watchers", "a,b", "--owner", "self1"
+            ])
+        );
+    }
+
+    #[test]
+    fn task_create_watchers_survive_with_explicit_owner() {
+        let argv = v(&[
+            "task", "create", "ws1", "t1", "Title", "--owner", "other", "--watchers", "a,b",
+        ]);
+        let out = expand_self_args(argv.clone(), Some("self1")).unwrap();
+        assert_eq!(out, argv, "explicit owner + watchers must pass through as-is");
     }
 
     #[test]
