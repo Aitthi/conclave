@@ -37,6 +37,7 @@ dirs = "6"
 portable-pty = "0.9.0"
 futures-util = "0.3.32"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+axum = "0.8"
 keyring = { version = "3", features = ["apple-native"] }
 sha2 = "0.10"
 unicode-normalization = "0.1"

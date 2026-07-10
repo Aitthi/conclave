@@ -62,6 +62,9 @@ pub struct AppState {
     /// handlers.
     pub code_cache: std::sync::Arc<codeintel::cache::CodeIntelCache>,
 
+    /// App-global loopback context-proxy runtime and conversation ledger.
+    pub ctx_proxy: std::sync::Arc<crate::engine::runtime::ctx_proxy::ProxyRuntime>,
+
     /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
     /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
     /// time. This is what makes `/clear` run strictly AFTER the save completes
@@ -98,6 +101,7 @@ impl AppState {
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
+            ctx_proxy: std::sync::Arc::new(crate::engine::runtime::ctx_proxy::ProxyRuntime::new()),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
@@ -214,6 +218,7 @@ impl AppState {
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
+            ctx_proxy: std::sync::Arc::new(crate::engine::runtime::ctx_proxy::ProxyRuntime::new()),
             compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
