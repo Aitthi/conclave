@@ -120,8 +120,16 @@ let failed = false;
 try {
   const page = await browser.newPage();
   await page.setViewport({ width: vw, height: vh, deviceScaleFactor: 2 });
+  // A component that CATCHES a fixture throw and only console.error's it used
+  // to pass green — collect error-type messages and any `[fixture]` hit (not
+  // warn or lower) so the run can fail AFTER the shot is written.
+  const consoleFails = [];
   page.on("console", (m) => {
-    if (m.type() === "error") console.log(`[page] console.error: ${m.text()}`);
+    const text = m.text();
+    if (m.type() === "error") console.log(`[page] console.error: ${text}`);
+    if (m.type() === "error" || text.includes("[fixture]")) {
+      consoleFails.push(`${m.type()}: ${text}`);
+    }
   });
   page.on("pageerror", (e) => {
     failed = true;
@@ -147,6 +155,10 @@ try {
   // evidence, the exit code carries the verdict.
   fs.writeFileSync(out, await page.screenshot({ type: "png", fullPage: full }));
   console.log(`[uishot] wrote ${out} (${vw}x${vh}@2x, scenario=${scenario})`);
+  if (consoleFails.length > 0) {
+    failed = true;
+    for (const line of consoleFails) console.log(`[uishot] console-fail: ${line}`);
+  }
 } finally {
   await browser.close();
 }
