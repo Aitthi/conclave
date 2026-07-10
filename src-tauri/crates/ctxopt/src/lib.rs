@@ -8,5 +8,6 @@ pub const RECENT_KEEP: usize = 10; // never elide within the last 10 messages
 pub const MIN_ELIDE_BYTES: usize = 600; // never elide small results
 pub const LEDGER_CAP: usize = 64; // LRU conversation cap
 
+pub mod analyze;
 pub mod estimate;
 pub mod request;
