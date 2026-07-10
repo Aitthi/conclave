@@ -3521,6 +3521,37 @@ fn extract_bash_command(input: &Value) -> Option<String> {
     }
 }
 
+/// Observation-critical rtk subcommands whose rendering is lossy-and-false
+/// under rtk 0.42.4 (task rtk-hook-denylist; diagnosis on task
+/// rtk-output-distortion): `rtk grep` fabricates "N matches in 0 files" and
+/// drops every match line when rg is absent from PATH, rg flags collide with
+/// rtk grep's own (`-l` = max-len, not files-with-matches), and `rtk ls` is a
+/// git-aware lister that hides gitignored entries. A rewrite that routes any
+/// of these through rtk is dropped so the RAW command runs unfiltered.
+const RTK_DENYLISTED_VERBS: [&str; 5] = ["grep", "ls", "tree", "find", "read"];
+
+/// True when `rewritten` invokes a denylisted `rtk <verb>` at any command
+/// position: start of string or after `&&`, `||`, `;`, `|`, `$(`. Matched on
+/// the REWRITTEN side — `rtk rewrite` is the single source of truth for the
+/// source→rtk mapping, so every source spelling (ls, rg, grep, fd, cat…) is
+/// caught without re-parsing the source command here (plan risk ledger).
+fn rewrite_is_denylisted(rewritten: &str) -> bool {
+    // Longer separators split first so `&&`/`||` are consumed whole and the
+    // later `|` pass only sees genuine pipes.
+    let mut segments = vec![rewritten];
+    for sep in ["&&", "||", ";", "|", "$("] {
+        segments = segments.into_iter().flat_map(|s| s.split(sep)).collect();
+    }
+    segments.into_iter().any(|seg| {
+        let mut toks = seg.split_whitespace();
+        toks.next() == Some("rtk")
+            && toks
+                .next()
+                // `$(rtk ls)` leaves the closing paren glued to the verb.
+                .is_some_and(|v| RTK_DENYLISTED_VERBS.contains(&v.trim_end_matches(')')))
+    })
+}
+
 /// Map one `rtk rewrite` run onto the PreToolUse hook response (rtk >= 0.23.0
 /// exit-code contract): 0 = rewrite (auto-allow), 3 = rewrite but let Claude
 /// Code prompt the user (no `permissionDecision`), 1/2/anything else = pass
@@ -3533,6 +3564,9 @@ fn rtk_hook_response(input: &Value, exit_code: i32, stdout: &str) -> Option<Valu
     let original = extract_bash_command(input)?;
     let rewritten = stdout.trim_end_matches('\n');
     if rewritten.is_empty() || rewritten == original {
+        return None;
+    }
+    if rewrite_is_denylisted(rewritten) {
         return None;
     }
     // `updatedInput` replaces tool_input wholesale, so carry every sibling
@@ -6451,5 +6485,59 @@ mod tests {
     #[test]
     fn rtk_hook_response_input_without_command_is_none() {
         assert!(super::rtk_hook_response(&serde_json::json!({}), 0, "rtk x").is_none());
+    }
+
+    /// Denylist (task rtk-hook-denylist): rewrites that would run the
+    /// observation-critical commands through rtk are dropped entirely — the
+    /// raw command must pass through unfiltered, on BOTH exit-code paths.
+    #[test]
+    fn rtk_hook_response_denylists_grep_rewrite_on_both_exit_paths() {
+        let rw = "rtk grep -n pat src/main.rs\n";
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 0, rw).is_none());
+        assert!(super::rtk_hook_response(&rtk_hook_input(), 3, rw).is_none());
+    }
+
+    #[test]
+    fn rtk_hook_response_denylists_every_observation_verb() {
+        for rw in [
+            "rtk ls\n",
+            "rtk ls -la src\n",
+            "rtk tree src\n",
+            "rtk find . -name x\n",
+            "rtk read foo.txt\n",
+        ] {
+            assert!(
+                super::rtk_hook_response(&rtk_hook_input(), 0, rw).is_none(),
+                "must denylist rewrite: {rw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rtk_hook_response_denylists_compound_and_pipeline_positions() {
+        for rw in [
+            "cd /x && rtk ls\n",
+            "true || rtk grep -n pat f\n",
+            "echo a; rtk tree src\n",
+            "sort names.txt | rtk read out.txt\n",
+            "echo $(rtk ls)\n",
+        ] {
+            assert!(
+                super::rtk_hook_response(&rtk_hook_input(), 0, rw).is_none(),
+                "must denylist rewrite at compound position: {rw:?}"
+            );
+        }
+    }
+
+    /// The denylist matches whole verbs at command positions only — `rtk`
+    /// appearing as an argument, or a verb-prefixed word, must still rewrite.
+    #[test]
+    fn rtk_hook_response_denylist_ignores_non_command_positions_and_prefixes() {
+        for rw in ["echo rtk ls\n", "rtk grepx foo\n", "rtk lsof\n"] {
+            assert!(
+                super::rtk_hook_response(&rtk_hook_input(), 0, rw).is_some(),
+                "must NOT denylist rewrite: {rw:?}"
+            );
+        }
     }
 }
