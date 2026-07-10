@@ -128,6 +128,7 @@ Subcommands:
   code stats|files|tree|symbols|find <args>   survey a codebase (tree-sitter)
   code callers|callees|refs|impact <name>     semantic cross-references
   code rename|rewrite [--apply]               AST-validated edits (dry-run default)
+  proxy status | mode <off|log|rewrite> | report [--since-hours N]
   rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
@@ -5655,6 +5656,12 @@ mod tests {
             expand_self_args(all_lim.clone(), Some("self1")).unwrap(),
             all_lim
         );
+    }
+
+    #[test]
+    fn proxy_commands_pass_through_for_plain_cli_exec() {
+        let input = v(&["proxy", "report", "--since-hours", "48"]);
+        assert_eq!(expand_self_args(input.clone(), None).unwrap(), input);
     }
 
     // ── browser screenshot: path resolution ────────────────────────────────

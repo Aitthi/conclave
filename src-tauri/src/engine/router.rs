@@ -1,6 +1,6 @@
 use crate::engine::commands::{
     agent, artifact, blackboard, browser, cli, code, design, fusion, instance, memory, message,
-    orient, provider, role, skill, skill_draft, snapshot, task, tool, workspace,
+    orient, provider, proxy, role, skill, skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -148,6 +148,11 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "code.impact" => code::impact(state, payload).await,
         "code.rename" => code::rename(state, payload).await,
         "code.rewrite" => code::rewrite(state, payload).await,
+
+        // ── proxy (context optimizer) ─────────────────────────────────────
+        "proxy.status" => proxy::status(state, payload).await,
+        "proxy.mode" => proxy::set_mode(state, payload).await,
+        "proxy.report" => proxy::report(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

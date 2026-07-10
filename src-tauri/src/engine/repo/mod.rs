@@ -26,6 +26,7 @@ pub mod inter_agent_message;
 pub mod memory;
 pub mod memory_proposal;
 pub mod provider;
+pub mod proxy_metric;
 pub mod role;
 pub mod session;
 pub mod skill;

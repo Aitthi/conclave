@@ -54,6 +54,11 @@ pub fn run() {
                 ));
             }
 
+            // Spawn the app-global loopback context proxy. It remains inactive
+            // until its listener binds successfully.
+            let proxy_state = std::sync::Arc::clone(&state);
+            tauri::async_runtime::spawn(engine::runtime::ctx_proxy::serve(proxy_state));
+
             // Task stall + challenge-default timer (ADR 0008 Lane B) — a
             // single app-wide background loop, same spawn idiom as the UDS
             // server above.
