@@ -1,5 +1,5 @@
 package main
 
-func Greet(name string) string { return "hi " + name }
+import "example.com/app/util"
 
-func main() { println(Greet("x")) }
+func main() { println(util.Greet("x")) }
