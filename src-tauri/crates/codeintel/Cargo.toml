@@ -20,6 +20,9 @@ tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.23"
 tree-sitter-python = "0.23"
+ast-grep-core = "=0.38.7"
+ast-grep-config = "=0.38.7"
+ast-grep-language = "=0.38.7"
 
 [dev-dependencies]
 tempfile = "3"
