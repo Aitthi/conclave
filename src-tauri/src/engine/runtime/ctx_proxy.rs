@@ -45,6 +45,7 @@ pub struct ProxyRuntime {
     pub upstream: RwLock<String>,
     pub ledger: Mutex<ctxopt::ledger::Ledger>,
     pub active: AtomicBool,
+    client: reqwest::Client,
 }
 
 impl ProxyRuntime {
@@ -63,6 +64,7 @@ impl ProxyRuntime {
             upstream: RwLock::new(DEFAULT_UPSTREAM.to_owned()),
             ledger: Mutex::new(ctxopt::ledger::Ledger::new(ctxopt::LEDGER_CAP)),
             active: AtomicBool::new(false),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -141,7 +143,9 @@ async fn forward_inner(
         .map(|value| value.as_str())
         .unwrap_or("/");
 
-    let mut upstream_request = reqwest::Client::new()
+    let mut upstream_request = state
+        .ctx_proxy
+        .client
         .request(parts.method, format!("{upstream}{path_and_query}"))
         .body(upstream_body);
     for (name, value) in filtered_headers(&parts.headers) {
