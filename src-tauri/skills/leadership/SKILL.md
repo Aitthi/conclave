@@ -92,8 +92,9 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   before claim is fixed by amending the canonical plan, abandoning the
   immutable task, and recreating it — never by an out-of-boundary integration
   workaround that preserves the old slug.
-- Full contract and field rules:
-  `docs/superpowers/specs/2026-07-10-lead-council-v1-design.md`.
+- Full contract and field rules live in the workspace's design spec — find it
+  via the council task's execution header (`readingOrder` names it first) or
+  the task ledger; this section is the operational summary.
 
 ## When the lead implements directly
 

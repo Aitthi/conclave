@@ -40,7 +40,8 @@ Collaboration, Leadership, and Implementer; this covers the LOOP between them.
   stays reconstructable from the challenge and ruling events plus the amended
   plan.
 - Convening, the header contract, and handoff live in Leadership; the full
-  protocol is `docs/superpowers/specs/2026-07-10-lead-council-v1-design.md`.
+  contract lives in the workspace's design spec, named by the council task's
+  execution header and its ledger.
 
 ## Grill each other — challenge is the protocol, not a conflict
 
