@@ -18,6 +18,7 @@
 - Any new `AppState` field MUST be initialized in BOTH `AppState::new()` (state.rs:83-99) and `AppState::for_tests()` (state.rs:198-214) — missing one breaks the build.
 - List-shaped verbs (`files`, `symbols`, `find`, `refs`) take `--limit N` (default **200**); when they cut, set top-level `"truncated": true`.
 - Commit after every task with a pathspec (`git commit -- <paths>`); never a bare `git commit` (shared checkout). Commit messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- A task that changes any `Cargo.toml` also regenerates `src-tauri/Cargo.lock` — include the lock in that task's commit pathspec. Standing ruling on challenge `853e8270` (task `codeintel-core-crate`): the lock rides with the dep change, even where a lane boundary listing omits it.
 - Gates per task: `cargo test -p codeintel` (Tasks 1–8, 11), `cargo test` in `src-tauri` (Tasks 9–11), plus the task's own listed commands. Run gates from `src-tauri/`.
 - A community grammar (Swift, Kotlin) that fails to compile against tree-sitter 0.25 is DROPPED from v1 (delete its lang entry + queries + fixtures + Cargo dep), noted in the task's commit message — per spec risk ledger. Do not fight it.
 - UI copy, help text, and code comments are English only.
@@ -165,10 +166,10 @@ Expected: compiles (the dep is linked but unused — allow it for now; `cargo bu
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src-tauri/Cargo.toml src-tauri/crates/codeintel
+git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/crates/codeintel
 git commit -m "feat(codeintel): scaffold crate — port codegraph-core (lang/walk/index/resolve/hash/error + 12 queries + tests)
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" -- src-tauri/Cargo.toml src-tauri/crates/codeintel
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" -- src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/crates/codeintel
 ```
 
 ---
@@ -784,7 +785,7 @@ Verb-specific request structs (all `camelCase`, all with `path`): `files{limit: 
 
 - [ ] **Step 6: Run** — `cargo test --lib` in src-tauri → PASS.
 
-- [ ] **Step 7: Commit** (pathspec `src-tauri/src/engine src-tauri/Cargo.toml`, `feat(engine): code.* command family backed by codeintel cache`).
+- [ ] **Step 7: Commit** (pathspec `src-tauri/src/engine src-tauri/Cargo.toml src-tauri/Cargo.lock`, `feat(engine): code.* command family backed by codeintel cache`).
 
 ---
 
