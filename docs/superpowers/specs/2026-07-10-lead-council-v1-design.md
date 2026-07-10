@@ -106,7 +106,7 @@ Paths reject absolute forms, backslashes, empty components, `.` and `..`, and sy
 3. Read the canonical plan, require the same ten-line header, and compute SHA-256 over the exact file bytes.
 4. Validate the header fields, task owner, task boundary, workspace agents, paths, anchors, required Markdown sections, UI canon rule, and command list.
 5. Reject unresolved placeholder markers and discovery instructions that tell the implementer to search broadly instead of naming a path or anchor.
-6. Append a typed `plan_check` event only on success. Its payload contains contract version, plan path, plan fingerprint, base commit, and actor.
+6. Append a typed `plan_check` event only on success. Its payload contains contract version, plan path, plan fingerprint, and base commit; the acting agent rides the event's `actor_agent_id` column, not the payload (adjudicated on the task ledger — Guetta's F2, acting-chair note be2e68d7: column-canonical, no payload duplication).
 7. Print a bounded success packet suitable for a recorded task gate.
 
 Required Markdown sections after line 10 are `Goal`, `Non-goals`, `Decisions`, `Ordered edits`, `Verification`, `Risks`, `Rejected alternatives`, and `Escalation`.
