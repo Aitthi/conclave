@@ -26,10 +26,13 @@
 //! permission change) do NOT vanish silently — they get the same
 //! parse-failure marker `index_one_file`'s `None` return produces, so they
 //! surface in `Index::warnings` as `"failed to parse <rel>"`, exactly like
-//! `build_index`'s handling of an unreadable/unparseable file. A file that
-//! later becomes readable again re-parses on its next `get_index` (the
-//! marker's stat is chosen so it never matches a real stat, forcing the
-//! comparison in step 2/3 to fall through to a reparse).
+//! `build_index`'s handling of an unreadable/unparseable file. Recovery is
+//! automatic only for stat-visible changes: a stat-failure marker stores a
+//! sentinel stat that never matches, so the file re-parses on the next
+//! `get_index`, while a read-failure marker keeps the file's real
+//! mtime/size — becoming readable again with an unchanged stat (e.g. a
+//! plain chmod back) stays marked until `invalidate_files` or a content
+//! edit forces the reparse.
 //!
 //! `CodeIntelCache` is `Send + Sync` (a `Mutex` around the whole per-root
 //! map). Holding the mutex for the full duration of a refresh — including
@@ -114,7 +117,9 @@ impl CodeIntelCache {
 
     /// Return the current `Index` for `root`, refreshing it first. Returns
     /// the same `Arc` (by pointer) as the previous call when nothing on disk
-    /// changed since then.
+    /// changed since then. Roots are keyed by the exact `PathBuf` passed —
+    /// pass a canonicalized root, or trailing-slash/symlink variants of the
+    /// same directory will occupy separate cache entries.
     pub fn get_index(&self, root: &Path) -> anyhow::Result<Arc<Index>> {
         let root_key = root.to_path_buf();
         let files = walk_sources(root)?;
