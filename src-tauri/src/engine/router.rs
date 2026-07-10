@@ -89,6 +89,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "task.get" => task::get(state, payload).await,
         "task.brief" => task::brief(state, payload).await,
         "task.claim" => task::claim(state, payload).await,
+        "task.planCheck" => task::plan_check(state, payload).await,
         "task.setState" => task::set_state(state, payload).await,
         "task.note" => task::note(state, payload).await,
         "task.gate" => task::gate(state, payload).await,

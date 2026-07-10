@@ -14,9 +14,6 @@
 //! the `task.planCheck` engine command, which builds on the accessors and
 //! helpers exposed here. Anchor-existence checks therefore take file CONTENT
 //! as a `&str` argument rather than reading disk.
-// Consumed by the `task.planCheck` command (next edit group in the plan);
-// suppress dead-code until that caller lands, mirroring `error.rs`.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

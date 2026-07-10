@@ -1060,6 +1060,52 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             ))
         }
 
+        // Pre-computed by `conclave-cli` like `gate` (the checkout reads —
+        // plan bytes, SHA-256, consumed files, git ancestry — already RAN
+        // client-side; the engine has no checkout to read):
+        // `task plan-check <actorId> <ws> <slug> <planPath> <fingerprint>
+        //  <ancestor 0|1> <planContent> <filesJson>`.
+        Some("plan-check") => {
+            let usage = "cli: task plan-check <workspaceId> <slug>";
+            let actor_id = argv.get(2).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let workspace_id = argv.get(3).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let slug = argv.get(4).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let plan_path = argv.get(5).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let fingerprint = argv.get(6).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let ancestor_raw = argv.get(7).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let plan_content = argv.get(8).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            let files_raw = argv.get(9).ok_or_else(|| AppError::Invalid(usage.into()))?;
+            if argv.len() != 10 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let ancestor = match ancestor_raw.as_str() {
+                "1" => true,
+                "0" => false,
+                other => {
+                    return Err(AppError::Invalid(format!(
+                        "cli: task plan-check: bad ancestor flag '{other}' (expected 0 or 1)"
+                    )))
+                }
+            };
+            let files: Value = serde_json::from_str(files_raw).map_err(|e| {
+                AppError::Invalid(format!("cli: task plan-check: bad files JSON: {e}"))
+            })?;
+            if !files.is_object() {
+                return Err(AppError::Invalid(
+                    "cli: task plan-check: files must be a JSON object of path -> content".into(),
+                ));
+            }
+            Ok((
+                "task.planCheck",
+                json!({
+                    "workspaceId": workspace_id, "slug": slug, "actorId": actor_id,
+                    "planPath": plan_path, "planFingerprint": fingerprint,
+                    "baseShaAncestor": ancestor, "planContent": plan_content,
+                    "files": files,
+                }),
+            ))
+        }
+
         Some("state") => {
             let actor_id = argv
                 .get(2)
@@ -1224,7 +1270,7 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         }
 
         _ => Err(AppError::Invalid(
-            "cli: task <list|get|create|claim|state|note|gate|challenge|rule|close|watch|unwatch> — unknown task subcommand".into(),
+            "cli: task <list|get|create|claim|plan-check|state|note|gate|challenge|rule|close|watch|unwatch> — unknown task subcommand".into(),
         )),
     }
 }
@@ -2131,6 +2177,94 @@ mod tests {
         assert!(is_invalid(&["task", "claim", "actor1", "ws1"]));
         assert!(is_invalid(&[
             "task", "claim", "actor1", "ws1", "t1", "extra"
+        ]));
+    }
+
+    #[test]
+    fn task_plan_check_maps_correctly() {
+        let words = [
+            "task",
+            "plan-check",
+            "actor1",
+            "ws1",
+            "t1",
+            "docs/plans/x.md",
+            "deadbeef",
+            "1",
+            "# Plan\ncontent",
+            r#"{"src/a.rs":"pub fn a() {}"}"#,
+        ];
+        assert_eq!(ok_method(&words), "task.planCheck");
+        assert_eq!(
+            ok_params(&words),
+            json!({
+                "workspaceId": "ws1", "slug": "t1", "actorId": "actor1",
+                "planPath": "docs/plans/x.md", "planFingerprint": "deadbeef",
+                "baseShaAncestor": true, "planContent": "# Plan\ncontent",
+                "files": { "src/a.rs": "pub fn a() {}" },
+            })
+        );
+        // Ancestor flag "0" maps to false.
+        let mut not_ancestor = words;
+        not_ancestor[7] = "0";
+        assert_eq!(ok_params(&not_ancestor)["baseShaAncestor"], json!(false));
+    }
+
+    #[test]
+    fn task_plan_check_wrong_arity_or_bad_words_is_invalid() {
+        // Too short (the raw 2-arg CLI form must never reach the wire).
+        assert!(is_invalid(&["task", "plan-check", "ws1", "t1"]));
+        // Too long.
+        assert!(is_invalid(&[
+            "task",
+            "plan-check",
+            "actor1",
+            "ws1",
+            "t1",
+            "docs/x.md",
+            "fp",
+            "1",
+            "plan",
+            "{}",
+            "extra"
+        ]));
+        // Bad ancestor flag.
+        assert!(is_invalid(&[
+            "task",
+            "plan-check",
+            "actor1",
+            "ws1",
+            "t1",
+            "docs/x.md",
+            "fp",
+            "yes",
+            "plan",
+            "{}"
+        ]));
+        // Files word must parse as a JSON object.
+        assert!(is_invalid(&[
+            "task",
+            "plan-check",
+            "actor1",
+            "ws1",
+            "t1",
+            "docs/x.md",
+            "fp",
+            "1",
+            "plan",
+            "not json"
+        ]));
+        assert!(is_invalid(&[
+            "task",
+            "plan-check",
+            "actor1",
+            "ws1",
+            "t1",
+            "docs/x.md",
+            "fp",
+            "1",
+            "plan",
+            "[]"
         ]));
     }
 

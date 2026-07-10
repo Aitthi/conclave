@@ -17,6 +17,7 @@ use std::process::{Command, ExitCode};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -104,6 +105,7 @@ Subcommands:
   task get      <workspaceId> <slug>
   task brief    <workspaceId> <slug> [--limit N]
   task claim    <workspaceId> <slug>          (inside a spawned agent)
+  task plan-check <workspaceId> <slug>        (validate + fingerprint the canonical council plan against this checkout; records a typed plan_check event on success; inside a spawned agent)
   task state    <workspaceId> <slug> <state>  (inside a spawned agent)
   task note     <workspaceId> <slug> <text...>          (inside a spawned agent)
   task gate     <workspaceId> <slug> -- <cmd...>        (inside a spawned agent; runs <cmd> here, exits with <cmd>'s exit code; each word after -- is passed verbatim, not re-parsed by a shell — for shell syntax use: -- sh -c \"…\")
@@ -232,6 +234,10 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
         // never require a spawned-agent context. Every other verb inherently
         // mutates task state/history and so REQUIRES self, same as `tell`.
         Some("task") if argv.get(1).map(String::as_str) == Some("gate") => Ok(argv),
+        // `plan-check` mirrors `gate`: `run_task_plan_check` already resolved
+        // self (plus checkout reads) and built the full wire argv before this
+        // runs — pass it through untouched.
+        Some("task") if argv.get(1).map(String::as_str) == Some("plan-check") => Ok(argv),
         Some("task") if argv.get(1).map(String::as_str) == Some("create") => {
             if argv.iter().any(|w| w == "--owner") {
                 return Ok(argv);
@@ -2020,6 +2026,265 @@ fn run_task_gate(
     Ok((wire, exit_code))
 }
 
+// ── task plan-check (lead-council v1: checkout reads run caller-side) ──────
+//
+// `conclave task plan-check <ws> <slug>` validates the canonical council plan
+// against the task. All CHECKOUT work happens HERE (the engine may run from
+// the app bundle with an unrelated cwd, so it can never read the agent's
+// checkout — same reasoning as `task gate`): load the stored snapshot over
+// the ordinary `task get` read surface, resolve `planPath` against THIS
+// checkout's git toplevel, hash the exact plan bytes, ship the contents of
+// every anchored `consumes`/`readingOrder` file, and run the `baseSha`
+// ancestry check with local git. VALIDATION itself is entirely engine-side
+// (`task.planCheck`), which appends the typed `plan_check` event only on
+// success.
+//
+// The ten-line-header grammar is duplicated here only MINIMALLY (extract four
+// fields, no validation): the bin target cannot import
+// `engine::plan_contract` — `lib.rs` keeps `mod engine` private — and the
+// engine re-validates everything anyway, so a parse disagreement can only
+// produce a loud engine error, never a silently green check.
+
+/// Ship-cap on plan + referenced-file bytes. The UDS server rejects request
+/// lines over 4 MiB (`engine::uds::MAX_LINE_BYTES`); 2 MiB of raw content
+/// leaves headroom for JSON escaping and the envelope.
+const PLAN_CHECK_MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
+/// The four header fields the CLIENT needs before the engine validates: which
+/// file to hash (`planPath`), which commit to ancestry-check (`baseSha`), and
+/// which referenced files to ship (`consumes` + `readingOrder`).
+struct MinPlanHeader {
+    plan_path: Option<String>,
+    base_sha: Option<String>,
+    consumes: Vec<String>,
+    reading_order: Vec<String>,
+}
+
+/// Best-effort extraction from a `conclave-plan:v1` ten-line header. `None`
+/// when the envelope or JSON is unreadable — callers then either fail loudly
+/// (no `planPath` to resolve) or ship a bare payload and let the engine's
+/// strict parser produce the canonical error.
+fn parse_min_plan_header(plan: &str) -> Option<MinPlanHeader> {
+    let lines: Vec<&str> = plan
+        .split('\n')
+        .take(10)
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    if lines.len() < 10 || lines[1].trim_end() != "<!-- conclave-plan:v1" {
+        return None;
+    }
+    // The JSON object = lines 3-9 plus the `}` that opens line 10 (the same
+    // envelope shape `engine::plan_contract::parse_header` pins).
+    let json_text = format!("{}\n}}", lines[2..9].join("\n"));
+    let v: Value = serde_json::from_str(&json_text).ok()?;
+    let strings = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(MinPlanHeader {
+        plan_path: v
+            .get("planPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        base_sha: v.get("baseSha").and_then(Value::as_str).map(str::to_string),
+        consumes: strings("consumes"),
+        reading_order: strings("readingOrder"),
+    })
+}
+
+/// The git toplevel containing `cwd` — the checkout root every repo-relative
+/// plan path resolves against (spec "Plan Check" step 2: the INVOKING
+/// checkout for a direct `task plan-check`).
+fn plan_check_checkout_root(cwd: &std::path::Path) -> Result<PathBuf, String> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("conclave: task plan-check: cannot run git: {e}"))?;
+    if !out.status.success() {
+        return Err("conclave: task plan-check: not inside a git repository".to_string());
+    }
+    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// Read `rel` under `root` with symlink/traversal containment: the
+/// canonicalized target must stay inside the canonicalized root (the field
+/// rule "paths reject … symlink escape from the checkout root" — the one
+/// path check `plan_contract` explicitly leaves to the disk-touching side).
+fn read_checkout_file(root: &std::path::Path, rel: &str) -> Result<Vec<u8>, String> {
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve checkout root: {e}"))?;
+    let canon = root
+        .join(rel)
+        .canonicalize()
+        .map_err(|e| format!("cannot read `{rel}`: {e}"))?;
+    if !canon.starts_with(&root_canon) {
+        return Err(format!(
+            "`{rel}` escapes the checkout root (symlink or traversal)"
+        ));
+    }
+    std::fs::read(&canon).map_err(|e| format!("cannot read `{rel}`: {e}"))
+}
+
+/// `git merge-base --is-ancestor <baseSha> HEAD` in `root`. Exit 0 → ancestor;
+/// exit 1, an unknown sha, or any git failure → NOT an ancestor of this
+/// checkout (a sha this checkout has never seen cannot be its ancestor). The
+/// result rides the wire as a flag the ENGINE enforces — the engine itself
+/// has no checkout to run git in, so ancestry is computed here, exactly like
+/// the file bytes it accompanies.
+fn base_sha_is_ancestor(root: &std::path::Path, base_sha: &str) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .args(["merge-base", "--is-ancestor", base_sha, "HEAD"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Collect the wire payload's checkout-derived words from the CURRENT plan
+/// content: the referenced-files JSON object and the ancestry flag. Pure
+/// given a reader, so the path/dedupe/cap logic is unit-testable without git.
+fn plan_check_files_and_total(
+    header: &MinPlanHeader,
+    mut read: impl FnMut(&str) -> Option<String>,
+) -> (serde_json::Map<String, Value>, usize) {
+    let mut files = serde_json::Map::new();
+    let mut total = 0usize;
+    for entry in header.consumes.iter().chain(header.reading_order.iter()) {
+        // Only anchored entries need content shipped (the anchor's exact-text
+        // check); plain readingOrder paths carry nothing exact to verify.
+        let Some((path, _anchor)) = entry.split_once('#') else {
+            continue;
+        };
+        if files.contains_key(path) {
+            continue;
+        }
+        // Unreadable/missing files are OMITTED — the engine reports them as
+        // the canonical validation failure (and appends no event).
+        if let Some(text) = read(path) {
+            total += text.len();
+            files.insert(path.to_string(), Value::String(text));
+        }
+    }
+    (files, total)
+}
+
+/// Build the fully-expanded `task plan-check` wire argv (the 10-word form the
+/// `cli.exec` allowlist pins):
+/// `task plan-check <actorId> <ws> <slug> <planPath> <fingerprint>
+///  <ancestor 0|1> <planContent> <filesJson>`.
+async fn run_task_plan_check(
+    argv: &[String],
+    self_instance: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let me = self_instance.filter(|s| !s.is_empty()).ok_or_else(|| {
+        "conclave: `task plan-check` is only available inside a spawned agent (CONCLAVE_INSTANCE_ID unset)"
+            .to_string()
+    })?;
+    let usage = "conclave: task plan-check <workspaceId> <slug>";
+    let (ws, slug) = match argv {
+        [_, _, ws, slug] => (ws.clone(), slug.clone()),
+        _ => return Err(usage.to_string()),
+    };
+
+    // The stored snapshot names the canonical `planPath` (spec steps 1-2) —
+    // fetched over the same `task get` read surface every client already has.
+    let got = uds_task_call(
+        vec!["task".into(), "get".into(), ws.clone(), slug.clone()],
+        self_instance,
+    )
+    .await
+    .map_err(|e| format!("conclave: task plan-check: cannot load task '{slug}': {e}"))?;
+    let stored_plan = got
+        .pointer("/task/plan")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let stored = parse_min_plan_header(stored_plan).ok_or_else(|| {
+        format!(
+            "conclave: task plan-check: task '{slug}' has no parseable `conclave-plan:v1` header in its stored plan"
+        )
+    })?;
+    let plan_path = stored.plan_path.ok_or_else(|| {
+        "conclave: task plan-check: the stored plan header names no planPath".to_string()
+    })?;
+
+    // Exact bytes of the canonical plan in THIS checkout → SHA-256.
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("conclave: task plan-check: cannot resolve cwd: {e}"))?;
+    let root = plan_check_checkout_root(&cwd)?;
+    let plan_bytes = read_checkout_file(&root, &plan_path)
+        .map_err(|e| format!("conclave: task plan-check: {e}"))?;
+    let fingerprint = sha256_hex(&plan_bytes);
+    let plan_content = String::from_utf8(plan_bytes)
+        .map_err(|_| format!("conclave: task plan-check: `{plan_path}` is not valid UTF-8"))?;
+
+    // Referenced-file contents + ancestry from the CURRENT header,
+    // best-effort: when the current header is unparseable we ship an empty
+    // map and a red flag and let the ENGINE'S strict parser produce the
+    // canonical error — the engine is the validator of record, this side
+    // only ships checkout bytes.
+    let mut files = serde_json::Map::new();
+    let mut ancestor = false;
+    if let Some(current) = parse_min_plan_header(&plan_content) {
+        let (shipped, files_total) = plan_check_files_and_total(&current, |path| {
+            read_checkout_file(&root, path)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        });
+        if plan_content.len() + files_total > PLAN_CHECK_MAX_CONTENT_BYTES {
+            return Err(format!(
+                "conclave: task plan-check: plan + referenced files exceed {PLAN_CHECK_MAX_CONTENT_BYTES} bytes; the payload must stay bounded"
+            ));
+        }
+        files = shipped;
+        if let Some(base_sha) = &current.base_sha {
+            ancestor = base_sha_is_ancestor(&root, base_sha);
+        }
+    }
+
+    Ok(vec![
+        "task".to_string(),
+        "plan-check".to_string(),
+        me.to_string(),
+        ws,
+        slug,
+        plan_path,
+        fingerprint,
+        if ancestor { "1" } else { "0" }.to_string(),
+        plan_content,
+        Value::Object(files).to_string(),
+    ])
+}
+
+/// Render the engine's bounded `task.planCheck` success packet — counts and
+/// the fingerprint, never the plan text (spec: "The command does not print
+/// the full plan").
+fn render_plan_check_result(result: &Value) -> String {
+    let s = |k: &str| result.get(k).and_then(Value::as_str).unwrap_or("?");
+    let n = |k: &str| result.get(k).and_then(Value::as_i64).unwrap_or(-1);
+    format!(
+        "plan-check OK: {}\n  plan: {}\n  fingerprint: {}\n  boundary={} anchors={} gates={}\n",
+        s("slug"),
+        s("planPath"),
+        s("fingerprint"),
+        n("boundaryCount"),
+        n("anchorCount"),
+        n("gateCount"),
+    )
+}
+
 // ── uishot (ADR 0008: capture runs caller-side) ────────────────────────────
 //
 // `conclave uishot [--task <slug>] <args...>` is a thin CLIENT-side wrapper
@@ -2272,6 +2537,9 @@ enum OutMode {
     /// One-line gate confirmation (`task gate`) — the log excerpt already
     /// printed client-side; echoing the event JSON would re-send the tail.
     GateResult,
+    /// The bounded plan-check packet (`task plan-check`) — counts and the
+    /// fingerprint, never the plan text.
+    PlanCheck,
     /// Pretty-printed JSON (everything else).
     Json,
 }
@@ -3013,6 +3281,19 @@ async fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    } else if argv.first().map(String::as_str) == Some("task")
+        && argv.get(1).map(String::as_str) == Some("plan-check")
+    {
+        // All checkout reads (plan bytes, SHA-256, referenced files, git
+        // ancestry) run HERE, then the expanded wire argv goes to the engine
+        // for validation — same client-side split as `task gate`.
+        match run_task_plan_check(&argv, self_instance.as_deref()).await {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        }
     } else {
         argv
     };
@@ -3077,6 +3358,8 @@ async fn main() -> ExitCode {
         OutMode::MsgList
     } else if argv.first().map(String::as_str) == Some("task") && sub == Some("brief") {
         OutMode::TaskBrief
+    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("plan-check") {
+        OutMode::PlanCheck
     } else if argv.first().map(String::as_str) == Some("orient") {
         OutMode::Orient
     } else if gate_exit_code.is_some() {
@@ -3283,6 +3566,9 @@ async fn main() -> ExitCode {
             // `task gate` → one confirmation line; the log excerpt already
             // printed client-side and the tail is on the ledger.
             OutMode::GateResult => render_gate_result(result),
+            // `task plan-check` → the bounded success packet (spec: the
+            // command does not print the full plan).
+            OutMode::PlanCheck => render_plan_check_result(result),
             OutMode::Json => {
                 let pretty =
                     serde_json::to_string_pretty(result).expect("serialize result cannot fail");
@@ -3312,7 +3598,10 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_self_args, validate_slug, GUARD_HOOK, GUARD_MARKER};
+    use super::{
+        expand_self_args, parse_min_plan_header, plan_check_files_and_total, read_checkout_file,
+        render_plan_check_result, sha256_hex, validate_slug, GUARD_HOOK, GUARD_MARKER,
+    };
     use std::path::{Path, PathBuf};
 
     fn v(words: &[&str]) -> Vec<String> {
@@ -3881,6 +4170,151 @@ mod tests {
             "task", "gate", "self1", "ws1", "t1", "cmd", "0", "sha", "/cwd", "tail",
         ]);
         assert_eq!(expand_self_args(argv.clone(), None).unwrap(), argv);
+    }
+
+    #[test]
+    fn task_plan_check_passes_through_expand_self_args_untouched() {
+        // run_task_plan_check (called earlier in main()) already filled the
+        // actorId slot and built the full 10-word wire form — mirror `gate`.
+        let argv = v(&[
+            "task",
+            "plan-check",
+            "self1",
+            "ws1",
+            "t1",
+            "docs/plans/x.md",
+            "deadbeef",
+            "1",
+            "# plan",
+            "{}",
+        ]);
+        assert_eq!(expand_self_args(argv.clone(), None).unwrap(), argv);
+    }
+
+    // ── task plan-check client helpers ─────────────────────────────────────
+
+    const MIN_HEADER_PLAN: &str = "# Example Task\n\
+        <!-- conclave-plan:v1\n\
+        {\n\
+        \"owner\":\"o-1\",\"authority\":\"in-loop\",\n\
+        \"planPath\":\"docs/plans/x.md\",\"baseSha\":\"abc\",\"escalation\":\"o-1\",\n\
+        \"readingOrder\":[\"docs/spec.md#Rules\",\"docs/plans/x.md\"],\n\
+        \"boundary\":[\"docs/plans/x.md\"],\n\
+        \"consumes\":[\"docs/spec.md#Rules\",\"src/a.rs#fn a\"],\n\
+        \"produces\":[],\"gates\":[\"git diff --check\"]\n\
+        } -->\n\nbody\n";
+
+    #[test]
+    fn parse_min_plan_header_extracts_the_four_client_fields() {
+        let h = parse_min_plan_header(MIN_HEADER_PLAN).expect("header parses");
+        assert_eq!(h.plan_path.as_deref(), Some("docs/plans/x.md"));
+        assert_eq!(h.base_sha.as_deref(), Some("abc"));
+        assert_eq!(h.consumes, vec!["docs/spec.md#Rules", "src/a.rs#fn a"]);
+        assert_eq!(
+            h.reading_order,
+            vec!["docs/spec.md#Rules", "docs/plans/x.md"]
+        );
+    }
+
+    #[test]
+    fn parse_min_plan_header_handles_crlf_and_rejects_non_contract_plans() {
+        let crlf = MIN_HEADER_PLAN.replace('\n', "\r\n");
+        assert!(parse_min_plan_header(&crlf).is_some());
+        assert!(parse_min_plan_header("").is_none());
+        assert!(parse_min_plan_header("just prose\nno header\n").is_none());
+        let short = "# T\n<!-- conclave-plan:v1\n{\n} -->\n";
+        assert!(parse_min_plan_header(short).is_none(), "under ten lines");
+    }
+
+    #[test]
+    fn plan_check_files_ships_anchored_entries_once_and_skips_plain_paths() {
+        let h = parse_min_plan_header(MIN_HEADER_PLAN).expect("header parses");
+        let mut reads: Vec<String> = Vec::new();
+        let (files, total) = plan_check_files_and_total(&h, |path| {
+            reads.push(path.to_string());
+            match path {
+                "docs/spec.md" => Some("## Rules\n".to_string()),
+                "src/a.rs" => Some("fn a() {}\n".to_string()),
+                _ => None,
+            }
+        });
+        // docs/spec.md appears in BOTH consumes and readingOrder — read once.
+        assert_eq!(reads, vec!["docs/spec.md", "src/a.rs"]);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files["docs/spec.md"], serde_json::json!("## Rules\n"));
+        assert_eq!(total, "## Rules\n".len() + "fn a() {}\n".len());
+    }
+
+    #[test]
+    fn plan_check_files_omits_unreadable_entries_for_the_engine_to_reject() {
+        let h = parse_min_plan_header(MIN_HEADER_PLAN).expect("header parses");
+        let (files, total) = plan_check_files_and_total(&h, |_| None);
+        assert!(files.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn read_checkout_file_reads_inside_and_rejects_traversal_and_symlink_escape() {
+        let root =
+            std::env::temp_dir().join(format!("conclave-plan-check-read-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!(
+            "conclave-plan-check-outside-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(root.join("docs")).expect("mkdir root/docs");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        std::fs::write(root.join("docs/x.md"), "inside").expect("write inside");
+        std::fs::write(outside.join("secret.md"), "outside").expect("write outside");
+        std::os::unix::fs::symlink(outside.join("secret.md"), root.join("docs/link.md"))
+            .expect("symlink");
+
+        assert_eq!(
+            read_checkout_file(&root, "docs/x.md").expect("read inside"),
+            b"inside".to_vec()
+        );
+        assert!(
+            read_checkout_file(&root, "../secret.md").is_err(),
+            "traversal must be rejected"
+        );
+        assert!(
+            read_checkout_file(&root, "docs/link.md")
+                .unwrap_err()
+                .contains("escapes the checkout root"),
+            "a symlink pointing outside the root must be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn sha256_hex_matches_the_known_empty_and_abc_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn render_plan_check_result_is_bounded_and_never_echoes_the_plan() {
+        let rendered = render_plan_check_result(&serde_json::json!({
+            "slug": "t1",
+            "planPath": "docs/plans/x.md",
+            "fingerprint": "ba7816bf8f01",
+            "boundaryCount": 3,
+            "anchorCount": 5,
+            "gateCount": 2,
+        }));
+        assert_eq!(
+            rendered,
+            "plan-check OK: t1\n  plan: docs/plans/x.md\n  fingerprint: ba7816bf8f01\n  boundary=3 anchors=5 gates=2\n"
+        );
     }
 
     // ── tail_bytes ────────────────────────────────────────────────────────

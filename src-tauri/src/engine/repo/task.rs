@@ -442,6 +442,25 @@ pub async fn add_ruling(
     Ok(append_event(pool, &task.id, "ruling", actor_agent_id, payload_json).await?)
 }
 
+/// Append a typed `plan_check` event — recorded ONLY on a successful plan
+/// validation (spec 2026-07-10 lead-council-v1 "Plan Check": a validation
+/// failure returns an error to the caller and appends nothing; the command
+/// layer never reaches this function on the failure path). The payload
+/// carries `contractVersion`, `planPath`, `planFingerprint`, and `baseSha`;
+/// the actor rides the ordinary `actor_agent_id` column.
+pub async fn add_plan_check(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    slug: &str,
+    actor_agent_id: Option<&str>,
+    payload_json: &str,
+) -> Result<TaskEventRow, TaskOpError> {
+    let task = get(pool, workspace_id, slug)
+        .await?
+        .ok_or(TaskOpError::NotFound)?;
+    Ok(append_event(pool, &task.id, "plan_check", actor_agent_id, payload_json).await?)
+}
+
 /// Transition a task's state, validating the move via [`valid_transition`]
 /// and recording a `state` event (`payload: {"from","to"}`). Runs inside a
 /// transaction so the read-validate-write is atomic (no lost-update race
@@ -1038,6 +1057,40 @@ mod tests {
             .await
             .expect("events failed");
         assert_eq!(events[0].kind, "gate");
+    }
+
+    #[tokio::test]
+    async fn add_plan_check_appends_a_typed_event_with_actor_and_payload() {
+        let pool = connect_in_memory().await;
+        let ws = fixture_workspace(&pool).await;
+        let task = fixture_task(&pool, &ws, "t1").await;
+
+        let payload = serde_json::json!({
+            "contractVersion": "conclave-plan:v1",
+            "planPath": "docs/superpowers/plans/example.md",
+            "planFingerprint": "ab".repeat(32),
+            "baseSha": "e8".repeat(20),
+        })
+        .to_string();
+        add_plan_check(&pool, &ws, "t1", Some("agent-1"), &payload)
+            .await
+            .expect("plan_check append failed");
+
+        let events = events_for(&pool, &task.id, 20)
+            .await
+            .expect("events failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "plan_check");
+        assert_eq!(events[0].actor_agent_id.as_deref(), Some("agent-1"));
+        assert!(events[0].payload.contains("conclave-plan:v1"));
+    }
+
+    #[tokio::test]
+    async fn add_plan_check_on_missing_task_is_not_found() {
+        let pool = connect_in_memory().await;
+        let ws = fixture_workspace(&pool).await;
+        let err = add_plan_check(&pool, &ws, "nope", None, "{}").await;
+        assert!(matches!(err, Err(TaskOpError::NotFound)));
     }
 
     #[tokio::test]

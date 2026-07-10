@@ -27,10 +27,11 @@
 //! event to the wrong agent.
 
 use crate::engine::repo::task::{TaskEventRow, TaskListRow, TaskOpError, TaskRow};
-use crate::engine::{repo, AppError, AppState};
+use crate::engine::{plan_contract, repo, AppError, AppState};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 /// Map a [`TaskOpError`] (business-rule rejection from the repo layer) to the
@@ -970,6 +971,191 @@ pub async fn gate(state: &AppState, payload: Value) -> Result<Value, AppError> {
     )
     .await?;
     Ok(task_event_to_json(&event))
+}
+
+// ── task.planCheck ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanCheckReq {
+    workspace_id: String,
+    slug: String,
+    actor_id: String,
+    /// The repo-relative path the CLI actually read — must equal the header's
+    /// own `planPath` (the file must describe itself).
+    plan_path: String,
+    /// SHA-256 (lowercase hex) the CLI computed over the exact file bytes.
+    plan_fingerprint: String,
+    /// `git merge-base --is-ancestor <baseSha> HEAD` result, computed by the
+    /// CLI: the engine has no checkout to run git in (it may run from the app
+    /// bundle with an unrelated cwd), so ancestry is checked client-side and
+    /// ENFORCED here — `false` fails validation. This is the same trust model
+    /// as the file contents themselves: the CLI is the checkout's reader of
+    /// record.
+    base_sha_ancestor: bool,
+    /// Full canonical plan text (the engine cannot read the checkout). Needed
+    /// whole: header parse, stored-snapshot header equality, and required
+    /// section / placeholder body checks all scan past line 10.
+    plan_content: String,
+    /// Content of every file referenced by an anchored `consumes` /
+    /// `readingOrder` entry, keyed by repo-relative path — read CLI-side for
+    /// the same no-checkout reason, so `plan_contract::check_consumed_anchor`
+    /// can do the exact-text check engine-side. A referenced path absent from
+    /// this map means the CLI could not read it → validation failure.
+    #[serde(default)]
+    files: HashMap<String, String>,
+}
+
+/// Validate a council plan against its task and record a typed `plan_check`
+/// event (spec 2026-07-10 lead-council-v1 "Plan Check"). PURE validation over
+/// the CLI-supplied checkout snapshot: any failure returns `AppError` and
+/// appends NO event. The success result is a bounded packet — never the plan
+/// text.
+pub async fn plan_check(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: PlanCheckReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    require_workspace(state, &req.workspace_id).await?;
+    enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
+
+    let task = repo::task::get(&state.db, &req.workspace_id, &req.slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", req.slug)))?;
+
+    // Fingerprint integrity: recompute over the supplied bytes so the recorded
+    // fingerprint can never disagree with the content that was validated.
+    let computed = format!("{:x}", Sha256::digest(req.plan_content.as_bytes()));
+    if computed != req.plan_fingerprint {
+        return Err(AppError::Invalid(format!(
+            "plan fingerprint mismatch: CLI sent {}, content hashes to {computed}",
+            req.plan_fingerprint
+        )));
+    }
+
+    // Header grammar + structural field rules, body sections/markers, and the
+    // immutable-snapshot equality rule ("the header in that file must remain
+    // byte-for-byte equal to the stored header").
+    let header = plan_contract::parse_and_validate_header(&req.plan_content)?;
+    plan_contract::check_plan_body(&req.plan_content)?;
+    plan_contract::check_header_equality(&task.plan, &req.plan_content)?;
+
+    if header.plan_path != req.plan_path {
+        return Err(AppError::Invalid(format!(
+            "planPath mismatch: header names `{}` but the checked file is `{}`",
+            header.plan_path, req.plan_path
+        )));
+    }
+
+    // DB-context field rules (the half plan_contract explicitly leaves to this
+    // command): owner, workspace agents, boundary set, UI canon, ancestry.
+    if task.owner_agent_id.as_deref() != Some(header.owner.as_str()) {
+        return Err(AppError::Invalid(format!(
+            "header owner `{}` does not equal task.ownerAgentId `{}`",
+            header.owner,
+            task.owner_agent_id.as_deref().unwrap_or("<none>")
+        )));
+    }
+    enforce_scope(state, &req.workspace_id, &header.escalation, "escalation").await?;
+    if let Some(council) = &header.council {
+        // chair == owner is already enforced structurally; owner belongs to the
+        // workspace by the task-create invariant. Members are checked here.
+        for member in &council.members {
+            enforce_scope(state, &req.workspace_id, member, "council member").await?;
+        }
+    }
+
+    let task_boundary = parse_json_array_strings(&task.file_boundary);
+    if !plan_contract::boundary_set_matches(&header.boundary, &task_boundary) {
+        return Err(AppError::Invalid(
+            "header boundary is not the set-equivalent of task.fileBoundary".into(),
+        ));
+    }
+
+    // UI canon rule: a boundary that touches `src/` UI must name a design
+    // canon on the task (`task.designCanon`).
+    let touches_ui = header
+        .boundary
+        .iter()
+        .any(|p| p == "src" || p.starts_with("src/"));
+    if touches_ui && task.design_canon.as_deref().is_none_or(str::is_empty) {
+        return Err(AppError::Invalid(
+            "boundary touches src/ UI but the task names no design canon".into(),
+        ));
+    }
+
+    if !req.base_sha_ancestor {
+        return Err(AppError::Invalid(format!(
+            "baseSha {} is not an ancestor of the checked checkout",
+            header.base_sha
+        )));
+    }
+
+    // Anchor existence, over the CLI-shipped file contents: every `consumes`
+    // entry (always anchored per the field rules) plus every ANCHORED
+    // `readingOrder` entry ("paths, anchors" validation; plain readingOrder
+    // paths carry nothing exact to check).
+    let anchored_reading = header
+        .reading_order
+        .iter()
+        .filter(|e| plan_contract::split_anchor(e).1.is_some());
+    let mut anchor_count = 0usize;
+    for entry in header.consumes.iter().chain(anchored_reading) {
+        let (path, _) = plan_contract::split_anchor(entry);
+        let content = req.files.get(path).ok_or_else(|| {
+            AppError::Invalid(format!(
+                "referenced file missing or unreadable in the checked checkout: `{path}`"
+            ))
+        })?;
+        plan_contract::check_consumed_anchor(entry, content)?;
+        anchor_count += 1;
+    }
+
+    // Everything passed — record the typed event (the ONLY write; every path
+    // above returns before any append).
+    let event_payload = json!({
+        "contractVersion": plan_contract::CONTRACT_VERSION,
+        "planPath": header.plan_path,
+        "planFingerprint": req.plan_fingerprint,
+        "baseSha": header.base_sha,
+    })
+    .to_string();
+    repo::task::add_plan_check(
+        &state.db,
+        &req.workspace_id,
+        &req.slug,
+        Some(&req.actor_id),
+        &event_payload,
+    )
+    .await?;
+    on_task_mutated(
+        state,
+        &req.workspace_id,
+        &req.slug,
+        Some(&req.actor_id),
+        "plan_check",
+        &format!(
+            "plan verified ({})",
+            short_fingerprint(&req.plan_fingerprint)
+        ),
+        // Ledger-only: a green plan check wakes no one, same as a green gate.
+        &Value::Null,
+    )
+    .await?;
+
+    // The bounded success packet (spec: slug, plan path, fingerprint, boundary
+    // count, anchor count, gate count — never the plan text).
+    Ok(json!({
+        "slug": req.slug,
+        "planPath": header.plan_path,
+        "fingerprint": req.plan_fingerprint,
+        "boundaryCount": header.boundary.len(),
+        "anchorCount": anchor_count,
+        "gateCount": header.gates.len(),
+    }))
+}
+
+/// First 12 hex chars of a fingerprint for one-line summaries.
+fn short_fingerprint(fp: &str) -> &str {
+    fp.get(..12).unwrap_or(fp)
 }
 
 // ── task.challenge ────────────────────────────────────────────────────────
@@ -4019,5 +4205,370 @@ mod tests {
             0,
             "an unwatched agent must not be notified of later mutations"
         );
+    }
+
+    // ── task.planCheck ─────────────────────────────────────────────────────
+
+    const PLAN_SHA: &str = "e8ce7bad254f6abbd2ac782a9d62b717701b759c";
+    const PLAN_PATH: &str = "docs/superpowers/plans/example.md";
+    const SPEC_PATH: &str = "docs/superpowers/specs/example.md";
+
+    /// A valid ten-line-contract plan for `owner`, docs-only boundary
+    /// `[PLAN_PATH]` (plus `extra_boundary`), consuming `SPEC_PATH#Field
+    /// Rules`. Mirrors the builders in `plan_contract::tests`.
+    fn fixture_plan(owner: &str, council_members: &[String], extra_boundary: &[&str]) -> String {
+        let council = if council_members.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#","council":{{"chair":"{owner}","members":{},"maxRounds":2}}"#,
+                serde_json::to_string(council_members).unwrap()
+            )
+        };
+        let mut boundary: Vec<&str> = extra_boundary.to_vec();
+        boundary.push(PLAN_PATH);
+        boundary.sort();
+        let boundary = serde_json::to_string(&boundary).unwrap();
+        let mut body = String::new();
+        for section in plan_contract::REQUIRED_SECTIONS {
+            body.push_str(&format!("\n## {section}\n\nBounded prose.\n"));
+        }
+        format!(
+            "# Example Task\n\
+             <!-- conclave-plan:v1\n\
+             {{\n\
+             \"owner\":\"{owner}\",\"authority\":\"in-loop\"{council},\n\
+             \"planPath\":\"{PLAN_PATH}\",\"baseSha\":\"{PLAN_SHA}\",\"escalation\":\"{owner}\",\n\
+             \"readingOrder\":[\"{SPEC_PATH}#Field Rules\",\"{PLAN_PATH}\"],\n\
+             \"boundary\":{boundary},\n\
+             \"consumes\":[\"{SPEC_PATH}#Field Rules\"],\n\
+             \"produces\":[\"{PLAN_PATH}#Ordered edits\"],\"gates\":[\"git diff --check\"]\n\
+             }} -->\n{body}"
+        )
+    }
+
+    /// The boundary strings the fixture plan carries, for `task create`.
+    fn fixture_boundary(extra: &[&str]) -> Vec<String> {
+        let mut b: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        b.push(PLAN_PATH.to_string());
+        b
+    }
+
+    /// Spec-file content satisfying the fixture plan's consumed anchor.
+    fn fixture_files() -> Value {
+        json!({ SPEC_PATH: "### Field Rules\n\n- owner equals task.ownerAgentId.\n" })
+    }
+
+    /// The full `task.planCheck` payload for `plan` with a correct
+    /// fingerprint and a green ancestry flag.
+    fn plan_check_payload(ws: &str, slug: &str, actor: &str, plan: &str, files: Value) -> Value {
+        json!({
+            "workspaceId": ws, "slug": slug, "actorId": actor,
+            "planPath": PLAN_PATH,
+            "planFingerprint": format!("{:x}", Sha256::digest(plan.as_bytes())),
+            "baseShaAncestor": true,
+            "planContent": plan,
+            "files": files,
+        })
+    }
+
+    /// Create a task whose stored snapshot, owner, and boundary match `plan`.
+    async fn fixture_plan_task(
+        state: &AppState,
+        ws: &str,
+        slug: &str,
+        owner: &str,
+        plan: &str,
+        extra_boundary: &[&str],
+        canon: Option<&str>,
+    ) {
+        let mut req = json!({
+            "workspaceId": ws, "slug": slug, "title": "Planned",
+            "ownerAgentId": owner,
+            "fileBoundary": fixture_boundary(extra_boundary),
+            "plan": plan,
+        });
+        if let Some(canon) = canon {
+            req["designCanon"] = json!(canon);
+        }
+        create(state, req).await.expect("create failed");
+    }
+
+    async fn event_kinds(state: &AppState, ws: &str, slug: &str) -> Vec<String> {
+        let row = repo::task::get(&state.db, ws, slug)
+            .await
+            .expect("get failed")
+            .expect("task exists");
+        repo::task::events_for(&state.db, &row.id, 50)
+            .await
+            .expect("events failed")
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn plan_check_success_returns_bounded_packet_and_appends_typed_event() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let m1 = fixture_instance(&state, &ws, "MemberA").await;
+        let m2 = fixture_instance(&state, &ws, "MemberB").await;
+        let plan = fixture_plan(&owner, &[m1, m2], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        let result = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &plan, fixture_files()),
+        )
+        .await
+        .expect("plan_check failed");
+
+        let fingerprint = format!("{:x}", Sha256::digest(plan.as_bytes()));
+        assert_eq!(
+            result,
+            json!({
+                "slug": "t1",
+                "planPath": PLAN_PATH,
+                "fingerprint": fingerprint,
+                "boundaryCount": 1,
+                "anchorCount": 2, // 1 consumes + 1 anchored readingOrder entry
+                "gateCount": 1,
+            }),
+            "bounded packet only — never the plan text"
+        );
+
+        // The typed event landed, attributed to the actor, with the frozen
+        // payload keys.
+        let row = repo::task::get(&state.db, &ws, "t1")
+            .await
+            .expect("get failed")
+            .expect("task exists");
+        let events = repo::task::events_for(&state.db, &row.id, 10)
+            .await
+            .expect("events failed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "plan_check");
+        assert_eq!(events[0].actor_agent_id.as_deref(), Some(owner.as_str()));
+        let payload: Value = serde_json::from_str(&events[0].payload).expect("payload JSON");
+        assert_eq!(payload["contractVersion"], json!("conclave-plan:v1"));
+        assert_eq!(payload["planPath"], json!(PLAN_PATH));
+        assert_eq!(payload["planFingerprint"], json!(fingerprint));
+        assert_eq!(payload["baseSha"], json!(PLAN_SHA));
+    }
+
+    #[tokio::test]
+    async fn plan_check_fingerprint_mismatch_fails_and_appends_no_event() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        let mut payload = plan_check_payload(&ws, "t1", &owner, &plan, fixture_files());
+        payload["planFingerprint"] = json!("ab".repeat(32));
+        let err = plan_check(&state, payload).await;
+        assert!(matches!(err, Err(AppError::Invalid(_))), "got {err:?}");
+        assert!(
+            event_kinds(&state, &ws, "t1").await.is_empty(),
+            "a validation failure must append nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_owner_mismatch() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let other = fixture_instance(&state, &ws, "Other").await;
+        let plan = fixture_plan(&other, &[], &[]); // header names a different owner
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &plan, fixture_files()),
+        )
+        .await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("owner")));
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_boundary_set_mismatch() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        // Task boundary carries an extra path the header does not.
+        create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "Planned",
+                "ownerAgentId": owner,
+                "fileBoundary": [PLAN_PATH, "docs/other.md"],
+                "plan": plan,
+            }),
+        )
+        .await
+        .expect("create failed");
+
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &plan, fixture_files()),
+        )
+        .await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("boundary")));
+        assert!(event_kinds(&state, &ws, "t1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_missing_consumed_file_and_missing_anchor() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        // Referenced file absent from the CLI-shipped map.
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &plan, json!({})),
+        )
+        .await;
+        assert!(
+            matches!(err, Err(AppError::Invalid(msg)) if msg.contains("missing or unreadable"))
+        );
+
+        // File present but the exact anchor text is absent.
+        let err = plan_check(
+            &state,
+            plan_check_payload(
+                &ws,
+                "t1",
+                &owner,
+                &plan,
+                json!({ SPEC_PATH: "no such heading here" }),
+            ),
+        )
+        .await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("anchor")));
+        assert!(event_kinds(&state, &ws, "t1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_header_drift_from_the_stored_snapshot() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        // The canonical file's header changed after task creation (baseSha
+        // edited); body-only edits stay fine (proven by the happy path).
+        let drifted = plan.replacen(PLAN_SHA, &"a".repeat(40), 1);
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &drifted, fixture_files()),
+        )
+        .await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("mismatch")));
+        assert!(event_kinds(&state, &ws, "t1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_a_non_ancestor_base_sha() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        let mut payload = plan_check_payload(&ws, "t1", &owner, &plan, fixture_files());
+        payload["baseShaAncestor"] = json!(false);
+        let err = plan_check(&state, payload).await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("ancestor")));
+        assert!(event_kinds(&state, &ws, "t1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_check_ui_boundary_requires_a_design_canon() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &["src/views/LaneBoard.tsx"]);
+
+        // Without a canon: rejected.
+        fixture_plan_task(
+            &state,
+            &ws,
+            "no-canon",
+            &owner,
+            &plan,
+            &["src/views/LaneBoard.tsx"],
+            None,
+        )
+        .await;
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "no-canon", &owner, &plan, fixture_files()),
+        )
+        .await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("canon")));
+        assert!(event_kinds(&state, &ws, "no-canon").await.is_empty());
+
+        // With a canon: the same plan passes.
+        fixture_plan_task(
+            &state,
+            &ws,
+            "with-canon",
+            &owner,
+            &plan,
+            &["src/views/LaneBoard.tsx"],
+            Some("laneboard-canon"),
+        )
+        .await;
+        let result = plan_check(
+            &state,
+            plan_check_payload(&ws, "with-canon", &owner, &plan, fixture_files()),
+        )
+        .await
+        .expect("plan_check with canon failed");
+        assert_eq!(result["boundaryCount"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_council_members_outside_the_workspace() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let other_ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let m1 = fixture_instance(&state, &ws, "MemberA").await;
+        let foreign = fixture_instance(&state, &other_ws, "Foreign").await;
+        let plan = fixture_plan(&owner, &[m1, foreign], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        let err = plan_check(
+            &state,
+            plan_check_payload(&ws, "t1", &owner, &plan, fixture_files()),
+        )
+        .await;
+        assert!(
+            matches!(err, Err(AppError::Invalid(msg)) if msg.contains("council member")),
+            "a cross-workspace member must fail scope"
+        );
+        assert!(event_kinds(&state, &ws, "t1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_check_rejects_a_plan_path_the_header_does_not_name() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Chair").await;
+        let plan = fixture_plan(&owner, &[], &[]);
+        fixture_plan_task(&state, &ws, "t1", &owner, &plan, &[], None).await;
+
+        let mut payload = plan_check_payload(&ws, "t1", &owner, &plan, fixture_files());
+        payload["planPath"] = json!("docs/superpowers/plans/other.md");
+        let err = plan_check(&state, payload).await;
+        assert!(matches!(err, Err(AppError::Invalid(msg)) if msg.contains("planPath")));
     }
 }

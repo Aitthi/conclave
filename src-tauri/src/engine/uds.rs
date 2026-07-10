@@ -416,6 +416,24 @@ mod tests {
                 .await
                 .expect("instantiate failed")
                 .id;
+        // A second workspace agent for `--watchers` coverage. `instantiate`
+        // is idempotent per (workspace, definition), so it needs its own def.
+        let member_def = crate::engine::repo::agent_definition::create(
+            &state.db,
+            &crate::engine::repo::agent_definition::AgentDefinitionInput {
+                name: "Member".into(),
+                agent_type: "cli".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create member def failed");
+        let member =
+            crate::engine::repo::workspace_agent::instantiate(&state.db, &ws, &member_def.id)
+                .await
+                .expect("instantiate member failed")
+                .id;
 
         let path = std::env::temp_dir().join("conclave-uds-test-task-verbs.sock");
         let _ = std::fs::remove_file(&path);
@@ -481,14 +499,16 @@ mod tests {
         assert_eq!(created["state"], json!("planned"));
 
         // `task claim <actorId> <ws> <slug>` (already self-expanded, mirroring
-        // what `conclave-cli` would send).
-        let claimed = call(
-            &mut write,
-            &mut reader,
-            2,
-            json!(["task", "claim", actor, ws, "acceptance-task"]),
-        )
-        .await;
+        // what `conclave-cli` would send). REGRESSION (lead-council v1): claim
+        // keeps its exact five-word expanded wire form — the freshness
+        // preflight is CLI-local and must never grow this argv.
+        let claim_argv = json!(["task", "claim", actor, ws, "acceptance-task"]);
+        assert_eq!(
+            claim_argv.as_array().expect("argv array").len(),
+            5,
+            "claim wire form must stay five words"
+        );
+        let claimed = call(&mut write, &mut reader, 2, claim_argv).await;
         assert_eq!(claimed["state"], json!("claimed"));
         assert_eq!(claimed["implementerAgentId"], json!(actor));
 
@@ -567,6 +587,116 @@ mod tests {
             row["challenges"],
             json!([]),
             "no challenges raised on this task"
+        );
+
+        // ── lead-council v1 additions ─────────────────────────────────────
+
+        // A valid `conclave-plan:v1` plan owned by `actor` (docs-only
+        // boundary; the ten-line contract shape `plan_contract` pins).
+        let plan_path = "docs/superpowers/plans/council.md";
+        let spec_path = "docs/superpowers/specs/council.md";
+        let base_sha = "e8ce7bad254f6abbd2ac782a9d62b717701b759c";
+        let mut body = String::new();
+        for section in crate::engine::plan_contract::REQUIRED_SECTIONS {
+            body.push_str(&format!("\n## {section}\n\nBounded prose.\n"));
+        }
+        let plan = format!(
+            "# Council Task\n\
+             <!-- conclave-plan:v1\n\
+             {{\n\
+             \"owner\":\"{actor}\",\"authority\":\"in-loop\",\n\
+             \"planPath\":\"{plan_path}\",\"baseSha\":\"{base_sha}\",\"escalation\":\"{actor}\",\n\
+             \"readingOrder\":[\"{spec_path}#Field Rules\",\"{plan_path}\"],\n\
+             \"boundary\":[\"{plan_path}\"],\n\
+             \"consumes\":[\"{spec_path}#Field Rules\"],\n\
+             \"produces\":[\"{plan_path}#Ordered edits\"],\"gates\":[\"git diff --check\"]\n\
+             }} -->\n{body}"
+        );
+
+        // `task create … --owner <actor> --boundary <planPath> --plan <text>
+        //  --watchers <member>` — the exact create-with-watchers wire form the
+        // CLI sends after `--plan-file` resolution and owner self-defaulting.
+        let created = call(
+            &mut write,
+            &mut reader,
+            7,
+            json!([
+                "task",
+                "create",
+                ws,
+                "council-task",
+                "Council",
+                "Task",
+                "--owner",
+                actor,
+                "--boundary",
+                plan_path,
+                "--plan",
+                plan,
+                "--watchers",
+                member
+            ]),
+        )
+        .await;
+        assert_eq!(created["slug"], json!("council-task"));
+        assert_eq!(
+            created["watcherAgentIds"],
+            json!([actor, member]),
+            "owner first, then the supplied watcher, atomically subscribed"
+        );
+
+        // `task plan-check <actorId> <ws> <slug> <planPath> <fingerprint>
+        //  <ancestor 0|1> <planContent> <filesJson>` — the exact 10-word wire
+        // form `run_task_plan_check` builds after its checkout reads.
+        use sha2::{Digest, Sha256};
+        let fingerprint = format!("{:x}", Sha256::digest(plan.as_bytes()));
+        let files = json!({ spec_path: "### Field Rules\n\n- owner equals task.ownerAgentId.\n" })
+            .to_string();
+        let checked = call(
+            &mut write,
+            &mut reader,
+            8,
+            json!([
+                "task",
+                "plan-check",
+                actor,
+                ws,
+                "council-task",
+                plan_path,
+                fingerprint,
+                "1",
+                plan,
+                files
+            ]),
+        )
+        .await;
+        assert_eq!(
+            checked,
+            json!({
+                "slug": "council-task",
+                "planPath": plan_path,
+                "fingerprint": fingerprint,
+                "boundaryCount": 1,
+                "anchorCount": 2,
+                "gateCount": 1,
+            }),
+            "bounded packet only — never the plan text"
+        );
+
+        // The typed event is on the ledger, newest-first.
+        let got = call(
+            &mut write,
+            &mut reader,
+            9,
+            json!(["task", "get", ws, "council-task"]),
+        )
+        .await;
+        let events = got["events"].as_array().expect("events array");
+        assert_eq!(events[0]["kind"], json!("plan_check"));
+        assert_eq!(events[0]["payload"]["planFingerprint"], json!(fingerprint));
+        assert_eq!(
+            events[0]["payload"]["contractVersion"],
+            json!("conclave-plan:v1")
         );
 
         server.abort();
