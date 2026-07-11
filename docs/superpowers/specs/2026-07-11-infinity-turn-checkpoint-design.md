@@ -1,70 +1,76 @@
-# Infinity-Turn Checkpoint (ctx-proxy Phase 2) — Design
+# Infinity-Turn Checkpoint (ctx-proxy Phase 2) — Design v2
 
-**Status:** DRAFT for two-principal council review (Detoro chair, Aoki co-principal). In-loop authority granted by human 2026-07-11; human reviews the finished result.
-**Supersedes nothing.** Distinct from Phase-1 dedup proxy, which is NO-GO/shelved (plan A9, commit 5ef698d).
-**Predecessor evidence:** `docs/superpowers/plans/2026-07-10-agent-proxy-phase1.md` (A9 ruling), blackboard `measure:proxy-025-verdict` / `measure:proxy-025-ruling`.
+**Status:** COUNCIL-REVIEWED (Detoro chair, Aoki co-principal). Six challenges filed and ACCEPTED; all folded below (decision log at tail). In-loop authority granted by human 2026-07-11; human reviews the finished result. Verdict: **rework-before-plan done; measurement-only Milestone-1 is viable under the amended metric contract.**
+**Distinct from** Phase-1 dedup proxy, which is NO-GO/shelved (plan A9, commit 5ef698d).
+**Predecessor evidence:** `docs/superpowers/plans/2026-07-10-agent-proxy-phase1.md` (A9), blackboard `measure:proxy-025-verdict` / `measure:proxy-025-ruling`.
 
 ## 1. Problem & goal
 
-Agents degrade — slower, lower-quality output — once their live context grows past roughly **400–500k tokens**, even on a 1M-window model (fable-5). The harness's own self-compaction fires at ~70% (~700k on 1M), which is **already past** the degradation zone and lands as one disruptive event, not continuous management.
+Agents degrade — slower, lower-quality output — once live context grows past roughly **400–500k tokens**, even on a 1M-window model. The harness self-compacts at ~70% (~700k on 1M), **already past** the degradation zone and as one disruptive event, not continuous management.
 
-**Goal:** a proxy-managed **"infinity turn"** — the proxy keeps the **effective context** (what is actually sent upstream to the model) inside the high-quality zone at all times by compacting recoverable old tool-output in the background. The agent perceives an effectively unbounded context that never leaves its good operating band; the harness keeps running transparently.
+**Goal:** a proxy-managed **"infinity turn"** — keep the **effective context** (what is sent upstream) inside the high-quality band at all times by compacting recoverable old tool-output in the background, so the model always operates in its good zone.
 
-**This is a QUALITY objective, not a cost objective.** Lower cost (smaller cached prefix) is a secondary benefit. The Phase-1 finding stands: "input reduction" is the wrong *primary* objective under prompt caching. Phase-2 is justified by keeping the model in its high-quality zone — a niche the harness does not cover.
+**This is a QUALITY objective, not a cost objective.** Cost is secondary. Phase-1's lesson stands: "input reduction" is the wrong *primary* objective under prompt caching.
 
-## 2. Why Phase-2 can work where Phase-1 failed
+## 2. Economics — stated honestly (was overclaimed; challenge a06953a8)
 
-Phase-1 elided only *duplicate* tool_results → tiny savings S (3.4% aggregate, 9.5% best) → cache-rebuild cost never amortized (break-even n ≥ (1.15R−1.25S)/(0.1S) → huge for small S). Phase-2 freezes a **large** block once (all recoverable old tool-output beyond the recent tail), so S is large and break-even collapses to ~2 turns — and the frozen block is monotonic and byte-stable, giving the long cache plateau Phase-1 never reached. The economics only close when S is large; **§7 gates the whole feature on empirically confirming S is large enough.**
+Phase-1 elided only duplicates → tiny S → cache rebuild never amortized. Phase-2 freezes a large recoverable block once, so S is larger — **but "large absolute S" does not imply fast break-even.** The governing quantity is **q = S_net / R**, where:
+- **R** = tokens in the invalidated cache suffix, starting at the **earliest changed block** (likely most of the prompt).
+- **S_net** = tokens actually removed, **net of** stub text + any index overhead + all kept non-recoverable outputs.
 
-## 3. Core mechanism (reuses the `ctxopt` crate; changes the policy)
+From the recorded cache model, break-even future rounds `n = 11.5/q − 12.5`; `n ≤ 2` requires **q ≥ 0.793** — a high bar. **No "~2 turns" claim is made.** Whether Phase-2 pays is decided empirically by the Milestone-1 metric contract (§7.1), not asserted here. Note byte-S ≠ the token quantity that defines the quality ceiling; the gate measures tokens.
 
-The existing pipeline (`policy → analyze → apply → validate` in `src-tauri/crates/ctxopt/` driven by `src-tauri/src/engine/runtime/ctx_proxy.rs`) is retained. Phase-2 replaces the **dedup policy** with a **checkpoint policy**:
+## 3. Core mechanism (reuses `ctxopt`; changes the policy)
 
-- **Trigger.** When estimated effective input crosses a configurable `ceiling` (default ~450k tokens), fire **one** checkpoint.
-- **Freeze region.** Everything **before the recent tail** (tail = last N messages / ~80–100k tokens, kept verbatim so live work is untouched). Within that region, stub **only recoverable** tool_results.
-- **Recoverability classifier (safety A).** By tool identity:
-  - *Recoverable → elidable:* `Read`, `Grep`, `Glob`, `LS`, search, code-intel — idempotent, re-obtainable on demand.
-  - *Non-recoverable → kept verbatim:* `Bash` (side effects), `WebFetch` (content drifts), `Write`/`Edit` (small anyway + confirmation), one-time computations. This bounds S; that is the accepted cost of safety.
-- **Memory index (safety C).** At checkpoint, generate one compact frozen index block listing what was stubbed (tool, path/args, turn) so the agent has breadcrumbs. Each stub is actionable: `[ctxopt checkpoint: elided Read <path> @turn N — re-read to restore]`.
-- **Escape hatch.** If the agent re-reads a stubbed file, that new Read lands in the live tail (not frozen) → content returns naturally. No special recovery path needed.
+Retains the `policy → analyze → apply → validate` pipeline (`src-tauri/crates/ctxopt/`, driven by `ctx_proxy.rs`). Phase-2 replaces the dedup policy with a **checkpoint policy**:
 
-The effect is **lossless in capability**: elided content is always re-obtainable, so nothing the agent needs is unrecoverably gone — it is simply not resident until pulled back.
+- **Freeze region.** Everything before the **recent tail** (last N messages / ~80–100k tokens, kept verbatim). Within it, stub **only recoverable** tool_results.
+- **Recoverability — two properties, not one (challenge 22ec8a2b):**
+  - *Capability-resident loss (ACCEPTED):* eliding a `Read`/`Grep`/`Glob`/`LS`/search/code-intel result removes it from context; the agent can re-obtain **current** state on demand. This is lossy w.r.t. the **historical** bytes the model saw — accepted, same tradeoff the harness's own compaction makes.
+  - *Exact-output recovery (NOT provided in v1):* would require a content-addressed snapshot artifact persisting original bytes. Deferred (see §9).
+  - *Non-recoverable → kept verbatim, tracked as a separate S bucket:* arbitrary `Bash` (side effects, mutable output — `cat`/`ls` are current-state, not historical recovery), `WebFetch` (drifts), `Write`/`Edit`. Only **content-addressed** reads (`git show <full SHA>`) are safely rerunnable and may later be reclassified recoverable.
+- **Breadcrumbs, NOT an index block (challenge 7e325df7).** Each stub is self-describing in its own `tool_result` content: `[ctxopt checkpoint: elided Read <path> @turn N — re-read to restore]`. No separate message/block is added, so the strict validator (§5) still holds. A collective manifest, if ever needed, is deferred to the apply-path design (§9).
+- **Escape hatch.** A re-read lands in the live tail (not frozen) → content returns naturally.
 
-## 4. Cache stability (the load-bearing difference from Phase-1)
+## 4. Checkpoint triggering & cache stability (thrash-guarded; challenge 6ea4c87f)
 
-- Frozen bytes are **immutable once written** (Phase-1 D5 prefix-stability) and the checkpoint set is **monotonic** (only extends forward).
-- **Re-checkpoint only** when effective input crosses `ceiling` again **and** ≥ΔN new messages have accrued since the last checkpoint — producing **few, large, long-lived** freezes instead of Phase-1's per-request elision ramp (which busted the prefix almost every turn).
-- A cache breakpoint is placed immediately after the frozen region so the compacted prefix caches; large S → break-even ~2 turns.
+- Frozen bytes are **immutable once written** (Phase-1 D5); the checkpoint set is **monotonic**.
+- **High/low-water hysteresis, not ΔN-only.** Fire a checkpoint **only if** projected **net saving > M** AND projected **post-context ≤ low-water L (< ceiling)**. Otherwise emit a **`saturated`/`unmanageable`** metric and make **no wire, state, or cache change** — a traffic shape dominated by non-recoverable growth or live-tail growth must not thrash the cache.
+- The checkpoint boundary is represented explicitly; prior stub bytes never mutate.
+- **Do not invent a cache breakpoint.** Milestone-1 only **observes** the actual incoming `cache_control` positions the client already sets (validator forbids changing them — validate.rs:63-70). Any deliberate breakpoint placement is an apply-path concern, deferred.
 
-## 5. Fail-open & equivalence guard
+## 5. Fail-open & equivalence guard (unchanged, strict)
 
-Any error on the checkpoint path (parse, classify, apply, validate, panic) → forward the **original request untouched**. The proxy must never be able to break an agent (Phase-1 invariant). `validate`: message count unchanged, every `tool_use` retains a matching `tool_result`, content only shrank.
+Any error on the checkpoint path → forward the **original request untouched** (Phase-1 invariant). `validate` stays strict: message count unchanged, every `tool_use` keeps a matching `tool_result`, block/key sets unchanged, only `tool_result.content` shrinks. Per-result stubs (§3) are compatible with this by construction; that is why breadcrumbs live inside stubs, not in a new block.
 
-## 6. Configuration ("infinity turn")
+## 6. Configuration — GLOBAL in v1 (per-agent is impossible today; challenge d5452139)
 
-Per-agent opt-in, mirroring the existing proxy toggles (in-memory atomics, reset on relaunch unless persistence is added): `proxy checkpoint on|off`, `proxy ceiling <tokens>`, tail size. Default **off**. "Infinity turn" = this feature enabled for an agent.
+The proxy runtime is **app-global** (`ctx_proxy.rs:42-50`, one atomic mutated by `commands/proxy.rs`; `instance.rs` routes every opted-in agent to the same port with **no agent identity**). Therefore v1 = a **global** toggle: `proxy checkpoint on|off`, `proxy ceiling <tokens>`, tail size, default **off**. Fleet-wide **log projection** is fine globally. **Per-agent control and any single-agent apply trial are BLOCKED** until an isolation design lands: agent/conversation identity carried to the proxy (or a per-agent endpoint/port), CLI targeting an agent id, and a test that enabling one agent cannot rewrite another's traffic.
 
-## 7. VALIDATION GATE — measure before building the apply path
+## 7. VALIDATION GATE (mandatory, ordered)
 
-This is mandatory and ordered; do not implement the apply/rewrite path until 7.1 passes.
+**Milestone-1 — log-mode projection (the only work greenlit now).** Implement the checkpoint policy in **log mode only**: compute what a checkpoint *would* stub and record the full metric contract per candidate, **without altering upstream bytes**. Metric contract (challenge a06953a8): earliest-changed byte/message, **R** (invalidated-suffix tokens), gross candidate tokens, stub+breadcrumb overhead, **S_net** (tokens), **q = S_net/R**, projected cache break-even, projected post-checkpoint tokens, and observed expected plateau turns — plus a separate non-recoverable-kept bucket. Persist into `proxy_request_metric` or a sibling table. **Pass criterion:** post-context enters a defined low-water band on real long-context traffic **AND** q/plateau support the cost bound. S alone does not pass.
 
-1. **Log-mode projection first.** Implement the checkpoint policy in **log mode only**: on real traffic, compute what a checkpoint *would* stub, the resulting effective-context-after, and the achieved S — **without** altering the bytes sent upstream. Measure over real fleet lanes whether structural (recoverable-only) S is large enough to pull effective context from >ceiling back into the target band. Recorded like Phase-1 into `proxy_request_metric` (or a sibling table).
-2. **Spike the load-bearing assumption.** Determine whether the agent harness accounts context from **API-returned usage** (then a proxy that shrinks the upstream request also stops the harness self-compacting — full "infinity turn") or from **its own message list** (then the harness still self-compacts on its own view; the model-quality win still holds, but "never fills up" is only partial). This changes what we can claim; it does not block the quality win.
-3. **Gate.** Only if 7.1 shows sufficient S and 7.2 is understood → flip apply on **one disposable agent**, measure before/after **quality** (the primary objective), effective-context band, and cache health. Fleet rollout is a separate later decision.
+**§7.2 — accounting is a DESIGN GATE before apply (challenge c19ef7b0).** Because the ledger identifies conversations by first-message + prefix hash (`ledger.rs:47-52`), harness self-compaction (which rewrites/drops the prefix) **resets** checkpoint state and the cache plateau. So harness accounting is not a mere "claim adjustment": settle it via a **controlled mock-upstream experiment** (hold response content constant, vary only returned `usage`) if Claude Code permits, else a live spike. **If own-list accounting**, narrow the product to pre-compaction quality shaping or harness integration; **do not claim infinity-turn.**
 
-**Honest risks:** (a) if recoverable tool-output does *not* dominate large contexts, structural S is insufficient and we must escalate to a hybrid LLM-summary of the oldest block (bigger S, adds cost/latency/quality risk) — 7.1 tells us before we invest; (b) 7.2 is unverified; (c) quality equivalence of a background-compacted context is itself an empirical question the one-agent trial must answer, not assume.
+**§7.3 — apply trial (BLOCKED until isolation §6 + accounting §7.2 settle).** Predefine the quality evaluation *before* any apply: replay matched long-context checkpoints, **baseline vs projected** context, with **blinded** next-action / task-outcome scoring; the isolated live agent is a **safety** validation only, not the primary quality measure.
+
+**Honest risks:** (a) structural recoverable S may be insufficient → escalate to hybrid LLM-summary (bigger S, adds cost/latency/quality risk) — Milestone-1 tells us first; (b) accounting (§7.2) unverified; (c) quality equivalence is measured, never assumed.
 
 ## 8. Testing
 
-Unit (`ctxopt`): checkpoint policy is deterministic (same input → same frozen set), recoverability classifier correctness, recent-tail always preserved, frozen set monotonic across turns; `apply` yields valid JSON with every tool_use/tool_result pair intact; `validate` guard rejects structure changes; **cache-stability test: identical input across turns → byte-identical output**. Plus the empirical S measurement from §7.1 in log mode. Fail-open tests: parse/classify/validate errors → original bytes returned.
+Unit (`ctxopt`): deterministic checkpoint (same input → same frozen set), recoverability classifier, recent-tail preserved, monotonic frozen set; `apply` → valid JSON, tool_use/tool_result pairs intact; `validate` rejects structure changes; **byte-stable test: identical input across turns → identical output**. **Adversarial (challenge 6ea4c87f):** zero-new-eligible growth and non-recoverable-heavy growth must emit `saturated` and change nothing. Metric-contract tests: R, S_net, q computed correctly incl. overhead. Fail-open: parse/classify/validate errors → original bytes.
 
-## 9. Boundary (anticipated)
+## 9. Boundary (anticipated) & deferred
 
-`src-tauri/crates/ctxopt/` (new checkpoint policy + recoverability classifier + index generator, alongside existing dedup), `src-tauri/src/engine/runtime/ctx_proxy.rs` (trigger/ceiling wiring, metric emission), `src-tauri/src/engine/commands/proxy.rs` (`checkpoint`/`ceiling` commands), CLI `proxy` argv mapping. Metric table migration if a sibling table is used. Exact paths finalized in the plan.
+Milestone-1 boundary: `src-tauri/crates/ctxopt/` (checkpoint policy + recoverability classifier, alongside dedup), `ctx_proxy.rs` (trigger/ceiling wiring, metric emission), `commands/proxy.rs` (`checkpoint`/`ceiling`), CLI argv mapping, metric migration if a sibling table is used. Exact paths finalized in the plan. **Deferred (apply-path, not Milestone-1):** per-agent isolation design (§6), accounting resolution (§7.2), a content-addressed snapshot store for exact-output recovery (§3), and any collective manifest/breakpoint representation with its own narrowly-proven validator.
 
-## Open questions for council (Aoki grill targets)
+## Decision log — council rulings 2026-07-11 (Detoro chair)
 
-1. **§7.2 harness accounting** — is there a cheaper way to settle it than a live spike? Does either answer change the design, not just the claim?
-2. **§3 recoverability set** — is Bash truly always non-recoverable for *context* purposes (we are not re-running it, only noting the output is gone)? Could large idempotent Bash reads (e.g. `cat`, `ls`) be safely reclassified to raise S?
-3. **§4 re-checkpoint policy** — is monotonic-extend + ΔN hysteresis enough to guarantee a long plateau, or is there a traffic shape that still thrashes?
-4. **§2 economics** — does the large-S break-even still hold once index-block + kept non-recoverable outputs are counted against S?
+All six of Aoki's challenges ACCEPTED after evidence verification; credit Aoki.
+- **R1 (22ec8a2b) recoverability:** dropped "lossless"; split capability-resident (accepted lossy) vs exact-output (needs snapshot). §3.
+- **R2 (d5452139) isolation:** v1 global toggle; per-agent + apply trial blocked until isolation design. §6.
+- **R3 (7e325df7) index/breakpoint vs validator:** no index block, no invented breakpoint; breadcrumbs inside per-result stubs; validator stays strict. §3/§4.
+- **R4 (a06953a8) economics:** deleted "~2 turns"; gate on q=S_net/R with full metric contract. §2/§7.1.
+- **R5 (6ea4c87f) thrash:** high/low-water + min-net-saving M + low-water L; saturated→no-op; adversarial tests. §4/§8.
+- **R6 (c19ef7b0) accounting+quality:** §7.2 upgraded to a design gate (mock-upstream accounting experiment); predefined blinded quality eval. §7.
