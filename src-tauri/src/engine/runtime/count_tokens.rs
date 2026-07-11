@@ -111,6 +111,12 @@ pub async fn count_tokens(
 
 /// Credential preflight (plan prerequisite): a trivial count_tokens call proving
 /// the live credential is authorized. Ok(()) iff HTTP 200.
+///
+/// M1 has no non-test caller yet: the live count path in `sample_checkpoint`
+/// already surfaces auth failures via `count_failure`, so this standalone probe
+/// is retained for an explicit live check (no CLI entry point wired in M1 — see
+/// the READY note / escalation to the lead).
+#[allow(dead_code)]
 pub async fn preflight(
     client: &reqwest::Client,
     upstream: &str,
