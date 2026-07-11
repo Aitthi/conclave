@@ -27,6 +27,7 @@ Every task inherits ALL of these:
 - **Design canon:** Lane-2 does not improvise the visual — it follows Lane-0's Conclave Design-view canon; visual disputes escalate to Arta.
 - **GUARD (boundary — caller-scoped commands):** any new agent-scoped CLI/engine command is threaded through `src-tauri/src/bin/conclave-cli.rs` (`expand_self_args`/`CONCLAVE_INSTANCE_ID`), `src-tauri/src/engine/commands/cli.rs` (argv→method map), and `src-tauri/src/engine/router.rs` (dispatch arm) — NOT only the command's own module. A boundary that names only the feature module (e.g. `commands/browser.rs`) cannot deliver caller identity. Include all three whenever caller-id or a new method is involved. (Root cause of challenge a281ebf9.)
 - **GUARD (boundary — TS type renames):** renaming an exported IPC type ripples into the barrel `src/ipc/index.ts` re-export; include it in any lane boundary that renames `src/ipc/types.ts` exports.
+- **GUARD (boundary — design-host screens):** the Conclave Design view renders ONE screen per `design/screens/<id>.tsx` file (id = filename), so distinct app states (populated vs empty vs a states board) are distinct screen files, not variants of one. A design boundary that must "cover all states" needs a `design/screens/<name>*.tsx` glob, not a single file. (Root cause of challenge bf0dfa82.)
 
 ---
 
@@ -100,7 +101,7 @@ Command signatures (facade `src/ipc/commands.ts`, backend `commands/browser.rs`)
 
 > Delegated to Arta (designer), who owns the Conclave Design view. This lane authors the visual in-repo under `design/` (NOT `.arta/`), so its boundary (`design/**`) never overlaps Lane-1 (`src-tauri/**`) or Lane-2 (`src/**`). **Blocks Lane-2's visual acceptance** — Lane-2 may build structure/fixtures against this plan before the canon lands, but its UI Pixel Gate is judged against this canon and Arta's sign-off.
 
-**Boundary:** `design/screens/browser.tsx`, `design/components/**`, `design/lib/**`, `design/theme.css` (in-repo, committed).
+**Boundary:** `design/screens/browser*.tsx` (design-host renders ONE screen per file, so distinct app states are distinct screens: `browser.tsx` populated + `browser-empty.tsx` empty, plus any `browser-states` board), `design/components/**`, `design/lib/**`, `design/theme.css` (in-repo, committed). (Screen glob widened from the single `browser.tsx` by lead ruling on challenge bf0dfa82 — the empty-state deliverable needs its own screen file; verified via design-host `screens.ts` one-file-per-screen + the design-native/design-empty/design-states precedent.)
 
 **Deliverable — `design/screens/browser.tsx` covering every state:**
 - Side rail (vertical, Arc-like): a row per tab = owner avatar/name + page title + status dot.
