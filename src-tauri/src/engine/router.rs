@@ -152,6 +152,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         // ── proxy (context optimizer) ─────────────────────────────────────
         "proxy.status" => proxy::status(state, payload).await,
         "proxy.mode" => proxy::set_mode(state, payload).await,
+        "proxy.threshold" => proxy::set_threshold(state, payload).await,
         "proxy.report" => proxy::report(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────

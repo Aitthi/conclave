@@ -1,6 +1,6 @@
 //! App-global loopback proxy for Anthropic API traffic.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -42,6 +42,9 @@ struct UsageTotals {
 pub struct ProxyRuntime {
     pub port: u16,
     pub mode: AtomicU8,
+    /// Elision high-water ratio, f32 stored as bits. Runtime-settable via
+    /// `proxy.threshold`; resets to `ctxopt::DEFAULT_HIGH_WATER` on restart.
+    pub threshold: AtomicU32,
     pub upstream: RwLock<String>,
     pub ledger: Mutex<ctxopt::ledger::Ledger>,
     pub active: AtomicBool,
@@ -61,6 +64,7 @@ impl ProxyRuntime {
         Self {
             port,
             mode: AtomicU8::new(MODE_LOG),
+            threshold: AtomicU32::new(ctxopt::DEFAULT_HIGH_WATER.to_bits()),
             upstream: RwLock::new(DEFAULT_UPSTREAM.to_owned()),
             ledger: Mutex::new(ctxopt::ledger::Ledger::new(ctxopt::LEDGER_CAP)),
             active: AtomicBool::new(false),
@@ -211,7 +215,8 @@ fn rewrite_body_inner(rt: &ProxyRuntime, body: &[u8]) -> RewriteOutcome {
         .map(|tokens| tokens as usize)
         .unwrap_or_else(|| ctxopt::estimate::est_tokens(body.len()));
     let window = ctxopt::estimate::context_window_for_model(&model);
-    let decision = ctxopt::policy::decide(est, window, conv);
+    let ratio = f32::from_bits(rt.threshold.load(Ordering::Acquire));
+    let decision = ctxopt::policy::decide(est, window, ratio, conv);
 
     let decision_name = match decision {
         ctxopt::policy::Decision::Passthrough => {

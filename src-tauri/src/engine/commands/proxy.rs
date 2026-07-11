@@ -11,6 +11,11 @@ struct ModeReq {
     mode: String,
 }
 
+#[derive(Deserialize)]
+struct ThresholdReq {
+    ratio: f32,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ReportReq {
@@ -35,6 +40,22 @@ pub async fn set_mode(state: &AppState, payload: Value) -> Result<Value, AppErro
         }
     };
     state.ctx_proxy.mode.store(mode, Ordering::Release);
+    Ok(status_value(state))
+}
+
+pub async fn set_threshold(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: ThresholdReq = serde_json::from_value(payload).map_err(|error| {
+        AppError::Invalid(format!("proxy.threshold: bad payload: {error}"))
+    })?;
+    if !req.ratio.is_finite() || !(0.05..=0.95).contains(&req.ratio) {
+        return Err(AppError::Invalid(
+            "proxy.threshold: ratio must be a number in [0.05, 0.95]".into(),
+        ));
+    }
+    state
+        .ctx_proxy
+        .threshold
+        .store(req.ratio.to_bits(), Ordering::Release);
     Ok(status_value(state))
 }
 
@@ -73,6 +94,7 @@ fn status_value(state: &AppState) -> Value {
             MODE_REWRITE => "rewrite",
             _ => "log",
         },
+        "threshold": f32::from_bits(runtime.threshold.load(Ordering::Acquire)),
         "conversations": conversations,
     })
 }
@@ -91,6 +113,8 @@ mod tests {
             .unwrap();
         assert_eq!(status["mode"], "log");
         assert_eq!(status["active"], false);
+        // Default threshold is the compile-time high-water, unchanged until set.
+        assert!((status["threshold"].as_f64().unwrap() - 0.70).abs() < 1e-6);
 
         let status = router::dispatch(&state, "proxy.mode", json!({ "mode": "rewrite" }))
             .await
@@ -121,5 +145,40 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, AppError::Invalid(_)));
         assert_eq!(state.ctx_proxy.mode.load(Ordering::Acquire), MODE_LOG);
+    }
+
+    #[tokio::test]
+    async fn valid_threshold_is_reflected_in_status() {
+        let state = AppState::for_tests().await;
+        let status = router::dispatch(&state, "proxy.threshold", json!({ "ratio": 0.25 }))
+            .await
+            .unwrap();
+        assert!((status["threshold"].as_f64().unwrap() - 0.25).abs() < 1e-6);
+        let stored = f32::from_bits(state.ctx_proxy.threshold.load(Ordering::Acquire));
+        assert!((stored - 0.25).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn out_of_range_threshold_is_rejected_without_changing_runtime() {
+        let state = AppState::for_tests().await;
+        let before = state.ctx_proxy.threshold.load(Ordering::Acquire);
+        for bad in [json!({ "ratio": 0.99 }), json!({ "ratio": 0.01 })] {
+            let error = router::dispatch(&state, "proxy.threshold", bad)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::Invalid(_)));
+        }
+        assert_eq!(state.ctx_proxy.threshold.load(Ordering::Acquire), before);
+    }
+
+    #[tokio::test]
+    async fn non_number_threshold_is_rejected() {
+        let state = AppState::for_tests().await;
+        let before = state.ctx_proxy.threshold.load(Ordering::Acquire);
+        let error = router::dispatch(&state, "proxy.threshold", json!({ "ratio": "half" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Invalid(_)));
+        assert_eq!(state.ctx_proxy.threshold.load(Ordering::Acquire), before);
     }
 }

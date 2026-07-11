@@ -128,7 +128,7 @@ Subcommands:
   code stats|files|tree|symbols|find <args>   survey a codebase (tree-sitter)
   code callers|callees|refs|impact <name>     semantic cross-references
   code rename|rewrite [--apply]               AST-validated edits (dry-run default)
-  proxy status | mode <off|log|rewrite> | report [--since-hours N]
+  proxy status | mode <off|log|rewrite> | threshold <ratio> | report [--since-hours N]
   rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
