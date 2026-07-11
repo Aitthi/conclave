@@ -12,6 +12,23 @@ use serde_json::{json, Value};
 
 pub const CHECKPOINT_METHOD_VERSION: &str = "m1-count_tokens-2023-06-01";
 
+/// Anthropic API error `type` enum (docs.anthropic.com/en/api/errors). On a
+/// count_tokens failure, the upstream-supplied `error.type` is persisted into a
+/// metric row ONLY when it EXACTLY matches one of these fixed, content-free
+/// literals — so a hostile or nonstandard upstream cannot smuggle response
+/// content through the field (rulings e376fec5 + f8651210, challenge fda10918).
+/// Any other value degrades to a status-only label.
+const KNOWN_ERROR_TYPES: &[&str] = &[
+    "invalid_request_error",
+    "authentication_error",
+    "permission_error",
+    "not_found_error",
+    "request_too_large",
+    "rate_limit_error",
+    "api_error",
+    "overloaded_error",
+];
+
 /// Auth headers lifted from the forwarded /v1/messages request. Used in-flight
 /// for count_tokens and dropped; never logged or persisted. Clone-only by
 /// design — no Debug/Serialize/Deserialize so a credential can never be
@@ -113,26 +130,30 @@ pub async fn count_tokens(
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         let status = resp.status();
-        // SECURITY (ruling e376fec5 / invariant proxy_checkpoint_metric.rs:3-5):
-        // the raw upstream body must NEVER enter this repository. Parse the known
-        // Anthropic error shape ({"type":"error","error":{"type":...}}) and keep
-        // ONLY the bounded, content-free `error.type` enum (authentication_error,
-        // invalid_request_error, …). `error.message` may echo request content, so
-        // it is never surfaced. A body that is not that shape → status only —
-        // never raw bytes.
+        // SECURITY (rulings e376fec5 + f8651210 / invariant
+        // proxy_checkpoint_metric.rs:3-5): the raw upstream body must NEVER enter
+        // this repository. Persist ONLY the http status plus an `error.type` that
+        // EXACTLY matches a known Anthropic enum literal (KNOWN_ERROR_TYPES). A
+        // length cap is NOT a content guarantee (challenge fda10918) — the
+        // allowlist is. `error.message` may echo request content, so it is never
+        // surfaced; an unknown/absent type or a non-JSON body degrades to a
+        // status-only label, never raw bytes.
         let body = resp.text().await.unwrap_or_default();
-        let error_type = serde_json::from_str::<Value>(&body)
-            .ok()
-            .as_ref()
-            .and_then(|v| v.get("error"))
-            .and_then(|e| e.get("type"))
-            .and_then(Value::as_str)
-            // error.type is a short bounded enum; cap defensively so a malformed
-            // or hostile upstream cannot smuggle content through this field.
-            .map(|t| t.chars().take(64).collect::<String>());
-        return Err(match error_type {
-            Some(t) => format!("count_tokens HTTP {status}: {t}"),
-            None => format!("count_tokens HTTP {status} (unparsed)"),
+        return Err(match serde_json::from_str::<Value>(&body) {
+            // Parseable JSON: keep error.type ONLY if it is an allowlisted enum
+            // literal; any other value (hostile, novel, or absent) → status-only.
+            Ok(v) => match v
+                .get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some(t) if KNOWN_ERROR_TYPES.contains(&t) => {
+                    format!("count_tokens HTTP {status}: {t}")
+                }
+                _ => format!("count_tokens HTTP {status} (unknown type)"),
+            },
+            // Body was not JSON at all → status only, never raw bytes.
+            Err(_) => format!("count_tokens HTTP {status} (unparsed)"),
         });
     }
     let value: Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -396,6 +417,55 @@ mod tests {
             "raw body must NOT leak: {err}"
         );
         sh.abort();
+    }
+
+    // A valid Anthropic error envelope whose `type` is NOT an allowlisted enum
+    // literal — a hostile/nonstandard upstream trying to smuggle content through
+    // the type field. The value must never be persisted (challenge fda10918).
+    async fn unknown_type_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(|_req: Request<Body>| async move {
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"type":"error","error":{
+                        "type":"SECRET_TYPE_LEAK_MARKER","message":"unused"}})
+                    .to_string(),
+                ))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn count_tokens_unknown_error_type_is_not_persisted() {
+        let (upstream, h) = unknown_type_upstream().await;
+        let client = count_client();
+        let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
+        let err = count_tokens(&client, &upstream, &cred("good"), &body)
+            .await
+            .expect_err("unlisted type → error");
+        assert!(
+            !err.contains("SECRET_TYPE_LEAK_MARKER"),
+            "hostile error.type must NOT be persisted: {err}"
+        );
+        assert!(err.contains("HTTP 400"), "status must be surfaced: {err}");
+        assert!(
+            err.contains("(unknown type)"),
+            "unlisted type must degrade to the status-only label: {err}"
+        );
+        // Prove it is status-ONLY: the type-appended form is "HTTP {status}: {t}",
+        // so no ": " may appear.
+        assert!(
+            !err.contains(": "),
+            "must not append any type value after the status: {err}"
+        );
+        h.abort();
     }
 
     #[tokio::test]
