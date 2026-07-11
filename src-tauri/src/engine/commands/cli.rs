@@ -923,13 +923,20 @@ fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
 }
 
 fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
-    let usage = "cli: proxy <status|mode <off|log|rewrite>|report [--since-hours N]>";
+    let usage =
+        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|report [--since-hours N]>";
     match argv.get(1).map(String::as_str) {
         Some("status") if argv.len() == 2 => Ok(("proxy.status", Value::Null)),
         Some("mode") if argv.len() == 3 => match argv[2].as_str() {
             "off" | "log" | "rewrite" => Ok(("proxy.mode", json!({ "mode": argv[2] }))),
             _ => Err(AppError::Invalid(usage.into())),
         },
+        Some("threshold") if argv.len() == 3 => {
+            let ratio = argv[2]
+                .parse::<f32>()
+                .map_err(|_| AppError::Invalid(usage.into()))?;
+            Ok(("proxy.threshold", json!({ "ratio": ratio })))
+        }
         Some("report") => {
             let (since_hours, rest) = take_flag(&argv[2..], "--since-hours");
             if !rest.is_empty() {
@@ -3467,6 +3474,11 @@ mod tests {
             ok_params(&["proxy", "report", "--since-hours", "48"]),
             json!({ "sinceHours": 48 })
         );
+        assert_eq!(ok_method(&["proxy", "threshold", "0.25"]), "proxy.threshold");
+        assert_eq!(
+            ok_params(&["proxy", "threshold", "0.25"]),
+            json!({ "ratio": 0.25 })
+        );
     }
 
     #[test]
@@ -3480,6 +3492,8 @@ mod tests {
             "yesterday"
         ]));
         assert!(is_invalid(&["proxy", "report", "--since-hours", "-1"]));
+        assert!(is_invalid(&["proxy", "threshold", "half"]));
+        assert!(is_invalid(&["proxy", "threshold"]));
     }
 
     #[test]
