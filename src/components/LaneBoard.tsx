@@ -18,6 +18,9 @@ import {
   Network,
   Scale,
   ShieldQuestion,
+  Plus,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { ipc, useTaskChanged, useEvent } from "../ipc";
 import type {
@@ -63,6 +66,18 @@ const LIVE = "var(--color-success)"; // proto --color-live (gate pass / merged)
 const VIOLET = "#bf5af0"; // proto --color-a-violet (review) — matches MemoryGraph
 const SKY = "#32ade6"; // proto --color-a-sky (design-canon glyph)
 const FAINT = "var(--color-text-tertiary)";
+// A brighter hairline (proto --hair-2) for card-hover borders + dashed empty
+// placeholders; still theme-flipping via --color-overlay.
+const HAIR2 = "color-mix(in srgb, var(--color-overlay) 11%, transparent)";
+// The bounded-lane surface: a very subtle top-down overlay gradient (proto .lane),
+// theme-aware — reads as faint light in dark, faint dark in light.
+const LANE_BG =
+  "linear-gradient(180deg, color-mix(in srgb, var(--color-overlay) 3%, transparent), color-mix(in srgb, var(--color-overlay) 1%, transparent))";
+// Soft amber glow ring for the in-progress status dot (proto .dot working).
+const WORKING_GLOW = "0 0 0 3px color-mix(in srgb, var(--color-status-working) 15%, transparent)";
+// Full lane width — sized so all five lanes (four full + the collapsed Merged
+// rail) stay in frame beside the app rail at a laptop width (D5 terminus).
+const LANE_W = 252;
 
 // Column order + accent, mirroring the canon. `abandoned` is off the happy path
 // — surfaced only through the "All lanes" toggle, never a sixth always-on column.
@@ -77,14 +92,6 @@ const ABANDONED_COLUMN = { state: "abandoned" as TaskState, label: "Abandoned", 
 
 function columnAccent(state: TaskState): string {
   return [...COLUMNS, ABANDONED_COLUMN].find((column) => column.state === state)?.accent ?? FAINT;
-}
-
-// Context pressure → meter colour. Honest graded signal for a whole swarm: amber
-// warns, rose = compact imminent (per-session ContextBars is always accent).
-function meterColor(pct: number): string {
-  if (pct >= 88) return ROSE;
-  if (pct >= 68) return WORKING;
-  return "var(--color-accent)";
 }
 
 // The gate's human label, derived client-side from the command (no stored label —
@@ -304,6 +311,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
   // ── header controls ────────────────────────────────────────────────────────
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false); // reveal the Abandoned column
+  const [mergedExpanded, setMergedExpanded] = useState(false); // D5: Merged terminus collapsed by default
   const q = query.trim().toLowerCase();
 
   const columns = showAll ? [...COLUMNS, ABANDONED_COLUMN] : COLUMNS;
@@ -367,7 +375,8 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         />
         <HeaderPill>
           <Columns3 size={11} style={{ color: "var(--color-accent)" }} />
-          {total} {total === 1 ? "task" : "tasks"}
+          <span className="font-semibold tabular-nums text-text-primary">{total}</span>{" "}
+          {total === 1 ? "task" : "tasks"}
         </HeaderPill>
         {openChallenges > 0 && (
           <HeaderPill>
@@ -377,7 +386,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         )}
         <div className="ml-auto flex items-center gap-2">
           <div
-            className="flex items-center gap-2 rounded-md px-2.5 h-7 bg-bg-canvas"
+            className="flex items-center gap-2 rounded-md px-2.5 h-7 bg-fill-soft"
             style={{ border: `1px solid ${BORDER}` }}
           >
             <Search size={12} className="text-text-tertiary shrink-0" />
@@ -400,7 +409,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
           <button
             onClick={() => setShowAll((v) => !v)}
             title={showAll ? "Hide abandoned lane" : "Show all lanes incl. abandoned"}
-            className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-7 text-[0.72rem] bg-bg-canvas transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-7 text-[0.72rem] bg-fill-soft transition-colors"
             style={{
               border: `1px solid ${BORDER}`,
               color: showAll ? "var(--color-text-primary)" : "var(--color-text-secondary)",
@@ -427,17 +436,30 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         {viewMode === "board" ? (
           <div className="flex-1 min-h-0 flex">
             <div className="flex-1 min-h-0 overflow-x-auto scroll-thin">
-              <div className="h-full flex gap-4 px-5 pt-3">
-                {columns.map((c) => (
-                  <Column
-                    key={c.state}
-                    col={c}
-                    tasks={visibleTasks}
-                    resolve={resolve}
-                    selectedSlug={selectedSlug}
-                    onOpenTask={setSelectedSlug}
-                  />
-                ))}
+              <div className="h-full flex gap-3 px-4 pt-3 pb-4">
+                {columns.map((c) =>
+                  c.state === "merged" ? (
+                    <MergedLane
+                      key={c.state}
+                      col={c}
+                      tasks={visibleTasks}
+                      resolve={resolve}
+                      selectedSlug={selectedSlug}
+                      onOpenTask={setSelectedSlug}
+                      expanded={mergedExpanded}
+                      onToggle={() => setMergedExpanded((v) => !v)}
+                    />
+                  ) : (
+                    <Column
+                      key={c.state}
+                      col={c}
+                      tasks={visibleTasks}
+                      resolve={resolve}
+                      selectedSlug={selectedSlug}
+                      onOpenTask={setSelectedSlug}
+                    />
+                  ),
+                )}
               </div>
             </div>
             <TaskDetailPane
@@ -463,81 +485,81 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
 
 // ── Telemetry strip ──────────────────────────────────────────────────────────
 
-function Meter({ t }: { t: AgentTelemetry }) {
-  const pct = t.ctx ? Math.min(100, Math.round((t.ctx.tokens / t.ctx.limit) * 100)) : null;
-  const color = pct != null ? meterColor(pct) : FAINT;
+function StatCounter({ n, label, color, live }: { n: number; label: string; color: string; live?: boolean }) {
   return (
-    <div
-      className="flex items-center gap-2 shrink-0"
-      title={
-        t.ctx
-          ? `${t.ident.name} — ${t.ctx.tokens.toLocaleString()} / ${t.ctx.limit.toLocaleString()} tokens${
-              t.ctx.estimated ? " (estimate)" : ""
-            }`
-          : `${t.ident.name} — no context reading yet`
-      }
-    >
-      <Avatar ident={t.ident} />
-      <span className="text-[0.72rem] font-medium text-text-primary">{t.ident.name}</span>
-      {t.working && (
-        <LoaderCircle size={10} className="animate-spin shrink-0" style={{ color: WORKING }} />
+    <div className="flex items-baseline gap-1.5 shrink-0">
+      {live && (
+        <span
+          className="w-[7px] h-[7px] rounded-full self-center shrink-0"
+          style={{
+            background: n > 0 ? LIVE : FAINT,
+            boxShadow: n > 0 ? `0 0 0 3px color-mix(in srgb, var(--color-success) 16%, transparent)` : undefined,
+          }}
+        />
       )}
-      <span
-        className="w-16 h-1.5 rounded-full overflow-hidden shrink-0"
-        style={{ background: BORDER }}
-      >
-        {pct != null && (
-          <span
-            className="block h-full rounded-full"
-            style={{ width: `${pct}%`, background: color }}
-          />
-        )}
+      <span className="text-[0.95rem] font-semibold tabular-nums tracking-[-0.02em]" style={{ color }}>
+        {n}
       </span>
-      <span
-        className="font-mono text-[0.66rem] tabular-nums w-8 text-right"
-        style={{ color }}
-      >
-        {pct != null ? `${pct}%` : "—"}
-      </span>
+      <span className="text-[0.6rem] uppercase tracking-[0.08em] text-text-tertiary">{label}</span>
     </div>
   );
 }
 
 function TelemetryStrip({ telemetry }: { telemetry: AgentTelemetry[] }) {
+  const live = telemetry.length;
   const working = telemetry.filter((t) => t.working).length;
+  const workingName = telemetry.find((t) => t.working)?.ident.name;
   const peak = telemetry.reduce((mx, t) => {
     const p = t.ctx ? Math.round((t.ctx.tokens / t.ctx.limit) * 100) : 0;
     return Math.max(mx, p);
   }, 0);
+  const hasLive = live > 0;
   return (
     <div
-      className="shrink-0 flex items-center gap-5 px-5 h-14 border-b overflow-x-auto scroll-thin"
+      className="shrink-0 flex items-center gap-4 px-5 h-12 border-b"
       style={{ borderColor: BORDER, background: "var(--color-sidebar)" }}
     >
-      <div className="flex flex-col shrink-0 pr-1">
-        <span className="text-[0.62rem] tracking-[0.09em] uppercase font-semibold text-text-tertiary">
-          Context
-        </span>
-        <span className="text-[0.7rem] leading-tight text-text-tertiary">
-          {telemetry.length} live · <span style={{ color: WORKING }}>{working} working</span>
-          {peak >= 88 && (
-            <>
-              {" · "}
-              <span style={{ color: ROSE }}>peak {peak}%</span>
-            </>
-          )}
-        </span>
-      </div>
-      <span className="w-px h-7 shrink-0" style={{ background: BORDER }} />
-      {telemetry.length === 0 ? (
-        <span className="text-[0.72rem] text-text-tertiary">No live agents</span>
-      ) : (
-        <div className="flex items-center gap-4">
-          {telemetry.map((t) => (
-            <Meter key={t.instanceId} t={t} />
+      <StatCounter n={live} label="live" color="var(--color-text-primary)" live />
+      <StatCounter
+        n={working}
+        label="working"
+        color={working > 0 ? WORKING : "var(--color-text-primary)"}
+      />
+      <span className="w-px h-6 shrink-0" style={{ background: BORDER }} />
+      {hasLive && (
+        <div className="flex items-center shrink-0">
+          {telemetry.slice(0, 6).map((t, i) => (
+            <span
+              key={t.instanceId}
+              className="w-[22px] h-[22px] rounded-[6px] grid place-items-center text-[10px] font-bold text-white"
+              style={{
+                background: t.ident.color,
+                marginLeft: i === 0 ? 0 : -6,
+                boxShadow: "0 0 0 2px var(--color-sidebar)",
+              }}
+              title={t.ident.name}
+            >
+              {t.ident.initials}
+            </span>
           ))}
         </div>
       )}
+      <span className="ml-auto text-[0.72rem] truncate" style={{ color: FAINT }}>
+        {hasLive ? (
+          <>
+            {workingName ? `${workingName} working · ` : ""}
+            {live} agent{live === 1 ? "" : "s"} live
+            {peak >= 88 && (
+              <>
+                {" · "}
+                <span style={{ color: ROSE }}>peak {peak}%</span>
+              </>
+            )}
+          </>
+        ) : (
+          "No agents live"
+        )}
+      </span>
     </div>
   );
 }
@@ -552,7 +574,7 @@ function HeaderSegment<T extends string>({
   options: Array<{ value: T; label: string; icon: ReactNode }>;
 }) {
   return (
-    <div className="ml-1 flex gap-1 rounded-lg p-1 bg-bg-canvas" style={{ border: `1px solid ${BORDER}` }}>
+    <div className="ml-1 flex gap-1 rounded-lg p-1 bg-fill-soft" style={{ border: `1px solid ${BORDER}` }}>
       {options.map((option) => {
         const active = option.value === value;
         return (
@@ -1146,7 +1168,7 @@ function GateChip({ g }: { g: TaskLastGate }) {
     >
       {ok ? <Check size={11} /> : <X size={11} />}
       <span>{gateLabel(g.cmd)}</span>
-      <span className="font-mono opacity-70 flex items-center gap-0.5">
+      <span className="font-mono flex items-center gap-0.5" style={{ color: FAINT }}>
         <GitCommitHorizontal size={10} />
         {g.sha.slice(0, 6)}
       </span>
@@ -1230,20 +1252,39 @@ function Card({
   selected: boolean;
   onOpenTask: (slug: string) => void;
 }) {
+  const [hover, setHover] = useState(false);
+  const edge = columnAccent(t.state);
+  const border = selected
+    ? "color-mix(in srgb, var(--color-accent) 38%, transparent)"
+    : hover
+      ? HAIR2
+      : BORDER;
+  const background = selected
+    ? "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-raised))"
+    : hover
+      ? "var(--color-fill-soft)"
+      : "var(--color-surface-raised)";
+  const hasBadges = t.lastGates.length > 0 || t.challenges.length > 0;
   return (
     <div
       onClick={() => onOpenTask(t.slug)}
-      className="rounded-lg p-2.5 cursor-pointer bg-surface-raised border transition-colors hover:bg-fill-soft"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="relative rounded-[11px] pl-3.5 pr-3 py-2.5 cursor-pointer overflow-hidden transition-[transform,background-color,border-color] duration-150 ease-out"
       style={{
-        borderColor: selected
-          ? "color-mix(in srgb, var(--color-accent) 38%, transparent)"
-          : "color-mix(in srgb, var(--color-overlay) 8%, transparent)",
-        background: selected
-          ? "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-raised))"
-          : "var(--color-surface-raised)",
+        background,
+        border: `1px solid ${border}`,
+        transform: hover && !selected ? "translateY(-1px)" : undefined,
       }}
     >
-      <div className="flex items-center gap-2 mb-1">
+      {/* status-colored left edge (spec D2) */}
+      <span
+        className="absolute left-0 top-0 bottom-0 w-[2.5px]"
+        style={{ background: edge, opacity: 0.7 }}
+        aria-hidden
+      />
+
+      <div className="flex items-center gap-2 mb-1.5">
         <span className="font-mono text-[0.64rem] truncate" style={{ color: FAINT }}>
           {t.slug}
         </span>
@@ -1257,12 +1298,15 @@ function Card({
         )}
       </div>
 
-      <div className="text-[0.79rem] font-medium leading-snug mb-2 text-text-primary" style={clamp2}>
+      <div
+        className="text-[0.8rem] font-[550] tracking-[-0.005em] leading-[1.34] text-text-primary"
+        style={clamp2}
+      >
         {t.title}
       </div>
 
-      {(t.lastGates.length > 0 || t.challenges.length > 0) && (
-        <div className="flex flex-wrap gap-1 mb-2">
+      {hasBadges && (
+        <div className="flex flex-wrap gap-1.5 mt-2.5">
           {t.lastGates.map((g) => (
             <GateChip key={g.cmd} g={g} />
           ))}
@@ -1272,17 +1316,20 @@ function Card({
         </div>
       )}
 
-      <div className="flex items-center gap-2.5">
+      <div
+        className="flex items-center gap-2.5 mt-2.5 pt-2.5"
+        style={{ borderTop: `1px solid ${BORDER}` }}
+      >
         <AgentPips t={t} resolve={resolve} />
         <span
-          className="inline-flex items-center gap-1 text-[0.62rem]"
+          className="inline-flex items-center gap-1 text-[0.62rem] tabular-nums"
           style={{ color: FAINT }}
           title={t.fileBoundary.join("\n")}
         >
           <FileCode2 size={11} />
           {t.fileBoundary.length}
         </span>
-        <span className="ml-auto text-[0.62rem] font-mono" style={{ color: FAINT }}>
+        <span className="ml-auto text-[0.62rem] font-mono tabular-nums" style={{ color: FAINT }}>
           {timeHint(t.updatedAt)}
         </span>
       </div>
@@ -1306,22 +1353,40 @@ function Column({
   onOpenTask: (slug: string) => void;
 }) {
   const items = tasks.filter((t) => t.state === col.state);
+  const working = col.state === "in_progress";
   return (
-    <section className="w-[266px] shrink-0 flex flex-col min-h-0">
-      <div className="flex items-center gap-2 px-1.5 py-2 shrink-0">
-        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col.accent }} />
-        <span className="text-[0.74rem] font-semibold text-text-primary">{col.label}</span>
-        <span className="font-mono text-[0.64rem]" style={{ color: FAINT }}>
+    <section
+      className="shrink-0 flex flex-col min-h-0 rounded-[14px]"
+      style={{ width: LANE_W, background: LANE_BG, border: `1px solid ${BORDER}` }}
+    >
+      <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-2.5 shrink-0">
+        <span
+          className="w-2 h-2 rounded-full shrink-0"
+          style={{ background: col.accent, boxShadow: working ? WORKING_GLOW : undefined }}
+        />
+        <span className="text-[0.76rem] font-semibold tracking-[0.01em] text-text-primary">
+          {col.label}
+        </span>
+        <span
+          className="font-mono text-[0.62rem] tabular-nums rounded-full px-2 py-px min-w-[20px] text-center"
+          style={{ color: FAINT, background: "color-mix(in srgb, var(--color-overlay) 5%, transparent)" }}
+        >
           {items.length}
         </span>
+        <button
+          className="ml-auto w-[22px] h-[22px] grid place-items-center rounded-md text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary transition-colors"
+          aria-label={`Add task to ${col.label}`}
+        >
+          <Plus size={13} />
+        </button>
       </div>
-      <div className="flex-1 overflow-y-auto scroll-thin flex flex-col gap-2 pb-4 pr-0.5">
+      <div className="flex-1 overflow-y-auto scroll-thin flex flex-col gap-2 px-2.5 pb-2.5 min-h-0">
         {items.length === 0 ? (
           <div
-            className="rounded-lg text-[0.68rem] px-3 py-4 text-center"
-            style={{ color: FAINT, border: `1px dashed ${BORDER}` }}
+            className="mx-1 mt-1 rounded-[10px] px-3 py-5 text-center text-[0.7rem] text-text-tertiary"
+            style={{ border: `1px dashed ${HAIR2}` }}
           >
-            none
+            No tasks
           </div>
         ) : (
           items.map((t) => (
@@ -1339,10 +1404,105 @@ function Column({
   );
 }
 
+// ── Merged terminus lane — collapsed to a rail by default (spec D5) ───────────
+
+function MergedLane({
+  col,
+  tasks,
+  resolve,
+  selectedSlug,
+  onOpenTask,
+  expanded,
+  onToggle,
+}: {
+  col: { state: TaskState; label: string; accent: string };
+  tasks: TaskListRow[];
+  resolve: (id: string | undefined) => Identity | null;
+  selectedSlug: string | null;
+  onOpenTask: (slug: string) => void;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const items = tasks.filter((t) => t.state === col.state);
+  return (
+    <section
+      className="shrink-0 flex flex-col min-h-0 rounded-[14px] overflow-hidden transition-[width] duration-200 ease-out"
+      style={{ width: expanded ? LANE_W : 46, background: LANE_BG, border: `1px solid ${BORDER}` }}
+    >
+      {expanded ? (
+        <>
+          <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-2.5 shrink-0">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col.accent }} />
+            <span className="text-[0.76rem] font-semibold tracking-[0.01em] text-text-primary">
+              {col.label}
+            </span>
+            <span
+              className="font-mono text-[0.62rem] tabular-nums rounded-full px-2 py-px min-w-[20px] text-center"
+              style={{ color: FAINT, background: "color-mix(in srgb, var(--color-overlay) 5%, transparent)" }}
+            >
+              {items.length}
+            </span>
+            <button
+              onClick={onToggle}
+              aria-label="Collapse Merged lane"
+              title="Collapse"
+              className="ml-auto w-[22px] h-[22px] grid place-items-center rounded-md text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary transition-colors"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto scroll-thin flex flex-col gap-2 px-2.5 pb-2.5 min-h-0">
+            {items.length === 0 ? (
+              <div
+                className="mx-1 mt-1 rounded-[10px] px-3 py-5 text-center text-[0.7rem] text-text-tertiary"
+                style={{ border: `1px dashed ${HAIR2}` }}
+              >
+                No tasks
+              </div>
+            ) : (
+              items.map((t) => (
+                <Card
+                  key={t.id}
+                  t={t}
+                  resolve={resolve}
+                  selected={selectedSlug === t.slug}
+                  onOpenTask={onOpenTask}
+                />
+              ))
+            )}
+          </div>
+        </>
+      ) : (
+        <button
+          onClick={onToggle}
+          title={`${col.label} (${items.length}) — click to expand`}
+          aria-label={`Expand ${col.label} lane`}
+          className="group flex-1 w-full flex flex-col items-center gap-3 py-3.5"
+        >
+          <ChevronLeft
+            size={14}
+            className="text-text-tertiary group-hover:text-text-secondary transition-colors shrink-0"
+          />
+          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col.accent }} />
+          <span className="[writing-mode:vertical-rl] text-[0.74rem] font-semibold tracking-[0.02em] text-text-secondary select-none">
+            {col.label}
+          </span>
+          <span
+            className="mt-auto font-mono text-[0.62rem] tabular-nums rounded-full px-1.5 py-0.5 min-w-[20px] text-center"
+            style={{ color: FAINT, background: "color-mix(in srgb, var(--color-overlay) 5%, transparent)" }}
+          >
+            {items.length}
+          </span>
+        </button>
+      )}
+    </section>
+  );
+}
+
 function HeaderPill({ children }: { children: ReactNode }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 h-6 px-2 rounded-md text-[0.68rem] font-medium text-text-secondary shrink-0 bg-bg-canvas"
+      className="inline-flex items-center gap-1.5 h-6 px-2 rounded-md text-[0.68rem] font-medium text-text-secondary shrink-0 bg-fill-soft"
       style={{ border: `1px solid ${BORDER}` }}
     >
       {children}
