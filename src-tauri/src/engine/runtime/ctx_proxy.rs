@@ -593,6 +593,11 @@ struct CheckpointJob {
     non_recoverable_kept_bytes: usize,
     projected_post_tokens: usize,
     est_whole_tokens: usize,
+    /// Real-token thresholds captured at gate time so the sampler classifies the
+    /// a/b/c counts (R8) without re-reading runtime state that may have changed.
+    ceiling: usize,
+    m: usize,
+    l: usize,
 }
 
 /// Sync pre-gate: parse the body, plan + project via ctxopt, and return an
@@ -616,22 +621,27 @@ fn checkpoint_gate(rt: &ProxyRuntime, body: &[u8], upstream: &str) -> Option<Che
     let plan = ctxopt::checkpoint::plan_checkpoint(&messages, est_whole_tokens, ceiling, tail)?;
     let m = rt.min_net_saving.load(Ordering::Acquire) as usize;
     let l = rt.low_water.load(Ordering::Acquire) as usize;
-    match ctxopt::checkpoint::project(&messages, &plan, est_whole_tokens, m, l) {
-        ctxopt::checkpoint::CheckpointOutcome::Saturated => None,
-        ctxopt::checkpoint::CheckpointOutcome::Eligible(p) => Some(CheckpointJob {
-            model,
-            upstream: upstream.to_owned(),
-            original,
-            projected_messages: p.projected_messages,
-            earliest_changed_msg_index: plan.earliest_changed_msg_index,
-            earliest_changed_byte: plan.candidates.first().map_or(0, |c| c.gross_bytes),
-            gross_candidate_bytes: p.gross_candidate_bytes,
-            stub_overhead_bytes: p.stub_overhead_bytes,
-            non_recoverable_kept_bytes: plan.non_recoverable_kept_bytes,
-            projected_post_tokens: p.projected_post_tokens,
-            est_whole_tokens,
-        }),
-    }
+    // R8: the M/L decision is made AFTER count_tokens on real tokens (in
+    // sample_checkpoint), never here in bytes/4 space. build_projection carries
+    // NO M/L gate — whenever the byte trigger fired AND there is ≥1 recoverable
+    // candidate, we build a job and ALWAYS sample+record (fixes D1's dropped row).
+    let projection = ctxopt::checkpoint::build_projection(&messages, &plan, est_whole_tokens)?;
+    Some(CheckpointJob {
+        model,
+        upstream: upstream.to_owned(),
+        original,
+        projected_messages: projection.projected_messages,
+        earliest_changed_msg_index: plan.earliest_changed_msg_index,
+        earliest_changed_byte: plan.candidates.first().map_or(0, |c| c.gross_bytes),
+        gross_candidate_bytes: projection.gross_candidate_bytes,
+        stub_overhead_bytes: projection.stub_overhead_bytes,
+        non_recoverable_kept_bytes: plan.non_recoverable_kept_bytes,
+        projected_post_tokens: projection.projected_post_tokens,
+        est_whole_tokens,
+        ceiling,
+        m,
+        l,
+    })
 }
 
 /// Lift ONLY the allowlisted auth headers off the forwarded request. Values are
@@ -712,6 +722,8 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
         count_failure: 0,
         method_version: ct::CHECKPOINT_METHOD_VERSION.to_owned(),
         bytes_est_tokens: saturating_i64(bytes_est as u64),
+        // Overwritten below once we know a/b (R8 classify) or that the count failed.
+        outcome: String::new(),
     };
     match counts {
         Ok((a, b, c)) => {
@@ -727,10 +739,25 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
                 f64::INFINITY
             };
             row.projected_post_tokens = saturating_i64(b);
+            // R8: classify on REAL tokens (a/b) against the thresholds captured at
+            // gate time — never on the bytes/4 estimate — and always persist.
+            row.outcome = match ctxopt::checkpoint::classify(
+                a as usize,
+                b as usize,
+                job.ceiling,
+                job.m,
+                job.l,
+            ) {
+                ctxopt::checkpoint::CheckpointClass::BelowCeiling => "below_ceiling",
+                ctxopt::checkpoint::CheckpointClass::Eligible => "eligible",
+                ctxopt::checkpoint::CheckpointClass::Saturated => "saturated",
+            }
+            .to_owned();
         }
         Err(error) => {
             eprintln!("[ctx-proxy] checkpoint count_tokens failed: {error}");
             row.count_failure = 1;
+            row.outcome = "count_failure".to_owned();
         }
     }
     let _ = job.est_whole_tokens; // captured for diagnostics; not persisted directly
@@ -1179,6 +1206,33 @@ mod tests {
             .unwrap();
         assert_eq!(report.samples, 1);
         assert_eq!(report.count_failures, 0); // counts succeeded against the fake
+        assert_eq!(report.eligible, 1); // eligible_runtime → real tokens classify eligible
+        up.abort();
+    }
+
+    // R8/D1 regression: the gate builds a job even when the projection is NOT
+    // eligible, and the sampler PERSISTS a `saturated` row. Before the fix,
+    // `CheckpointOutcome::Saturated => None` dropped these → 0 interpretable rows.
+    #[tokio::test]
+    async fn sample_checkpoint_records_saturated_row_when_low_water_not_met() {
+        let (upstream, up) = start_checkpoint_upstream().await;
+        let mut state = AppState::for_tests().await;
+        let rt = eligible_runtime(0);
+        rt.low_water.store(1, Ordering::Release); // real projected post > L(1) → saturated
+        let rt = Arc::new(rt);
+        state.ctx_proxy = rt.clone();
+        let state = Arc::new(state);
+        let body = serde_json::to_vec(&high_water_request(1_000)).unwrap();
+        let job = checkpoint_gate(&rt, &body, &upstream)
+            .expect("gate builds a job even when the projection will be saturated");
+        sample_checkpoint(state.clone(), test_cred(), job).await;
+        let report = crate::engine::repo::proxy_checkpoint_metric::report(&state.db, 24)
+            .await
+            .unwrap();
+        assert_eq!(report.samples, 1); // D1 fix: saturated STILL persists a row
+        assert_eq!(report.saturated, 1);
+        assert_eq!(report.eligible, 0);
+        assert_eq!(report.count_failures, 0);
         up.abort();
     }
 

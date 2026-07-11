@@ -124,23 +124,44 @@ pub struct Projection {
     pub projected_post_tokens: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckpointOutcome {
+/// Real-token checkpoint classification, decided AFTER `count_tokens` (R8,
+/// design §4/§7.1). `bytes/4` is only a sample trigger + recorded diagnostic —
+/// it must never gate M/L, because it overstates real tokens ~4.7× on
+/// cache-heavy traffic and would drop every real conversation as saturated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointClass {
+    BelowCeiling,
+    Eligible,
     Saturated,
-    Eligible(Projection),
 }
 
-/// Build the projected message list and apply the min-net-saving (M) + low-water (L)
-/// pre-gate. Bounds count_tokens calls: only Eligible outcomes get sampled.
-pub fn project(
+/// Classify a sampled checkpoint on REAL token counts. `a` = count(original),
+/// `b` = count(projected); `ceiling`/`m`/`l` are all real-token thresholds.
+/// - `BelowCeiling` when the byte trigger was a false positive (`a <= ceiling`).
+/// - `Eligible` when net saving `a - b > m` AND projected post `b <= l`.
+/// - `Saturated` otherwise (near-miss; still recorded so its distribution shows).
+pub fn classify(a: usize, b: usize, ceiling: usize, m: usize, l: usize) -> CheckpointClass {
+    if a <= ceiling {
+        return CheckpointClass::BelowCeiling;
+    }
+    if a.saturating_sub(b) > m && b <= l {
+        CheckpointClass::Eligible
+    } else {
+        CheckpointClass::Saturated
+    }
+}
+
+/// Build the projected message list + byte-space diagnostics for a plan.
+/// `Some(Projection)` when the plan has candidates, `None` otherwise. Carries NO
+/// M/L gate — that is `classify`'s job, on real tokens (R8). `est_whole_tokens`
+/// is the bytes/4 diagnostic used only for the `projected_post_tokens` estimate.
+pub fn build_projection(
     messages: &Value,
     plan: &CheckpointPlan,
     est_whole_tokens: usize,
-    min_net_saving_tokens: usize,
-    low_water_tokens: usize,
-) -> CheckpointOutcome {
+) -> Option<Projection> {
     if plan.candidates.is_empty() {
-        return CheckpointOutcome::Saturated;
+        return None;
     }
     let stubs: HashMap<&str, &str> = plan
         .candidates
@@ -156,18 +177,14 @@ pub fn project(
     let net_saved_tokens = est_tokens(net_saved_bytes);
     let projected_post_tokens = est_whole_tokens.saturating_sub(net_saved_tokens);
 
-    if net_saved_tokens > min_net_saving_tokens && projected_post_tokens <= low_water_tokens {
-        CheckpointOutcome::Eligible(Projection {
-            projected_messages: projected,
-            gross_candidate_bytes,
-            stub_overhead_bytes,
-            net_saved_bytes,
-            net_saved_tokens,
-            projected_post_tokens,
-        })
-    } else {
-        CheckpointOutcome::Saturated
-    }
+    Some(Projection {
+        projected_messages: projected,
+        gross_candidate_bytes,
+        stub_overhead_bytes,
+        net_saved_bytes,
+        net_saved_tokens,
+        projected_post_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -262,8 +279,62 @@ mod tests {
         assert!(plan.candidates[0].gross_bytes > plan.candidates[0].stub_bytes);
     }
 
+    // --- classify (R8): M/L decided on REAL tokens, three buckets ---
+
     #[test]
-    fn eligible_when_net_saving_over_m_and_post_under_l() {
+    fn classify_below_ceiling_when_real_tokens_at_or_under_ceiling() {
+        // Byte trigger fired (est > ceiling) but real a <= ceiling → false positive.
+        assert_eq!(
+            classify(100_000, 0, 100_000, 40_000, 350_000),
+            CheckpointClass::BelowCeiling
+        ); // a == ceiling boundary
+        assert_eq!(
+            classify(50_000, 10_000, 100_000, 40_000, 350_000),
+            CheckpointClass::BelowCeiling
+        );
+    }
+
+    #[test]
+    fn classify_eligible_when_net_over_m_and_post_at_or_under_l() {
+        // a=500k, b=300k → net=200k > M=40k; post b=300k <= L=350k.
+        assert_eq!(
+            classify(500_000, 300_000, 100_000, 40_000, 350_000),
+            CheckpointClass::Eligible
+        );
+        // b == L is the eligible boundary (<=).
+        assert_eq!(
+            classify(500_000, 350_000, 100_000, 40_000, 350_000),
+            CheckpointClass::Eligible
+        );
+    }
+
+    #[test]
+    fn classify_saturated_when_net_at_or_below_m() {
+        // a-b == M exactly is NOT > M → saturated (b<=L isolates the M failure).
+        assert_eq!(
+            classify(390_000, 350_000, 100_000, 40_000, 350_000),
+            CheckpointClass::Saturated
+        );
+    }
+
+    #[test]
+    fn classify_saturated_when_post_over_l() {
+        // Net big enough (a-b=140k > M) but projected post b > L.
+        assert_eq!(
+            classify(500_000, 360_000, 100_000, 40_000, 350_000),
+            CheckpointClass::Saturated
+        );
+        // b just one token over L.
+        assert_eq!(
+            classify(500_000, 350_001, 100_000, 40_000, 350_000),
+            CheckpointClass::Saturated
+        );
+    }
+
+    // --- build_projection (R8): projection + byte diagnostics, no M/L gate ---
+
+    #[test]
+    fn build_projection_some_when_candidates_present() {
         let big = "x".repeat(8000);
         let m = msgs(
             vec![
@@ -273,60 +344,44 @@ mod tests {
             40,
         );
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
-        match project(&m, &plan, 500_000, 1_000, 499_000) {
-            CheckpointOutcome::Eligible(p) => {
-                assert!(p.net_saved_tokens > 1_000);
-                assert!(p.projected_post_tokens <= 499_000);
-                assert!(p.gross_candidate_bytes > p.stub_overhead_bytes);
-                assert_ne!(p.projected_messages, m);
-                assert!(p.projected_messages[1]["content"][0]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("[ctxopt checkpoint:"));
-            }
-            other => panic!("expected Eligible, got {other:?}"),
-        }
+        let p = build_projection(&m, &plan, 500_000).expect("candidates present");
+        assert!(p.net_saved_tokens > 0);
+        assert!(p.gross_candidate_bytes > p.stub_overhead_bytes);
+        assert_ne!(p.projected_messages, m);
+        assert!(p.projected_messages[1]["content"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[ctxopt checkpoint:"));
+        // Byte-space diagnostic: post = whole − net_saved (all in bytes/4 space).
+        assert_eq!(p.projected_post_tokens, 500_000 - p.net_saved_tokens);
     }
 
     #[test]
-    fn saturated_when_net_saving_below_m() {
-        let big = "x".repeat(8000);
-        let m = msgs(
-            vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
-            40,
-        );
-        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
-        assert_eq!(
-            project(&m, &plan, 500_000, 10_000_000, 499_000),
-            CheckpointOutcome::Saturated
-        );
-    }
-
-    #[test]
-    fn saturated_when_post_stays_above_l() {
-        let big = "x".repeat(8000);
-        let m = msgs(
-            vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
-            40,
-        );
-        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
-        assert_eq!(
-            project(&m, &plan, 500_000, 1, 1_000),
-            CheckpointOutcome::Saturated
-        );
-    }
-
-    #[test]
-    fn saturated_when_no_candidates() {
+    fn build_projection_none_when_no_candidates() {
         let big = "x".repeat(8000);
         let m = msgs(
             vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
             2,
-        ); // all in tail
+        ); // the single result sits in the verbatim tail → no candidates
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
+        assert!(plan.candidates.is_empty());
+        assert!(build_projection(&m, &plan, 500_000).is_none());
+    }
+
+    #[test]
+    fn build_projection_is_deterministic() {
+        let big = "x".repeat(4000);
+        let m = msgs(
+            vec![
+                tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big),
+                tool_pair("t2", "Grep", json!({"pattern":"foo"}), &big),
+            ],
+            40,
+        );
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
         assert_eq!(
-            project(&m, &plan, 500_000, 1, 499_000),
-            CheckpointOutcome::Saturated
+            build_projection(&m, &plan, 500_000),
+            build_projection(&m, &plan, 500_000)
         );
     }
 

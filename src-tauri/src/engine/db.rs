@@ -257,6 +257,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 22 {
+        sqlx::raw_sql(include_str!("migrations/0022_proxy_checkpoint_outcome.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 22;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -413,7 +422,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 21, "migrate() from v13 must reach schema v21");
+        assert_eq!(version, 22, "migrate() from v13 must reach schema v22");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -664,7 +673,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 21, "user_version should be 21");
+        assert_eq!(version, 22, "user_version should be 22");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -867,7 +876,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -958,7 +967,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1068,7 +1077,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
