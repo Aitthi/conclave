@@ -19,7 +19,15 @@ import {
 // side-rail chrome variant (human vs agent, active/inactive, ended badge)
 // in a single scenario. `fx-ag-tiesto`/`fx-ag-dew` reuse the fixture agent
 // roster ids/names from ./data for a consistent fixture identity.
-const browserTabs: BrowserTab[] = [
+//
+// Mutable module state (not the fixed-literal-timestamps kind — BrowserTab
+// carries none): newTab/goto/setActive/close all read AND write this same
+// list, and `browser.status` reads it back, so the 2s poll in
+// InAppBrowserView doesn't stomp a tab the human just created back out of
+// existence with stale static data. Caught in review (Mellow) — a stateless
+// per-call echo, like `browser.open`'s below, made the empty scenario's new
+// tab visibly vanish ~2s after clicking "+ New tab".
+let tabsState: BrowserTab[] = [
   {
     tabId: "human-1",
     owner: { kind: "human", id: "human", label: "You" },
@@ -45,6 +53,12 @@ const browserTabs: BrowserTab[] = [
     ended: true,
   },
 ];
+let activeTabIdState: string | undefined = "human-1";
+let humanSeq = 1;
+
+function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
+  return { tabs: tabsState, activeTabId: activeTabIdState };
+}
 
 // Handler coverage for every command the v1 views invoke on their render path.
 // `workspace.use` / `session.resize` are no-op void handlers so an incidental
@@ -116,36 +130,35 @@ export const handlers: FixtureHandlers = {
   // Tauri. One human tab (active) + two agent tabs, one of them `ended` —
   // exercises every chrome variant (human vs agent, active/inactive, ended
   // badge) in a single scenario.
-  "browser.status": () => ({
-    tabs: browserTabs,
-    activeTabId: "human-1",
-  }),
+  "browser.status": () => browserSnapshot(),
   // Open echoes the requested URL back (deterministic — no Tauri, no clock).
   // Without this handler the view's Open button throws the loud [fixture]
   // error in fixture mode.
   "browser.open": ({ url }) => ({ ok: true, url, title: "Example Domain" }),
-  // goto/setActive/close each recompute a `BrowserState` from the same fixed
-  // `browserTabs` base — deterministic per call (no cross-call mutable state,
-  // matching the rest of this scenario), not persisted between calls.
-  // newTab only returns the new tab id (Interface Contract) — deterministic,
-  // does not append to `browserTabs`.
-  "browser.newTab": () => ({ tabId: "human-2" }),
-  "browser.goto": ({ tabId, url }) => ({
-    tabs: browserTabs.map((t) =>
+  "browser.newTab": () => {
+    humanSeq += 1;
+    const tabId = `human-${humanSeq}`;
+    tabsState = [
+      ...tabsState,
+      { tabId, owner: { kind: "human", id: "human", label: "You" }, loading: false, ended: false },
+    ];
+    return { tabId };
+  },
+  "browser.goto": ({ tabId, url }) => {
+    tabsState = tabsState.map((t) =>
       t.tabId === tabId ? { ...t, url, title: "Example Domain", loading: false } : t,
-    ),
-    activeTabId: tabId,
-  }),
-  "browser.setActive": ({ tabId }) => ({
-    tabs: browserTabs,
-    activeTabId: tabId,
-  }),
+    );
+    activeTabIdState = tabId;
+    return browserSnapshot();
+  },
+  "browser.setActive": ({ tabId }) => {
+    activeTabIdState = tabId;
+    return browserSnapshot();
+  },
   "browser.close": ({ tabId }) => {
-    const remaining = browserTabs.filter((t) => t.tabId !== tabId);
-    return {
-      tabs: remaining,
-      activeTabId: remaining[0]?.tabId,
-    };
+    tabsState = tabsState.filter((t) => t.tabId !== tabId);
+    if (activeTabIdState === tabId) activeTabIdState = tabsState[0]?.tabId;
+    return browserSnapshot();
   },
   // UI-only overlay plumbing — fixture mode has no native webview, so these are
   // no-ops (fixed, no Tauri). A missing handler would throw by design.
