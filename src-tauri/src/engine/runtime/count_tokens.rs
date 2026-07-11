@@ -21,6 +21,7 @@ pub struct CountCredential {
     pub api_key: Option<String>,       // x-api-key
     pub authorization: Option<String>, // Authorization: Bearer …
     pub anthropic_version: String,     // anthropic-version header
+    pub anthropic_beta: Option<String>, // anthropic-beta (required by OAuth Bearer + [1m] context)
 }
 
 impl CountCredential {
@@ -78,6 +79,14 @@ fn apply_cred(mut req: reqwest::RequestBuilder, cred: &CountCredential) -> reqwe
     if let Some(auth) = cred.authorization.as_deref().and_then(sensitive_header) {
         req = req.header("authorization", auth);
     }
+    // anthropic-beta is not a secret (ruling ea3df57c amendment) but is required
+    // for OAuth Bearer auth to be accepted and for [1m] 1M-context. Forward the
+    // whole value verbatim — it may be a comma-separated list; never split it.
+    if let Some(beta) = cred.anthropic_beta.as_deref() {
+        if let Ok(hv) = reqwest::header::HeaderValue::from_str(beta) {
+            req = req.header("anthropic-beta", hv);
+        }
+    }
     req.header("anthropic-version", cred.anthropic_version.as_str())
         .header("content-type", "application/json")
 }
@@ -103,7 +112,19 @@ pub async fn count_tokens(
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("count_tokens HTTP {}", resp.status()));
+        let status = resp.status();
+        // Surface the error BODY so the failure is diagnosable (the GUI app's
+        // stderr → /dev/null hides it). API error bodies are JSON
+        // ({"type":"error","error":{...}}) — no secrets; still truncate to ≤200
+        // chars defensively.
+        let snippet = resp
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect::<String>();
+        return Err(format!("count_tokens HTTP {status}: {snippet}"));
     }
     let value: Value = resp.json().await.map_err(|e| e.to_string())?;
     value
@@ -185,6 +206,7 @@ mod tests {
             api_key: Some(key.into()),
             authorization: None,
             anthropic_version: "2023-06-01".into(),
+            anthropic_beta: None,
         }
     }
 
@@ -219,6 +241,69 @@ mod tests {
             .await
             .unwrap();
         assert!(n > 0);
+        h.abort();
+    }
+
+    // Fake upstream that REQUIRES anthropic-beta: 400s with a JSON error body when
+    // absent, echoes a token count when the expected beta value is present. Models
+    // the OAuth/[1m] requirement the M1 sampler was blind to.
+    async fn beta_required_upstream(expected: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(move |request: Request<Body>| async move {
+            let ok = request
+                .headers()
+                .get("anthropic-beta")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == expected)
+                .unwrap_or(false);
+            if !ok {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"type":"error","error":{"type":"invalid_request_error",
+                            "message":"anthropic-beta header required"}})
+                        .to_string(),
+                    ))
+                    .unwrap();
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "input_tokens": 7 }).to_string()))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn count_tokens_forwards_anthropic_beta_and_surfaces_error_body() {
+        let (upstream, h) = beta_required_upstream("oauth-2025-04-20,context-1m-2025-08-07").await;
+        let client = count_client();
+        let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
+
+        // With beta forwarded, the strict upstream accepts and returns its count.
+        let mut with_beta = cred("good");
+        with_beta.anthropic_beta = Some("oauth-2025-04-20,context-1m-2025-08-07".into());
+        let n = count_tokens(&client, &upstream, &with_beta, &body)
+            .await
+            .expect("beta forwarded → success");
+        assert_eq!(n, 7);
+
+        // Without beta, the upstream 400s AND the error body snippet is surfaced
+        // (proves the /dev/null-blind failure is now diagnosable).
+        let err = count_tokens(&client, &upstream, &cred("good"), &body)
+            .await
+            .expect_err("missing beta → error");
+        assert!(err.contains("HTTP 400"), "status must be surfaced: {err}");
+        assert!(
+            err.contains("anthropic-beta header required"),
+            "error body snippet must be surfaced: {err}"
+        );
         h.abort();
     }
 
@@ -310,6 +395,7 @@ mod tests {
             api_key: None,
             authorization: None,
             anthropic_version: "2023-06-01".into(),
+            anthropic_beta: None,
         };
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
         let result = count_tokens(&client, &upstream, &no_auth, &body).await;

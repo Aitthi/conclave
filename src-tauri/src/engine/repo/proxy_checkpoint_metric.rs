@@ -28,6 +28,9 @@ pub struct CheckpointMetricInsert {
     pub bytes_est_tokens: i64,
     /// R8 real-token bucket: `below_ceiling` | `eligible` | `saturated` | `count_failure`.
     pub outcome: String,
+    /// count_tokens failure diagnostic (HTTP status + ≤200-char body snippet) on
+    /// `count_failure`; `None` otherwise. SQL-diagnosis only — NOT in checkpoint-report.
+    pub error_snippet: Option<String>,
 }
 
 pub async fn insert(pool: &SqlitePool, m: CheckpointMetricInsert) -> sqlx::Result<()> {
@@ -36,8 +39,8 @@ pub async fn insert(pool: &SqlitePool, m: CheckpointMetricInsert) -> sqlx::Resul
          created_at, model, earliest_changed_byte, earliest_changed_msg, r_tokens, \
          gross_candidate_tokens, stub_overhead_tokens, s_net_tokens, q, projected_break_even, \
          projected_post_tokens, plateau_turns, non_recoverable_kept_tokens, provider_estimate, \
-         count_failure, method_version, bytes_est_tokens, outcome) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         count_failure, method_version, bytes_est_tokens, outcome, error_snippet) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
     )
     .bind(m.created_at)
     .bind(m.model)
@@ -57,6 +60,7 @@ pub async fn insert(pool: &SqlitePool, m: CheckpointMetricInsert) -> sqlx::Resul
     .bind(m.method_version)
     .bind(m.bytes_est_tokens)
     .bind(m.outcome)
+    .bind(m.error_snippet)
     .execute(pool)
     .await?;
     Ok(())
@@ -201,6 +205,11 @@ mod tests {
             method_version: "m1-count_tokens-2023-06-01".into(),
             bytes_est_tokens: 500_000,
             outcome: outcome.into(),
+            error_snippet: if fail == 1 {
+                Some("count_tokens HTTP 400: {\"type\":\"error\"}".into())
+            } else {
+                None
+            },
         }
     }
 
@@ -215,6 +224,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, "saturated");
+    }
+
+    #[tokio::test]
+    async fn insert_persists_error_snippet_on_failure_and_null_on_success() {
+        let pool = connect_in_memory().await;
+        insert(&pool, row("count_failure", 0.0, 0, 0, 1))
+            .await
+            .unwrap();
+        insert(&pool, row("saturated", 0.3, 360_000, 0, 0))
+            .await
+            .unwrap();
+        let snippets: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT error_snippet FROM proxy_checkpoint_metric ORDER BY outcome",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        // ORDER BY outcome: 'count_failure' < 'saturated'.
+        assert!(snippets[0].as_deref().unwrap().contains("HTTP 400"));
+        assert_eq!(snippets[1], None, "success rows carry no error snippet");
     }
 
     #[tokio::test]
