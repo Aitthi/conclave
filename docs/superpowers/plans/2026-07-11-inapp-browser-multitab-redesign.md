@@ -243,8 +243,8 @@ fn mark_ended_sets_flag_only_for_agent() {
 ### Task B4: CLI/agent-end wiring + live multi-agent gate
 
 - [ ] Confirm `conclave browser <verb>` reaches the engine carrying caller identity (no CLI change if the engine derives it; otherwise thread it). Note findings.
-- [ ] Hook agent teardown → `mark_ended(agentId)`.
-- [ ] **Gate (live):** two agents each `conclave browser open <different url>`; assert `browser.status` shows two agent tabs, non-colliding; end one → its tab shows `ended:true`, still viewable. Record gate note.
+- [ ] ~~Hook agent teardown → `mark_ended(agentId)`~~ — **DEFERRED to follow-up task `inapp-browser-ended-detection`** (ruling on Tiësto's D4b escalation, verified by Mellow). The genuine crash-death signal is `commands/instance.rs forward_session_output()` (~978-1245): a detached, epoch-guarded, shared-by-every-agent EOF forwarder with a documented prior ordering race — hooking it is a fragile concurrency change, unrelated to the browser boundary, that must not be rushed into this lane. The `ended` flag + `mark_ended` method (B1) + the frontend's ended chrome (Lane-2, fixture-exercised) all SHIP now; only the call-site that flips the flag is deferred. Tab **persistence** (no auto-close) ships regardless — the human closes ended agent tabs manually until the follow-up lands.
+- [ ] **Gate (live):** two agents each `conclave browser open <different url>`; assert `browser.status` shows two agent tabs, non-colliding, each independently navigable. (The ended-badge is exercised via the Lane-2 fixture, not the live agent-exit path — see the deferral above.) Record gate note.
 
 ---
 

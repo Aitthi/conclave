@@ -158,7 +158,7 @@ Testability seam: keep the **pure tab-registry logic** (state map: create/reuse/
 - **Lane-2 (frontend):** tab-aware `InAppBrowserView` + side rail per canon + IPC types + fixtures + UI Pixel Gate. Starts after Lane-0 canon lands; consumes Lane-1's `BrowserState` shape (agree the TS/Rust type at the boundary up front).
 - **Integration:** lead (Detoro) owns the merge order (canon → backend → frontend) and re-runs gates.
 
-**Explicitly out of scope (v1):** multiple tabs per agent; human take-over of agent tabs; event-bus push (keep polling); LRU eviction; backend-enforced read-only.
+**Explicitly out of scope (v1):** multiple tabs per agent; human take-over of agent tabs; event-bus push (keep polling); LRU eviction; backend-enforced read-only. **D4b auto ended-badge (the `mark_ended` call-site on agent process-exit)** is deferred to a follow-up task `inapp-browser-ended-detection` — the real crash-death signal lives in the fragile, shared `commands/instance.rs forward_session_output()` EOF forwarder (documented race), which must not be rushed into the browser lane. The `ended` flag, `mark_ended` registry method, and frontend ended-chrome all ship in v1 (fixture-exercised); tab **persistence** ships (no auto-close), so the human closes ended agent tabs manually until the follow-up wires the flag.
 
 ## 11. Pointers
 
