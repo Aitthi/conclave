@@ -959,6 +959,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             id.clone(),
             session.id.clone(),
             def.cli_kind.clone(),
+            def.model.clone(),
             output_rx,
             track_context,
             transcript_ctx,
@@ -1031,18 +1032,22 @@ async fn forward_session_output(
     instance_id: String,
     session_id: String,
     cli_kind: Option<String>,
+    model: Option<String>,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
     track_context: bool,
     transcript_ctx: Option<TranscriptPollContext>,
     epoch: u64,
 ) {
     let session_row = repo::session::get(&db, &session_id).await.ok().flatten();
-    let limit = session_row
-        .as_ref()
-        .and_then(|s| s.context_limit)
-        .unwrap_or_else(|| {
-            repo::session::default_context_limit_for(cli_kind.as_deref().unwrap_or(""))
-        });
+    // Same resolution as the spawn-time transcript_ctx fallback (R2b/R4): for
+    // codex this seeds `TranscriptMeterState.limit` below with the per-model
+    // table value, ignoring any stored session.context_limit, before the
+    // transcript reader's first real poll lands.
+    let limit = resolve_session_context_limit(
+        cli_kind.as_deref().unwrap_or(""),
+        model.as_deref(),
+        session_row.as_ref().and_then(|s| s.context_limit),
+    );
     if track_context {
         // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
         // is the baseline at the previous persist, so we only write every
@@ -1872,6 +1877,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             None,
+            None,
             rx,
             true, // chat backend — context tracking enabled.
             None,
@@ -1916,6 +1922,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             rx,
             true, // chat backend — context tracking enabled.
@@ -1971,6 +1978,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             rx,
             true, // chat backend — context tracking enabled.
@@ -2041,6 +2049,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             rx,
             false, // CLI/PTY backend — context tracking disabled.
@@ -2172,6 +2181,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             Some("codex".into()),
+            None,
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
             Some(transcript_ctx),
@@ -2197,6 +2207,156 @@ mod tests {
             after.context_limit,
             Some(8_000),
             "CLI transcript reading must persist the transcript context limit"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+    }
+
+    /// Regression for the miss Mellow's review caught (challenge f00b5263,
+    /// upheld 2026-07-11): `forward_session_output` must resolve its own
+    /// pre-poll `limit` through [`resolve_session_context_limit`] — the same
+    /// helper the spawn-time `TranscriptPollContext::new` call uses — instead
+    /// of the plain stored-value-then-generic-default fallback. Exercised
+    /// with a codex transcript file whose `token_count` event carries NO
+    /// `model_context_window` field (the harness didn't report one, forcing
+    /// the reader onto `fallback_limit`) and a deliberately WRONG stored
+    /// `session.context_limit` (999) pre-seeded before the forwarder runs —
+    /// proving the persisted limit comes from the gpt-5.4 table entry
+    /// (1_050_000), not the stale stored value and not the generic
+    /// [`repo::session::DEFAULT_CONTEXT_LIMIT`] (200_000).
+    #[tokio::test]
+    async fn forwarder_codex_known_model_seeds_table_limit_not_stored_or_default() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let ws = workspace_agent::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("workspace agent exists");
+        let workspace_row = workspace::get(&state.db, &ws.workspace_id)
+            .await
+            .expect("workspace get failed")
+            .expect("workspace exists");
+
+        // Deliberately wrong stored value — proves R4 (stored codex context
+        // limit is ignored) rather than merely "some prior default".
+        repo::session::set_context_reading(&state.db, &session.id, 0, 999)
+            .await
+            .expect("seed stale stored context_limit");
+
+        let claude_root = temp_root("forwarder-model-seed-claude");
+        let codex_root = temp_root("forwarder-model-seed-codex");
+        let codex_file = codex_root.join("2026/07/11/rollout.jsonl");
+        std::fs::create_dir_all(codex_file.parent().expect("codex parent dir"))
+            .expect("create codex dir");
+        write_jsonl(
+            &codex_file,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace_row.folder_path.clone(),
+                        "id": "codex-session-id-not-conclave-instance-id",
+                        "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": format!("You are a Conclave agent, and your own agent id is {id}.")
+                            }
+                        ]
+                    }
+                }),
+                // NO "model_context_window" field — the harness didn't
+                // report one, so the reader must fall back to the
+                // constructed TranscriptPollContext's fallback_limit.
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": "2099-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": { "total_tokens": 42 },
+                            "total_token_usage": { "total_tokens": 42 }
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let started_at = DateTime::parse_from_rfc3339(&session.started_at)
+            .expect("session started_at must parse")
+            .with_timezone(&Utc);
+        // `with_reader` (test-only) so the reader scans the temp roots above
+        // instead of the real `~/.codex/sessions` — but `fallback_limit` is
+        // resolved through the SAME helper the production spawn-time
+        // `TranscriptPollContext::new` call site uses, proving the wiring.
+        let transcript_ctx = TranscriptPollContext::with_reader(
+            runtime::transcript_context::TranscriptContextReader::new(
+                runtime::transcript_context::TranscriptContextConfig {
+                    claude_projects_root: claude_root.clone(),
+                    codex_sessions_root: codex_root.clone(),
+                    fallback_limit: resolve_session_context_limit(
+                        "codex",
+                        Some("gpt-5.4"),
+                        Some(999),
+                    ),
+                },
+            ),
+            &workspace_row.folder_path,
+            "codex",
+            started_at,
+        );
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            Some("codex".into()),
+            Some("gpt-5.4".into()),
+            rx,
+            false, // CLI/PTY backend — transcript-backed context enabled.
+            Some(transcript_ctx),
+            epoch,
+        ));
+
+        tx.send("prompt".to_string())
+            .await
+            .expect("send chunk failed");
+        drop(tx);
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_limit,
+            Some(1_050_000),
+            "codex + known model (gpt-5.4) must seed the table's context limit, \
+             not the stale stored value (999) or the generic default (200_000)"
         );
 
         let _ = std::fs::remove_dir_all(&claude_root);
