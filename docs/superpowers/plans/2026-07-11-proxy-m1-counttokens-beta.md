@@ -53,12 +53,20 @@ this rationale.
   `format!("count_tokens HTTP {status}: {snippet}")`. API error bodies are JSON
   (`{"type":"error","error":{...}}`) — no secrets; still truncate defensively.
 - Persist it durably (stderr is `/dev/null`): add nullable column
-  `error_snippet TEXT` to `proxy_checkpoint_metric` (migration `0023_proxy_checkpoint_error_snippet.sql`,
-  `ALTER TABLE ... ADD COLUMN error_snippet TEXT`). In `sample_checkpoint`'s `Err(error)`
-  arm, set `row.error_snippet = Some(error)`; `None` on success. Wire the column through
-  `CheckpointMetricInsert` + `insert()` in `repo/proxy_checkpoint_metric.rs`.
-  Do NOT put it in `checkpoint-report` output (keep that schema stable); it is for
-  SQL diagnosis only.
+  `error_snippet TEXT` to `proxy_checkpoint_metric` via a NEW migration file
+  `src-tauri/src/engine/migrations/0023_proxy_checkpoint_error_snippet.sql`
+  (`ALTER TABLE proxy_checkpoint_metric ADD COLUMN error_snippet TEXT;`).
+  **The file alone does nothing** — migrations are applied by version-gated
+  `include_str!` blocks in `src-tauri/src/engine/db.rs`. You MUST add a
+  `if version < 23 { include_str!("migrations/0023_proxy_checkpoint_error_snippet.sql"); PRAGMA user_version = 23; }`
+  block (mirror the existing 0022 block) **and bump the `user_version` assertions
+  22 → 23** in db.rs's migration tests (e.g. db.rs:676 `assert_eq!(version, 22 …)`
+  and the fresh-migrate/highest-file test ~db.rs:729–736), or the column is never
+  created and `insert()` fails at runtime and the tests go red. In
+  `sample_checkpoint`'s `Err(error)` arm, set `row.error_snippet = Some(error)`;
+  `None` on success. Wire the column through `CheckpointMetricInsert` + `insert()`
+  in `repo/proxy_checkpoint_metric.rs`. Do NOT put it in `checkpoint-report`
+  output (keep that schema stable); it is for SQL diagnosis only.
 
 ### 4. Regression test — `count_tokens.rs` tests
 - Extend the fake-upstream test so the fake asserts the incoming request carries the
@@ -66,10 +74,14 @@ this rationale.
   Assert `count_tokens` succeeds with beta present.
 
 ## Boundary
+(Amended 2026-07-11 per Tiësto challenge cf0d3c06 — ACCEPTED. Original snapshot had
+the wrong migration dir and omitted db.rs; corrected here. Aoki independently concurred.)
 - `src-tauri/src/engine/runtime/count_tokens.rs`
 - `src-tauri/src/engine/runtime/ctx_proxy.rs`
 - `src-tauri/src/engine/repo/proxy_checkpoint_metric.rs`
-- `src-tauri/migrations/0023_proxy_checkpoint_error_snippet.sql` (new)
+- `src-tauri/src/engine/migrations/0023_proxy_checkpoint_error_snippet.sql` (new)
+- `src-tauri/src/engine/db.rs` (register 0023: `version < 23` include_str! block +
+  `PRAGMA user_version = 23`; bump the 22→23 `user_version` test assertions)
 - `docs/superpowers/specs/2026-07-11-infinity-turn-checkpoint-design.md` (§7.1 amend)
 
 ## Gate (run from `src-tauri/`)
