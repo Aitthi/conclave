@@ -4,16 +4,92 @@
 @source "./components/**/*.tsx";
 @source "./lib/**/*.{ts,tsx}";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+  Design canon for the in-app Browser redesign (Lane-0).
+  Tokens MIRROR the production system in src/styles/app.css so the frontend
+  (Dew, Lane-2) can reuse these exact utility names 1:1:
+    bg-canvas / bg-surface / bg-surface-raised / bg-sidebar / bg-fill
+    text-text-primary / text-text-secondary / text-text-muted / text-text-tertiary
+    text-accent / bg-accent / border-border / bg-overlay/[.05]
+  Base @theme = the app's LIGHT palette; .dark overrides = the app's DARK palette,
+  so the mockup reads correctly in whichever mode the app is in.
+  Agent hues are the app's real --color-agent-* values (identity chips).
+*/
+
 @theme {
-  --color-canvas: #0b0b0f;
-  --color-surface: #17171d;
-  --color-ink: #ececf1;
-  --color-muted: #9a9aa7;
-  --color-accent: #6d6df0;
-  --color-border: #262630;
+  /* surfaces (light) */
+  --color-canvas: #ececed;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-sidebar: #f5f5f7;
+  --color-fill: #f2f2f4;
+  --color-fill-soft: #f7f7f9;
 
-  --radius-panel: 0.875rem;
+  /* text (light) */
+  --color-text-primary: #1d1d1f;
+  --color-text-secondary: #6e6e73;
+  --color-text-muted: #86868b;
+  --color-text-tertiary: #a1a1a6;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* accent — macOS system blue (production --c-accent), NOT the scaffold indigo */
+  --color-accent: #0a84ff;
+  --color-accent-hover: #0070e0;
+
+  /* lines / over-surface tint — production uses overlay=#000 (light) */
+  --color-border: #e3e3e6;
+  --color-overlay: #000000;
+
+  /* status (shared both modes) */
+  --color-live: #30d158;      /* running / live dot */
+  --color-waiting: #ff9f0a;   /* loading / waiting */
+  --color-danger: #ff453a;
+
+  --radius-row: 0.5rem;
+  --radius-panel: 0.75rem;
+  --radius-chip: 0.4375rem;
+
+  /* system stack (matches app) + Thai fallback for any non-Latin runs */
+  --font-sans: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI",
+    "Noto Sans Thai", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+.dark {
+  --color-canvas: #161618;
+  --color-surface: #232325;
+  --color-surface-raised: #2d2d30;
+  --color-sidebar: #1c1c1e;
+  --color-fill: #2a2a2d;
+  --color-fill-soft: #29292c;
+
+  --color-text-primary: #f5f5f7;
+  --color-text-secondary: #9a9aa0;
+  --color-text-muted: #8a8a90;
+  --color-text-tertiary: #6a6a70;
+
+  --color-accent: #0a84ff;
+  --color-accent-hover: #3a9bff;
+
+  --color-border: #333336;
+  --color-overlay: #ffffff;
+
+  --color-danger: #ff453a;
+}
+
+/*
+  Agent identity hues (production --color-agent-*). Kept as plain :root custom
+  properties, NOT @theme tokens: they're referenced only via `var(--color-agent-*)`
+  in inline styles (identity chips are data-driven), never via a `bg-agent-*`
+  utility — and Tailwind v4 tree-shakes any @theme variable no utility consumes,
+  which would leave the var undefined at runtime. Same hue in light and dark.
+*/
+:root {
+  --color-agent-teal: #0fa3a3;    /* Dew    (vega)    */
+  --color-agent-orange: #ff7a45;  /* Guetta (atlas)   */
+  --color-agent-magenta: #d6409f; /* Tiesto (iris)    */
+  --color-agent-blue: #32ade6;    /* Mellow (echo)    */
+  --color-agent-amber: #ff9f0a;   /* Dabin  (sol)     */
+  --color-agent-indigo: #5e5ce6;  /* Aoki   (maestro) */
 }
