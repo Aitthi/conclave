@@ -12,6 +12,23 @@ use serde_json::{json, Value};
 
 pub const CHECKPOINT_METHOD_VERSION: &str = "m1-count_tokens-2023-06-01";
 
+/// Anthropic API error `type` enum (docs.anthropic.com/en/api/errors). On a
+/// count_tokens failure, the upstream-supplied `error.type` is persisted into a
+/// metric row ONLY when it EXACTLY matches one of these fixed, content-free
+/// literals — so a hostile or nonstandard upstream cannot smuggle response
+/// content through the field (rulings e376fec5 + f8651210, challenge fda10918).
+/// Any other value degrades to a status-only label.
+const KNOWN_ERROR_TYPES: &[&str] = &[
+    "invalid_request_error",
+    "authentication_error",
+    "permission_error",
+    "not_found_error",
+    "request_too_large",
+    "rate_limit_error",
+    "api_error",
+    "overloaded_error",
+];
+
 /// Auth headers lifted from the forwarded /v1/messages request. Used in-flight
 /// for count_tokens and dropped; never logged or persisted. Clone-only by
 /// design — no Debug/Serialize/Deserialize so a credential can never be
@@ -113,18 +130,31 @@ pub async fn count_tokens(
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         let status = resp.status();
-        // Surface the error BODY so the failure is diagnosable (the GUI app's
-        // stderr → /dev/null hides it). API error bodies are JSON
-        // ({"type":"error","error":{...}}) — no secrets; still truncate to ≤200
-        // chars defensively.
-        let snippet = resp
-            .text()
-            .await
-            .unwrap_or_default()
-            .chars()
-            .take(200)
-            .collect::<String>();
-        return Err(format!("count_tokens HTTP {status}: {snippet}"));
+        // SECURITY (rulings e376fec5 + f8651210 / invariant
+        // proxy_checkpoint_metric.rs:3-5): the raw upstream body must NEVER enter
+        // this repository. Persist ONLY the http status plus an `error.type` that
+        // EXACTLY matches a known Anthropic enum literal (KNOWN_ERROR_TYPES). A
+        // length cap is NOT a content guarantee (challenge fda10918) — the
+        // allowlist is. `error.message` may echo request content, so it is never
+        // surfaced; an unknown/absent type or a non-JSON body degrades to a
+        // status-only label, never raw bytes.
+        let body = resp.text().await.unwrap_or_default();
+        return Err(match serde_json::from_str::<Value>(&body) {
+            // Parseable JSON: keep error.type ONLY if it is an allowlisted enum
+            // literal; any other value (hostile, novel, or absent) → status-only.
+            Ok(v) => match v
+                .get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some(t) if KNOWN_ERROR_TYPES.contains(&t) => {
+                    format!("count_tokens HTTP {status}: {t}")
+                }
+                _ => format!("count_tokens HTTP {status} (unknown type)"),
+            },
+            // Body was not JSON at all → status only, never raw bytes.
+            Err(_) => format!("count_tokens HTTP {status} (unparsed)"),
+        });
     }
     let value: Value = resp.json().await.map_err(|e| e.to_string())?;
     value
@@ -281,7 +311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn count_tokens_forwards_anthropic_beta_and_surfaces_error_body() {
+    async fn count_tokens_forwards_anthropic_beta_and_surfaces_error_type() {
         let (upstream, h) = beta_required_upstream("oauth-2025-04-20,context-1m-2025-08-07").await;
         let client = count_client();
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
@@ -294,15 +324,146 @@ mod tests {
             .expect("beta forwarded → success");
         assert_eq!(n, 7);
 
-        // Without beta, the upstream 400s AND the error body snippet is surfaced
-        // (proves the /dev/null-blind failure is now diagnosable).
+        // Without beta, the upstream 400s. The failure is diagnosable via the
+        // bounded error.TYPE, but the error.MESSAGE (here "anthropic-beta header
+        // required") is NEVER surfaced — repo invariant, ruling e376fec5.
         let err = count_tokens(&client, &upstream, &cred("good"), &body)
             .await
             .expect_err("missing beta → error");
         assert!(err.contains("HTTP 400"), "status must be surfaced: {err}");
         assert!(
-            err.contains("anthropic-beta header required"),
-            "error body snippet must be surfaced: {err}"
+            err.contains("invalid_request_error"),
+            "error.type must be surfaced: {err}"
+        );
+        assert!(
+            !err.contains("anthropic-beta header required"),
+            "error.message must NOT be surfaced (repo invariant): {err}"
+        );
+        h.abort();
+    }
+
+    // Fake upstream returning the Anthropic error shape whose `message` carries a
+    // distinctive marker. Proves the non-success arm keeps error.TYPE and drops
+    // error.MESSAGE (invariant: response bodies never enter this repository).
+    async fn error_message_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(|_req: Request<Body>| async move {
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"type":"error","error":{
+                        "type":"invalid_request_error",
+                        "message":"SECRET_PROMPT_LEAK_MARKER user said hunter2"}})
+                    .to_string(),
+                ))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn count_tokens_error_keeps_type_drops_message() {
+        let (upstream, h) = error_message_upstream().await;
+        let client = count_client();
+        let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
+        let err = count_tokens(&client, &upstream, &cred("good"), &body)
+            .await
+            .expect_err("400 → error");
+        assert!(err.contains("HTTP 400"), "status must be surfaced: {err}");
+        assert!(
+            err.contains("invalid_request_error"),
+            "error.type must be surfaced: {err}"
+        );
+        assert!(
+            !err.contains("SECRET_PROMPT_LEAK_MARKER"),
+            "error.message must NOT leak into the persisted snippet: {err}"
+        );
+        assert!(
+            !err.contains("hunter2"),
+            "no message content may leak: {err}"
+        );
+        h.abort();
+    }
+
+    // A non-JSON / unparseable error body → status only, never raw bytes.
+    #[tokio::test]
+    async fn count_tokens_unparseable_error_is_status_only() {
+        let app = Router::new().fallback(any(|_req: Request<Body>| async move {
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::from("RAW_HTML_LEAK <html>gateway down user-secret</html>"))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sh = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let up = format!("http://{addr}");
+        let client = count_client();
+        let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
+        let err = count_tokens(&client, &up, &cred("good"), &body)
+            .await
+            .expect_err("502 → error");
+        assert!(err.contains("HTTP 502"), "status must be surfaced: {err}");
+        assert!(err.contains("(unparsed)"), "must mark unparsed: {err}");
+        assert!(
+            !err.contains("RAW_HTML_LEAK"),
+            "raw body must NOT leak: {err}"
+        );
+        sh.abort();
+    }
+
+    // A valid Anthropic error envelope whose `type` is NOT an allowlisted enum
+    // literal — a hostile/nonstandard upstream trying to smuggle content through
+    // the type field. The value must never be persisted (challenge fda10918).
+    async fn unknown_type_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(|_req: Request<Body>| async move {
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"type":"error","error":{
+                        "type":"SECRET_TYPE_LEAK_MARKER","message":"unused"}})
+                    .to_string(),
+                ))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn count_tokens_unknown_error_type_is_not_persisted() {
+        let (upstream, h) = unknown_type_upstream().await;
+        let client = count_client();
+        let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
+        let err = count_tokens(&client, &upstream, &cred("good"), &body)
+            .await
+            .expect_err("unlisted type → error");
+        assert!(
+            !err.contains("SECRET_TYPE_LEAK_MARKER"),
+            "hostile error.type must NOT be persisted: {err}"
+        );
+        assert!(err.contains("HTTP 400"), "status must be surfaced: {err}");
+        assert!(
+            err.contains("(unknown type)"),
+            "unlisted type must degrade to the status-only label: {err}"
+        );
+        // Prove it is status-ONLY: the type-appended form is "HTTP {status}: {t}",
+        // so no ": " may appear.
+        assert!(
+            !err.contains(": "),
+            "must not append any type value after the status: {err}"
         );
         h.abort();
     }

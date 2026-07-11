@@ -725,8 +725,9 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
         bytes_est_tokens: saturating_i64(bytes_est as u64),
         // Overwritten below once we know a/b (R8 classify) or that the count failed.
         outcome: String::new(),
-        // Set to the count_tokens error (HTTP status + body snippet) on failure;
-        // stays None on success. Durable diagnosis path — stderr is /dev/null.
+        // Set to the count_tokens error (HTTP status + bounded error.type, or
+        // status-only when unparseable — never the raw body) on failure; stays
+        // None on success. Durable diagnosis path — stderr is /dev/null.
         error_snippet: None,
     };
     match counts {
