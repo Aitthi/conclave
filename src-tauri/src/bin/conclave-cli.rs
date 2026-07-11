@@ -351,52 +351,81 @@ fn expand_self_args(argv: Vec<String>, self_instance: Option<&str>) -> Result<Ve
             out.extend_from_slice(&argv[2..]); // any --limit N tail
             Ok(out)
         }
-        Some("browser") if argv.get(1).map(String::as_str) == Some("screenshot") => {
-            // Resolve the output path (default ./browser-screenshot.png) to an
-            // absolute path in the AGENT's cwd, so the app process — which has a
-            // different cwd — writes the PNG where the agent can read it.
-            let mut out = argv.clone();
-            // The path is the first non-flag token after "screenshot"; flags are
-            // --width/--height with a following value. Find it, or inject default.
-            let flags = ["--width", "--height"];
-            let mut i = 2;
-            let mut path_idx: Option<usize> = None;
-            while i < out.len() {
-                if flags.contains(&out[i].as_str()) {
-                    // Only skip the value slot if there IS one and it doesn't
-                    // itself look like a flag; otherwise treat this as a
-                    // malformed/missing-value flag and advance by one so we
-                    // don't misread the next flag as this one's value.
-                    if i + 1 < out.len() && !out[i + 1].starts_with("--") {
-                        i += 2; // skip flag + its value
-                    } else {
-                        i += 1;
-                    }
-                    continue;
-                }
-                path_idx = Some(i);
-                break;
+        // Browser agent verbs auto-scope to the caller's OWN tab: inject the
+        // caller id (from CONCLAVE_INSTANCE_ID) POSITIONALLY at argv[2] — right
+        // after the verb, the `task claim` idiom — so free-text verb args
+        // (eval/type) can never be mistaken for it (anti-spoof, mirrored by the
+        // server-side splice in commands/cli.rs `map_browser_verb`). `status`
+        // is a GLOBAL read of the whole tab list, so it needs no self.
+        Some("browser") => match argv.get(1).map(String::as_str) {
+            // No verb → let the engine emit the usage error unchanged.
+            None | Some("status") => Ok(argv),
+            Some(verb) => {
+                // Every scoped verb REQUIRES a spawned-agent context (same as
+                // `task gate` / `msg list`): there is no "my tab" outside one.
+                let me = require_self(&format!("browser {verb}"))?;
+                // `screenshot` also needs client-side path resolution, done on
+                // the ORIGINAL argv BEFORE the id shifts the positions.
+                let mut out = if verb == "screenshot" {
+                    resolve_browser_screenshot_path(argv)?
+                } else {
+                    argv
+                };
+                // Insert right after the verb (argv[2]); for a no-arg verb like
+                // `close` (len 2) this appends, which is still argv[2].
+                out.insert(2, me.to_string());
+                Ok(out)
             }
-            let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-            match path_idx {
-                Some(idx) => {
-                    let p = std::path::Path::new(&out[idx]);
-                    if p.is_relative() {
-                        out[idx] = cwd.join(p).to_string_lossy().into_owned();
-                    }
-                }
-                None => {
-                    out.push(
-                        cwd.join("browser-screenshot.png")
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
-                }
-            }
-            Ok(out)
-        }
+        },
         _ => Ok(argv),
     }
+}
+
+/// `browser screenshot [path] [--width N] [--height N]`: resolve the output path
+/// (default `./browser-screenshot.png`) to an absolute path in the AGENT's cwd,
+/// so the app process — which has a different cwd — writes the PNG where the
+/// agent can read it. Returns the argv with the path made absolute (or the
+/// default appended). Runs on the ORIGINAL argv, BEFORE the caller id is spliced
+/// in, so the path scan from index 2 is unaffected by the injection.
+fn resolve_browser_screenshot_path(argv: Vec<String>) -> Result<Vec<String>, String> {
+    let mut out = argv;
+    // The path is the first non-flag token after "screenshot"; flags are
+    // --width/--height with a following value. Find it, or inject the default.
+    let flags = ["--width", "--height"];
+    let mut i = 2;
+    let mut path_idx: Option<usize> = None;
+    while i < out.len() {
+        if flags.contains(&out[i].as_str()) {
+            // Only skip the value slot if there IS one and it doesn't itself look
+            // like a flag; otherwise treat this as a malformed/missing-value flag
+            // and advance by one so we don't misread the next flag as its value.
+            if i + 1 < out.len() && !out[i + 1].starts_with("--") {
+                i += 2; // skip flag + its value
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        path_idx = Some(i);
+        break;
+    }
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    match path_idx {
+        Some(idx) => {
+            let p = std::path::Path::new(&out[idx]);
+            if p.is_relative() {
+                out[idx] = cwd.join(p).to_string_lossy().into_owned();
+            }
+        }
+        None => {
+            out.push(
+                cwd.join("browser-screenshot.png")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// `artifact add ... --file <path>`: read the file at the CLIENT's cwd and
@@ -5664,80 +5693,129 @@ mod tests {
         assert_eq!(expand_self_args(input.clone(), None).unwrap(), input);
     }
 
-    // ── browser screenshot: path resolution ────────────────────────────────
+    // ── browser: caller-id injection + screenshot path resolution ──────────
+    //
+    // Every browser agent verb REQUIRES a spawned-agent context (self); the id
+    // is injected POSITIONALLY at argv[2] (right after the verb). `screenshot`
+    // ALSO resolves its path client-side, on the ORIGINAL argv BEFORE the id
+    // shifts positions, so the resolved path ends up at argv[3].
 
     #[test]
-    fn expand_browser_screenshot_resolves_relative_path_to_absolute() {
-        let out = expand_self_args(v(&["browser", "screenshot", "shot.png"]), None).unwrap();
-        assert_eq!(out.len(), 3);
+    fn expand_browser_verb_injects_caller_id_at_argv2() {
+        // open/goto/eval/click/type/close all get the self id spliced in at [2].
+        assert_eq!(
+            expand_self_args(v(&["browser", "open", "example.com"]), Some("agentX")).unwrap(),
+            v(&["browser", "open", "agentX", "example.com"])
+        );
+        assert_eq!(
+            expand_self_args(v(&["browser", "close"]), Some("agentX")).unwrap(),
+            v(&["browser", "close", "agentX"])
+        );
+        assert_eq!(
+            expand_self_args(v(&["browser", "eval", "1", "+", "2"]), Some("agentX")).unwrap(),
+            v(&["browser", "eval", "agentX", "1", "+", "2"])
+        );
+    }
+
+    #[test]
+    fn expand_browser_status_passes_through_without_self() {
+        // status is a GLOBAL read — no self required, no id injected.
+        assert_eq!(
+            expand_self_args(v(&["browser", "status"]), None).unwrap(),
+            v(&["browser", "status"])
+        );
+        assert_eq!(
+            expand_self_args(v(&["browser", "status"]), Some("agentX")).unwrap(),
+            v(&["browser", "status"])
+        );
+    }
+
+    #[test]
+    fn expand_browser_scoped_verb_requires_self() {
+        // Without a spawned-agent context, a scoped browser verb is an error
+        // (same contract as `task gate` / `msg list`), never a silent shared tab.
+        assert!(expand_self_args(v(&["browser", "open", "x"]), None).is_err());
+        assert!(expand_self_args(v(&["browser", "screenshot"]), None).is_err());
+    }
+
+    #[test]
+    fn expand_browser_screenshot_resolves_relative_path_to_absolute_after_id() {
+        let out = expand_self_args(v(&["browser", "screenshot", "shot.png"]), Some("agentX"))
+            .unwrap();
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[2], "agentX"); // caller id at argv[2]
         assert!(
-            Path::new(&out[2]).is_absolute(),
+            Path::new(&out[3]).is_absolute(),
             "expected absolute path, got {}",
-            out[2]
+            out[3]
         );
         assert!(
-            out[2].ends_with("shot.png"),
+            out[3].ends_with("shot.png"),
             "expected path to end with the given filename, got {}",
-            out[2]
+            out[3]
         );
     }
 
     #[test]
-    fn expand_browser_screenshot_leaves_absolute_path_unchanged() {
-        let out = expand_self_args(v(&["browser", "screenshot", "/tmp/shot.png"]), None).unwrap();
-        assert_eq!(out, v(&["browser", "screenshot", "/tmp/shot.png"]));
+    fn expand_browser_screenshot_leaves_absolute_path_unchanged_after_id() {
+        let out = expand_self_args(v(&["browser", "screenshot", "/tmp/shot.png"]), Some("agentX"))
+            .unwrap();
+        assert_eq!(out, v(&["browser", "screenshot", "agentX", "/tmp/shot.png"]));
     }
 
     #[test]
-    fn expand_browser_screenshot_injects_default_path_when_absent() {
-        let out = expand_self_args(v(&["browser", "screenshot"]), None).unwrap();
-        assert_eq!(out.len(), 3);
+    fn expand_browser_screenshot_injects_default_path_when_absent_after_id() {
+        let out = expand_self_args(v(&["browser", "screenshot"]), Some("agentX")).unwrap();
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[2], "agentX");
         assert!(
-            Path::new(&out[2]).is_absolute(),
+            Path::new(&out[3]).is_absolute(),
             "expected absolute default path, got {}",
-            out[2]
+            out[3]
         );
         assert!(
-            out[2].ends_with("browser-screenshot.png"),
+            out[3].ends_with("browser-screenshot.png"),
             "expected default filename, got {}",
-            out[2]
+            out[3]
         );
     }
 
     #[test]
-    fn expand_browser_screenshot_skips_flags_before_path() {
+    fn expand_browser_screenshot_skips_flags_before_path_after_id() {
         let out = expand_self_args(
             v(&["browser", "screenshot", "--width", "1440", "shot.png"]),
-            None,
+            Some("agentX"),
         )
         .unwrap();
-        // The path token is the last one; --width/1440 pass through untouched.
-        assert_eq!(out[2], "--width");
-        assert_eq!(out[3], "1440");
+        // id at [2], then the flag pair untouched, then the resolved path.
+        assert_eq!(out[2], "agentX");
+        assert_eq!(out[3], "--width");
+        assert_eq!(out[4], "1440");
         assert!(
-            Path::new(&out[4]).is_absolute(),
+            Path::new(&out[5]).is_absolute(),
             "expected the trailing token to be resolved, got {}",
-            out[4]
+            out[5]
         );
-        assert!(out[4].ends_with("shot.png"), "got {}", out[4]);
+        assert!(out[5].ends_with("shot.png"), "got {}", out[5]);
     }
 
     #[test]
-    fn expand_browser_screenshot_resolves_path_before_trailing_flags() {
+    fn expand_browser_screenshot_resolves_path_before_trailing_flags_after_id() {
         let out = expand_self_args(
             v(&["browser", "screenshot", "shot.png", "--width", "1440"]),
-            None,
+            Some("agentX"),
         )
         .unwrap();
+        assert_eq!(out[2], "agentX");
         assert!(
-            Path::new(&out[2]).is_absolute(),
+            Path::new(&out[3]).is_absolute(),
             "expected the path token to be resolved, got {}",
-            out[2]
+            out[3]
         );
-        assert!(out[2].ends_with("shot.png"), "got {}", out[2]);
+        assert!(out[3].ends_with("shot.png"), "got {}", out[3]);
         // The trailing flag pair is untouched and still present.
-        assert_eq!(out[3], "--width");
-        assert_eq!(out[4], "1440");
+        assert_eq!(out[4], "--width");
+        assert_eq!(out[5], "1440");
     }
 
     #[test]

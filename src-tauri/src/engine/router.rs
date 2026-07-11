@@ -135,6 +135,8 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "browser.setBounds" => browser::set_bounds(state, payload).await,
         "browser.setVisible" => browser::set_visible(state, payload).await,
         "browser.screenshot" => browser::screenshot(state, payload).await,
+        "browser.newTab" => browser::new_tab(state, payload).await,
+        "browser.setActive" => browser::set_active(state, payload).await,
 
         // ── code (code intelligence) ──────────────────────────────────────
         "code.stats" => code::stats(state, payload).await,

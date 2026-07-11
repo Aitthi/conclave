@@ -456,9 +456,6 @@ pub fn state() -> BrowserState {
 
 /// Open a fresh HUMAN tab (registry-only — its native webview is created lazily
 /// on the first navigation). Returns the new tabId (`human-<seq>`).
-// Wired to `commands::browser::new_tab` (router `browser.newTab`) when the
-// Lane-1 boundary widening lands (challenge a281ebf9); lands ahead of it.
-#[allow(dead_code)]
 pub fn new_human_tab() -> TabId {
     with_registry(|r| r.new_human_tab())
 }
@@ -466,7 +463,10 @@ pub fn new_human_tab() -> TabId {
 /// Mark an agent's tab `ended` (read-only until the human closes it, D4b). The
 /// webview stays ALIVE — the human can still view the final page after the agent
 /// is gone; only the human's `close` tears it down.
-// Wired to the B4 agent-end teardown hook (challenge a281ebf9); lands ahead of it.
+// D4b (the ended-badge) is DEFERRED to task `inapp-browser-ended-detection`: the
+// correct trigger is the agent-crash path (`instance.rs forward_session_output`
+// EOF branch), a fragile shared-lifecycle edit out of scope for this lane
+// (Detoro ruling on a281ebf9's D4b addendum). This registry op is ready for it.
 #[allow(dead_code)]
 pub fn mark_ended(agent_id: &str) {
     with_registry(|r| r.mark_ended(agent_id));
@@ -529,9 +529,6 @@ pub fn navigate(
 /// otherwise the outgoing page flashes over the incoming one during a switch).
 /// A no-op-safe switch to a tab whose webview does not exist yet (a new human
 /// tab before its first navigation). Returns the updated tab list.
-// Wired to `commands::browser::set_active` (router `browser.setActive`) when the
-// Lane-1 boundary widening lands (challenge a281ebf9); lands ahead of it.
-#[allow(dead_code)]
 pub fn set_active(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
     let (known, all_ids) = with_registry(|r| {
         let known = r.set_active(tab_id);

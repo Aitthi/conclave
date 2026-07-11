@@ -339,17 +339,11 @@ pub async fn status(_state: &AppState, _payload: Value) -> Result<Value, AppErro
 
 /// Create a new human tab; returns its `tabId`. Registry-only (its webview is
 /// created on the first navigation), so no app handle is needed.
-// Reached by router `browser.newTab`, added when the Lane-1 boundary widening
-// lands (challenge a281ebf9); lands ahead of its router arm.
-#[allow(dead_code)]
 pub async fn new_tab(_state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let tab_id = browser::new_human_tab();
     Ok(serde_json::json!({ "tabId": tab_id }))
 }
 
-// Reached by router `browser.setActive`, added when the Lane-1 boundary widening
-// lands (challenge a281ebf9); lands ahead of its router arm.
-#[allow(dead_code)]
 pub async fn set_active(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req =
         serde_json::from_value::<TabIdReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
