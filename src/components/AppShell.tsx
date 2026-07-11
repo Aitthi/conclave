@@ -309,6 +309,19 @@ export function AppShell() {
   // renders.
   const slotFullWindow = (showDesign || showArtifacts) && workspacePaneVisible;
 
+  // Full-window Browser (human request 2026-07-11): the in-app Browser is a
+  // center screen (it REPLACES the WorkspacePane, so workspacePaneVisible is
+  // false while it's up — it can't ride slotFullWindow). Unlike the other
+  // center screens it carries its OWN nav rail with a "Close Browser" button,
+  // so collapsing the app Rail + Roster leaves the user a way back and never
+  // strands them. Gate on an active workspace to mirror the other slot flags.
+  const browserFullWindow = showBrowser && !!activeWorkspaceId;
+
+  // Sidebars (Rail + Roster) collapse to 0 width for canvas-slot full-window
+  // (Design / Artifacts) OR full-window Browser — the single predicate every
+  // collapse site below reads, so the two modes can't drift apart.
+  const sidebarsCollapsed = slotFullWindow || browserFullWindow;
+
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
       {/*
@@ -334,11 +347,11 @@ export function AppShell() {
             strip over the canvas + terminal below. */}
         {/* Rail column bg */}
         <div
-          className={`${slotFullWindow ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+          className={`${sidebarsCollapsed ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
         />
         {/* Roster column bg */}
         <div
-          className={`${slotFullWindow ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+          className={`${sidebarsCollapsed ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
         />
         {/* Main content bg */}
         <div className="flex-1 bg-sidebar pointer-events-none" />
@@ -356,9 +369,9 @@ export function AppShell() {
             CSS clipping hides pixels only, leaving focusables tabbable (Armin
             F1). */}
         <div
-          inert={slotFullWindow}
-          aria-hidden={slotFullWindow || undefined}
-          className={slotFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
+          inert={sidebarsCollapsed}
+          aria-hidden={sidebarsCollapsed || undefined}
+          className={sidebarsCollapsed ? "w-0 shrink-0 overflow-hidden" : "contents"}
         >
           <Rail
             workspaces={workspaces}
@@ -411,9 +424,9 @@ export function AppShell() {
                 `aria-hidden` when collapsed remove its clipped-but-mounted
                 focusables from the tab order + a11y tree (Armin F1). */}
             <div
-              inert={slotFullWindow}
-              aria-hidden={slotFullWindow || undefined}
-              className={slotFullWindow ? "w-0 shrink-0 overflow-hidden" : "contents"}
+              inert={sidebarsCollapsed}
+              aria-hidden={sidebarsCollapsed || undefined}
+              className={sidebarsCollapsed ? "w-0 shrink-0 overflow-hidden" : "contents"}
             >
             <Roster
               workspaceId={activeWorkspaceId}

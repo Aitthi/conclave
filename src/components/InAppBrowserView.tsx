@@ -86,23 +86,29 @@ function TabRow({
   tab,
   active,
   onSelect,
+  onClose,
 }: {
   tab: BrowserTab;
   active: boolean;
   onSelect: (tabId: string) => void;
+  // Present ⇒ the row is closable: a ✕ fades in on hover, replacing the
+  // right-side status indicator. Omitted ⇒ no close affordance (a live agent
+  // tab is read-only — closing is the agent's to do, not the human's, D2).
+  onClose?: (tabId: string) => void;
 }) {
   const status = statusOf(tab);
   const ended = status === "ended";
 
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(tab.tabId)}
-      aria-current={active ? "true" : undefined}
-      className={`group flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors ${
-        active ? "bg-accent/[0.12]" : "hover:bg-overlay/[0.05]"
-      }`}
-    >
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={() => onSelect(tab.tabId)}
+        aria-current={active ? "true" : undefined}
+        className={`flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors ${
+          active ? "bg-accent/[0.12]" : "hover:bg-overlay/[0.05]"
+        }`}
+      >
       <span className="relative shrink-0">
         <span
           className={`grid h-8 w-8 place-items-center rounded-md text-[11px] font-semibold text-white ${
@@ -136,7 +142,11 @@ function TabRow({
         </span>
       </span>
 
-      <span className="shrink-0 self-start pt-0.5">
+      <span
+        className={`shrink-0 self-start pt-0.5 ${
+          onClose ? "transition-opacity group-hover:opacity-0" : ""
+        }`}
+      >
         {status === "loading" && (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-status-waiting" />
         )}
@@ -146,7 +156,25 @@ function TabRow({
           </span>
         )}
       </span>
-    </button>
+      </button>
+
+      {/* Close ✕ — fades in over the status slot on row hover / keyboard
+          focus. stopPropagation so closing never also selects the row. */}
+      {onClose && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose(tab.tabId);
+          }}
+          title="Close tab"
+          aria-label={`Close ${tab.owner.label}'s tab`}
+          className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-text-tertiary opacity-0 transition-opacity hover:bg-overlay/[0.08] hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -374,6 +402,7 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
                         tab={t}
                         active={t.tabId === activeTab?.tabId}
                         onSelect={(id) => void doSelect(id)}
+                        onClose={(id) => void doClose(id)}
                       />
                     ))}
                   </div>
@@ -390,6 +419,11 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
                         tab={t}
                         active={t.tabId === activeTab?.tabId}
                         onSelect={(id) => void doSelect(id)}
+                        // An agent's LIVE tab is read-only (D2) — no close. An
+                        // ENDED tab is a corpse the human may dismiss.
+                        onClose={
+                          t.ended ? (id) => void doClose(id) : undefined
+                        }
                       />
                     ))}
                   </div>
