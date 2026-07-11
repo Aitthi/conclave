@@ -59,10 +59,13 @@ this rationale.
   **The file alone does nothing** — migrations are applied by version-gated
   `include_str!` blocks in `src-tauri/src/engine/db.rs`. You MUST add a
   `if version < 23 { include_str!("migrations/0023_proxy_checkpoint_error_snippet.sql"); PRAGMA user_version = 23; }`
-  block (mirror the existing 0022 block) **and bump the `user_version` assertions
-  22 → 23** in db.rs's migration tests (e.g. db.rs:676 `assert_eq!(version, 22 …)`
-  and the fresh-migrate/highest-file test ~db.rs:729–736), or the column is never
-  created and `insert()` fails at runtime and the tests go red. In
+  block (mirror the existing 0022 block) **and bump EVERY `assert_eq!(version, 22 …)`
+  in db.rs's migration tests to 23** — there are FIVE sites (main: db.rs:425, 676,
+  879, 970, 1080); do NOT rely on a named subset, `grep -n "assert_eq!(version, 22"
+  src/engine/db.rs` and bump every hit. Leave the migration BLOCK lines (`if version
+  < 22`, `PRAGMA user_version = 22`) — you ADD a parallel `< 23` block, you don't edit
+  those. Miss an assertion → the column still lands but those tests go red; miss the
+  `< 23` block entirely → the column is never created and `insert()` fails at runtime. In
   `sample_checkpoint`'s `Err(error)` arm, set `row.error_snippet = Some(error)`;
   `None` on success. Wire the column through `CheckpointMetricInsert` + `insert()`
   in `repo/proxy_checkpoint_metric.rs`. Do NOT put it in `checkpoint-report`
