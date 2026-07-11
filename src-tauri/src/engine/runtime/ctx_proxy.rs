@@ -143,14 +143,12 @@ async fn forward_inner(
         .map(|value| value.as_str())
         .unwrap_or("/");
 
-    let mut upstream_request = state
+    let upstream_request = state
         .ctx_proxy
         .client
         .request(parts.method, format!("{upstream}{path_and_query}"))
         .body(upstream_body);
-    for (name, value) in filtered_headers(&parts.headers) {
-        upstream_request = upstream_request.header(name, value);
-    }
+    let upstream_request = with_upstream_headers(upstream_request, &parts.headers);
 
     let upstream_response = upstream_request
         .send()
@@ -449,6 +447,21 @@ fn filtered_headers(
     })
 }
 
+fn with_upstream_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+) -> reqwest::RequestBuilder {
+    for (name, value) in filtered_headers(headers) {
+        // The SSE usage tee parses the upstream bytes directly. Do not negotiate
+        // compressed bytes that it cannot parse (reqwest compression is disabled).
+        if name == axum::http::header::ACCEPT_ENCODING {
+            continue;
+        }
+        request = request.header(name, value);
+    }
+    request
+}
+
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
@@ -608,6 +621,35 @@ mod tests {
 
         proxy_handle.abort();
         upstream_handle.abort();
+    }
+
+    #[test]
+    fn upstream_request_does_not_copy_accept_encoding() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert(
+            axum::http::header::ACCEPT_ENCODING,
+            axum::http::HeaderValue::from_static("gzip, br, zstd"),
+        );
+        inbound.insert(
+            axum::http::header::HeaderName::from_static("x-test-header"),
+            axum::http::HeaderValue::from_static("preserved"),
+        );
+
+        let outbound = with_upstream_headers(
+            reqwest::Client::new().post("https://api.anthropic.com/v1/messages"),
+            &inbound,
+        )
+        .build()
+        .unwrap();
+
+        assert!(outbound
+            .headers()
+            .get(axum::http::header::ACCEPT_ENCODING)
+            .is_none());
+        assert_eq!(
+            outbound.headers().get("x-test-header").unwrap(),
+            "preserved"
+        );
     }
 
     #[test]
