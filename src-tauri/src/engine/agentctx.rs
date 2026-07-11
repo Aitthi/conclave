@@ -475,7 +475,10 @@ it via this full path, quoted, instead of searching for it."
 /// A5 awareness sentence: appended to the preamble ONLY when the caller
 /// (`commands::instance`) actually installed the rtk PreToolUse hook for this
 /// spawn (both shim links resolved and `def.rtk_enabled` isn't `false`) —
-/// mirrors [`conclave_path_sentence`]'s append-when-installed contract.
+/// mirrors [`conclave_path_sentence`]'s append-when-installed contract. CLI-
+/// generic wording: it serves BOTH claude-code (per-instance settings hook) and
+/// codex (per-spawn `-c hooks.PreToolUse` override, Lane K) spawns, since the
+/// rtk rewrite behaviour the agent must be aware of is identical on both.
 /// Single line, no `=` (ADR 0001); no interpolated fields, so no
 /// `sanitize_field` call is needed here (the sentence is a fixed literal).
 ///
