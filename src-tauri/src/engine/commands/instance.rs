@@ -667,11 +667,13 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     None
                 };
 
-            // Context-proxy routing (agent-proxy spec D8, double opt-in):
-            // decided ONCE here and threaded through both the launch-branch
-            // sandbox allowlists and the env block below, so the base-URL
-            // override and its loopback sandbox hole fire together or not at
-            // all. `proxy_port` is Some only when the injection fired.
+            // Context-proxy routing: Claude agents default ON (rtk-parity),
+            // codex agents default OFF (Anthropic-only proxy), decided via
+            // `base == "claude"`. Decided ONCE here and threaded through both
+            // the launch-branch sandbox allowlists and the env block below,
+            // so the base-URL override and its loopback sandbox hole fire
+            // together or not at all. `proxy_port` is Some only when the
+            // injection fired.
             let proxy_env_var =
                 proxy_env(def.proxy_enabled, base == "claude", state.ctx_proxy.active_port());
             let proxy_port = proxy_env_var.is_some().then(|| state.ctx_proxy.port);
