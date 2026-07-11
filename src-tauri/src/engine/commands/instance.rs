@@ -670,42 +670,48 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             let proxy_port = proxy_env_var.is_some().then(|| state.ctx_proxy.port);
 
             let mut launch = String::from(base);
+
+            // Resolve the rtk PreToolUse hook (A5), SHARED by both CLI launch
+            // branches — the human mandate is "make codex use rtk the way
+            // claude-code does". Install only when the agent hasn't opted out
+            // (`rtk_enabled` NULL/absent defaults to ON, per the DB column's
+            // house style) AND both shim links the agent's Bash hook will
+            // actually invoke are present on disk right now —
+            // `ensure_conclave_shim` ran best-effort above and may have skipped
+            // the `rtk` link entirely (dev run without the binary staged) or
+            // linked a since-removed target. `is_usable_bin` applies the SAME
+            // zero-size-counts-as-absent guard `resolve_rtk_bin` uses, so a
+            // placeholder rtk build artifact never gets wired into a live hook.
+            // Fail open: any gap here just means no PreToolUse hook, never a
+            // blocked spawn. `base` is only ever "claude" or "codex" here (other
+            // cli_kinds early-returned above), and each branch installs the hook
+            // its own way — claude via the per-instance settings JSON, codex via
+            // a per-spawn `-c` override.
+            let rtk_on = def.rtk_enabled.unwrap_or(true);
+            let rtk_hook = conclave_bin.as_ref().filter(|_| rtk_on).and_then(|bin| {
+                let cli_bin = bin.join("conclave");
+                let rtk_bin = bin.join("rtk");
+                if cli_bin.is_file() && crate::engine::agentctx::is_usable_bin(&rtk_bin) {
+                    Some(runtime::sandbox_config::RtkHook { cli_bin, rtk_bin })
+                } else {
+                    None
+                }
+            });
+
+            // Awareness sentence appended ONLY when the hook was actually
+            // installed (same append-when-installed style as the conclave path
+            // sentence above) — an agent whose rtk hook never got wired has
+            // nothing to be warned about. Both claude and codex install the hook
+            // when `rtk_hook` is Some, so the sentence is generic and shared.
+            let preamble = match &rtk_hook {
+                Some(_) => format!(
+                    "{preamble} {}",
+                    crate::engine::agentctx::rtk_awareness_sentence()
+                ),
+                None => preamble,
+            };
+
             if base == "claude" {
-                // Resolve the rtk PreToolUse hook (A5): only when the agent
-                // hasn't opted out (`rtk_enabled` NULL/absent defaults to ON,
-                // per the DB column's house style) AND both shim links the
-                // agent's Bash hook will actually invoke are present on disk
-                // right now — `ensure_conclave_shim` ran best-effort above
-                // and may have skipped the `rtk` link entirely (dev run
-                // without the binary staged) or linked a since-removed
-                // target. `is_usable_bin` applies the SAME zero-size-counts-
-                // as-absent guard `resolve_rtk_bin` uses, so a placeholder
-                // rtk build artifact never gets wired into a live hook.
-                // Fail open: any gap here just means no PreToolUse hook,
-                // never a blocked spawn.
-                let rtk_on = def.rtk_enabled.unwrap_or(true);
-                let rtk_hook = conclave_bin.as_ref().filter(|_| rtk_on).and_then(|bin| {
-                    let cli_bin = bin.join("conclave");
-                    let rtk_bin = bin.join("rtk");
-                    if cli_bin.is_file() && crate::engine::agentctx::is_usable_bin(&rtk_bin) {
-                        Some(runtime::sandbox_config::RtkHook { cli_bin, rtk_bin })
-                    } else {
-                        None
-                    }
-                });
-
-                // Awareness sentence appended ONLY when the hook was actually
-                // installed (same append-when-installed style as the
-                // conclave path sentence above) — an agent whose rtk hook
-                // never got wired has nothing to be warned about.
-                let preamble = match &rtk_hook {
-                    Some(_) => format!(
-                        "{preamble} {}",
-                        crate::engine::agentctx::rtk_awareness_sentence()
-                    ),
-                    None => preamble,
-                };
-
                 if let Some(mode) = def.permission_mode.as_deref() {
                     // Validated to an allowlist at save time, but quote anyway so a
                     // future bypass can't inject a second shell command here.
@@ -775,6 +781,22 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     for ov in runtime::sandbox_config::codex_socket_overrides(sock, proxy_port) {
                         launch.push_str(&format!(" -c {}", shell_quote(&ov)));
                     }
+                }
+                // rtk PreToolUse hook (Lane K): the codex analogue of claude's
+                // per-instance settings hook. One `-c` flag carries the whole
+                // hook table inline; `--dangerously-bypass-hook-trust` is
+                // MANDATORY or the injected hook SILENTLY never fires (codex-cli
+                // 0.144.1 — a `-c`-injected hook isn't in the persisted trust
+                // store; verified live in Guetta's research). Same double
+                // opt-in gate as claude (`rtk_hook` is Some only when
+                // rtk_enabled and both bins resolve), so this too is fail-open.
+                // Never writes the user's ~/.codex/config.toml.
+                if let Some(rtk) = &rtk_hook {
+                    launch.push_str(&format!(
+                        " -c {}",
+                        shell_quote(&runtime::sandbox_config::codex_rtk_hook_override(rtk))
+                    ));
+                    launch.push_str(" --dangerously-bypass-hook-trust");
                 }
             }
             if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {

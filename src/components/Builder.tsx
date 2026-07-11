@@ -473,8 +473,8 @@ export function Builder({
         // CLI launch config (claude-code + codex; omitted for other kinds).
         permissionMode: showCliConfig ? permissionMode : undefined,
         contextWindow: contextWindowForSave,
-        // Token filter (rtk) — claude-code only; the engine treats absent as ON.
-        rtkEnabled: isClaudeCode ? rtkEnabled : undefined,
+        // Token filter (rtk) — claude-code + codex; the engine treats absent as ON.
+        rtkEnabled: showCliConfig ? rtkEnabled : undefined,
         customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
@@ -1272,16 +1272,15 @@ export function Builder({
                   </div>
                 )}
 
-                {/* Token filter (rtk) — Claude Code only; absent/null = ON. */}
-                {isClaudeCode && (
+                {/* Token filter (rtk) — Claude Code + Codex; absent/null = ON. */}
+                {showCliConfig && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-text-secondary">Token filter (rtk)</span>
                     <Toggle on={rtkEnabled} onChange={setRtkEnabled} label="Token filter (rtk)" />
                   </div>
                   <p className="text-[10.5px] text-text-tertiary mt-1.5">
-                    Rewrites shell commands through rtk to compress output and save tokens. Claude
-                    agents only.
+                    Rewrites shell commands through rtk to compress output and save tokens.
                   </p>
                 </div>
                 )}

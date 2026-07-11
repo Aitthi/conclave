@@ -204,6 +204,29 @@ fn rtk_hook_command(rtk: &RtkHook) -> String {
     )
 }
 
+/// Build the single `-c` override value that registers the rtk PreToolUse hook
+/// on a **codex** spawn (Lane K). Where claude-code gets a persisted
+/// per-instance settings JSON, codex takes the whole hook table inline on one
+/// `-c` flag as an array-of-tables TOML literal on the dotted leaf
+/// `hooks.PreToolUse`. The embedded command is the SAME [`rtk_hook_command`]
+/// claude uses (both paths single-quoted); it lands inside a TOML
+/// double-quoted string, which is safe because the command never contains a
+/// double quote. `matcher="^Bash$"` scopes the hook to Bash tool calls (codex
+/// mirrors claude's tool naming); `timeout` is in SECONDS — codex's config key
+/// is literally `timeout` (default 600), NOT `timeoutSec`.
+///
+/// The caller (`commands::instance`) MUST also pass
+/// `--dangerously-bypass-hook-trust` on the same spawn — without it a
+/// `-c`-injected hook SILENTLY never fires (no warning, no error), because
+/// injected hooks aren't in codex's persisted trust store (codex-cli 0.144.1,
+/// verified live in Guetta's research, task codex-hooks-research).
+pub fn codex_rtk_hook_override(rtk: &RtkHook) -> String {
+    format!(
+        "hooks.PreToolUse=[{{matcher=\"^Bash$\",hooks=[{{type=\"command\",command=\"{}\",timeout=30}}]}}]",
+        rtk_hook_command(rtk)
+    )
+}
+
 /// Build the full per-instance claude settings: always the owner-marker
 /// SessionStart hook; plus the sandbox socket allowance when the spawn runs
 /// sandboxed (`socket_path` present); plus an optional PreToolUse hook that
@@ -377,6 +400,25 @@ mod tests {
             ov[2],
             "permissions.conclave.network.unix_sockets={\"/tmp/space dir/conclave.sock\"=\"allow\"}"
         );
+    }
+
+    #[test]
+    fn codex_rtk_hook_override_embeds_command_and_bash_matcher() {
+        // The inline-TOML value must carry the exact rtk_hook_command claude
+        // uses, an `^Bash$` matcher, and a `timeout` (seconds) key — the whole
+        // thing on the single dotted leaf `hooks.PreToolUse`.
+        let rtk = RtkHook {
+            cli_bin: PathBuf::from("/Users/x/Library/Application Support/Conclave/bin/conclave"),
+            rtk_bin: PathBuf::from("/Users/x/Library/Application Support/Conclave/bin/rtk"),
+        };
+        let ov = codex_rtk_hook_override(&rtk);
+        assert_eq!(
+            ov,
+            "hooks.PreToolUse=[{matcher=\"^Bash$\",hooks=[{type=\"command\",command=\"'/Users/x/Library/Application Support/Conclave/bin/conclave' rtk-hook --rtk '/Users/x/Library/Application Support/Conclave/bin/rtk'\",timeout=30}]}]"
+        );
+        // No double quote inside the embedded command (paths are single-quoted),
+        // so the TOML double-quoted `command="..."` string never needs escaping.
+        assert!(!rtk_hook_command(&rtk).contains('"'));
     }
 
     #[test]
