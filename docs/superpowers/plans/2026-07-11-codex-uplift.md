@@ -32,11 +32,16 @@ setting Auto in the UI (no manual input anymore), and make codex use rtk
   model ที่ทำได้จริงๆ" (docs/plans/2026-07-09-codex-context-window-actual-max.md):
   `gpt-5.4` 1_050_000 · `gpt-5.5` 400_000 (Codex cap < API window) ·
   `gpt-5.4-mini` 400_000 · `gpt-5-codex` 400_000 · `gpt-5.3-codex` 400_000 ·
-  `gpt-5.3-codex-spark` 128_000. GPT-5.6 family: the API page says 1.05M
-  context; whether Codex serves 5.6 at the full window is UNVERIFIED — research
-  task `codex-hooks-research` pins it from official OpenAI sources. Provisional
-  value 1_050_000 for all three; lane M may not go READY until the memo lands
-  or Detoro rules on a discrepancy.
+  `gpt-5.3-codex-spark` 128_000. GPT-5.6 family: **RULED 372_000** for all
+  three (Detoro, 2026-07-11, amending the provisional 1_050_000) — Guetta's
+  memo (task codex-hooks-research note b7a044ab) found `codex debug models` on
+  codex-cli 0.144.1 reports context_window=372000 for sol/terra/luna,
+  reproduced independently by Detoro, and github.com/openai/codex issue
+  #31860 documents a SERVER-enforced ceiling near 380K that a client override
+  to 1.05M does not lift. Using 1.05M would set auto-compact at ~997K — codex
+  would never self-compact before hitting the real cap. UNSTABLE value: the
+  issue is 2 days old and contested; the table comment must cite issue #31860
+  and say "re-check at the next Codex CLI version bump".
 - **R4 — stored values.** The `context_window` column stays (claude-code still
   uses `"1m"`/`"200k"`). Codex agents stop sending it and any stored codex
   value is IGNORED at launch — auto wins. No migration.
@@ -115,9 +120,8 @@ Gates before READY: `cargo test` (in src-tauri, or the engine test subset),
 `pnpm build`, `pnpm uishot builder` + Read the PNG. Each recorded via
 `conclave task gate`.
 
-READY additionally requires: Guetta's memo confirming (or correcting) the
-GPT-5.6 Codex windows — if the memo contradicts 1_050_000, post a task note
-and wait for Detoro's ruling before READY.
+READY gate on GPT-5.6 values: RESOLVED — Guetta's memo landed and Detoro
+ruled 372_000 for all three gpt-5.6 ids (see R3). No further blocker.
 
 ## Lane R — task `codex-hooks-research` (researcher: Guetta)
 
@@ -145,22 +149,41 @@ No code. Deliverable = ONE memo as a task note, with sources.
 
 ## Lane K — task `codex-rtk-hook` (implementer: Tiësto) — plan finalized after Lane R
 
-Skeleton (do not claim before Detoro finalizes): inject the rtk PreToolUse
-hook into the codex launch branch (instance.rs:728-760) via `-c` overrides
-when `rtk_enabled != false` and both bins resolve (mirror the claude gate at
-instance.rs:654-671); extend or sibling `run_rtk_hook` in conclave-cli.rs for
-the codex wire format; extend the Builder rtk Toggle (:1355-1361, save at
+Research CONFIRMED the mechanism (Guetta memo, task codex-hooks-research note
+b7a044ab — read it in full before claiming). Key contracts:
+
+- Injection is ONE `-c` flag with an inline-TOML array-of-tables value on the
+  dotted leaf, plus a MANDATORY trust bypass flag:
+  `-c 'hooks.PreToolUse=[{matcher="^Bash$",hooks=[{type="command",command="<conclave> rtk-hook --rtk <rtk>",timeout=30}]}]' --dangerously-bypass-hook-trust`
+  WITHOUT `--dangerously-bypass-hook-trust` the `-c`-injected hook SILENTLY
+  never fires (no warning, no error — live-verified both ways). A gate must
+  prove the hook actually fired (e.g. observe the rewrite in a scratch codex
+  exec), not just that the spawn succeeded.
+- `timeout` is in SECONDS and the TOML key is `timeout` (not `timeoutSec`).
+- The hook binary needs ZERO changes: codex's PreToolUse input carries
+  `.tool_input.command` with `tool_name: "Bash"` identically to claude-code,
+  and conclave's `rtk_hook_response` output (`hookSpecificOutput` +
+  `permissionDecision: "allow"` + `updatedInput`) is already byte-compatible;
+  `rtk-hook` always exits 0 so exit-code-2 semantics never apply.
+- Never write `~/.codex/config.toml` — the `-c` form satisfies this.
+
+Scope: codex launch branch (instance.rs:728-760) builds the two args when
+`rtk_enabled != false` and both bins resolve (mirror the claude gate at
+instance.rs:654-671, reuse `rtk_hook_command()` from sandbox_config.rs:199 for
+the command string); extend the Builder rtk Toggle (:1355-1361, save at
 :537-538) to codex; rtk awareness preamble sentence for codex
 (agentctx.rs:476-493). Boundary overlaps lane M on Builder.tsx and
-instance.rs → lane K starts only after lane M merges.
+instance.rs → lane K starts only after lane M merges; Detoro cuts the final
+boundary then.
 
 ## Risk ledger
 
-- GPT-5.6 Codex cap unverified (R3) — blocking gate on lane M READY.
-- `-c` hook injection may not accept nested TOML on one flag — lane R must
-  prove it live; fallback is a per-instance codex config layer via
-  `CODEX_HOME`/profile IF codex offers one that does not touch the user's
-  config (research question, not an implementer improvisation).
+- GPT-5.6 Codex cap RULED 372_000 but UNSTABLE (open issue #31860, users
+  pushing OpenAI to raise it) — re-check at every Codex CLI version bump; the
+  table comment carries this reminder.
+- `-c` hook injection: PROVEN live (lane R). Residual risk is the silent
+  no-op without `--dangerously-bypass-hook-trust` — lane K's acceptance gate
+  must observe the hook firing, not just a clean spawn.
 - Overriding `model_context_window` above what the serving stack honors:
   transcript-detected window takes precedence at runtime, so a wrong table
   value self-corrects on the meter — but auto-compact limit would still be
