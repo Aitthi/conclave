@@ -375,7 +375,8 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         />
         <HeaderPill>
           <Columns3 size={11} style={{ color: "var(--color-accent)" }} />
-          {total} {total === 1 ? "task" : "tasks"}
+          <span className="font-semibold tabular-nums text-text-primary">{total}</span>{" "}
+          {total === 1 ? "task" : "tasks"}
         </HeaderPill>
         {openChallenges > 0 && (
           <HeaderPill>
@@ -385,7 +386,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         )}
         <div className="ml-auto flex items-center gap-2">
           <div
-            className="flex items-center gap-2 rounded-md px-2.5 h-7 bg-bg-canvas"
+            className="flex items-center gap-2 rounded-md px-2.5 h-7 bg-fill-soft"
             style={{ border: `1px solid ${BORDER}` }}
           >
             <Search size={12} className="text-text-tertiary shrink-0" />
@@ -408,7 +409,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
           <button
             onClick={() => setShowAll((v) => !v)}
             title={showAll ? "Hide abandoned lane" : "Show all lanes incl. abandoned"}
-            className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-7 text-[0.72rem] bg-bg-canvas transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-7 text-[0.72rem] bg-fill-soft transition-colors"
             style={{
               border: `1px solid ${BORDER}`,
               color: showAll ? "var(--color-text-primary)" : "var(--color-text-secondary)",
@@ -573,7 +574,7 @@ function HeaderSegment<T extends string>({
   options: Array<{ value: T; label: string; icon: ReactNode }>;
 }) {
   return (
-    <div className="ml-1 flex gap-1 rounded-lg p-1 bg-bg-canvas" style={{ border: `1px solid ${BORDER}` }}>
+    <div className="ml-1 flex gap-1 rounded-lg p-1 bg-fill-soft" style={{ border: `1px solid ${BORDER}` }}>
       {options.map((option) => {
         const active = option.value === value;
         return (
@@ -1501,7 +1502,7 @@ function MergedLane({
 function HeaderPill({ children }: { children: ReactNode }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 h-6 px-2 rounded-md text-[0.68rem] font-medium text-text-secondary shrink-0 bg-bg-canvas"
+      className="inline-flex items-center gap-1.5 h-6 px-2 rounded-md text-[0.68rem] font-medium text-text-secondary shrink-0 bg-fill-soft"
       style={{ border: `1px solid ${BORDER}` }}
     >
       {children}
