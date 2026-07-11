@@ -84,8 +84,11 @@ struct SaveAgentReq {
     /// rtk (Claude Code hook) toggle. Absent or `Some(true)` = enabled;
     /// `Some(false)` = disabled (Lane A ⇄ Lane C wire contract).
     rtk_enabled: Option<bool>,
-    /// Context-proxy opt-in (agent-proxy spec D8). Absent or `Some(false)` =
-    /// disabled; only an explicit `Some(true)` opts the agent in.
+    /// Context-proxy toggle (agent-proxy spec D8, superseded 2026-07-11). The
+    /// default is decided at spawn in `instance.rs::proxy_env`, not here:
+    /// Claude agents default ON (NULL/absent = ON, rtk-parity), codex default
+    /// OFF. `Some(false)` opts a Claude agent out; `Some(true)` opts a codex
+    /// agent in. Stored verbatim; this save path does not impose a default.
     proxy_enabled: Option<bool>,
 }
 
