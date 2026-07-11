@@ -18,6 +18,7 @@ import {
   Network,
   Scale,
   ShieldQuestion,
+  Plus,
 } from "lucide-react";
 import { ipc, useTaskChanged, useEvent } from "../ipc";
 import type {
@@ -63,6 +64,15 @@ const LIVE = "var(--color-success)"; // proto --color-live (gate pass / merged)
 const VIOLET = "#bf5af0"; // proto --color-a-violet (review) — matches MemoryGraph
 const SKY = "#32ade6"; // proto --color-a-sky (design-canon glyph)
 const FAINT = "var(--color-text-tertiary)";
+// A brighter hairline (proto --hair-2) for card-hover borders + dashed empty
+// placeholders; still theme-flipping via --color-overlay.
+const HAIR2 = "color-mix(in srgb, var(--color-overlay) 11%, transparent)";
+// The bounded-lane surface: a very subtle top-down overlay gradient (proto .lane),
+// theme-aware — reads as faint light in dark, faint dark in light.
+const LANE_BG =
+  "linear-gradient(180deg, color-mix(in srgb, var(--color-overlay) 3%, transparent), color-mix(in srgb, var(--color-overlay) 1%, transparent))";
+// Soft amber glow ring for the in-progress status dot (proto .dot working).
+const WORKING_GLOW = "0 0 0 3px color-mix(in srgb, var(--color-status-working) 15%, transparent)";
 
 // Column order + accent, mirroring the canon. `abandoned` is off the happy path
 // — surfaced only through the "All lanes" toggle, never a sixth always-on column.
@@ -427,7 +437,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         {viewMode === "board" ? (
           <div className="flex-1 min-h-0 flex">
             <div className="flex-1 min-h-0 overflow-x-auto scroll-thin">
-              <div className="h-full flex gap-4 px-5 pt-3">
+              <div className="h-full flex gap-3.5 px-5 pt-3 pb-4">
                 {columns.map((c) => (
                   <Column
                     key={c.state}
@@ -1306,22 +1316,40 @@ function Column({
   onOpenTask: (slug: string) => void;
 }) {
   const items = tasks.filter((t) => t.state === col.state);
+  const working = col.state === "in_progress";
   return (
-    <section className="w-[266px] shrink-0 flex flex-col min-h-0">
-      <div className="flex items-center gap-2 px-1.5 py-2 shrink-0">
-        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col.accent }} />
-        <span className="text-[0.74rem] font-semibold text-text-primary">{col.label}</span>
-        <span className="font-mono text-[0.64rem]" style={{ color: FAINT }}>
+    <section
+      className="w-[276px] shrink-0 flex flex-col min-h-0 rounded-[14px]"
+      style={{ background: LANE_BG, border: `1px solid ${BORDER}` }}
+    >
+      <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-2.5 shrink-0">
+        <span
+          className="w-2 h-2 rounded-full shrink-0"
+          style={{ background: col.accent, boxShadow: working ? WORKING_GLOW : undefined }}
+        />
+        <span className="text-[0.76rem] font-semibold tracking-[0.01em] text-text-primary">
+          {col.label}
+        </span>
+        <span
+          className="font-mono text-[0.62rem] tabular-nums rounded-full px-2 py-px min-w-[20px] text-center"
+          style={{ color: FAINT, background: "color-mix(in srgb, var(--color-overlay) 5%, transparent)" }}
+        >
           {items.length}
         </span>
+        <button
+          className="ml-auto w-[22px] h-[22px] grid place-items-center rounded-md text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary transition-colors"
+          aria-label={`Add task to ${col.label}`}
+        >
+          <Plus size={13} />
+        </button>
       </div>
-      <div className="flex-1 overflow-y-auto scroll-thin flex flex-col gap-2 pb-4 pr-0.5">
+      <div className="flex-1 overflow-y-auto scroll-thin flex flex-col gap-2 px-2.5 pb-2.5 min-h-0">
         {items.length === 0 ? (
           <div
-            className="rounded-lg text-[0.68rem] px-3 py-4 text-center"
-            style={{ color: FAINT, border: `1px dashed ${BORDER}` }}
+            className="mx-1 mt-1 rounded-[10px] px-3 py-5 text-center text-[0.7rem] text-text-tertiary"
+            style={{ border: `1px dashed ${HAIR2}` }}
           >
-            none
+            No tasks
           </div>
         ) : (
           items.map((t) => (
