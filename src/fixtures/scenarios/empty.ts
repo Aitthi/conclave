@@ -33,14 +33,14 @@ export const handlers: FixtureHandlers = {
   "skill.list": () => [],
   "provider.list": () => [],
   "session.resize": () => undefined,
-  // Fresh-install look: no browser open. status returns ok:false so the view
-  // shows its "no browser open" empty state and never calls snapshot.
-  "browser.status": () => ({ ok: false, message: "no browser is open" }),
+  // Fresh-install look: no tabs. The side rail renders its own empty state
+  // (no tabs, just the "+" affordance) and never calls snapshot.
+  "browser.status": () => ({ tabs: [], activeTabId: undefined }),
   // Open still works from the empty state (deterministic echo, no Tauri) —
   // a missing handler would throw the loud [fixture] error on first click.
   "browser.open": ({ url }) => ({ ok: true, url }),
-  "browser.setBounds": () => ({ ok: true }),
-  "browser.setVisible": () => ({ ok: true }),
-  "browser.close": () => ({ ok: false, message: "no browser is open" }),
+  "browser.close": () => ({ tabs: [], activeTabId: undefined }),
+  "browser.setBounds": () => undefined,
+  "browser.setVisible": () => undefined,
   "browser.screenshot": () => ({ path: "/tmp/browser-screenshot.png", width: 1280, height: 800 }),
 };

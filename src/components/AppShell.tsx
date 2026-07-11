@@ -210,7 +210,7 @@ export function AppShell() {
       ipc.browser
         .status()
         .then((st) => {
-          if (alive) setBrowserActive(!!st.ok);
+          if (alive) setBrowserActive(st.tabs.length > 0);
         })
         .catch(() => {});
     };
