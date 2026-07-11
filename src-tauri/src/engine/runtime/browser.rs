@@ -20,7 +20,7 @@
 //! IIFE wrapped in `try/catch` that RETURNS `{ __error: string }` rather than
 //! throwing. A page tool that sees `__error` maps it to [`BrowserError::Page`].
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -29,8 +29,12 @@ use tauri::{
 };
 use tokio::sync::oneshot;
 
-/// Stable label for the single shared browser window (plan §Runtime Notes).
-/// V1 is one browser per Conclave app process.
+use super::browser_tabs::{BrowserOwner, BrowserState, TabId, TabRegistry};
+
+/// Label PREFIX for the per-tab native webviews. Each tab's webview is labelled
+/// `agent-browser:<tabId>` (see [`label_for`]); the old singleton used the bare
+/// prefix. One browser overlay per Conclave app process, now multiplexed into N
+/// concurrent tabs (only the active one visible; the rest hidden-but-alive).
 const BROWSER_LABEL: &str = "agent-browser";
 
 /// Round-trip budget for an `eval_with_callback` page tool. A remote page can
@@ -59,21 +63,11 @@ const MIN_CAPTURE_PX: f64 = 1.0;
 const MAX_CAPTURE_PX: f64 = 10_000.0;
 
 // ── Result types (mirrored 1:1 by src/ipc/types.ts, camelCase) ──────────────
-
-/// Result of `open`/`goto`/`status`/`close`. `ok` is false with a `message`
-/// when there is no browser to report on (status/close before open) — an
-/// absent browser is reported gracefully, not as a hard error.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserState {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
+//
+// The tab-list reply shape (`BrowserState`/`BrowserTab`/`BrowserOwner`) lives in
+// `super::browser_tabs` — the pure, unit-tested registry owns the wire contract.
+// The action/snapshot/shot result types below stay here (they belong to the
+// page tools, not the tab registry).
 
 /// Viewport rectangle (logical pixels) the Browser tab reserves for the native
 /// webview overlay. Mirrored by `BrowserBounds` in `src/ipc/types.ts`.
@@ -411,45 +405,208 @@ fn eval_js(js: &str) -> String {
     )
 }
 
-// ── Tauri-backed page tools ─────────────────────────────────────────────────
+// ── Tab registry + native webview pool ───────────────────────────────────────
 
-/// The single shared browser webview, if it is currently open.
-fn webview(app: &AppHandle) -> Option<Webview> {
-    app.get_webview(BROWSER_LABEL)
+/// The process-global tab registry: all per-tab metadata (owner, last-navigated
+/// url, title, loading, ended), the active-tab pointer, and the human-tab
+/// sequence. The native webviews themselves live in Tauri's own manager, keyed
+/// by [`label_for`]; this registry holds everything Tauri does not. One browser
+/// overlay per app process (mirrors the old singleton), now multiplexed.
+fn registry() -> &'static Mutex<TabRegistry> {
+    static REG: OnceLock<Mutex<TabRegistry>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(TabRegistry::new()))
 }
 
-fn require_webview(app: &AppHandle) -> Result<Webview, BrowserError> {
-    webview(app).ok_or(BrowserError::NotOpen)
+/// Lock the registry, recovering from a poisoned mutex rather than cascading a
+/// panic (matches the runtime module's lock convention). The closure runs while
+/// the lock is held — callers MUST NOT `.await` inside it (the guard is a
+/// `std::sync::Mutex`, not held across suspension points anywhere below).
+fn with_registry<R>(f: impl FnOnce(&mut TabRegistry) -> R) -> R {
+    let mut guard = registry().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
 }
 
-/// State reply for `open`/`goto`, carrying the URL we just navigated to.
+/// Native webview label for a tab: `agent-browser:<tabId>`. Tauri v2 permits
+/// `-`, `:` and `_` in labels; every `tabId` is either an agent UUID or
+/// `human-<seq>`, both already label-safe, so no sanitization is needed.
+fn label_for(tab_id: &str) -> String {
+    format!("{BROWSER_LABEL}:{tab_id}")
+}
+
+/// The native webview for `tab_id`, if one has been created (a human tab exists
+/// in the registry before its first navigation and so has none yet).
+fn webview_for(app: &AppHandle, tab_id: &str) -> Option<Webview> {
+    app.get_webview(&label_for(tab_id))
+}
+
+fn require_webview_for(app: &AppHandle, tab_id: &str) -> Result<Webview, BrowserError> {
+    webview_for(app, tab_id).ok_or(BrowserError::NotOpen)
+}
+
+// ── Registry-only operations (no native webview) ─────────────────────────────
+
+/// The full tab list + active pointer — the `browser.status` reply. A pure read
+/// of the registry: it NEVER probes a native URL (`WKWebView.URL` on a fresh
+/// child webview panics on the main thread and kills the whole app — crash
+/// history `de0a632f`); every tab's `url` is the caller's navigation target,
+/// stored on navigate.
+pub fn state() -> BrowserState {
+    with_registry(|r| r.state())
+}
+
+/// Open a fresh HUMAN tab (registry-only — its native webview is created lazily
+/// on the first navigation). Returns the new tabId (`human-<seq>`).
+// Wired to `commands::browser::new_tab` (router `browser.newTab`) when the
+// Lane-1 boundary widening lands (challenge a281ebf9); lands ahead of it.
+#[allow(dead_code)]
+pub fn new_human_tab() -> TabId {
+    with_registry(|r| r.new_human_tab())
+}
+
+/// Mark an agent's tab `ended` (read-only until the human closes it, D4b). The
+/// webview stays ALIVE — the human can still view the final page after the agent
+/// is gone; only the human's `close` tears it down.
+// Wired to the B4 agent-end teardown hook (challenge a281ebf9); lands ahead of it.
+#[allow(dead_code)]
+pub fn mark_ended(agent_id: &str) {
+    with_registry(|r| r.mark_ended(agent_id));
+}
+
+// ── Native webview pool (the tab-keyed multiplex) ────────────────────────────
+
+/// Create-or-reuse the tab keyed by `tab_id` and navigate it to `url`.
 ///
-/// NEVER ask the native layer for the URL here: `WKWebView.URL` is nil until a
-/// navigation commits, and wry's `url_from_webview` (wry-0.55.1
-/// `wkwebview/mod.rs:1349`) unwraps it ON THE MAIN THREAD — for a freshly
-/// created `about:blank` webview that panic is deterministic, tao stops the
-/// event loop and re-raises on exit, and the whole app dies taking every agent
-/// session with it (task browser-crash-fix, reproduced 2026-07-11; app deaths
-/// of 2026-07-10). The navigation target is what the caller asked for and is
-/// always available race-free. `Webview` (a child webview) has no page-title
-/// getter — title belongs to the window — so embedded state carries only the
-/// URL; agents read the live URL/title from `snapshot`.
-fn state_with_url(target: &Url) -> BrowserState {
-    BrowserState {
-        ok: true,
-        url: Some(target.to_string()),
-        title: None,
-        message: None,
+/// On CREATE: records `owner`, then `add_child`s a HIDDEN native webview (a
+/// background agent-initiated open never paints over whatever tab the human is
+/// on; the mounted Browser tab reveals the active one via [`set_active`] /
+/// [`set_visible`]). On REUSE: navigates the existing webview, owner untouched.
+/// `bounds` positions a freshly-created webview (offscreen when React has not
+/// reported a rect yet). Loading is cleared once the navigation is dispatched.
+///
+/// NEVER reads the native URL — `url` (the caller's target) is what the registry
+/// stores and what `status` returns (crash history `de0a632f`).
+pub fn navigate(
+    app: &AppHandle,
+    tab_id: &str,
+    owner: BrowserOwner,
+    url: &str,
+    bounds: Option<Bounds>,
+) -> Result<BrowserState, BrowserError> {
+    let target = normalize_url(url)?;
+    with_registry(|r| {
+        r.upsert(tab_id.to_string(), owner, Some(target.to_string()));
+    });
+    match webview_for(app, tab_id) {
+        Some(view) => {
+            view.navigate(target)
+                .map_err(|e| BrowserError::Webview(e.to_string()))?;
+        }
+        None => {
+            let window = app
+                .get_window("main")
+                .ok_or_else(|| BrowserError::Webview("main window not found".into()))?;
+            let (position, size) = resolve_bounds(bounds);
+            let view = window
+                .add_child(
+                    WebviewBuilder::new(label_for(tab_id), WebviewUrl::External(target)),
+                    position,
+                    size,
+                )
+                .map_err(|e| BrowserError::Webview(e.to_string()))?;
+            // Always create hidden: only the active tab is ever shown.
+            let _ = view.hide();
+        }
     }
+    // v1 has no native load-complete signal, so clear `loading` once the
+    // navigation is dispatched rather than leave a perpetual spinner in the
+    // rail. The `loading` field stays in the contract for a future load hook.
+    with_registry(|r| r.set_loaded(tab_id, None));
+    Ok(state())
 }
 
-/// Exception-safe in-page probe for the LIVE URL (`status` only): a plain
-/// string (or null) result, never a throw — same contract as the other
-/// injected scripts. Evaluated through `eval_value`, so it is timeout-bounded
-/// and runs off the fragile native `WKWebView.URL` path entirely.
-const HREF_JS: &str = r#"(function () {
-  try { return String(location.href); } catch (e) { return null; }
-})()"#;
+/// Make `tab_id` the visible tab. Hides every OTHER live webview FIRST, then
+/// shows this one — the hide-before-show order is load-bearing (invariant #4:
+/// otherwise the outgoing page flashes over the incoming one during a switch).
+/// A no-op-safe switch to a tab whose webview does not exist yet (a new human
+/// tab before its first navigation). Returns the updated tab list.
+// Wired to `commands::browser::set_active` (router `browser.setActive`) when the
+// Lane-1 boundary widening lands (challenge a281ebf9); lands ahead of it.
+#[allow(dead_code)]
+pub fn set_active(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
+    let (known, all_ids) = with_registry(|r| {
+        let known = r.set_active(tab_id);
+        let ids: Vec<TabId> = r.state().tabs.into_iter().map(|t| t.tab_id).collect();
+        (known, ids)
+    });
+    if !known {
+        return Ok(state());
+    }
+    for id in &all_ids {
+        if id != tab_id {
+            if let Some(view) = webview_for(app, id) {
+                let _ = view.hide();
+            }
+        }
+    }
+    if let Some(view) = webview_for(app, tab_id) {
+        view.show().map_err(|e| BrowserError::Webview(e.to_string()))?;
+    }
+    Ok(state())
+}
+
+/// Position/resize the ACTIVE tab's webview over the Browser tab's reserved
+/// region. A graceful no-op when there is no active tab or it has no webview
+/// yet. Inactive webviews keep their last bounds (they are hidden anyway).
+pub fn set_bounds(app: &AppHandle, bounds: Bounds) -> Result<(), BrowserError> {
+    let active = with_registry(|r| r.state().active_tab_id);
+    if let Some(id) = active {
+        if let Some(view) = webview_for(app, &id) {
+            let (position, size) = resolve_bounds(Some(bounds));
+            view.set_position(position)
+                .map_err(|e| BrowserError::Webview(e.to_string()))?;
+            view.set_size(size)
+                .map_err(|e| BrowserError::Webview(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Show/hide the whole browser overlay (the ACTIVE tab's webview) on the Browser
+/// tab's mount/unmount, WITHOUT closing it — background agents keep driving
+/// hidden tabs. A graceful no-op when nothing is active.
+pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), BrowserError> {
+    let active = with_registry(|r| r.state().active_tab_id);
+    if let Some(id) = active {
+        if let Some(view) = webview_for(app, &id) {
+            let res = if visible { view.show() } else { view.hide() };
+            res.map_err(|e| BrowserError::Webview(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Close ONE tab: destroy its native webview (if any) and drop it from the
+/// registry, which reselects the first remaining tab as active. Shows the new
+/// active tab so the overlay never goes blank while a tab remains. Returns the
+/// updated tab list.
+pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
+    if let Some(view) = webview_for(app, tab_id) {
+        view.close()
+            .map_err(|e| BrowserError::Webview(e.to_string()))?;
+    }
+    let new_active = with_registry(|r| {
+        r.close(tab_id);
+        r.state().active_tab_id
+    });
+    if let Some(id) = new_active {
+        if let Some(view) = webview_for(app, &id) {
+            let _ = view.show();
+        }
+    }
+    Ok(state())
+}
+
+// ── Tauri-backed page tools (per-tab) ────────────────────────────────────────
 
 /// Run one `eval_with_callback` round trip and parse its JSON result. Bridges
 /// the `Fn(String)` callback to async via a oneshot; the `Mutex<Option<_>>`
@@ -491,133 +648,60 @@ fn reject_page_error(v: &serde_json::Value) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// Open the browser at `url`. If already open, navigate the existing webview and
-/// show it. Otherwise add a child webview to the main window at `bounds` (or
-/// offscreen+hidden when React has not reported a rect yet).
-pub async fn open(
-    app: &AppHandle,
-    url: &str,
-    bounds: Option<Bounds>,
-) -> Result<BrowserState, BrowserError> {
-    let target = normalize_url(url)?;
-    if let Some(view) = webview(app) {
-        view.navigate(target.clone())
-            .map_err(|e| BrowserError::Webview(e.to_string()))?;
-        return Ok(state_with_url(&target));
-    }
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| BrowserError::Webview("main window not found".into()))?;
-    let (position, size) = resolve_bounds(bounds);
-    let view = window
-        .add_child(
-            WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(target.clone())),
-            position,
-            size,
-        )
-        .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    // Visibility is owned by the frontend (set_visible on the Browser tab's
-    // mount/unmount). Always create hidden so a background agent-initiated open
-    // never paints over whatever tab the human is on; the mounted Browser tab
-    // shows it via set_visible.
-    let _ = view.hide();
-    Ok(state_with_url(&target))
-}
-
-/// Navigate the current browser window. Errors with [`BrowserError::NotOpen`]
-/// if no browser is open (use `open` to create one).
-pub async fn goto(app: &AppHandle, url: &str) -> Result<BrowserState, BrowserError> {
-    let target = normalize_url(url)?;
-    let view = require_webview(app)?;
-    view.navigate(target.clone())
-        .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    Ok(state_with_url(&target))
-}
-
-/// Report the current URL, or a graceful `ok:false` when nothing is open.
-/// The URL comes from an in-page `location.href` probe (see [`HREF_JS`]), not
-/// the native getter; a page that cannot answer yet (still creating/loading,
-/// or the probe times out) degrades to `url: None` instead of failing —
-/// status is informational and must never hard-error on an open browser.
-pub async fn status(app: &AppHandle) -> Result<BrowserState, BrowserError> {
-    match webview(app) {
-        Some(view) => {
-            let url = eval_value(&view, HREF_JS.to_owned())
-                .await
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned));
-            Ok(BrowserState {
-                ok: true,
-                url,
-                title: None,
-                message: None,
-            })
-        }
-        None => Ok(BrowserState {
-            ok: false,
-            url: None,
-            title: None,
-            message: Some("no browser is open".into()),
-        }),
-    }
-}
-
-/// DOM/text snapshot of the current page (capped body text).
+/// DOM/text snapshot of tab `tab_id`'s current page (capped body text).
 pub async fn snapshot(
     app: &AppHandle,
+    tab_id: &str,
     max_text: Option<i64>,
 ) -> Result<BrowserSnapshot, BrowserError> {
-    let view = require_webview(app)?;
+    let view = require_webview_for(app, tab_id)?;
     let value = eval_value(&view, snapshot_js(clamp_max_text(max_text))).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("snapshot shape mismatch: {e}")))
 }
 
-/// Click the element matching `selector` (selector as emitted by `snapshot`).
-pub async fn click(app: &AppHandle, selector: &str) -> Result<BrowserActionResult, BrowserError> {
-    let view = require_webview(app)?;
+/// Click the element matching `selector` in tab `tab_id` (selector as emitted
+/// by `snapshot`).
+pub async fn click(
+    app: &AppHandle,
+    tab_id: &str,
+    selector: &str,
+) -> Result<BrowserActionResult, BrowserError> {
+    let view = require_webview_for(app, tab_id)?;
     let value = eval_value(&view, click_js(selector)).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("click result shape mismatch: {e}")))
 }
 
-/// Focus and fill the input-like element matching `selector` with `text`.
+/// Focus and fill the input-like element matching `selector` in tab `tab_id`
+/// with `text`.
 pub async fn type_text(
     app: &AppHandle,
+    tab_id: &str,
     selector: &str,
     text: &str,
 ) -> Result<BrowserActionResult, BrowserError> {
-    let view = require_webview(app)?;
+    let view = require_webview_for(app, tab_id)?;
     let value = eval_value(&view, type_js(selector, text)).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("type result shape mismatch: {e}")))
 }
 
-/// Escape hatch: evaluate `js` in the page and return its JSON result. Local
-/// tool only — never exposed over any network or plugin passthrough.
-pub async fn eval_json(app: &AppHandle, js: &str) -> Result<serde_json::Value, BrowserError> {
-    let view = require_webview(app)?;
+/// Escape hatch: evaluate `js` in tab `tab_id`'s page and return its JSON
+/// result. Local tool only — never exposed over any network or plugin
+/// passthrough.
+pub async fn eval_json(
+    app: &AppHandle,
+    tab_id: &str,
+    js: &str,
+) -> Result<serde_json::Value, BrowserError> {
+    let view = require_webview_for(app, tab_id)?;
     let value = eval_value(&view, eval_js(js)).await?;
     reject_page_error(&value)?;
     Ok(value)
-}
-
-/// Close the browser window. Idempotent — closing when nothing is open is a
-/// graceful `ok:true`.
-pub async fn close(app: &AppHandle) -> Result<BrowserState, BrowserError> {
-    if let Some(view) = webview(app) {
-        view.close()
-            .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    }
-    Ok(BrowserState {
-        ok: true,
-        url: None,
-        title: None,
-        message: None,
-    })
 }
 
 /// One-shot slot carrying the encoded PNG (or an error string) from the
@@ -632,11 +716,12 @@ type ShotSlot = Mutex<Option<oneshot::Sender<Result<Vec<u8>, String>>>>;
 #[cfg(target_os = "macos")]
 pub async fn screenshot(
     app: &AppHandle,
+    tab_id: &str,
     path: &str,
     width: Option<f64>,
     height: Option<f64>,
 ) -> Result<BrowserShot, BrowserError> {
-    let view = require_webview(app)?;
+    let view = require_webview_for(app, tab_id)?;
     let (w, h) = resolve_capture_size(width, height);
 
     // Remember the current size so a background capture never disturbs a
@@ -749,6 +834,7 @@ pub async fn screenshot(
 #[cfg(not(target_os = "macos"))]
 pub async fn screenshot(
     _app: &AppHandle,
+    _tab_id: &str,
     _path: &str,
     _width: Option<f64>,
     _height: Option<f64>,
@@ -756,40 +842,6 @@ pub async fn screenshot(
     Err(BrowserError::Webview(
         "screenshot is only supported on macOS".into(),
     ))
-}
-
-/// Position/resize the embedded webview over the Browser tab's reserved region.
-/// Graceful no-op `ok` when no browser is open.
-pub async fn set_bounds(app: &AppHandle, bounds: Bounds) -> Result<BrowserState, BrowserError> {
-    if let Some(view) = webview(app) {
-        let (position, size) = resolve_bounds(Some(bounds));
-        view.set_position(position)
-            .map_err(|e| BrowserError::Webview(e.to_string()))?;
-        view.set_size(size)
-            .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    }
-    Ok(BrowserState {
-        ok: true,
-        url: None,
-        title: None,
-        message: None,
-    })
-}
-
-/// Show/hide the embedded webview on tab switch WITHOUT closing it — the page
-/// stays loaded so an agent keeps driving it in the background. Graceful no-op
-/// `ok` when no browser is open.
-pub async fn set_visible(app: &AppHandle, visible: bool) -> Result<BrowserState, BrowserError> {
-    if let Some(view) = webview(app) {
-        let res = if visible { view.show() } else { view.hide() };
-        res.map_err(|e| BrowserError::Webview(e.to_string()))?;
-    }
-    Ok(BrowserState {
-        ok: true,
-        url: None,
-        title: None,
-        message: None,
-    })
 }
 
 #[cfg(test)]

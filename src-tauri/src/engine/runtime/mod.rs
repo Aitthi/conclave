@@ -20,6 +20,11 @@
 //! `unwrap_or_else(|e| e.into_inner())` so a panicked holder cannot cascade.
 
 pub mod browser;
+// Several registry methods (new_human_tab / human-seq / owner consts) land ahead
+// of their command-layer + agent-end consumers, which are wired once the Lane-1
+// boundary widening lands (router `browser.newTab`/`setActive` arms + the B4
+// agent-end hook; challenge a281ebf9). Fully unit-tested in B1 regardless.
+#[allow(dead_code)]
 pub mod browser_tabs;
 pub mod chat;
 pub mod ctx_proxy;
