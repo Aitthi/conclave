@@ -408,13 +408,29 @@ export interface DesignInfo {
 }
 
 // ── In-app browser agent tools (runtime::browser) ─────────────────────────
-// Mirrors the Rust `#[serde(rename_all = "camelCase")]` result structs. `ok`
-// is false (with a `message`) when there is no browser open to report on.
-export interface BrowserStatus {
-  ok: boolean;
-  url?: string;
+// Mirrors the Rust `#[serde(rename_all = "camelCase")]` result structs.
+// Tabs are keyed by owner: `tabId == agentId` for agent tabs (one per agent,
+// reused on re-navigation) and `tabId == "human-<seq>"` for human tabs.
+export type OwnerKind = "human" | "agent";
+
+export interface BrowserOwner {
+  kind: OwnerKind;
+  id: string; // agentId for agents; "human" for human tabs
+  label: string; // display name: agent name, or "You" for human tabs
+}
+
+export interface BrowserTab {
+  tabId: string;
+  owner: BrowserOwner;
+  url?: string; // last-navigated target — never read from the native getter
   title?: string;
-  message?: string;
+  loading: boolean;
+  ended: boolean; // agent finished; tab is read-only until human closes it
+}
+
+export interface BrowserState {
+  tabs: BrowserTab[];
+  activeTabId?: string;
 }
 
 export interface BrowserActionResult {
