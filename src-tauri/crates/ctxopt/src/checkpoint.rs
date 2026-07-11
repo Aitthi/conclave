@@ -2,6 +2,11 @@
 //! Milestone-1: LOG MODE ONLY — it measures what a checkpoint *would* do and
 //! never alters forwarded bytes. serde_json only (crate purity).
 
+use std::collections::HashMap;
+use serde_json::{json, Value};
+
+use crate::request::{index_tools, ToolCall};
+
 /// Read-only, re-runnable-for-current-state tools whose historical output may be
 /// stubbed and re-obtained on demand. Everything else (side-effecting, drifting,
 /// mutating) and every unknown name is kept verbatim (fail-safe).
@@ -10,6 +15,97 @@ pub fn is_recoverable(tool_name: &str) -> bool {
         tool_name,
         "Read" | "Grep" | "Glob" | "LS" | "WebSearch" | "NotebookRead"
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointCandidate {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub msg_idx: usize,
+    pub gross_bytes: usize,
+    pub stub: String,
+    pub stub_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointPlan {
+    pub candidates: Vec<CheckpointCandidate>,
+    pub earliest_changed_msg_index: usize,
+    pub tail_start: usize,
+    pub non_recoverable_kept_bytes: usize,
+}
+
+fn candidate_path(call: &ToolCall) -> Option<String> {
+    call.input
+        .get("file_path")
+        .or_else(|| call.input.get("notebook_path"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn breadcrumb(tool: &str, path: Option<&str>, turn: usize) -> String {
+    match path {
+        Some(p) => format!("[ctxopt checkpoint: elided {tool} {p} @turn {turn} — re-read to restore]"),
+        None => format!("[ctxopt checkpoint: elided {tool} @turn {turn} — re-read to restore]"),
+    }
+}
+
+fn content_bytes(text: &str) -> usize {
+    json!([{ "type": "text", "text": text }]).to_string().len()
+}
+
+/// None when the estimate is at/below the ceiling (no checkpoint considered).
+/// Some(plan) when above ceiling; `candidates` may be empty (Task 3 rules it saturated).
+pub fn plan_checkpoint(
+    messages: &Value,
+    est_tokens: usize,
+    ceiling_tokens: usize,
+    tail_msgs: usize,
+) -> Option<CheckpointPlan> {
+    if est_tokens <= ceiling_tokens {
+        return None;
+    }
+    let total_msgs = messages.as_array().map_or(0, Vec::len);
+    let tail_start = total_msgs.saturating_sub(tail_msgs);
+
+    let (calls, results) = index_tools(messages);
+    let call_by_id: HashMap<&str, &ToolCall> =
+        calls.iter().map(|c| (c.id.as_str(), c)).collect();
+
+    let mut candidates: Vec<CheckpointCandidate> = Vec::new();
+    let mut non_recoverable_kept_bytes = 0usize;
+
+    for r in &results {
+        if r.msg_idx >= tail_start {
+            continue; // verbatim recent tail
+        }
+        let Some(text) = r.text.as_deref() else { continue };
+        let Some(call) = call_by_id.get(r.tool_use_id.as_str()) else { continue };
+        if !is_recoverable(&call.name) {
+            non_recoverable_kept_bytes += content_bytes(text);
+            continue;
+        }
+        let path = candidate_path(call);
+        let stub = breadcrumb(&call.name, path.as_deref(), r.msg_idx);
+        let stub_bytes = content_bytes(&stub);
+        candidates.push(CheckpointCandidate {
+            tool_use_id: r.tool_use_id.clone(),
+            tool_name: call.name.clone(),
+            msg_idx: r.msg_idx,
+            gross_bytes: content_bytes(text),
+            stub,
+            stub_bytes,
+        });
+    }
+    candidates.sort_by_key(|c| c.msg_idx);
+    let earliest_changed_msg_index = candidates.first().map_or(tail_start, |c| c.msg_idx);
+
+    Some(CheckpointPlan {
+        candidates,
+        earliest_changed_msg_index,
+        tail_start,
+        non_recoverable_kept_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -35,5 +131,59 @@ mod tests {
         assert!(!is_recoverable("Conclave"));
         assert!(!is_recoverable("mcp__whatever__do"));
         assert!(!is_recoverable(""));
+    }
+
+    use serde_json::{json, Value};
+
+    fn tool_pair(id: &str, name: &str, input: Value, text: &str) -> [Value; 2] {
+        [
+            json!({"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":[{"type":"text","text":text}]}]}),
+        ]
+    }
+    fn filler(n: usize) -> Vec<Value> {
+        (0..n).map(|i| json!({"role":"user","content":[{"type":"text","text":format!("f{i}")}]})).collect()
+    }
+    fn msgs(pairs: Vec<[Value; 2]>, fill: usize) -> Value {
+        let mut out: Vec<Value> = pairs.into_iter().flatten().collect();
+        out.extend(filler(fill));
+        Value::Array(out)
+    }
+
+    #[test]
+    fn below_ceiling_returns_none() {
+        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &"x".repeat(700))], 40);
+        assert!(plan_checkpoint(&m, 100, 450_000, 15).is_none());
+    }
+
+    #[test]
+    fn selects_recoverable_in_frozen_region_and_pairs_tool_name() {
+        let big = "x".repeat(2000);
+        let m = msgs(
+            vec![
+                tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big),
+                tool_pair("t2", "Grep", json!({"pattern":"foo"}), &big),
+                tool_pair("t3", "Bash", json!({"command":"ls"}), &big), // non-recoverable → kept bucket
+            ],
+            40,
+        );
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).expect("above ceiling");
+        let ids: Vec<&str> = plan.candidates.iter().map(|c| c.tool_use_id.as_str()).collect();
+        assert_eq!(ids, ["t1", "t2"]); // Bash excluded
+        assert_eq!(plan.candidates[0].tool_name, "Read");
+        assert!(plan.candidates[0].stub.contains("Read"));
+        assert!(plan.candidates[0].stub.contains("/a.rs"));
+        assert_eq!(plan.earliest_changed_msg_index, 1); // t1 result is message #1
+        assert!(plan.non_recoverable_kept_bytes > 0);   // the Bash result
+        assert!(plan.candidates[0].gross_bytes > plan.candidates[0].stub_bytes);
+    }
+
+    #[test]
+    fn recent_tail_is_never_a_candidate() {
+        let big = "x".repeat(2000);
+        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 2);
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).expect("above ceiling");
+        assert!(plan.candidates.is_empty());
+        assert_eq!(plan.earliest_changed_msg_index, plan.tail_start);
     }
 }
