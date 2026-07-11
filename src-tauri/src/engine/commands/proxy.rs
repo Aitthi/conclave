@@ -190,7 +190,7 @@ mod tests {
         let state = AppState::for_tests().await;
         let status = router::dispatch(&state, "proxy.checkpoint", json!({ "enabled": true })).await.unwrap();
         assert_eq!(status["checkpoint"], true);
-        assert_eq!(state.ctx_proxy.checkpoint.load(Ordering::Acquire), true);
+        assert!(state.ctx_proxy.checkpoint.load(Ordering::Acquire));
 
         let status = router::dispatch(&state, "proxy.ceiling", json!({ "tokens": 400_000 })).await.unwrap();
         assert_eq!(status["ceiling"], 400_000);

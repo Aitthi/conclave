@@ -1026,10 +1026,11 @@ mod tests {
         )
         .await;
 
-        let mut ledger = runtime.ledger.lock().unwrap();
-        let index = ledger.observe(&request["messages"]);
-        assert_eq!(ledger.conv_mut(index).last_input_tokens, Some(125));
-        drop(ledger);
+        {
+            let mut ledger = runtime.ledger.lock().unwrap();
+            let index = ledger.observe(&request["messages"]);
+            assert_eq!(ledger.conv_mut(index).last_input_tokens, Some(125));
+        } // guard scoped out before the await below (clippy await_holding_lock)
         let report = crate::engine::repo::proxy_metric::report(&state.db, 24)
             .await
             .unwrap();
