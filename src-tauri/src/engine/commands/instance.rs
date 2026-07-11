@@ -52,11 +52,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn positive_context_window_tokens(value: Option<&str>) -> Option<i64> {
-    let tokens = value?.trim().parse::<i64>().ok()?;
-    (tokens > 0).then_some(tokens)
-}
-
 fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
     if context_window == Some("1m") {
         format!("{model}[1m]")
@@ -65,20 +60,45 @@ fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
     }
 }
 
-fn append_codex_context_window_config(launch: &mut String, context_window: Option<&str>) {
-    if let Some(tokens) = positive_context_window_tokens(context_window) {
-        let auto_compact_token_limit = (i128::from(tokens) * 95 / 100) as i64;
-        launch.push_str(&format!(
-            " -c {}",
-            shell_quote(&format!("model_context_window={tokens}"))
-        ));
-        launch.push_str(&format!(
-            " -c {}",
-            shell_quote(&format!(
-                "model_auto_compact_token_limit={auto_compact_token_limit}"
-            ))
-        ));
+/// Emit codex's numeric context-window `-c` overrides for `model`, resolved
+/// through [`crate::engine::codex_models::codex_model_context_window`] (plan
+/// ruling R2 — "Auto" derives the value from the model, the Builder no
+/// longer collects a manual number and any stored `context_window` value is
+/// ignored at launch). Emits NOTHING for an unknown model so codex's own
+/// default wins, matching the old sentinel/invalid-value behavior.
+fn append_codex_context_window_config(launch: &mut String, model: Option<&str>) {
+    let Some(tokens) =
+        crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
+    else {
+        return;
+    };
+    let auto_compact_token_limit = (i128::from(tokens) * 95 / 100) as i64;
+    launch.push_str(&format!(
+        " -c {}",
+        shell_quote(&format!("model_context_window={tokens}"))
+    ));
+    launch.push_str(&format!(
+        " -c {}",
+        shell_quote(&format!(
+            "model_auto_compact_token_limit={auto_compact_token_limit}"
+        ))
+    ));
+}
+
+/// Resolve the pre-detection fallback context limit for a freshly spawned
+/// session (plan ruling R2b/R4): for codex agents, the per-model table wins
+/// and any STORED `context_limit` is ignored ("auto" wins, matching the
+/// launch-arg side); every other `cli_kind` keeps the previous
+/// stored-value-then-default resolution untouched. The transcript-detected
+/// window (`runtime::transcript_context`) still takes precedence over this
+/// fallback once a real reading lands — this only seeds the meter before
+/// that happens.
+fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Option<i64>) -> i64 {
+    if cli_kind == "codex" {
+        return crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
+            .unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind));
     }
+    stored.unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind))
 }
 
 /// The `ANTHROPIC_BASE_URL` override routing an agent through the loopback
@@ -729,7 +749,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
                 }
-                append_codex_context_window_config(&mut launch, def.context_window.as_deref());
+                append_codex_context_window_config(&mut launch, def.model.as_deref());
                 // Codex's mode flags differ from claude's; map the shared
                 // permission_mode value to them. "auto" = never pause for
                 // approval but keep the sandbox; "bypass" = --yolo (alias of
@@ -857,9 +877,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 &ws.folder_path,
                 &cli_kind,
                 started_at,
-                session
-                    .context_limit
-                    .unwrap_or_else(|| repo::session::default_context_limit_for(&cli_kind)),
+                resolve_session_context_limit(
+                    &cli_kind,
+                    def.model.as_deref(),
+                    session.context_limit,
+                ),
             );
             Some((backend.output_rx, epoch, Some(transcript_ctx)))
         }
@@ -1579,41 +1601,82 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn codex_context_window_config_appends_numeric_override() {
+    fn codex_context_window_config_appends_table_override_for_known_model() {
         let mut launch = String::from("codex --model 'gpt-5.3-codex-spark'");
-        append_codex_context_window_config(&mut launch, Some("400000"));
+        append_codex_context_window_config(&mut launch, Some("gpt-5.3-codex-spark"));
 
+        // 128_000 * 95 / 100 = 121_600.
         assert!(
-            launch.contains(" -c 'model_context_window=400000'"),
+            launch.contains(" -c 'model_context_window=128000'"),
             "{launch}"
         );
         assert!(
-            launch.contains(" -c 'model_auto_compact_token_limit=380000'"),
+            launch.contains(" -c 'model_auto_compact_token_limit=121600'"),
             "{launch}"
         );
     }
 
     #[test]
-    fn codex_context_window_config_ignores_claude_sentinels() {
-        for value in [
-            Some("1m"),
-            Some("200k"),
-            Some("0"),
-            Some("-1"),
-            Some("nonnumeric"),
-            None,
-        ] {
+    fn codex_context_window_config_emits_nothing_for_unknown_model() {
+        for model in [Some("some-future-model"), Some(""), None] {
             let mut launch = String::from("codex");
-            append_codex_context_window_config(&mut launch, value);
+            append_codex_context_window_config(&mut launch, model);
             assert!(
                 !launch.contains("model_context_window"),
-                "sentinel/invalid value must not become a Codex context override: {launch}"
+                "unknown/absent model must not become a Codex context override: {launch}"
             );
             assert!(
                 !launch.contains("model_auto_compact_token_limit"),
-                "sentinel/invalid value must not become a Codex auto-compact override: {launch}"
+                "unknown/absent model must not become a Codex auto-compact override: {launch}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_session_context_limit_codex_uses_table_and_ignores_stored() {
+        // Known model: table value wins even when a stale stored value is
+        // present (R4 — stored codex context_limit is ignored at launch).
+        assert_eq!(
+            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999)),
+            1_050_000
+        );
+        // Unknown model: falls back to the conservative codex default, still
+        // ignoring the stored value.
+        assert_eq!(
+            resolve_session_context_limit("codex", Some("some-future-model"), Some(999)),
+            repo::session::default_context_limit_for("codex")
+        );
+        // No model at all: same conservative fallback.
+        assert_eq!(
+            resolve_session_context_limit("codex", None, Some(999)),
+            repo::session::default_context_limit_for("codex")
+        );
+    }
+
+    #[test]
+    fn resolve_session_context_limit_non_codex_keeps_stored_value() {
+        assert_eq!(
+            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42)),
+            42
+        );
+        assert_eq!(
+            resolve_session_context_limit("claude-code", None, None),
+            repo::session::default_context_limit_for("claude-code")
+        );
+    }
+
+    #[test]
+    fn codex_context_window_config_ignores_stored_context_window_entirely() {
+        // R2/R4: the function no longer takes a stored `context_window` value
+        // at all — only the model resolves the override, proving the old
+        // stored numeric/sentinel value ("400000", "1m", "200k", ...) can no
+        // longer influence codex's launch args.
+        let mut launch = String::from("codex --model 'gpt-5.4'");
+        append_codex_context_window_config(&mut launch, Some("gpt-5.4"));
+        assert!(
+            launch.contains(" -c 'model_context_window=1050000'"),
+            "{launch}"
+        );
     }
 
     /// Env injection for the context proxy (agent-proxy Task 11): only the
