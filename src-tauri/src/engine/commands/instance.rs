@@ -3161,6 +3161,56 @@ mod tests {
         );
     }
 
+    /// T2 (parity): the SITE-1 crash path — the no-transcript early-return branch
+    /// (`track_context=false` + `transcript_ctx=None`, taken by an untracked CLI
+    /// backend) — must ALSO mark the owning tab ended on EOF. Mirrors
+    /// `forwarder_marks_tab_ended_on_eof` (which drives the shared tail / site-2)
+    /// but with `track_context=false` so the early-return guard at the top of the
+    /// else-branch runs instead of the shared tail. Same epoch-guarded shape.
+    #[tokio::test]
+    async fn forwarder_marks_tab_ended_on_eof_no_transcript() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        runtime::browser::test_seed_agent_tab(&id);
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            None,
+            None,
+            rx,
+            false, // track_context=false + transcript_ctx=None → site-1 early-return.
+            None,
+            epoch,
+        ));
+
+        drop(tx); // EOF → site-1 epoch-guarded cleanup runs.
+        task.await.expect("forwarder task panicked");
+
+        assert_eq!(
+            tab_ended(&id),
+            Some(true),
+            "no-transcript crash-death EOF (site-1) must mark the owning tab ended"
+        );
+    }
+
     /// T2 (guard): a LATE EOF from a SUPERSEDED generation (its epoch no longer
     /// matches the live one after a restart reused the id) must NOT mark the tab
     /// ended — the same epoch guard that protects the idle transition.
