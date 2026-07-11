@@ -48,10 +48,20 @@ this rationale.
   request header (same `get(..)` pattern as the others).
 
 ### 3. Make the failure diagnosable (so we never guess again)
-- `count_tokens.rs:105–106`: on non-success, read the response **body** and include a
-  truncated snippet (≤200 chars) in the `Err` string, e.g.
-  `format!("count_tokens HTTP {status}: {snippet}")`. API error bodies are JSON
-  (`{"type":"error","error":{...}}`) — no secrets; still truncate defensively.
+- `count_tokens.rs` non-success arm: **NEVER persist the raw response body.** The repo
+  invariant at `proxy_checkpoint_metric.rs:3-5` forbids request/response bodies entering
+  this repo. Instead parse the known Anthropic error shape
+  (`{"type":"error","error":{"type":…}}`) and build a **content-free** Err of
+  `http-status + error.type` only, e.g. `format!("count_tokens HTTP {status}: {error_type}")`
+  → `"count_tokens HTTP 400: authentication_error"`. If the body does not parse as that
+  shape, record **status-only** (`"HTTP {status} (unparsed)"`) — never raw bytes.
+  `error.type` is a bounded enum (authentication_error / invalid_request_error /
+  not_found_error / …), so it distinguishes auth-scope vs beta vs model-id vs too-long
+  while carrying no user content. Optional: append the opaque `request-id` response
+  header if trivially available. (Amended per security challenge 76dbd0ed — Aoki found,
+  Tiësto evidenced the repo invariant; original plan wrongly authorized a raw ≤200-char
+  body. The spec §7.1 wording and the migration-file comment must match: "status +
+  error.type", NOT "≤200-char body".)
 - Persist it durably (stderr is `/dev/null`): add nullable column
   `error_snippet TEXT` to `proxy_checkpoint_metric` via a NEW migration file
   `src-tauri/src/engine/migrations/0023_proxy_checkpoint_error_snippet.sql`
@@ -75,6 +85,10 @@ this rationale.
 - Extend the fake-upstream test so the fake asserts the incoming request carries the
   `anthropic-beta` header when the `CountCredential` sets it, and 400s if absent.
   Assert `count_tokens` succeeds with beta present.
+- On the 400 path, the fake returns an error body containing a distinctive marker in
+  `error.message` (e.g. a fake "secret-xyz"); assert the surfaced Err **contains
+  `error.type`** and **does NOT contain** that message marker — proving the raw body
+  never reaches `error_snippet` (guards challenge 76dbd0ed).
 
 ## Boundary
 (Amended 2026-07-11 per Tiësto challenge cf0d3c06 — ACCEPTED. Original snapshot had
