@@ -23,6 +23,7 @@
     "@xterm/addon-webgl": "0.20.0-beta.286",
     "@xterm/xterm": "6.1.0-beta.287",
     "lucide-react": "^1.21.0",
+    "marked": "^18.0.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

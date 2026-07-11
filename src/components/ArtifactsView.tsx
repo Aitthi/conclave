@@ -4,6 +4,29 @@ import { ipc, type Artifact, type WorkspaceAgent } from "../ipc";
 import { useArtifactChanged } from "../ipc/events";
 import { timeHint } from "../lib/timeHint";
 import { ArtifactFrame } from "./ArtifactView";
+import { markdownToDocument } from "../lib/markdown";
+import { subscribeTheme } from "../lib/theme";
+
+/**
+ * Live effective dark/light state, read from the `.dark` class on <html> and
+ * kept current across explicit theme toggles (subscribeTheme). Lets an open
+ * markdown preview repaint its baked-in palette instead of going stale.
+ */
+function useIsDark(): boolean {
+  const [dark, setDark] = useState(
+    () =>
+      typeof document !== "undefined" &&
+      document.documentElement.classList.contains("dark"),
+  );
+  useEffect(
+    () =>
+      subscribeTheme(() =>
+        setDark(document.documentElement.classList.contains("dark")),
+      ),
+    [],
+  );
+  return dark;
+}
 
 type ArtifactFilter = "all" | "markdown" | "code" | "html" | "svg" | "mermaid" | "react" | "text";
 type PreviewMode = "preview" | "code";
@@ -108,6 +131,19 @@ function ArtifactBody({
 }) {
   const kind = normalizeKind(artifact.kind);
   const content = artifact.content ?? artifact.html ?? "";
+  const dark = useIsDark();
+
+  if (kind === "markdown" && view === "preview") {
+    // Markdown → HTML doc rendered through the same sandboxed frame as html/svg
+    // artifacts (opaque origin + CSP), never injected into the app DOM. `dark`
+    // tracks the live theme so the rendered typography matches light/dark.
+    return (
+      <ArtifactFrame
+        html={markdownToDocument(content, { dark })}
+        title={artifact.title ?? artifact.id}
+      />
+    );
+  }
 
   if ((kind === "html" || kind === "svg") && view === "preview") {
     return <ArtifactFrame html={htmlForPreview(artifact)} title={artifact.title ?? artifact.id} />;
@@ -203,7 +239,8 @@ export function ArtifactsView({
 
   const total = artifacts.length;
   const activeKind = normalizeKind(activeArtifact?.kind);
-  const canPreviewToggle = activeKind === "html" || activeKind === "svg";
+  const canPreviewToggle =
+    activeKind === "html" || activeKind === "svg" || activeKind === "markdown";
 
   // Root is a <section>, not <main>: ArtifactsView now renders INSIDE the
   // WorkspacePane canvas slot, which lives beside the page's single <main>
@@ -352,7 +389,7 @@ export function ArtifactsView({
                 <FileCode2 className="w-6 h-6 mx-auto mb-3 text-text-tertiary" />
                 <div className="text-[13px] text-text-primary">Select an artifact to inspect it.</div>
                 <div className="mt-1 text-[12px] text-text-tertiary">
-                  Saved HTML and SVG artifacts preview in a sandboxed frame. Other kinds show code.
+                  Saved HTML, SVG, and markdown artifacts preview in a sandboxed frame. Other kinds show code.
                 </div>
               </div>
             </div>
