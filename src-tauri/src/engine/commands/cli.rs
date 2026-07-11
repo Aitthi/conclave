@@ -3585,11 +3585,23 @@ mod tests {
             ok_params(&["proxy", "threshold", "0.25"]),
             json!({ "ratio": 0.25 })
         );
-        assert_eq!(ok_method(&["proxy", "checkpoint", "on"]), "proxy.checkpoint");
-        assert_eq!(ok_params(&["proxy", "checkpoint", "on"]), json!({ "enabled": true }));
+        assert_eq!(
+            ok_method(&["proxy", "checkpoint", "on"]),
+            "proxy.checkpoint"
+        );
+        assert_eq!(
+            ok_params(&["proxy", "checkpoint", "on"]),
+            json!({ "enabled": true })
+        );
         assert_eq!(ok_method(&["proxy", "ceiling", "400000"]), "proxy.ceiling");
-        assert_eq!(ok_params(&["proxy", "ceiling", "400000"]), json!({ "tokens": 400_000 }));
-        assert_eq!(ok_method(&["proxy", "checkpoint-report"]), "proxy.checkpointReport");
+        assert_eq!(
+            ok_params(&["proxy", "ceiling", "400000"]),
+            json!({ "tokens": 400_000 })
+        );
+        assert_eq!(
+            ok_method(&["proxy", "checkpoint-report"]),
+            "proxy.checkpointReport"
+        );
     }
 
     #[test]

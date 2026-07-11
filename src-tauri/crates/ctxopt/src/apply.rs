@@ -9,14 +9,24 @@ use crate::analyze::Elision;
 /// Returns serialized bytes saved (old − new, saturating, summed).
 pub fn stub_tool_results(messages: &mut Value, stubs: &HashMap<&str, &str>) -> usize {
     let mut saved = 0usize;
-    let Some(msgs) = messages.as_array_mut() else { return 0 };
+    let Some(msgs) = messages.as_array_mut() else {
+        return 0;
+    };
     for msg in msgs {
-        let Some(blocks) = msg.get_mut("content").and_then(Value::as_array_mut) else { continue };
+        let Some(blocks) = msg.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
         for b in blocks {
             if b.get("type").and_then(Value::as_str) != Some("tool_result") {
                 continue;
             }
-            let Some(stub) = b.get("tool_use_id").and_then(Value::as_str).and_then(|id| stubs.get(id)) else { continue };
+            let Some(stub) = b
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .and_then(|id| stubs.get(id))
+            else {
+                continue;
+            };
             let replacement = json!([{ "type": "text", "text": stub }]);
             if let Some(obj) = b.as_object_mut() {
                 let old_len = obj.get("content").map_or(0, |c| c.to_string().len());
@@ -33,8 +43,10 @@ pub fn stub_tool_results(messages: &mut Value, stubs: &HashMap<&str, &str>) -> u
 /// `content` changes — every sibling key (`cache_control`, `is_error`, unknown
 /// fields) stays untouched. Returns serialized bytes saved.
 pub fn apply(messages: &mut Value, elisions: &[Elision]) -> usize {
-    let stubs: HashMap<&str, &str> =
-        elisions.iter().map(|e| (e.tool_use_id.as_str(), e.stub.as_str())).collect();
+    let stubs: HashMap<&str, &str> = elisions
+        .iter()
+        .map(|e| (e.tool_use_id.as_str(), e.stub.as_str()))
+        .collect();
     stub_tool_results(messages, &stubs)
 }
 
@@ -115,7 +127,10 @@ mod tests {
     fn stub_tool_results_replaces_only_named_ids() {
         use std::collections::HashMap;
         let mut m = fixture(); // tu_1 tool_result with 700-byte content
-        let stubs: HashMap<&str, &str> = HashMap::from([("tu_1", "[ctxopt checkpoint: elided Read /a.rs @turn 1 — re-read to restore]")]);
+        let stubs: HashMap<&str, &str> = HashMap::from([(
+            "tu_1",
+            "[ctxopt checkpoint: elided Read /a.rs @turn 1 — re-read to restore]",
+        )]);
         let saved = stub_tool_results(&mut m, &stubs);
         assert!(saved > 0);
         assert_eq!(m[1]["content"][0]["content"][0]["text"], stubs["tu_1"]);

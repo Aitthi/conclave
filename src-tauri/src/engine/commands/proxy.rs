@@ -91,7 +91,10 @@ pub async fn report(state: &AppState, payload: Value) -> Result<Value, AppError>
 pub async fn set_checkpoint(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: CheckpointReq = serde_json::from_value(payload)
         .map_err(|e| AppError::Invalid(format!("proxy.checkpoint: bad payload: {e}")))?;
-    state.ctx_proxy.checkpoint.store(req.enabled, Ordering::Release);
+    state
+        .ctx_proxy
+        .checkpoint
+        .store(req.enabled, Ordering::Release);
     Ok(status_value(state))
 }
 
@@ -188,15 +191,21 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_toggle_and_ceiling_reflected_in_status() {
         let state = AppState::for_tests().await;
-        let status = router::dispatch(&state, "proxy.checkpoint", json!({ "enabled": true })).await.unwrap();
+        let status = router::dispatch(&state, "proxy.checkpoint", json!({ "enabled": true }))
+            .await
+            .unwrap();
         assert_eq!(status["checkpoint"], true);
         assert!(state.ctx_proxy.checkpoint.load(Ordering::Acquire));
 
-        let status = router::dispatch(&state, "proxy.ceiling", json!({ "tokens": 400_000 })).await.unwrap();
+        let status = router::dispatch(&state, "proxy.ceiling", json!({ "tokens": 400_000 }))
+            .await
+            .unwrap();
         assert_eq!(status["ceiling"], 400_000);
         assert_eq!(state.ctx_proxy.ceiling.load(Ordering::Acquire), 400_000);
 
-        let report = router::dispatch(&state, "proxy.checkpointReport", Value::Null).await.unwrap();
+        let report = router::dispatch(&state, "proxy.checkpointReport", Value::Null)
+            .await
+            .unwrap();
         assert_eq!(report["samples"], 0);
     }
 
