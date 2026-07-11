@@ -99,11 +99,13 @@ Today every verb (`open/goto/status/snapshot/click/type/eval/close/setBounds/set
 - The active tab's native webview is overlaid on the measured region exactly as today (`regionRef`, `InAppBrowserView.tsx:233`).
 - Follow the **center-pane mount contract** where it fits (floating blurred header, absolute-inset-0; template `MemoryGraph.tsx:~445`, memory `a861b8e4`) — Arta reconciles the new side rail with this shell in the canon.
 
-### 4.6 Redesign → Arta (design canon)
+### 4.6 Redesign → Conclave Design view (design canon)
 
-- There is **no Arta canon** for the browser view today (`.arta/proto/screens/browser.tsx` does not exist).
-- **Arta produces `.arta/proto/screens/browser.tsx`** — a fixture-mode proto mockup of the side-rail design (owner rows, active/inactive/ended states, human vs agent tab chrome, empty state). This is the **design canon** the frontend lane pins (a specific proto SHA) and must not improvise around.
-- The frontend lane satisfies the **UI Pixel Gate** (CLAUDE.md): `pnpm uishot browser` (+ `--scenario empty`), open and Read each PNG, attach paths in the READY note, record the gate.
+- The redesign is authored in the **Conclave Design view (design-host)** — **NOT** `.arta/`. For this workspace the design canvas is **in-repo**: screens live at `design/screens/*.tsx` at the repo root (committed; `welcome.tsx` today). `~/.conclave/design-host/registry.json` is only an id→dir map pointing back at the repo's `design/` (`design-host/vite/projects.ts`, `screens.ts listScreens`).
+- **Arta produces `design/screens/browser.tsx`** (filename = screen id `browser`; `export const meta={title}` + default-export component), with side-rail rows/chrome in `design/components/*` and tokens from `design/theme.css`. It covers all states (active/inactive/loading/ended, human vs agent chrome, empty). This is the **design canon** the frontend lane pins (committed SHA on blackboard `design:inapp-browser`) and must not improvise around.
+- **One-time setup:** the Design view has never been opened for codeup, so `~/.conclave/design-host/registry.json` has no codeup entry yet. The human must open the Design view once (fires `design.ensure`) before Arta can serve the screen. `listScreens` auto-discovers `design/screens/*.tsx` — no manifest to edit.
+- **Lane-0 gate:** `conclave design review codeup` → zero serious findings + Arta's blind rubric pass.
+- The frontend lane satisfies the **UI Pixel Gate** (CLAUDE.md): `pnpm uishot browser` (+ `--scenario empty`), open and Read each PNG, attach paths in the READY note, record the gate. Arta reviews those PNGs against the canon (design-acceptance) before merge.
 
 ## 5. Component boundaries (for isolation)
 
@@ -113,7 +115,7 @@ Today every verb (`open/goto/status/snapshot/click/type/eval/close/setBounds/set
 | **Browser command layer** (`commands/browser.rs`) | Maps IPC/CLI verbs to registry ops; **derives owner id from the authenticated caller**; returns `BrowserState`. | registry |
 | **IPC facade** (`src/ipc/commands.ts`, `types.ts`) | Typed `browser.*` seam + `BrowserState`/`BrowserTab` types. | — |
 | **View** (`InAppBrowserView.tsx`) | Side-rail UI, tab switching, human vs agent chrome, overlay bounds. | IPC facade, fixtures |
-| **Design canon** (`.arta/proto/screens/browser.tsx`) | The pinned visual spec for the view. | — (Arta) |
+| **Design canon** (`design/screens/browser.tsx`, Conclave Design view) | The pinned visual spec for the view. | — (Arta) |
 | **Fixtures** (`src/fixtures/scenarios/{default,empty}.ts`) | Fixture `browser.status` returning a tab list so uishot renders the chrome without Tauri. | types |
 
 Testability seam: keep the **pure tab-registry logic** (state map: create/reuse/switch/close/ended keying) separable from the native webview calls, so the registry can be unit-tested without a live webview (native/bundle webview paths are not exercisable from `cargo test` — split pure logic from the native wrapper, per the resolver-splitting precedent in memory). Native calls stay a thin wrapper the registry drives.
@@ -151,7 +153,7 @@ Testability seam: keep the **pure tab-registry logic** (state map: create/reuse/
 
 ## 10. Scope & phasing (lanes)
 
-- **Lane-0 (design, Arta):** `.arta/proto/screens/browser.tsx` canon — side-rail mockup, all tab states + empty state. **Blocks Lane-2.**
+- **Lane-0 (design, Arta — Conclave Design view):** `design/screens/browser.tsx` canon — side-rail mockup, all tab states + empty state. Boundary `design/**`. **Blocks Lane-2.**
 - **Lane-1 (backend, Rust — highest risk):** webview registry multiplex + command layer owner-keying + `BrowserState`. Parallel to Lane-0. Resolve risk #2 first.
 - **Lane-2 (frontend):** tab-aware `InAppBrowserView` + side rail per canon + IPC types + fixtures + UI Pixel Gate. Starts after Lane-0 canon lands; consumes Lane-1's `BrowserState` shape (agree the TS/Rust type at the boundary up front).
 - **Integration:** lead (Detoro) owns the merge order (canon → backend → frontend) and re-runs gates.
@@ -164,5 +166,5 @@ Testability seam: keep the **pure tab-registry logic** (state map: create/reuse/
 - Backend: `src-tauri/src/engine/runtime/browser.rs` (1004; label/add_child `:513-514`, `state_with_url` `:427-444`, IIFE `:14-21`) · `src-tauri/src/engine/commands/browser.rs` (242).
 - IPC: `src/ipc/commands.ts:349-359` (surface) / `:489-501` (facade) · `src/ipc/types.ts:413-418` (`BrowserStatus`).
 - Fixtures: `src/fixtures/scenarios/default.ts:84-98`, `empty.ts:38-45`.
-- Design mount contract: `MemoryGraph.tsx:~445` (memory `a861b8e4`). UI Pixel Gate: `CLAUDE.md`, blackboard `protocol:ui-pixel-gate`.
+- Design canon: `design/screens/browser.tsx` via Conclave Design view (design-host: `design-host/vite/projects.ts`, `screens.ts`; registry `~/.conclave/design-host/registry.json` → repo `design/`); pin on blackboard `design:inapp-browser`; gate `conclave design review codeup`. Mount contract: `MemoryGraph.tsx:~445` (memory `a861b8e4`). UI Pixel Gate: `CLAUDE.md`, blackboard `protocol:ui-pixel-gate`.
 - Crash history: memory `de0a632f` (about:blank URL panic), `d41c0e06` (eval JSON safety).
