@@ -2,8 +2,8 @@
 //! Milestone-1: LOG MODE ONLY — it measures what a checkpoint *would* do and
 //! never alters forwarded bytes. serde_json only (crate purity).
 
-use std::collections::HashMap;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::estimate::est_tokens;
 use crate::request::{index_tools, ToolCall};
@@ -46,7 +46,9 @@ fn candidate_path(call: &ToolCall) -> Option<String> {
 
 fn breadcrumb(tool: &str, path: Option<&str>, turn: usize) -> String {
     match path {
-        Some(p) => format!("[ctxopt checkpoint: elided {tool} {p} @turn {turn} — re-read to restore]"),
+        Some(p) => {
+            format!("[ctxopt checkpoint: elided {tool} {p} @turn {turn} — re-read to restore]")
+        }
         None => format!("[ctxopt checkpoint: elided {tool} @turn {turn} — re-read to restore]"),
     }
 }
@@ -70,8 +72,7 @@ pub fn plan_checkpoint(
     let tail_start = total_msgs.saturating_sub(tail_msgs);
 
     let (calls, results) = index_tools(messages);
-    let call_by_id: HashMap<&str, &ToolCall> =
-        calls.iter().map(|c| (c.id.as_str(), c)).collect();
+    let call_by_id: HashMap<&str, &ToolCall> = calls.iter().map(|c| (c.id.as_str(), c)).collect();
 
     let mut candidates: Vec<CheckpointCandidate> = Vec::new();
     let mut non_recoverable_kept_bytes = 0usize;
@@ -80,8 +81,12 @@ pub fn plan_checkpoint(
         if r.msg_idx >= tail_start {
             continue; // verbatim recent tail
         }
-        let Some(text) = r.text.as_deref() else { continue };
-        let Some(call) = call_by_id.get(r.tool_use_id.as_str()) else { continue };
+        let Some(text) = r.text.as_deref() else {
+            continue;
+        };
+        let Some(call) = call_by_id.get(r.tool_use_id.as_str()) else {
+            continue;
+        };
         if !is_recoverable(&call.name) {
             non_recoverable_kept_bytes += content_bytes(text);
             continue;
@@ -178,7 +183,15 @@ mod tests {
 
     #[test]
     fn side_effecting_and_drifting_tools_are_not_recoverable() {
-        for t in ["Bash", "WebFetch", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+        for t in [
+            "Bash",
+            "WebFetch",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "Task",
+        ] {
             assert!(!is_recoverable(t), "{t} must not be recoverable");
         }
     }
@@ -199,7 +212,9 @@ mod tests {
         ]
     }
     fn filler(n: usize) -> Vec<Value> {
-        (0..n).map(|i| json!({"role":"user","content":[{"type":"text","text":format!("f{i}")}]})).collect()
+        (0..n)
+            .map(|i| json!({"role":"user","content":[{"type":"text","text":format!("f{i}")}]}))
+            .collect()
     }
     fn msgs(pairs: Vec<[Value; 2]>, fill: usize) -> Value {
         let mut out: Vec<Value> = pairs.into_iter().flatten().collect();
@@ -209,7 +224,15 @@ mod tests {
 
     #[test]
     fn below_ceiling_returns_none() {
-        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &"x".repeat(700))], 40);
+        let m = msgs(
+            vec![tool_pair(
+                "t1",
+                "Read",
+                json!({"file_path":"/a.rs"}),
+                &"x".repeat(700),
+            )],
+            40,
+        );
         assert!(plan_checkpoint(&m, 100, 450_000, 15).is_none());
     }
 
@@ -225,13 +248,17 @@ mod tests {
             40,
         );
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).expect("above ceiling");
-        let ids: Vec<&str> = plan.candidates.iter().map(|c| c.tool_use_id.as_str()).collect();
+        let ids: Vec<&str> = plan
+            .candidates
+            .iter()
+            .map(|c| c.tool_use_id.as_str())
+            .collect();
         assert_eq!(ids, ["t1", "t2"]); // Bash excluded
         assert_eq!(plan.candidates[0].tool_name, "Read");
         assert!(plan.candidates[0].stub.contains("Read"));
         assert!(plan.candidates[0].stub.contains("/a.rs"));
         assert_eq!(plan.earliest_changed_msg_index, 1); // t1 result is message #1
-        assert!(plan.non_recoverable_kept_bytes > 0);   // the Bash result
+        assert!(plan.non_recoverable_kept_bytes > 0); // the Bash result
         assert!(plan.candidates[0].gross_bytes > plan.candidates[0].stub_bytes);
     }
 
@@ -253,7 +280,9 @@ mod tests {
                 assert!(p.gross_candidate_bytes > p.stub_overhead_bytes);
                 assert_ne!(p.projected_messages, m);
                 assert!(p.projected_messages[1]["content"][0]["content"][0]["text"]
-                    .as_str().unwrap().starts_with("[ctxopt checkpoint:"));
+                    .as_str()
+                    .unwrap()
+                    .starts_with("[ctxopt checkpoint:"));
             }
             other => panic!("expected Eligible, got {other:?}"),
         }
@@ -262,31 +291,52 @@ mod tests {
     #[test]
     fn saturated_when_net_saving_below_m() {
         let big = "x".repeat(8000);
-        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 40);
+        let m = msgs(
+            vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
+            40,
+        );
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
-        assert_eq!(project(&m, &plan, 500_000, 10_000_000, 499_000), CheckpointOutcome::Saturated);
+        assert_eq!(
+            project(&m, &plan, 500_000, 10_000_000, 499_000),
+            CheckpointOutcome::Saturated
+        );
     }
 
     #[test]
     fn saturated_when_post_stays_above_l() {
         let big = "x".repeat(8000);
-        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 40);
+        let m = msgs(
+            vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
+            40,
+        );
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
-        assert_eq!(project(&m, &plan, 500_000, 1, 1_000), CheckpointOutcome::Saturated);
+        assert_eq!(
+            project(&m, &plan, 500_000, 1, 1_000),
+            CheckpointOutcome::Saturated
+        );
     }
 
     #[test]
     fn saturated_when_no_candidates() {
         let big = "x".repeat(8000);
-        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 2); // all in tail
+        let m = msgs(
+            vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
+            2,
+        ); // all in tail
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
-        assert_eq!(project(&m, &plan, 500_000, 1, 499_000), CheckpointOutcome::Saturated);
+        assert_eq!(
+            project(&m, &plan, 500_000, 1, 499_000),
+            CheckpointOutcome::Saturated
+        );
     }
 
     #[test]
     fn recent_tail_is_never_a_candidate() {
         let big = "x".repeat(2000);
-        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 2);
+        let m = msgs(
+            vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)],
+            2,
+        );
         let plan = plan_checkpoint(&m, 500_000, 450_000, 15).expect("above ceiling");
         assert!(plan.candidates.is_empty());
         assert_eq!(plan.earliest_changed_msg_index, plan.tail_start);

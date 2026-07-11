@@ -114,7 +114,11 @@ mod tests {
             stub_overhead_tokens: 200,
             s_net_tokens: (q * 400_000.0) as i64,
             q,
-            projected_break_even: if q > 0.0 { 11.5 / q - 12.5 } else { f64::INFINITY },
+            projected_break_even: if q > 0.0 {
+                11.5 / q - 12.5
+            } else {
+                f64::INFINITY
+            },
             projected_post_tokens: post,
             plateau_turns: plateau,
             non_recoverable_kept_tokens: 5_000,

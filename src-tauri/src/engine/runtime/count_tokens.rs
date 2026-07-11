@@ -93,7 +93,10 @@ pub async fn count_tokens(
     if !cred.has_auth() {
         return Err("count_tokens: missing auth credential; no request issued".to_string());
     }
-    let url = format!("{}/v1/messages/count_tokens", upstream.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/messages/count_tokens",
+        upstream.trim_end_matches('/')
+    );
     let resp = apply_cred(client.post(url), cred)
         .body(body.to_string())
         .send()
@@ -124,7 +127,9 @@ pub async fn preflight(
 ) -> Result<(), String> {
     let body = json!({ "model": "claude-3-5-haiku-20241022",
         "messages": [{ "role": "user", "content": "ok" }] });
-    count_tokens(client, upstream, cred, &body).await.map(|_| ())
+    count_tokens(client, upstream, cred, &body)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -147,9 +152,16 @@ mod tests {
             let hits = hits2.clone();
             async move {
                 hits.fetch_add(1, Ordering::SeqCst);
-                let unauth = request.headers().get("x-api-key").map(|v| v == "bad").unwrap_or(false);
+                let unauth = request
+                    .headers()
+                    .get("x-api-key")
+                    .map(|v| v == "bad")
+                    .unwrap_or(false);
                 if unauth {
-                    return Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::from("no")).unwrap();
+                    return Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Body::from("no"))
+                        .unwrap();
                 }
                 let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
                 let count = body.len() as u64;
@@ -160,14 +172,20 @@ mod tests {
                     .unwrap()
             }
         }));
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), hits, handle)
     }
 
     fn cred(key: &str) -> CountCredential {
-        CountCredential { api_key: Some(key.into()), authorization: None, anthropic_version: "2023-06-01".into() }
+        CountCredential {
+            api_key: Some(key.into()),
+            authorization: None,
+            anthropic_version: "2023-06-01".into(),
+        }
     }
 
     #[test]
@@ -197,7 +215,9 @@ mod tests {
         let (upstream, _hits, h) = fake_upstream().await;
         let client = count_client();
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"hello"}] });
-        let n = count_tokens(&client, &upstream, &cred("good"), &body).await.unwrap();
+        let n = count_tokens(&client, &upstream, &cred("good"), &body)
+            .await
+            .unwrap();
         assert!(n > 0);
         h.abort();
     }
@@ -220,10 +240,16 @@ mod tests {
         let app = Router::new().fallback(any(move |_req: Request<Body>| {
             let loc = format!("{target_for_redir}/v1/messages/count_tokens");
             async move {
-                Response::builder().status(StatusCode::FOUND).header("location", loc).body(Body::from("")).unwrap()
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header("location", loc)
+                    .body(Body::from(""))
+                    .unwrap()
             }
         }));
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         let rh = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let redirector = format!("http://{addr}");
@@ -232,8 +258,15 @@ mod tests {
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
         // Policy::none() → the 302 is returned as-is (not success) → Err, and target is never hit.
         let result = count_tokens(&client, &redirector, &cred("good"), &body).await;
-        assert!(result.is_err(), "3xx must be surfaced as an error, not followed");
-        assert_eq!(target_hits.load(Ordering::SeqCst), 0, "credential must never reach the redirect target");
+        assert!(
+            result.is_err(),
+            "3xx must be surfaced as an error, not followed"
+        );
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            0,
+            "credential must never reach the redirect target"
+        );
         rh.abort();
         th.abort();
     }
@@ -243,15 +276,23 @@ mod tests {
     async fn count_client_times_out_on_slow_upstream() {
         let app = Router::new().fallback(any(|_req: Request<Body>| async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            Response::builder().status(StatusCode::OK).body(Body::from("{}")).unwrap()
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("{}"))
+                .unwrap()
         }));
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         let sh = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let slow = format!("http://{addr}");
         // A short-timeout client stands in for the production 20s client; assert it returns fast.
-        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_millis(300)).build().unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
         let started = tokio::time::Instant::now();
         let result = count_tokens(&client, &slow, &cred("good"), &body).await;
@@ -265,11 +306,19 @@ mod tests {
     async fn missing_auth_makes_no_remote_call() {
         let (upstream, hits, h) = fake_upstream().await;
         let client = count_client();
-        let no_auth = CountCredential { api_key: None, authorization: None, anthropic_version: "2023-06-01".into() };
+        let no_auth = CountCredential {
+            api_key: None,
+            authorization: None,
+            anthropic_version: "2023-06-01".into(),
+        };
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
         let result = count_tokens(&client, &upstream, &no_auth, &body).await;
         assert!(result.is_err(), "missing auth must fail");
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "no remote call may be made without auth");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no remote call may be made without auth"
+        );
         h.abort();
     }
 }
