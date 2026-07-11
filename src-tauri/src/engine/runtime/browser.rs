@@ -407,18 +407,34 @@ fn require_webview(app: &AppHandle) -> Result<Webview, BrowserError> {
     webview(app).ok_or(BrowserError::NotOpen)
 }
 
-/// Best-effort current URL for a state reply. `Webview` (a child webview) has no
-/// page-title getter — title belongs to the window — so embedded state carries
-/// only the URL; the human reads the page title from the live page itself, and
-/// agents get it from `snapshot`.
-fn state_from(view: &Webview) -> BrowserState {
+/// State reply for `open`/`goto`, carrying the URL we just navigated to.
+///
+/// NEVER ask the native layer for the URL here: `WKWebView.URL` is nil until a
+/// navigation commits, and wry's `url_from_webview` (wry-0.55.1
+/// `wkwebview/mod.rs:1349`) unwraps it ON THE MAIN THREAD — for a freshly
+/// created `about:blank` webview that panic is deterministic, tao stops the
+/// event loop and re-raises on exit, and the whole app dies taking every agent
+/// session with it (task browser-crash-fix, reproduced 2026-07-11; app deaths
+/// of 2026-07-10). The navigation target is what the caller asked for and is
+/// always available race-free. `Webview` (a child webview) has no page-title
+/// getter — title belongs to the window — so embedded state carries only the
+/// URL; agents read the live URL/title from `snapshot`.
+fn state_with_url(target: &Url) -> BrowserState {
     BrowserState {
         ok: true,
-        url: view.url().ok().map(|u| u.to_string()),
+        url: Some(target.to_string()),
         title: None,
         message: None,
     }
 }
+
+/// Exception-safe in-page probe for the LIVE URL (`status` only): a plain
+/// string (or null) result, never a throw — same contract as the other
+/// injected scripts. Evaluated through `eval_value`, so it is timeout-bounded
+/// and runs off the fragile native `WKWebView.URL` path entirely.
+const HREF_JS: &str = r#"(function () {
+  try { return String(location.href); } catch (e) { return null; }
+})()"#;
 
 /// Run one `eval_with_callback` round trip and parse its JSON result. Bridges
 /// the `Fn(String)` callback to async via a oneshot; the `Mutex<Option<_>>`
@@ -470,9 +486,9 @@ pub async fn open(
 ) -> Result<BrowserState, BrowserError> {
     let target = normalize_url(url)?;
     if let Some(view) = webview(app) {
-        view.navigate(target)
+        view.navigate(target.clone())
             .map_err(|e| BrowserError::Webview(e.to_string()))?;
-        return Ok(state_from(&view));
+        return Ok(state_with_url(&target));
     }
     let window = app
         .get_window("main")
@@ -480,7 +496,7 @@ pub async fn open(
     let (position, size) = resolve_bounds(bounds);
     let view = window
         .add_child(
-            WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(target)),
+            WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(target.clone())),
             position,
             size,
         )
@@ -490,7 +506,7 @@ pub async fn open(
     // never paints over whatever tab the human is on; the mounted Browser tab
     // shows it via set_visible.
     let _ = view.hide();
-    Ok(state_from(&view))
+    Ok(state_with_url(&target))
 }
 
 /// Navigate the current browser window. Errors with [`BrowserError::NotOpen`]
@@ -498,15 +514,30 @@ pub async fn open(
 pub async fn goto(app: &AppHandle, url: &str) -> Result<BrowserState, BrowserError> {
     let target = normalize_url(url)?;
     let view = require_webview(app)?;
-    view.navigate(target)
+    view.navigate(target.clone())
         .map_err(|e| BrowserError::Webview(e.to_string()))?;
-    Ok(state_from(&view))
+    Ok(state_with_url(&target))
 }
 
-/// Report the current URL/title, or a graceful `ok:false` when nothing is open.
+/// Report the current URL, or a graceful `ok:false` when nothing is open.
+/// The URL comes from an in-page `location.href` probe (see [`HREF_JS`]), not
+/// the native getter; a page that cannot answer yet (still creating/loading,
+/// or the probe times out) degrades to `url: None` instead of failing —
+/// status is informational and must never hard-error on an open browser.
 pub async fn status(app: &AppHandle) -> Result<BrowserState, BrowserError> {
     match webview(app) {
-        Some(view) => Ok(state_from(&view)),
+        Some(view) => {
+            let url = eval_value(&view, HREF_JS.to_owned())
+                .await
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned));
+            Ok(BrowserState {
+                ok: true,
+                url,
+                title: None,
+                message: None,
+            })
+        }
         None => Ok(BrowserState {
             ok: false,
             url: None,
