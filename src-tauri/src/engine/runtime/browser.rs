@@ -377,6 +377,19 @@ fn type_js(selector: &str, text: &str) -> String {
 /// Construction and execution are separated so a RUNTIME throw from the
 /// expression path propagates to the outer catch instead of re-running the
 /// source's side effects through the fallback.
+///
+/// The completion value is forced JSON-safe via a `JSON.stringify` round trip
+/// BEFORE it reaches the native bridge: WebKit marshals a `Date` result to
+/// `NSDate` and non-finite numbers to non-finite `NSNumber`s, and wry's
+/// completion handler feeds the marshalled value straight into
+/// `NSJSONSerialization`, which throws `NSInvalidArgumentException` for both
+/// ("Invalid type in JSON write (__NSTaggedDate)") — an uncaught ObjC
+/// exception that kills the whole app and never reaches the Rust panic hook
+/// (task browser-eval-json-safety, reproduced 2026-07-11 with `new Date()`
+/// and `NaN`). After the round trip a Date answers as its ISO string,
+/// NaN/Infinity as null, unstringifiable values (BigInt, cycles) as
+/// `{ __error }` via the outer catch, and a value stringify erases entirely
+/// (function, symbol) as null.
 fn eval_js(js: &str) -> String {
     format!(
         r#"(function () {{
@@ -387,7 +400,9 @@ fn eval_js(js: &str) -> String {
       fn = new Function("return (" + src + "\n)");
     }} catch (e) {{}}
     var r = fn ? fn() : (0, eval)(src);
-    return r === undefined ? null : r;
+    if (r === undefined) return null;
+    var s = JSON.stringify(r);
+    return s === undefined ? null : JSON.parse(s);
   }} catch (e) {{
     return {{ __error: String(e && e.message ? e.message : e) }};
   }}
@@ -916,8 +931,27 @@ mod tests {
              expression path must NOT re-run the source through the fallback"
         );
         assert!(
-            js.contains("r === undefined ? null : r"),
+            js.contains("if (r === undefined) return null;"),
             "undefined results must normalize to null (JSON-serializable)"
+        );
+    }
+
+    #[test]
+    fn eval_js_forces_the_completion_value_json_safe() {
+        let js = eval_js("new Date()");
+        // The stringify round trip is the app-crash guard: a Date/NaN completion
+        // value marshals to NSDate / non-finite NSNumber, and wry hands it to
+        // NSJSONSerialization, whose NSInvalidArgumentException kills the whole
+        // app (reproduced 2026-07-11, task browser-eval-json-safety). The value
+        // must be flattened to JSON IN THE PAGE, before the native bridge.
+        assert!(
+            js.contains("var s = JSON.stringify(r);"),
+            "completion value must go through a JSON.stringify round trip"
+        );
+        assert!(
+            js.contains("return s === undefined ? null : JSON.parse(s);"),
+            "stringify-erased values (function/symbol) must answer null, \
+             everything else the parsed JSON"
         );
     }
 
