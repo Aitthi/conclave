@@ -52,11 +52,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn positive_context_window_tokens(value: Option<&str>) -> Option<i64> {
-    let tokens = value?.trim().parse::<i64>().ok()?;
-    (tokens > 0).then_some(tokens)
-}
-
 fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
     if context_window == Some("1m") {
         format!("{model}[1m]")
@@ -65,20 +60,45 @@ fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
     }
 }
 
-fn append_codex_context_window_config(launch: &mut String, context_window: Option<&str>) {
-    if let Some(tokens) = positive_context_window_tokens(context_window) {
-        let auto_compact_token_limit = (i128::from(tokens) * 95 / 100) as i64;
-        launch.push_str(&format!(
-            " -c {}",
-            shell_quote(&format!("model_context_window={tokens}"))
-        ));
-        launch.push_str(&format!(
-            " -c {}",
-            shell_quote(&format!(
-                "model_auto_compact_token_limit={auto_compact_token_limit}"
-            ))
-        ));
+/// Emit codex's numeric context-window `-c` overrides for `model`, resolved
+/// through [`crate::engine::codex_models::codex_model_context_window`] (plan
+/// ruling R2 — "Auto" derives the value from the model, the Builder no
+/// longer collects a manual number and any stored `context_window` value is
+/// ignored at launch). Emits NOTHING for an unknown model so codex's own
+/// default wins, matching the old sentinel/invalid-value behavior.
+fn append_codex_context_window_config(launch: &mut String, model: Option<&str>) {
+    let Some(tokens) =
+        crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
+    else {
+        return;
+    };
+    let auto_compact_token_limit = (i128::from(tokens) * 95 / 100) as i64;
+    launch.push_str(&format!(
+        " -c {}",
+        shell_quote(&format!("model_context_window={tokens}"))
+    ));
+    launch.push_str(&format!(
+        " -c {}",
+        shell_quote(&format!(
+            "model_auto_compact_token_limit={auto_compact_token_limit}"
+        ))
+    ));
+}
+
+/// Resolve the pre-detection fallback context limit for a freshly spawned
+/// session (plan ruling R2b/R4): for codex agents, the per-model table wins
+/// and any STORED `context_limit` is ignored ("auto" wins, matching the
+/// launch-arg side); every other `cli_kind` keeps the previous
+/// stored-value-then-default resolution untouched. The transcript-detected
+/// window (`runtime::transcript_context`) still takes precedence over this
+/// fallback once a real reading lands — this only seeds the meter before
+/// that happens.
+fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Option<i64>) -> i64 {
+    if cli_kind == "codex" {
+        return crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
+            .unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind));
     }
+    stored.unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind))
 }
 
 /// The `ANTHROPIC_BASE_URL` override routing an agent through the loopback
@@ -729,7 +749,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
                 }
-                append_codex_context_window_config(&mut launch, def.context_window.as_deref());
+                append_codex_context_window_config(&mut launch, def.model.as_deref());
                 // Codex's mode flags differ from claude's; map the shared
                 // permission_mode value to them. "auto" = never pause for
                 // approval but keep the sandbox; "bypass" = --yolo (alias of
@@ -857,9 +877,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 &ws.folder_path,
                 &cli_kind,
                 started_at,
-                session
-                    .context_limit
-                    .unwrap_or_else(|| repo::session::default_context_limit_for(&cli_kind)),
+                resolve_session_context_limit(
+                    &cli_kind,
+                    def.model.as_deref(),
+                    session.context_limit,
+                ),
             );
             Some((backend.output_rx, epoch, Some(transcript_ctx)))
         }
@@ -937,6 +959,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             id.clone(),
             session.id.clone(),
             def.cli_kind.clone(),
+            def.model.clone(),
             output_rx,
             track_context,
             transcript_ctx,
@@ -1009,18 +1032,22 @@ async fn forward_session_output(
     instance_id: String,
     session_id: String,
     cli_kind: Option<String>,
+    model: Option<String>,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
     track_context: bool,
     transcript_ctx: Option<TranscriptPollContext>,
     epoch: u64,
 ) {
     let session_row = repo::session::get(&db, &session_id).await.ok().flatten();
-    let limit = session_row
-        .as_ref()
-        .and_then(|s| s.context_limit)
-        .unwrap_or_else(|| {
-            repo::session::default_context_limit_for(cli_kind.as_deref().unwrap_or(""))
-        });
+    // Same resolution as the spawn-time transcript_ctx fallback (R2b/R4): for
+    // codex this seeds `TranscriptMeterState.limit` below with the per-model
+    // table value, ignoring any stored session.context_limit, before the
+    // transcript reader's first real poll lands.
+    let limit = resolve_session_context_limit(
+        cli_kind.as_deref().unwrap_or(""),
+        model.as_deref(),
+        session_row.as_ref().and_then(|s| s.context_limit),
+    );
     if track_context {
         // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
         // is the baseline at the previous persist, so we only write every
@@ -1579,41 +1606,82 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn codex_context_window_config_appends_numeric_override() {
+    fn codex_context_window_config_appends_table_override_for_known_model() {
         let mut launch = String::from("codex --model 'gpt-5.3-codex-spark'");
-        append_codex_context_window_config(&mut launch, Some("400000"));
+        append_codex_context_window_config(&mut launch, Some("gpt-5.3-codex-spark"));
 
+        // 128_000 * 95 / 100 = 121_600.
         assert!(
-            launch.contains(" -c 'model_context_window=400000'"),
+            launch.contains(" -c 'model_context_window=128000'"),
             "{launch}"
         );
         assert!(
-            launch.contains(" -c 'model_auto_compact_token_limit=380000'"),
+            launch.contains(" -c 'model_auto_compact_token_limit=121600'"),
             "{launch}"
         );
     }
 
     #[test]
-    fn codex_context_window_config_ignores_claude_sentinels() {
-        for value in [
-            Some("1m"),
-            Some("200k"),
-            Some("0"),
-            Some("-1"),
-            Some("nonnumeric"),
-            None,
-        ] {
+    fn codex_context_window_config_emits_nothing_for_unknown_model() {
+        for model in [Some("some-future-model"), Some(""), None] {
             let mut launch = String::from("codex");
-            append_codex_context_window_config(&mut launch, value);
+            append_codex_context_window_config(&mut launch, model);
             assert!(
                 !launch.contains("model_context_window"),
-                "sentinel/invalid value must not become a Codex context override: {launch}"
+                "unknown/absent model must not become a Codex context override: {launch}"
             );
             assert!(
                 !launch.contains("model_auto_compact_token_limit"),
-                "sentinel/invalid value must not become a Codex auto-compact override: {launch}"
+                "unknown/absent model must not become a Codex auto-compact override: {launch}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_session_context_limit_codex_uses_table_and_ignores_stored() {
+        // Known model: table value wins even when a stale stored value is
+        // present (R4 — stored codex context_limit is ignored at launch).
+        assert_eq!(
+            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999)),
+            1_050_000
+        );
+        // Unknown model: falls back to the conservative codex default, still
+        // ignoring the stored value.
+        assert_eq!(
+            resolve_session_context_limit("codex", Some("some-future-model"), Some(999)),
+            repo::session::default_context_limit_for("codex")
+        );
+        // No model at all: same conservative fallback.
+        assert_eq!(
+            resolve_session_context_limit("codex", None, Some(999)),
+            repo::session::default_context_limit_for("codex")
+        );
+    }
+
+    #[test]
+    fn resolve_session_context_limit_non_codex_keeps_stored_value() {
+        assert_eq!(
+            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42)),
+            42
+        );
+        assert_eq!(
+            resolve_session_context_limit("claude-code", None, None),
+            repo::session::default_context_limit_for("claude-code")
+        );
+    }
+
+    #[test]
+    fn codex_context_window_config_ignores_stored_context_window_entirely() {
+        // R2/R4: the function no longer takes a stored `context_window` value
+        // at all — only the model resolves the override, proving the old
+        // stored numeric/sentinel value ("400000", "1m", "200k", ...) can no
+        // longer influence codex's launch args.
+        let mut launch = String::from("codex --model 'gpt-5.4'");
+        append_codex_context_window_config(&mut launch, Some("gpt-5.4"));
+        assert!(
+            launch.contains(" -c 'model_context_window=1050000'"),
+            "{launch}"
+        );
     }
 
     /// Env injection for the context proxy (agent-proxy Task 11): only the
@@ -1809,6 +1877,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             None,
+            None,
             rx,
             true, // chat backend — context tracking enabled.
             None,
@@ -1853,6 +1922,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             rx,
             true, // chat backend — context tracking enabled.
@@ -1908,6 +1978,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             rx,
             true, // chat backend — context tracking enabled.
@@ -1978,6 +2049,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             rx,
             false, // CLI/PTY backend — context tracking disabled.
@@ -2109,6 +2181,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             Some("codex".into()),
+            None,
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
             Some(transcript_ctx),
@@ -2134,6 +2207,156 @@ mod tests {
             after.context_limit,
             Some(8_000),
             "CLI transcript reading must persist the transcript context limit"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+    }
+
+    /// Regression for the miss Mellow's review caught (challenge f00b5263,
+    /// upheld 2026-07-11): `forward_session_output` must resolve its own
+    /// pre-poll `limit` through [`resolve_session_context_limit`] — the same
+    /// helper the spawn-time `TranscriptPollContext::new` call uses — instead
+    /// of the plain stored-value-then-generic-default fallback. Exercised
+    /// with a codex transcript file whose `token_count` event carries NO
+    /// `model_context_window` field (the harness didn't report one, forcing
+    /// the reader onto `fallback_limit`) and a deliberately WRONG stored
+    /// `session.context_limit` (999) pre-seeded before the forwarder runs —
+    /// proving the persisted limit comes from the gpt-5.4 table entry
+    /// (1_050_000), not the stale stored value and not the generic
+    /// [`repo::session::DEFAULT_CONTEXT_LIMIT`] (200_000).
+    #[tokio::test]
+    async fn forwarder_codex_known_model_seeds_table_limit_not_stored_or_default() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let ws = workspace_agent::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("workspace agent exists");
+        let workspace_row = workspace::get(&state.db, &ws.workspace_id)
+            .await
+            .expect("workspace get failed")
+            .expect("workspace exists");
+
+        // Deliberately wrong stored value — proves R4 (stored codex context
+        // limit is ignored) rather than merely "some prior default".
+        repo::session::set_context_reading(&state.db, &session.id, 0, 999)
+            .await
+            .expect("seed stale stored context_limit");
+
+        let claude_root = temp_root("forwarder-model-seed-claude");
+        let codex_root = temp_root("forwarder-model-seed-codex");
+        let codex_file = codex_root.join("2026/07/11/rollout.jsonl");
+        std::fs::create_dir_all(codex_file.parent().expect("codex parent dir"))
+            .expect("create codex dir");
+        write_jsonl(
+            &codex_file,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace_row.folder_path.clone(),
+                        "id": "codex-session-id-not-conclave-instance-id",
+                        "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": format!("You are a Conclave agent, and your own agent id is {id}.")
+                            }
+                        ]
+                    }
+                }),
+                // NO "model_context_window" field — the harness didn't
+                // report one, so the reader must fall back to the
+                // constructed TranscriptPollContext's fallback_limit.
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": "2099-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": { "total_tokens": 42 },
+                            "total_token_usage": { "total_tokens": 42 }
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let started_at = DateTime::parse_from_rfc3339(&session.started_at)
+            .expect("session started_at must parse")
+            .with_timezone(&Utc);
+        // `with_reader` (test-only) so the reader scans the temp roots above
+        // instead of the real `~/.codex/sessions` — but `fallback_limit` is
+        // resolved through the SAME helper the production spawn-time
+        // `TranscriptPollContext::new` call site uses, proving the wiring.
+        let transcript_ctx = TranscriptPollContext::with_reader(
+            runtime::transcript_context::TranscriptContextReader::new(
+                runtime::transcript_context::TranscriptContextConfig {
+                    claude_projects_root: claude_root.clone(),
+                    codex_sessions_root: codex_root.clone(),
+                    fallback_limit: resolve_session_context_limit(
+                        "codex",
+                        Some("gpt-5.4"),
+                        Some(999),
+                    ),
+                },
+            ),
+            &workspace_row.folder_path,
+            "codex",
+            started_at,
+        );
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            Some("codex".into()),
+            Some("gpt-5.4".into()),
+            rx,
+            false, // CLI/PTY backend — transcript-backed context enabled.
+            Some(transcript_ctx),
+            epoch,
+        ));
+
+        tx.send("prompt".to_string())
+            .await
+            .expect("send chunk failed");
+        drop(tx);
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_limit,
+            Some(1_050_000),
+            "codex + known model (gpt-5.4) must seed the table's context limit, \
+             not the stale stored value (999) or the generic default (200_000)"
         );
 
         let _ = std::fs::remove_dir_all(&claude_root);

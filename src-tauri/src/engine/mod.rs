@@ -1,5 +1,6 @@
 pub mod agentctx;
 pub mod bus;
+pub mod codex_models;
 pub mod commands;
 pub mod db;
 pub mod error;
