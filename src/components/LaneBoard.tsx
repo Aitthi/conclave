@@ -89,14 +89,6 @@ function columnAccent(state: TaskState): string {
   return [...COLUMNS, ABANDONED_COLUMN].find((column) => column.state === state)?.accent ?? FAINT;
 }
 
-// Context pressure → meter colour. Honest graded signal for a whole swarm: amber
-// warns, rose = compact imminent (per-session ContextBars is always accent).
-function meterColor(pct: number): string {
-  if (pct >= 88) return ROSE;
-  if (pct >= 68) return WORKING;
-  return "var(--color-accent)";
-}
-
 // The gate's human label, derived client-side from the command (no stored label —
 // lead ruling). Maps the usual gate commands to a short name.
 function gateLabel(cmd: string): string {
@@ -473,81 +465,81 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
 
 // ── Telemetry strip ──────────────────────────────────────────────────────────
 
-function Meter({ t }: { t: AgentTelemetry }) {
-  const pct = t.ctx ? Math.min(100, Math.round((t.ctx.tokens / t.ctx.limit) * 100)) : null;
-  const color = pct != null ? meterColor(pct) : FAINT;
+function StatCounter({ n, label, color, live }: { n: number; label: string; color: string; live?: boolean }) {
   return (
-    <div
-      className="flex items-center gap-2 shrink-0"
-      title={
-        t.ctx
-          ? `${t.ident.name} — ${t.ctx.tokens.toLocaleString()} / ${t.ctx.limit.toLocaleString()} tokens${
-              t.ctx.estimated ? " (estimate)" : ""
-            }`
-          : `${t.ident.name} — no context reading yet`
-      }
-    >
-      <Avatar ident={t.ident} />
-      <span className="text-[0.72rem] font-medium text-text-primary">{t.ident.name}</span>
-      {t.working && (
-        <LoaderCircle size={10} className="animate-spin shrink-0" style={{ color: WORKING }} />
+    <div className="flex items-baseline gap-1.5 shrink-0">
+      {live && (
+        <span
+          className="w-[7px] h-[7px] rounded-full self-center shrink-0"
+          style={{
+            background: n > 0 ? LIVE : FAINT,
+            boxShadow: n > 0 ? `0 0 0 3px color-mix(in srgb, var(--color-success) 16%, transparent)` : undefined,
+          }}
+        />
       )}
-      <span
-        className="w-16 h-1.5 rounded-full overflow-hidden shrink-0"
-        style={{ background: BORDER }}
-      >
-        {pct != null && (
-          <span
-            className="block h-full rounded-full"
-            style={{ width: `${pct}%`, background: color }}
-          />
-        )}
+      <span className="text-[0.95rem] font-semibold tabular-nums tracking-[-0.02em]" style={{ color }}>
+        {n}
       </span>
-      <span
-        className="font-mono text-[0.66rem] tabular-nums w-8 text-right"
-        style={{ color }}
-      >
-        {pct != null ? `${pct}%` : "—"}
-      </span>
+      <span className="text-[0.6rem] uppercase tracking-[0.08em] text-text-tertiary">{label}</span>
     </div>
   );
 }
 
 function TelemetryStrip({ telemetry }: { telemetry: AgentTelemetry[] }) {
+  const live = telemetry.length;
   const working = telemetry.filter((t) => t.working).length;
+  const workingName = telemetry.find((t) => t.working)?.ident.name;
   const peak = telemetry.reduce((mx, t) => {
     const p = t.ctx ? Math.round((t.ctx.tokens / t.ctx.limit) * 100) : 0;
     return Math.max(mx, p);
   }, 0);
+  const hasLive = live > 0;
   return (
     <div
-      className="shrink-0 flex items-center gap-5 px-5 h-14 border-b overflow-x-auto scroll-thin"
+      className="shrink-0 flex items-center gap-4 px-5 h-12 border-b"
       style={{ borderColor: BORDER, background: "var(--color-sidebar)" }}
     >
-      <div className="flex flex-col shrink-0 pr-1">
-        <span className="text-[0.62rem] tracking-[0.09em] uppercase font-semibold text-text-tertiary">
-          Context
-        </span>
-        <span className="text-[0.7rem] leading-tight text-text-tertiary">
-          {telemetry.length} live · <span style={{ color: WORKING }}>{working} working</span>
-          {peak >= 88 && (
-            <>
-              {" · "}
-              <span style={{ color: ROSE }}>peak {peak}%</span>
-            </>
-          )}
-        </span>
-      </div>
-      <span className="w-px h-7 shrink-0" style={{ background: BORDER }} />
-      {telemetry.length === 0 ? (
-        <span className="text-[0.72rem] text-text-tertiary">No live agents</span>
-      ) : (
-        <div className="flex items-center gap-4">
-          {telemetry.map((t) => (
-            <Meter key={t.instanceId} t={t} />
+      <StatCounter n={live} label="live" color="var(--color-text-primary)" live />
+      <StatCounter
+        n={working}
+        label="working"
+        color={working > 0 ? WORKING : "var(--color-text-primary)"}
+      />
+      <span className="w-px h-6 shrink-0" style={{ background: BORDER }} />
+      {hasLive && (
+        <div className="flex items-center shrink-0">
+          {telemetry.slice(0, 6).map((t, i) => (
+            <span
+              key={t.instanceId}
+              className="w-[22px] h-[22px] rounded-[6px] grid place-items-center text-[10px] font-bold text-white"
+              style={{
+                background: t.ident.color,
+                marginLeft: i === 0 ? 0 : -6,
+                boxShadow: "0 0 0 2px var(--color-sidebar)",
+              }}
+              title={t.ident.name}
+            >
+              {t.ident.initials}
+            </span>
           ))}
         </div>
       )}
+      <span className="ml-auto text-[0.72rem] truncate" style={{ color: FAINT }}>
+        {hasLive ? (
+          <>
+            {workingName ? `${workingName} working · ` : ""}
+            {live} agent{live === 1 ? "" : "s"} live
+            {peak >= 88 && (
+              <>
+                {" · "}
+                <span style={{ color: ROSE }}>peak {peak}%</span>
+              </>
+            )}
+          </>
+        ) : (
+          "No agents live"
+        )}
+      </span>
     </div>
   );
 }
