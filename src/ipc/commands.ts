@@ -22,7 +22,7 @@ import type {
   TaskEvent,
   Artifact,
   DesignInfo,
-  BrowserStatus,
+  BrowserState,
   BrowserSnapshot,
   BrowserActionResult,
   BrowserBounds,
@@ -346,16 +346,18 @@ export interface Commands {
   };
 
   // ── In-app browser agent tools (runtime::browser) ───────────────────────
-  "browser.open": { req: { url: string; bounds?: BrowserBounds }; res: BrowserStatus };
-  "browser.goto": { req: { url: string }; res: BrowserStatus };
-  "browser.status": { req: void; res: BrowserStatus };
+  "browser.open": { req: { url: string; bounds?: BrowserBounds }; res: BrowserActionResult };
+  "browser.goto": { req: { tabId: string; url: string }; res: BrowserState };
+  "browser.status": { req: void; res: BrowserState };
+  "browser.newTab": { req: void; res: { tabId: string } };
+  "browser.setActive": { req: { tabId: string }; res: BrowserState };
   "browser.snapshot": { req: { maxText?: number } | void; res: BrowserSnapshot };
   "browser.click": { req: { selector: string }; res: BrowserActionResult };
   "browser.type": { req: { selector: string; text: string }; res: BrowserActionResult };
   "browser.eval": { req: { js: string }; res: unknown };
-  "browser.close": { req: void; res: BrowserStatus };
-  "browser.setBounds": { req: BrowserBounds; res: BrowserStatus };
-  "browser.setVisible": { req: { visible: boolean }; res: BrowserStatus };
+  "browser.close": { req: { tabId: string }; res: BrowserState };
+  "browser.setBounds": { req: BrowserBounds; res: void };
+  "browser.setVisible": { req: { visible: boolean }; res: void };
   "browser.screenshot": { req: { path: string; width?: number; height?: number }; res: BrowserShot };
 }
 
@@ -490,11 +492,13 @@ export const ipc = {
     open: (req: Commands["browser.open"]["req"]) => call("browser.open", req),
     goto: (req: Commands["browser.goto"]["req"]) => call("browser.goto", req),
     status: () => call("browser.status"),
+    newTab: () => call("browser.newTab"),
+    setActive: (req: Commands["browser.setActive"]["req"]) => call("browser.setActive", req),
     snapshot: (req?: Commands["browser.snapshot"]["req"]) => call("browser.snapshot", req),
     click: (req: Commands["browser.click"]["req"]) => call("browser.click", req),
     type: (req: Commands["browser.type"]["req"]) => call("browser.type", req),
     eval: (req: Commands["browser.eval"]["req"]) => call("browser.eval", req),
-    close: () => call("browser.close"),
+    close: (req: Commands["browser.close"]["req"]) => call("browser.close", req),
     setBounds: (req: Commands["browser.setBounds"]["req"]) => call("browser.setBounds", req),
     setVisible: (req: Commands["browser.setVisible"]["req"]) => call("browser.setVisible", req),
     screenshot: (req: Commands["browser.screenshot"]["req"]) => call("browser.screenshot", req),
