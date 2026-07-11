@@ -19,6 +19,8 @@ import {
   Scale,
   ShieldQuestion,
   Plus,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { ipc, useTaskChanged, useEvent } from "../ipc";
 import type {
@@ -73,6 +75,9 @@ const LANE_BG =
   "linear-gradient(180deg, color-mix(in srgb, var(--color-overlay) 3%, transparent), color-mix(in srgb, var(--color-overlay) 1%, transparent))";
 // Soft amber glow ring for the in-progress status dot (proto .dot working).
 const WORKING_GLOW = "0 0 0 3px color-mix(in srgb, var(--color-status-working) 15%, transparent)";
+// Full lane width — sized so all five lanes (four full + the collapsed Merged
+// rail) stay in frame beside the app rail at a laptop width (D5 terminus).
+const LANE_W = 252;
 
 // Column order + accent, mirroring the canon. `abandoned` is off the happy path
 // — surfaced only through the "All lanes" toggle, never a sixth always-on column.
@@ -306,6 +311,7 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
   // ── header controls ────────────────────────────────────────────────────────
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false); // reveal the Abandoned column
+  const [mergedExpanded, setMergedExpanded] = useState(false); // D5: Merged terminus collapsed by default
   const q = query.trim().toLowerCase();
 
   const columns = showAll ? [...COLUMNS, ABANDONED_COLUMN] : COLUMNS;
@@ -429,17 +435,30 @@ export function LaneBoard({ workspaceId, workspaceName, onClose }: LaneBoardProp
         {viewMode === "board" ? (
           <div className="flex-1 min-h-0 flex">
             <div className="flex-1 min-h-0 overflow-x-auto scroll-thin">
-              <div className="h-full flex gap-3.5 px-5 pt-3 pb-4">
-                {columns.map((c) => (
-                  <Column
-                    key={c.state}
-                    col={c}
-                    tasks={visibleTasks}
-                    resolve={resolve}
-                    selectedSlug={selectedSlug}
-                    onOpenTask={setSelectedSlug}
-                  />
-                ))}
+              <div className="h-full flex gap-3 px-4 pt-3 pb-4">
+                {columns.map((c) =>
+                  c.state === "merged" ? (
+                    <MergedLane
+                      key={c.state}
+                      col={c}
+                      tasks={visibleTasks}
+                      resolve={resolve}
+                      selectedSlug={selectedSlug}
+                      onOpenTask={setSelectedSlug}
+                      expanded={mergedExpanded}
+                      onToggle={() => setMergedExpanded((v) => !v)}
+                    />
+                  ) : (
+                    <Column
+                      key={c.state}
+                      col={c}
+                      tasks={visibleTasks}
+                      resolve={resolve}
+                      selectedSlug={selectedSlug}
+                      onOpenTask={setSelectedSlug}
+                    />
+                  ),
+                )}
               </div>
             </div>
             <TaskDetailPane
@@ -1336,8 +1355,8 @@ function Column({
   const working = col.state === "in_progress";
   return (
     <section
-      className="w-[276px] shrink-0 flex flex-col min-h-0 rounded-[14px]"
-      style={{ background: LANE_BG, border: `1px solid ${BORDER}` }}
+      className="shrink-0 flex flex-col min-h-0 rounded-[14px]"
+      style={{ width: LANE_W, background: LANE_BG, border: `1px solid ${BORDER}` }}
     >
       <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-2.5 shrink-0">
         <span
@@ -1380,6 +1399,101 @@ function Column({
           ))
         )}
       </div>
+    </section>
+  );
+}
+
+// ── Merged terminus lane — collapsed to a rail by default (spec D5) ───────────
+
+function MergedLane({
+  col,
+  tasks,
+  resolve,
+  selectedSlug,
+  onOpenTask,
+  expanded,
+  onToggle,
+}: {
+  col: { state: TaskState; label: string; accent: string };
+  tasks: TaskListRow[];
+  resolve: (id: string | undefined) => Identity | null;
+  selectedSlug: string | null;
+  onOpenTask: (slug: string) => void;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const items = tasks.filter((t) => t.state === col.state);
+  return (
+    <section
+      className="shrink-0 flex flex-col min-h-0 rounded-[14px] overflow-hidden transition-[width] duration-200 ease-out"
+      style={{ width: expanded ? LANE_W : 46, background: LANE_BG, border: `1px solid ${BORDER}` }}
+    >
+      {expanded ? (
+        <>
+          <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-2.5 shrink-0">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col.accent }} />
+            <span className="text-[0.76rem] font-semibold tracking-[0.01em] text-text-primary">
+              {col.label}
+            </span>
+            <span
+              className="font-mono text-[0.62rem] tabular-nums rounded-full px-2 py-px min-w-[20px] text-center"
+              style={{ color: FAINT, background: "color-mix(in srgb, var(--color-overlay) 5%, transparent)" }}
+            >
+              {items.length}
+            </span>
+            <button
+              onClick={onToggle}
+              aria-label="Collapse Merged lane"
+              title="Collapse"
+              className="ml-auto w-[22px] h-[22px] grid place-items-center rounded-md text-text-tertiary hover:bg-overlay/[0.06] hover:text-text-secondary transition-colors"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto scroll-thin flex flex-col gap-2 px-2.5 pb-2.5 min-h-0">
+            {items.length === 0 ? (
+              <div
+                className="mx-1 mt-1 rounded-[10px] px-3 py-5 text-center text-[0.7rem] text-text-tertiary"
+                style={{ border: `1px dashed ${HAIR2}` }}
+              >
+                No tasks
+              </div>
+            ) : (
+              items.map((t) => (
+                <Card
+                  key={t.id}
+                  t={t}
+                  resolve={resolve}
+                  selected={selectedSlug === t.slug}
+                  onOpenTask={onOpenTask}
+                />
+              ))
+            )}
+          </div>
+        </>
+      ) : (
+        <button
+          onClick={onToggle}
+          title={`${col.label} (${items.length}) — click to expand`}
+          aria-label={`Expand ${col.label} lane`}
+          className="group flex-1 w-full flex flex-col items-center gap-3 py-3.5"
+        >
+          <ChevronLeft
+            size={14}
+            className="text-text-tertiary group-hover:text-text-secondary transition-colors shrink-0"
+          />
+          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: col.accent }} />
+          <span className="[writing-mode:vertical-rl] text-[0.74rem] font-semibold tracking-[0.02em] text-text-secondary select-none">
+            {col.label}
+          </span>
+          <span
+            className="mt-auto font-mono text-[0.62rem] tabular-nums rounded-full px-1.5 py-0.5 min-w-[20px] text-center"
+            style={{ color: FAINT, background: "color-mix(in srgb, var(--color-overlay) 5%, transparent)" }}
+          >
+            {items.length}
+          </span>
+        </button>
+      )}
     </section>
   );
 }
