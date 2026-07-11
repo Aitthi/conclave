@@ -315,6 +315,16 @@ export function AppShell() {
   // center screens it carries its OWN nav rail with a "Close Browser" button,
   // so collapsing the app Rail + Roster leaves the user a way back and never
   // strands them. Gate on an active workspace to mirror the other slot flags.
+  //
+  // INVARIANT (Mellow, review of 620482b): this does NOT also require the other
+  // center-screen flags to be false, unlike slotFullWindow (which gates on
+  // workspacePaneVisible). Safe today because every setter of showChat/
+  // showBlackboard/showMemory/showLaneBoard is reached from the Roster (inert
+  // while collapsed) or a menu path that clears showBrowser first — so browser
+  // can never be latent behind a peer center screen. If you add a NEW entry
+  // point to those four flags that does NOT clear showBrowser, add
+  // `&& !centerScreenOpen`-style exclusivity here (browser is last in the
+  // render chain, so a peer flag would win the branch while this stays true).
   const browserFullWindow = showBrowser && !!activeWorkspaceId;
 
   // Sidebars (Rail + Roster) collapse to 0 width for canvas-slot full-window
