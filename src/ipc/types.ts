@@ -69,6 +69,9 @@ export interface AgentDefinition {
   /** Token filter (rtk) toggle — `null`/absent means enabled (default ON).
    *  Claude agents only (wire name contract: DB `rtk_enabled`). */
   rtkEnabled?: boolean | null;
+  /** Context proxy toggle — `null`/absent means enabled (default ON).
+   *  Claude agents only; NULL = ON (rtk-parity). DB `proxy_enabled`. */
+  proxyEnabled?: boolean | null;
   /** Annotated by `agentDef.list`: the FULL set of skill ids (builtin first,
    *  then attached custom, matching the launch-snapshot ordering used by
    *  `repo::skill::content_for_agent`) a `cli` agent would use if launched
