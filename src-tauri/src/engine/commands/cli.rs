@@ -778,109 +778,41 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         },
 
         // ── browser (in-app browser agent tools) ──────────────────────────
-        // `browser <open|goto|status|snapshot|click|type|eval|close>`. URL
-        // scheme normalization happens server-side in `runtime::browser`; this
-        // only maps verbs → router commands + payloads. Output is JSON.
-        "browser" => match argv.get(1).map(String::as_str) {
-            Some("open") => {
-                if argv.len() != 3 {
-                    return Err(AppError::Invalid("cli: browser open <url>".into()));
+        // `browser <open|goto|status|snapshot|click|type|eval|close>`. Agent
+        // verbs auto-scope to the caller's OWN tab: `conclave-cli` injects the
+        // server-trusted caller id (from CONCLAVE_INSTANCE_ID) POSITIONALLY at
+        // argv[2] — right after the verb, the same idiom as `task claim` — so
+        // free-text verb args (eval/type) can NEVER be mistaken for it
+        // (anti-spoof). We splice that id out here so the per-verb parsing in
+        // `map_browser_verb` sees the ORIGINAL positional shape, then re-attach
+        // it as the trusted `callerId`. `status` is a global read (no id).
+        "browser" => {
+            let verb = argv.get(1).map(String::as_str);
+            let (caller_id, cleaned): (Option<String>, Vec<String>) = if verb == Some("status") {
+                (None, argv.to_vec())
+            } else {
+                let cid = argv.get(2).cloned();
+                let mut cleaned = Vec::with_capacity(argv.len().saturating_sub(1));
+                cleaned.push(argv[0].clone()); // "browser"
+                if let Some(v) = argv.get(1) {
+                    cleaned.push(v.clone()); // verb
                 }
-                Ok(("browser.open", json!({ "url": argv[2] })))
+                // Skip argv[2] (the injected caller id); keep the verb's own args.
+                cleaned.extend_from_slice(argv.get(3..).unwrap_or(&[]));
+                (cid, cleaned)
+            };
+            let (method, mut params) = map_browser_verb(&cleaned)?;
+            if let Some(cid) = caller_id.filter(|s| !s.is_empty()) {
+                match &mut params {
+                    Value::Object(map) => {
+                        map.insert("callerId".to_string(), Value::String(cid));
+                    }
+                    Value::Null => params = json!({ "callerId": cid }),
+                    _ => {}
+                }
             }
-            Some("goto") => {
-                if argv.len() != 3 {
-                    return Err(AppError::Invalid("cli: browser goto <url>".into()));
-                }
-                Ok(("browser.goto", json!({ "url": argv[2] })))
-            }
-            Some("status") => {
-                if argv.len() != 2 {
-                    return Err(AppError::Invalid("cli: browser status".into()));
-                }
-                Ok(("browser.status", Value::Null))
-            }
-            Some("snapshot") => {
-                let (max, rest) = take_flag(argv.get(2..).unwrap_or(&[]), "--max-text");
-                if !rest.is_empty() {
-                    return Err(AppError::Invalid(
-                        "cli: browser snapshot [--max-text N]".into(),
-                    ));
-                }
-                let mut params = json!({});
-                if let Some(raw) = max {
-                    let n = raw.parse::<i64>().map_err(|_| {
-                        AppError::Invalid(
-                            "cli: browser snapshot: --max-text expects an integer".into(),
-                        )
-                    })?;
-                    params["maxText"] = json!(n);
-                }
-                Ok(("browser.snapshot", params))
-            }
-            Some("click") => {
-                if argv.len() != 3 {
-                    return Err(AppError::Invalid("cli: browser click <selector>".into()));
-                }
-                Ok(("browser.click", json!({ "selector": argv[2] })))
-            }
-            Some("type") => {
-                let selector = argv.get(2).ok_or_else(|| {
-                    AppError::Invalid("cli: browser type <selector> <text...>".into())
-                })?;
-                if argv.len() < 4 {
-                    return Err(AppError::Invalid(
-                        "cli: browser type <selector> <text...>".into(),
-                    ));
-                }
-                let text = argv[3..].join(" ");
-                Ok(("browser.type", json!({ "selector": selector, "text": text })))
-            }
-            Some("eval") => {
-                if argv.len() < 3 {
-                    return Err(AppError::Invalid("cli: browser eval <js...>".into()));
-                }
-                Ok(("browser.eval", json!({ "js": argv[2..].join(" ") })))
-            }
-            Some("close") => {
-                if argv.len() != 2 {
-                    return Err(AppError::Invalid("cli: browser close".into()));
-                }
-                Ok(("browser.close", Value::Null))
-            }
-            Some("screenshot") => {
-                // path is positional (already absolute — the CLI resolved it in
-                // the agent's cwd); --width/--height are optional f64 flags.
-                let after = argv.get(2..).unwrap_or(&[]);
-                let (width_raw, after) = take_flag(after, "--width");
-                let (height_raw, after) = take_flag(&after, "--height");
-                let path = after.first().cloned().ok_or_else(|| {
-                    AppError::Invalid("cli: browser screenshot <path> [--width N] [--height N]".into())
-                })?;
-                if after.len() != 1 {
-                    return Err(AppError::Invalid(
-                        "cli: browser screenshot <path> [--width N] [--height N]".into(),
-                    ));
-                }
-                let mut params = json!({ "path": path });
-                if let Some(raw) = width_raw {
-                    let n = raw.parse::<f64>().map_err(|_| {
-                        AppError::Invalid("cli: browser screenshot: --width expects a number".into())
-                    })?;
-                    params["width"] = json!(n);
-                }
-                if let Some(raw) = height_raw {
-                    let n = raw.parse::<f64>().map_err(|_| {
-                        AppError::Invalid("cli: browser screenshot: --height expects a number".into())
-                    })?;
-                    params["height"] = json!(n);
-                }
-                Ok(("browser.screenshot", params))
-            }
-            _ => Err(AppError::Invalid(
-                "cli: browser <open|goto|status|snapshot|screenshot|click|type|eval|close> — unknown browser subcommand".into(),
-            )),
-        },
+            Ok((method, params))
+        }
 
         // ── code (tree-sitter code intelligence) ──────────────────────────
         "code" => map_code_argv(argv),
@@ -892,6 +824,113 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         other => Err(AppError::Invalid(format!(
             "cli: unknown subcommand '{other}' (allowed: ws, agent, send, tell, msg, bb, snapshot, memory, task, run, restart, design, browser, code, proxy)"
         ))),
+    }
+}
+
+/// Map a `browser <verb> [args…]` argv (with the injected caller id already
+/// spliced out by the caller) to its router method + params. URL scheme
+/// normalization happens server-side in `runtime::browser`; this only maps
+/// verbs → router commands + payloads. `argv[0]` is `"browser"`, `argv[1]` the
+/// verb, `argv[2..]` the verb's own args — the exact positional shape the human
+/// types, since the caller id (if any) was removed upstream.
+fn map_browser_verb(argv: &[String]) -> Result<(&'static str, Value), AppError> {
+    match argv.get(1).map(String::as_str) {
+        Some("open") => {
+            if argv.len() != 3 {
+                return Err(AppError::Invalid("cli: browser open <url>".into()));
+            }
+            Ok(("browser.open", json!({ "url": argv[2] })))
+        }
+        Some("goto") => {
+            if argv.len() != 3 {
+                return Err(AppError::Invalid("cli: browser goto <url>".into()));
+            }
+            Ok(("browser.goto", json!({ "url": argv[2] })))
+        }
+        Some("status") => {
+            if argv.len() != 2 {
+                return Err(AppError::Invalid("cli: browser status".into()));
+            }
+            Ok(("browser.status", Value::Null))
+        }
+        Some("snapshot") => {
+            let (max, rest) = take_flag(argv.get(2..).unwrap_or(&[]), "--max-text");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(
+                    "cli: browser snapshot [--max-text N]".into(),
+                ));
+            }
+            let mut params = json!({});
+            if let Some(raw) = max {
+                let n = raw.parse::<i64>().map_err(|_| {
+                    AppError::Invalid("cli: browser snapshot: --max-text expects an integer".into())
+                })?;
+                params["maxText"] = json!(n);
+            }
+            Ok(("browser.snapshot", params))
+        }
+        Some("click") => {
+            if argv.len() != 3 {
+                return Err(AppError::Invalid("cli: browser click <selector>".into()));
+            }
+            Ok(("browser.click", json!({ "selector": argv[2] })))
+        }
+        Some("type") => {
+            let selector = argv.get(2).ok_or_else(|| {
+                AppError::Invalid("cli: browser type <selector> <text...>".into())
+            })?;
+            if argv.len() < 4 {
+                return Err(AppError::Invalid(
+                    "cli: browser type <selector> <text...>".into(),
+                ));
+            }
+            let text = argv[3..].join(" ");
+            Ok(("browser.type", json!({ "selector": selector, "text": text })))
+        }
+        Some("eval") => {
+            if argv.len() < 3 {
+                return Err(AppError::Invalid("cli: browser eval <js...>".into()));
+            }
+            Ok(("browser.eval", json!({ "js": argv[2..].join(" ") })))
+        }
+        Some("close") => {
+            if argv.len() != 2 {
+                return Err(AppError::Invalid("cli: browser close".into()));
+            }
+            Ok(("browser.close", Value::Null))
+        }
+        Some("screenshot") => {
+            // path is positional (already absolute — the CLI resolved it in the
+            // agent's cwd); --width/--height are optional f64 flags.
+            let after = argv.get(2..).unwrap_or(&[]);
+            let (width_raw, after) = take_flag(after, "--width");
+            let (height_raw, after) = take_flag(&after, "--height");
+            let path = after.first().cloned().ok_or_else(|| {
+                AppError::Invalid("cli: browser screenshot <path> [--width N] [--height N]".into())
+            })?;
+            if after.len() != 1 {
+                return Err(AppError::Invalid(
+                    "cli: browser screenshot <path> [--width N] [--height N]".into(),
+                ));
+            }
+            let mut params = json!({ "path": path });
+            if let Some(raw) = width_raw {
+                let n = raw.parse::<f64>().map_err(|_| {
+                    AppError::Invalid("cli: browser screenshot: --width expects a number".into())
+                })?;
+                params["width"] = json!(n);
+            }
+            if let Some(raw) = height_raw {
+                let n = raw.parse::<f64>().map_err(|_| {
+                    AppError::Invalid("cli: browser screenshot: --height expects a number".into())
+                })?;
+                params["height"] = json!(n);
+            }
+            Ok(("browser.screenshot", params))
+        }
+        _ => Err(AppError::Invalid(
+            "cli: browser <open|goto|status|snapshot|screenshot|click|type|eval|close> — unknown browser subcommand".into(),
+        )),
     }
 }
 
@@ -3307,110 +3346,142 @@ mod tests {
 
     // ── browser ───────────────────────────────────────────────────────────
 
+    // Agent browser verbs arrive at the engine with the caller id spliced in at
+    // argv[2] (conclave-cli injects it from CONCLAVE_INSTANCE_ID). These tests
+    // exercise that ENGINE-side wire form: `browser <verb> <callerId> <args…>`,
+    // and assert the id re-attaches as the trusted `callerId` param.
     #[test]
-    fn browser_open_and_goto_map_url_verbatim() {
+    fn browser_open_and_goto_carry_url_and_caller_id() {
         assert_eq!(
-            ok_method(&["browser", "open", "example.com"]),
+            ok_method(&["browser", "open", "agentA", "example.com"]),
             "browser.open"
         );
         assert_eq!(
-            ok_params(&["browser", "open", "example.com"]),
-            json!({ "url": "example.com" })
+            ok_params(&["browser", "open", "agentA", "example.com"]),
+            json!({ "url": "example.com", "callerId": "agentA" })
         );
         assert_eq!(
-            ok_method(&["browser", "goto", "https://x.test/"]),
+            ok_method(&["browser", "goto", "agentA", "https://x.test/"]),
             "browser.goto"
         );
         assert_eq!(
-            ok_params(&["browser", "goto", "https://x.test/"]),
-            json!({ "url": "https://x.test/" })
+            ok_params(&["browser", "goto", "agentA", "https://x.test/"]),
+            json!({ "url": "https://x.test/", "callerId": "agentA" })
         );
     }
 
     #[test]
-    fn browser_open_requires_exactly_one_url() {
-        assert!(is_invalid(&["browser", "open"]));
-        assert!(is_invalid(&["browser", "open", "a", "b"]));
-        assert!(is_invalid(&["browser", "goto"]));
+    fn browser_open_requires_exactly_one_url_after_the_caller_id() {
+        assert!(is_invalid(&["browser", "open", "agentA"])); // id but no url
+        assert!(is_invalid(&["browser", "open", "agentA", "a", "b"])); // two urls
+        assert!(is_invalid(&["browser", "goto", "agentA"]));
     }
 
     #[test]
-    fn browser_status_and_close_are_void() {
+    fn browser_status_carries_no_caller_id_close_does() {
+        // status is a GLOBAL read — no id spliced, stays void.
         assert_eq!(ok_method(&["browser", "status"]), "browser.status");
         assert_eq!(ok_params(&["browser", "status"]), Value::Null);
-        assert_eq!(ok_method(&["browser", "close"]), "browser.close");
-        assert_eq!(ok_params(&["browser", "close"]), Value::Null);
         assert!(is_invalid(&["browser", "status", "extra"]));
-        assert!(is_invalid(&["browser", "close", "extra"]));
+        // close scopes to the caller's own tab → callerId at argv[2].
+        assert_eq!(ok_method(&["browser", "close", "agentA"]), "browser.close");
+        assert_eq!(
+            ok_params(&["browser", "close", "agentA"]),
+            json!({ "callerId": "agentA" })
+        );
+        assert!(is_invalid(&["browser", "close", "agentA", "extra"]));
     }
 
     #[test]
-    fn browser_snapshot_optional_max_text() {
-        assert_eq!(ok_method(&["browser", "snapshot"]), "browser.snapshot");
-        assert_eq!(ok_params(&["browser", "snapshot"]), json!({}));
+    fn browser_snapshot_optional_max_text_with_caller_id() {
         assert_eq!(
-            ok_params(&["browser", "snapshot", "--max-text", "500"]),
-            json!({ "maxText": 500 })
+            ok_method(&["browser", "snapshot", "agentA"]),
+            "browser.snapshot"
+        );
+        assert_eq!(
+            ok_params(&["browser", "snapshot", "agentA"]),
+            json!({ "callerId": "agentA" })
+        );
+        assert_eq!(
+            ok_params(&["browser", "snapshot", "agentA", "--max-text", "500"]),
+            json!({ "maxText": 500, "callerId": "agentA" })
         );
         // Non-integer and stray positional args are rejected.
-        assert!(is_invalid(&["browser", "snapshot", "--max-text", "lots"]));
-        assert!(is_invalid(&["browser", "snapshot", "junk"]));
+        assert!(is_invalid(&["browser", "snapshot", "agentA", "--max-text", "lots"]));
+        assert!(is_invalid(&["browser", "snapshot", "agentA", "junk"]));
     }
 
     #[test]
-    fn browser_click_and_type_map_selector_and_text() {
+    fn browser_click_and_type_map_selector_and_text_with_caller_id() {
         assert_eq!(
-            ok_params(&["browser", "click", "#submit"]),
-            json!({ "selector": "#submit" })
+            ok_params(&["browser", "click", "agentA", "#submit"]),
+            json!({ "selector": "#submit", "callerId": "agentA" })
         );
-        assert!(is_invalid(&["browser", "click"]));
+        assert!(is_invalid(&["browser", "click", "agentA"]));
         // type joins the trailing words into one text payload.
         assert_eq!(
-            ok_method(&["browser", "type", "#q", "hello", "world"]),
+            ok_method(&["browser", "type", "agentA", "#q", "hello", "world"]),
             "browser.type"
         );
         assert_eq!(
-            ok_params(&["browser", "type", "#q", "hello", "world"]),
-            json!({ "selector": "#q", "text": "hello world" })
+            ok_params(&["browser", "type", "agentA", "#q", "hello", "world"]),
+            json!({ "selector": "#q", "text": "hello world", "callerId": "agentA" })
         );
-        assert!(is_invalid(&["browser", "type", "#q"]));
+        assert!(is_invalid(&["browser", "type", "agentA", "#q"]));
     }
 
     #[test]
-    fn browser_eval_joins_js_and_rejects_empty() {
+    fn browser_eval_joins_js_and_rejects_empty_with_caller_id() {
         assert_eq!(
-            ok_params(&["browser", "eval", "document.title"]),
-            json!({ "js": "document.title" })
+            ok_params(&["browser", "eval", "agentA", "document.title"]),
+            json!({ "js": "document.title", "callerId": "agentA" })
         );
         assert_eq!(
-            ok_params(&["browser", "eval", "1", "+", "2"]),
-            json!({ "js": "1 + 2" })
+            ok_params(&["browser", "eval", "agentA", "1", "+", "2"]),
+            json!({ "js": "1 + 2", "callerId": "agentA" })
         );
-        assert!(is_invalid(&["browser", "eval"]));
+        assert!(is_invalid(&["browser", "eval", "agentA"]));
+    }
+
+    /// Anti-spoof: the caller id is taken POSITIONALLY from argv[2], never
+    /// scavenged from a verb's free-text args. A crafted `eval` whose JS text
+    /// itself looks like another agent id (or a `--caller-id` flag) cannot
+    /// override the trusted id — the JS maps verbatim, the id stays argv[2].
+    #[test]
+    fn browser_caller_id_is_positional_not_from_free_text_args() {
+        assert_eq!(
+            ok_params(&["browser", "eval", "agentA", "other-agent-id", "--caller-id", "evil"]),
+            json!({ "js": "other-agent-id --caller-id evil", "callerId": "agentA" })
+        );
+        assert_eq!(
+            ok_params(&["browser", "type", "agentA", "#in", "--caller-id", "evil"]),
+            json!({ "selector": "#in", "text": "--caller-id evil", "callerId": "agentA" })
+        );
     }
 
     #[test]
-    fn browser_screenshot_maps_with_defaults_and_flags() {
+    fn browser_screenshot_maps_with_defaults_and_flags_and_caller_id() {
         // path is positional; already absolute by the time map_argv sees it.
         assert_eq!(
-            ok_method(&["browser", "screenshot", "/ws/shot.png"]),
+            ok_method(&["browser", "screenshot", "agentA", "/ws/shot.png"]),
             "browser.screenshot"
         );
         assert_eq!(
-            ok_params(&["browser", "screenshot", "/ws/shot.png"]),
-            json!({ "path": "/ws/shot.png" })
+            ok_params(&["browser", "screenshot", "agentA", "/ws/shot.png"]),
+            json!({ "path": "/ws/shot.png", "callerId": "agentA" })
         );
         assert_eq!(
             ok_params(&[
                 "browser",
                 "screenshot",
+                "agentA",
                 "/ws/shot.png",
                 "--width",
                 "1440",
                 "--height",
                 "900"
             ]),
-            json!({ "path": "/ws/shot.png", "width": 1440.0, "height": 900.0 })
+            json!({ "path": "/ws/shot.png", "width": 1440.0, "height": 900.0, "callerId": "agentA" })
         );
     }
 
@@ -3419,6 +3490,7 @@ mod tests {
         assert!(is_invalid(&[
             "browser",
             "screenshot",
+            "agentA",
             "/ws/s.png",
             "--width",
             "abc"
