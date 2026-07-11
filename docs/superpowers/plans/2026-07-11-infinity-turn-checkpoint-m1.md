@@ -4,6 +4,8 @@
 
 owner: 4fb2198c-e0d9-4e4b-af9e-d4e72542bace (Detoro) · authority: in-loop · spec: `docs/superpowers/specs/2026-07-11-infinity-turn-checkpoint-design.md` (v3, council-approved)
 
+> **⚠ AMENDMENT R8 (2026-07-11, Detoro chair + Aoki co-principal; challenges 4f3aa72a + c08a3cf1).** This plan was implemented and shipped, then M1 measurement returned **0 interpretable samples**. Root cause: the `project()` M/L pre-gate runs in `bytes/4` space (overstates real tokens ~4.7× on cache-heavy traffic) and `checkpoint_gate` maps `Saturated → None` (no metric row). The **byte-space `Projection`/`project()` M/L pre-gate design and the `Saturated ⇒ None` mapping shown below are SUPERSEDED** — do not re-implement them as written. The authoritative corrected design (3-bucket `below_ceiling|eligible|saturated` classification decided **after** `count_tokens`, always persisting a row, `outcome` column added) lives in the fix plan **`docs/superpowers/plans/2026-07-11-infinity-turn-checkpoint-m1-fix.md`** and spec §4/§7.1 (R8). Everything else in this plan (ctxopt structure, recoverability classifier, count_tokens a/b/c client, async queue, migration pattern) stands.
+
 **Goal:** Add a **log-mode-only** checkpoint projection to the ctx-proxy that measures, for real long-context `/v1/messages` traffic, whether freezing recoverable old tool_results *would* pull the effective context into a low-water band — recording the full `q = S_net/R` metric contract via Anthropic `count_tokens` — **without ever altering the bytes forwarded upstream**.
 
 **Architecture:** Pure deterministic logic (recoverability classifier, checkpoint policy, projection + hysteresis pre-gate) lands in `src-tauri/crates/ctxopt` (serde_json only). All async/IO — the `count_tokens` client, the off-forwarding-path sampling queue, the new metric persistence, the global checkpoint toggle, and the ctx_proxy wiring — lives engine-side in `src-tauri/src/engine/`. The measurement path reads the request body by reference and produces metric rows; it is structurally incapable of changing `upstream_body`.
@@ -313,6 +315,9 @@ pub struct Projection {
     pub projected_post_tokens: usize, // est_whole_tokens − net_saved_tokens (saturating)
 }
 
+// ⚠ SUPERSEDED by R8 (see top banner + m1-fix plan): the byte-space M/L pre-gate
+// below and the 2-outcome enum are replaced by a 3-bucket classification decided
+// AFTER count_tokens (below_ceiling|eligible|saturated), always persisting a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointOutcome {
     Saturated,               // below M, above L, or nothing to freeze → no sampling, no change
@@ -1024,6 +1029,9 @@ fn checkpoint_gate(rt: &ProxyRuntime, body: &[u8]) -> Option<CheckpointJob> {
     let plan = ctxopt::checkpoint::plan_checkpoint(&messages, est_whole_tokens, ceiling, tail)?;
     let m = rt.min_net_saving.load(Ordering::Acquire) as usize;
     let l = rt.low_water.load(Ordering::Acquire) as usize;
+    // ⚠ SUPERSEDED by R8: `Saturated => None` drops the row and hides the sample.
+    // Corrected gate demotes bytes/4 to a trigger and classifies post-count_tokens,
+    // always persisting a row. See m1-fix plan.
     match ctxopt::checkpoint::project(&messages, &plan, est_whole_tokens, m, l) {
         ctxopt::checkpoint::CheckpointOutcome::Saturated => None,
         ctxopt::checkpoint::CheckpointOutcome::Eligible(p) => Some(CheckpointJob {
