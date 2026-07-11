@@ -20,6 +20,7 @@
 //! `unwrap_or_else(|e| e.into_inner())` so a panicked holder cannot cascade.
 
 pub mod browser;
+pub mod browser_tabs;
 pub mod chat;
 pub mod ctx_proxy;
 pub mod design_host;
