@@ -22,6 +22,16 @@ struct ReportReq {
     since_hours: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct CheckpointReq {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct CeilingReq {
+    tokens: u64,
+}
+
 pub async fn status(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     Ok(status_value(state))
 }
@@ -78,6 +88,44 @@ pub async fn report(state: &AppState, payload: Value) -> Result<Value, AppError>
     .expect("ProxyReport serialization cannot fail"))
 }
 
+pub async fn set_checkpoint(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: CheckpointReq = serde_json::from_value(payload)
+        .map_err(|e| AppError::Invalid(format!("proxy.checkpoint: bad payload: {e}")))?;
+    state
+        .ctx_proxy
+        .checkpoint
+        .store(req.enabled, Ordering::Release);
+    Ok(status_value(state))
+}
+
+pub async fn set_ceiling(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: CeilingReq = serde_json::from_value(payload)
+        .map_err(|e| AppError::Invalid(format!("proxy.ceiling: bad payload: {e}")))?;
+    let tokens = u32::try_from(req.tokens)
+        .map_err(|_| AppError::Invalid("proxy.ceiling: tokens out of range".into()))?;
+    state.ctx_proxy.ceiling.store(tokens, Ordering::Release);
+    Ok(status_value(state))
+}
+
+pub async fn checkpoint_report(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = if payload.is_null() {
+        ReportReq::default()
+    } else {
+        serde_json::from_value::<ReportReq>(payload)
+            .map_err(|e| AppError::Invalid(format!("proxy.checkpointReport: bad payload: {e}")))?
+    };
+    let since_hours = req.since_hours.unwrap_or(24);
+    if since_hours < 0 {
+        return Err(AppError::Invalid(
+            "proxy.checkpointReport: sinceHours must be non-negative".into(),
+        ));
+    }
+    Ok(serde_json::to_value(
+        crate::engine::repo::proxy_checkpoint_metric::report(&state.db, since_hours).await?,
+    )
+    .expect("CheckpointReport serialization cannot fail"))
+}
+
 fn status_value(state: &AppState) -> Value {
     let runtime = &state.ctx_proxy;
     let mode = runtime.mode.load(Ordering::Acquire);
@@ -96,6 +144,9 @@ fn status_value(state: &AppState) -> Value {
         },
         "threshold": f32::from_bits(runtime.threshold.load(Ordering::Acquire)),
         "conversations": conversations,
+        "checkpoint": runtime.checkpoint.load(Ordering::Acquire),
+        "ceiling": runtime.ceiling.load(Ordering::Acquire),
+        "checkpointSamplesDropped": runtime.samples_dropped.load(Ordering::Acquire),
     })
 }
 
@@ -135,6 +186,27 @@ mod tests {
                 "cacheReadTokens": 0,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_toggle_and_ceiling_reflected_in_status() {
+        let state = AppState::for_tests().await;
+        let status = router::dispatch(&state, "proxy.checkpoint", json!({ "enabled": true }))
+            .await
+            .unwrap();
+        assert_eq!(status["checkpoint"], true);
+        assert!(state.ctx_proxy.checkpoint.load(Ordering::Acquire));
+
+        let status = router::dispatch(&state, "proxy.ceiling", json!({ "tokens": 400_000 }))
+            .await
+            .unwrap();
+        assert_eq!(status["ceiling"], 400_000);
+        assert_eq!(state.ctx_proxy.ceiling.load(Ordering::Acquire), 400_000);
+
+        let report = router::dispatch(&state, "proxy.checkpointReport", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(report["samples"], 0);
     }
 
     #[tokio::test]

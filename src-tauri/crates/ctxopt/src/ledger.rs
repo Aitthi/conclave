@@ -10,6 +10,8 @@ pub struct ConvState {
     pub frozen: Vec<Elision>,
     pub last_eval_est: usize,
     pub last_input_tokens: Option<u64>,
+    pub checkpoint_boundary: Option<usize>,
+    pub plateau_turns: u32,
 }
 
 /// In-memory LRU of conversation states, identity by hash-prefix match
@@ -64,6 +66,8 @@ impl Ledger {
                     frozen: Vec::new(),
                     last_eval_est: 0,
                     last_input_tokens: None,
+                    checkpoint_boundary: None,
+                    plateau_turns: 0,
                 });
             }
         }
@@ -81,6 +85,19 @@ impl Ledger {
     pub fn is_empty(&self) -> bool {
         self.convs.is_empty()
     }
+}
+
+/// Fold a newly-observed projected boundary into a conversation's plateau count.
+/// Same boundary as last eligible sample → +1; a new/changed boundary → reset to 0.
+/// Returns the plateau count AFTER this observation.
+pub fn record_plateau(conv: &mut ConvState, boundary: usize) -> u32 {
+    if conv.checkpoint_boundary == Some(boundary) {
+        conv.plateau_turns = conv.plateau_turns.saturating_add(1);
+    } else {
+        conv.checkpoint_boundary = Some(boundary);
+        conv.plateau_turns = 0;
+    }
+    conv.plateau_turns
 }
 
 #[cfg(test)]
@@ -110,6 +127,19 @@ mod tests {
         let idx1 = led.observe(&conv(&["a", "b"]));
         let idx2 = led.observe(&conv(&["z", "b"]));
         assert_ne!(idx1, idx2);
+    }
+
+    #[test]
+    fn plateau_increments_while_boundary_holds_and_resets_on_change() {
+        let mut led = Ledger::new(4);
+        let idx = led.observe(&conv(&["a"]));
+        let c = led.conv_mut(idx);
+        assert_eq!(record_plateau(c, 7), 0); // first sight of boundary 7
+        assert_eq!(record_plateau(c, 7), 1); // held
+        assert_eq!(record_plateau(c, 7), 2); // held
+        assert_eq!(record_plateau(c, 9), 0); // boundary moved → reset
+        assert_eq!(c.checkpoint_boundary, Some(9));
+        assert_eq!(c.plateau_turns, 0);
     }
 
     #[test]

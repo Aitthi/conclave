@@ -40,6 +40,8 @@ mod tests {
                 .collect(),
             last_eval_est: last_eval_est,
             last_input_tokens: None,
+            checkpoint_boundary: None,
+            plateau_turns: 0,
         }
     }
 

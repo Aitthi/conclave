@@ -963,7 +963,7 @@ fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
 
 fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
     let usage =
-        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|report [--since-hours N]>";
+        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|checkpoint <on|off>|ceiling <tokens>|report [--since-hours N]|checkpoint-report [--since-hours N]>";
     match argv.get(1).map(String::as_str) {
         Some("status") if argv.len() == 2 => Ok(("proxy.status", Value::Null)),
         Some("mode") if argv.len() == 3 => match argv[2].as_str() {
@@ -996,6 +996,40 @@ fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 params["sinceHours"] = json!(value);
             }
             Ok(("proxy.report", params))
+        }
+        Some("checkpoint") if argv.len() == 3 => match argv[2].as_str() {
+            "on" => Ok(("proxy.checkpoint", json!({ "enabled": true }))),
+            "off" => Ok(("proxy.checkpoint", json!({ "enabled": false }))),
+            _ => Err(AppError::Invalid(usage.into())),
+        },
+        Some("ceiling") if argv.len() == 3 => {
+            let tokens = argv[2]
+                .parse::<u64>()
+                .map_err(|_| AppError::Invalid(usage.into()))?;
+            Ok(("proxy.ceiling", json!({ "tokens": tokens })))
+        }
+        Some("checkpoint-report") => {
+            let (since_hours, rest) = take_flag(&argv[2..], "--since-hours");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let mut params = json!({});
+            if let Some(raw) = since_hours {
+                let value = raw.parse::<i64>().map_err(|_| {
+                    AppError::Invalid(
+                        "cli: proxy checkpoint-report: --since-hours expects a non-negative integer"
+                            .into(),
+                    )
+                })?;
+                if value < 0 {
+                    return Err(AppError::Invalid(
+                        "cli: proxy checkpoint-report: --since-hours expects a non-negative integer"
+                            .into(),
+                    ));
+                }
+                params["sinceHours"] = json!(value);
+            }
+            Ok(("proxy.checkpointReport", params))
         }
         _ => Err(AppError::Invalid(usage.into())),
     }
@@ -3550,6 +3584,23 @@ mod tests {
         assert_eq!(
             ok_params(&["proxy", "threshold", "0.25"]),
             json!({ "ratio": 0.25 })
+        );
+        assert_eq!(
+            ok_method(&["proxy", "checkpoint", "on"]),
+            "proxy.checkpoint"
+        );
+        assert_eq!(
+            ok_params(&["proxy", "checkpoint", "on"]),
+            json!({ "enabled": true })
+        );
+        assert_eq!(ok_method(&["proxy", "ceiling", "400000"]), "proxy.ceiling");
+        assert_eq!(
+            ok_params(&["proxy", "ceiling", "400000"]),
+            json!({ "tokens": 400_000 })
+        );
+        assert_eq!(
+            ok_method(&["proxy", "checkpoint-report"]),
+            "proxy.checkpointReport"
         );
     }
 

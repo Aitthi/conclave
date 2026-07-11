@@ -22,6 +22,7 @@
 pub mod browser;
 pub mod browser_tabs;
 pub mod chat;
+pub mod count_tokens;
 pub mod ctx_proxy;
 pub mod design_host;
 // The memory-v1 embedder seam lands before its T3/T4 consumers.
