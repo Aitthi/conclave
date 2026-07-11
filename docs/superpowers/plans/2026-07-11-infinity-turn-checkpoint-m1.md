@@ -490,6 +490,12 @@ pub fn project(
 
 ### Task 4: count_tokens client + async sampling queue (engine)
 
+> **SECURITY CONTAINMENT (council challenge ea3df57c, Aoki — MANDATORY before this task is READY).** Incoming-request auth is the correct source, but it must be contained:
+> - **Dedicated count client, no redirects:** build a separate `reqwest::Client` with `.redirect(reqwest::redirect::Policy::none())` and an explicit `.timeout(...)` (e.g. 20s); no retries. Rationale: reqwest 0.12 default follows up to 10 redirects and its `remove_sensitive_headers` strips `Authorization`/`Cookie` cross-host but **NOT `x-api-key`** — a redirect to another host would leak the client key. `Policy::none()` means a 3xx is returned as-is and no second, credential-bearing request is ever made.
+> - **Sensitive credential type:** `CountCredential` keeps `#[derive(Clone)]` ONLY — never add `Debug`/`Serialize`/`Deserialize`. Store each auth value as a `reqwest::header::HeaderValue` with `.set_sensitive(true)`. Forward only an explicit allowlist: `authorization`, `x-api-key`, `anthropic-version` (and `anthropic-beta` only if count fidelity requires it) — never the whole header map.
+> - **Missing auth → zero calls:** if neither `authorization` nor `x-api-key` is present, return a count-failure outcome and make **no** remote request.
+> - **Required tests (in this task):** (a) a fake upstream returning a cross-host 3xx → the count client does NOT follow it and no credential reaches the redirect target; (b) a slow upstream → the explicit timeout fires, the permit is released and the credential dropped (no hang); (c) missing-auth input → zero remote calls, failure recorded.
+
 **Files:**
 - Create: `src-tauri/src/engine/runtime/count_tokens.rs`
 - Modify: `src-tauri/src/engine/runtime/mod.rs` (add `pub mod count_tokens;`)
@@ -894,6 +900,12 @@ pub fn record_plateau(conv: &mut ConvState, boundary: usize) -> u32 {
 - [ ] **Step 5:** commit `git add src-tauri/crates/ctxopt/src/ledger.rs src-tauri/crates/ctxopt/src/policy.rs && git commit -m "feat(ctxopt): observed checkpoint plateau state on ConvState"`
 
 ### Task 7: Wire the checkpoint measurement path into ctx_proxy (engine)
+
+> **SECURITY CONTAINMENT (council challenge ea3df57c, Aoki — MANDATORY before this task is READY).**
+> - **Immutable upstream capture (no async TOCTOU):** `CheckpointJob` MUST carry the exact `upstream` base string captured for the ORIGINAL forward. `sample_checkpoint` uses `job.upstream` and MUST NOT re-read `state.ctx_proxy.upstream` — a change between forward and sampling could otherwise send credential A to host B.
+> - **Schedule after success:** enqueue `sample_checkpoint` ONLY after the original upstream response returns a success status. A failed/aborted forward samples nothing.
+> - **Rate/cadence beyond the semaphore:** the 2-permit semaphore bounds concurrency, not rate or credential lifetime. Add a global cooldown/rate-limit (or per-conversation-boundary sampling cadence) so sustained eligible traffic cannot fan out unbounded (each eligible request otherwise triggers 3 count calls). Dropped/rate-limited samples are recorded as a metric, never silently lost.
+> - **Required tests (in this task):** (a) mutating `state.ctx_proxy.upstream` between forward and the spawned sample cannot retarget the in-flight credential (the job holds the original upstream); (b) sustained eligible requests respect the cap/cooldown and dropped samples are recorded; (c) sampling is scheduled only after a successful original response.
 
 **Files:**
 - Modify: `src-tauri/src/engine/runtime/ctx_proxy.rs` (add global checkpoint atomics to `ProxyRuntime`; add the sampling semaphore; add `credential_from_headers`, the sync pre-gate `checkpoint_gate`, and the async `sample_checkpoint`; call the gate from `forward_inner` after the upstream body is fixed)
