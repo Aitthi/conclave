@@ -25,6 +25,8 @@ Every task inherits ALL of these:
 - **Fresh lane worktrees have no `node_modules`** — run `pnpm install` once before any `pnpm`/`tauri` gate.
 - **Shared checkout:** commit only your boundary paths (`conclave stage commit`, or `git commit -- <paths>`), never a bare `git commit` (sweeps peers' staged work).
 - **Design canon:** Lane-2 does not improvise the visual — it follows Lane-0's Conclave Design-view canon; visual disputes escalate to Arta.
+- **GUARD (boundary — caller-scoped commands):** any new agent-scoped CLI/engine command is threaded through `src-tauri/src/bin/conclave-cli.rs` (`expand_self_args`/`CONCLAVE_INSTANCE_ID`), `src-tauri/src/engine/commands/cli.rs` (argv→method map), and `src-tauri/src/engine/router.rs` (dispatch arm) — NOT only the command's own module. A boundary that names only the feature module (e.g. `commands/browser.rs`) cannot deliver caller identity. Include all three whenever caller-id or a new method is involved. (Root cause of challenge a281ebf9.)
+- **GUARD (boundary — TS type renames):** renaming an exported IPC type ripples into the barrel `src/ipc/index.ts` re-export; include it in any lane boundary that renames `src/ipc/types.ts` exports.
 
 ---
 
@@ -78,6 +80,7 @@ Command signatures (facade `src/ipc/commands.ts`, backend `commands/browser.rs`)
 - Create: `src-tauri/src/engine/runtime/browser_tabs.rs` — pure `TabRegistry` (state map, no wry). Unit-testable.
 - Modify: `src-tauri/src/engine/runtime/browser.rs` — replace singleton with registry-driven multi-webview; thin native wrapper.
 - Modify: `src-tauri/src/engine/commands/browser.rs` — owner derivation from caller; verb→registry mapping; `BrowserState` return; new `newTab`/`setActive`/`close(tabId)`/`goto(tabId,url)`.
+- Modify: `src-tauri/src/bin/conclave-cli.rs`, `src-tauri/src/engine/commands/cli.rs`, `src-tauri/src/engine/router.rs` — thread the caller's agent id into browser verbs via the `expand_self_args`/`CONCLAVE_INSTANCE_ID` idiom (the browser CLI arm at `commands/cli.rs:784` currently passes NO caller id; agent-scoped verbs must inject it like `tell`/`task claim`). **Added post-plan** per Tiësto's challenge a281ebf9 — caller-id auto-scoping is unreachable from the original 3-file boundary.
 
 **Lane-2 (frontend, TS/React):**
 - Modify: `src/ipc/types.ts:413-418` — replace `BrowserStatus` with `BrowserTab`/`BrowserState`/`BrowserOwner`.
@@ -117,7 +120,7 @@ Command signatures (facade `src/ipc/commands.ts`, backend `commands/browser.rs`)
 
 ## Lane-1 — Backend multiplex (owner: a Rust implementer; highest risk)
 
-**Boundary:** `src-tauri/src/engine/runtime/browser.rs`, `src-tauri/src/engine/runtime/browser_tabs.rs`, `src-tauri/src/engine/commands/browser.rs`.
+**Boundary:** `src-tauri/src/engine/runtime/browser.rs`, `src-tauri/src/engine/runtime/browser_tabs.rs`, `src-tauri/src/engine/commands/browser.rs`, `src-tauri/src/bin/conclave-cli.rs`, `src-tauri/src/engine/commands/cli.rs`, `src-tauri/src/engine/router.rs`. (Last 3 added by lead ruling on challenge a281ebf9 — caller-id threading lives there; verified by Tiësto + Mellow + lead, zero overlap with other lanes.)
 
 **Resolve FIRST (risk #2):** how existing agent-scoped engine calls obtain the caller's agent id (UDS session / engine router context — see memory *Engine UDS JSON-RPC direct*). Owner derivation depends on it. Post findings as a task note before Task B3.
 
@@ -245,7 +248,7 @@ fn mark_ended_sets_flag_only_for_agent() {
 
 ## Lane-2 — Frontend tab-aware view + side rail (owner: a frontend implementer)
 
-**Boundary:** `src/ipc/types.ts`, `src/ipc/commands.ts`, `src/components/InAppBrowserView.tsx`, `src/fixtures/scenarios/default.ts`, `src/fixtures/scenarios/empty.ts`, `src/components/AppShell.tsx` (rail badge only). **Consumes:** the Interface Contract + Lane-0 canon. Can build on fixtures before Lane-1 lands; integrates at merge.
+**Boundary:** `src/ipc/types.ts`, `src/ipc/commands.ts`, `src/ipc/index.ts` (barrel re-export of the renamed types), `src/components/InAppBrowserView.tsx`, `src/fixtures/scenarios/default.ts`, `src/fixtures/scenarios/empty.ts`, `src/components/AppShell.tsx` (rail badge / browserActive fallout). **Consumes:** the Interface Contract + Lane-0 canon. Can build on fixtures before Lane-1 lands; integrates at merge.
 
 ### Task F1: IPC types + facade signatures (TDD via tsc)
 
