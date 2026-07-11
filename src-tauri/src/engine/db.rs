@@ -248,6 +248,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 21 {
+        sqlx::raw_sql(include_str!("migrations/0021_proxy_checkpoint_metric.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 21;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
