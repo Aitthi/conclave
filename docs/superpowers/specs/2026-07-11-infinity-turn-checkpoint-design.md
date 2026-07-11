@@ -1,4 +1,4 @@
-# Infinity-Turn Checkpoint (ctx-proxy Phase 2) — Design v2
+# Infinity-Turn Checkpoint (ctx-proxy Phase 2) — Design v3
 
 **Status:** COUNCIL-REVIEWED (Detoro chair, Aoki co-principal). Seven challenges filed and ACCEPTED; all folded below (decision log at tail). In-loop authority granted by human 2026-07-11; human reviews the finished result. Verdict: **rework-before-plan done; measurement-only Milestone-1 is viable under the amended metric contract.**
 **Distinct from** Phase-1 dedup proxy, which is NO-GO/shelved (plan A9, commit 5ef698d).
@@ -69,7 +69,7 @@ Milestone-1 boundary: `src-tauri/crates/ctxopt/` (checkpoint policy + recoverabi
 
 ## Decision log — council rulings 2026-07-11 (Detoro chair)
 
-All six of Aoki's challenges ACCEPTED after evidence verification; credit Aoki.
+All seven of Aoki's challenges ACCEPTED after evidence verification; credit Aoki.
 - **R1 (22ec8a2b) recoverability:** dropped "lossless"; split capability-resident (accepted lossy) vs exact-output (needs snapshot). §3.
 - **R2 (d5452139) isolation:** v1 global toggle; per-agent + apply trial blocked until isolation design. §6.
 - **R3 (7e325df7) index/breakpoint vs validator:** no index block, no invented breakpoint; breadcrumbs inside per-result stubs; validator stays strict. §3/§4.
