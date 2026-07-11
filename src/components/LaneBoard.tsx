@@ -1156,7 +1156,7 @@ function GateChip({ g }: { g: TaskLastGate }) {
     >
       {ok ? <Check size={11} /> : <X size={11} />}
       <span>{gateLabel(g.cmd)}</span>
-      <span className="font-mono opacity-70 flex items-center gap-0.5">
+      <span className="font-mono flex items-center gap-0.5" style={{ color: FAINT }}>
         <GitCommitHorizontal size={10} />
         {g.sha.slice(0, 6)}
       </span>
@@ -1240,20 +1240,39 @@ function Card({
   selected: boolean;
   onOpenTask: (slug: string) => void;
 }) {
+  const [hover, setHover] = useState(false);
+  const edge = columnAccent(t.state);
+  const border = selected
+    ? "color-mix(in srgb, var(--color-accent) 38%, transparent)"
+    : hover
+      ? HAIR2
+      : BORDER;
+  const background = selected
+    ? "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-raised))"
+    : hover
+      ? "var(--color-fill-soft)"
+      : "var(--color-surface-raised)";
+  const hasBadges = t.lastGates.length > 0 || t.challenges.length > 0;
   return (
     <div
       onClick={() => onOpenTask(t.slug)}
-      className="rounded-lg p-2.5 cursor-pointer bg-surface-raised border transition-colors hover:bg-fill-soft"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="relative rounded-[11px] pl-3.5 pr-3 py-2.5 cursor-pointer overflow-hidden transition-[transform,background-color,border-color] duration-150 ease-out"
       style={{
-        borderColor: selected
-          ? "color-mix(in srgb, var(--color-accent) 38%, transparent)"
-          : "color-mix(in srgb, var(--color-overlay) 8%, transparent)",
-        background: selected
-          ? "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-raised))"
-          : "var(--color-surface-raised)",
+        background,
+        border: `1px solid ${border}`,
+        transform: hover && !selected ? "translateY(-1px)" : undefined,
       }}
     >
-      <div className="flex items-center gap-2 mb-1">
+      {/* status-colored left edge (spec D2) */}
+      <span
+        className="absolute left-0 top-0 bottom-0 w-[2.5px]"
+        style={{ background: edge, opacity: 0.7 }}
+        aria-hidden
+      />
+
+      <div className="flex items-center gap-2 mb-1.5">
         <span className="font-mono text-[0.64rem] truncate" style={{ color: FAINT }}>
           {t.slug}
         </span>
@@ -1267,12 +1286,15 @@ function Card({
         )}
       </div>
 
-      <div className="text-[0.79rem] font-medium leading-snug mb-2 text-text-primary" style={clamp2}>
+      <div
+        className="text-[0.8rem] font-[550] tracking-[-0.005em] leading-[1.34] text-text-primary"
+        style={clamp2}
+      >
         {t.title}
       </div>
 
-      {(t.lastGates.length > 0 || t.challenges.length > 0) && (
-        <div className="flex flex-wrap gap-1 mb-2">
+      {hasBadges && (
+        <div className="flex flex-wrap gap-1.5 mt-2.5">
           {t.lastGates.map((g) => (
             <GateChip key={g.cmd} g={g} />
           ))}
@@ -1282,17 +1304,20 @@ function Card({
         </div>
       )}
 
-      <div className="flex items-center gap-2.5">
+      <div
+        className="flex items-center gap-2.5 mt-2.5 pt-2.5"
+        style={{ borderTop: `1px solid ${BORDER}` }}
+      >
         <AgentPips t={t} resolve={resolve} />
         <span
-          className="inline-flex items-center gap-1 text-[0.62rem]"
+          className="inline-flex items-center gap-1 text-[0.62rem] tabular-nums"
           style={{ color: FAINT }}
           title={t.fileBoundary.join("\n")}
         >
           <FileCode2 size={11} />
           {t.fileBoundary.length}
         </span>
-        <span className="ml-auto text-[0.62rem] font-mono" style={{ color: FAINT }}>
+        <span className="ml-auto text-[0.62rem] font-mono tabular-nums" style={{ color: FAINT }}>
           {timeHint(t.updatedAt)}
         </span>
       </div>
