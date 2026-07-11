@@ -657,6 +657,7 @@ fn credential_from_headers(headers: &HeaderMap) -> CountCredential {
         api_key: get("x-api-key"),
         authorization: get("authorization"),
         anthropic_version: get("anthropic-version").unwrap_or_else(|| "2023-06-01".to_owned()),
+        anthropic_beta: get("anthropic-beta"),
     }
 }
 
@@ -724,6 +725,9 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
         bytes_est_tokens: saturating_i64(bytes_est as u64),
         // Overwritten below once we know a/b (R8 classify) or that the count failed.
         outcome: String::new(),
+        // Set to the count_tokens error (HTTP status + body snippet) on failure;
+        // stays None on success. Durable diagnosis path — stderr is /dev/null.
+        error_snippet: None,
     };
     match counts {
         Ok((a, b, c)) => {
@@ -758,6 +762,7 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
             eprintln!("[ctx-proxy] checkpoint count_tokens failed: {error}");
             row.count_failure = 1;
             row.outcome = "count_failure".to_owned();
+            row.error_snippet = Some(error);
         }
     }
     let _ = job.est_whole_tokens; // captured for diagnostics; not persisted directly
@@ -1077,6 +1082,7 @@ mod tests {
             api_key: Some("k".into()),
             authorization: None,
             anthropic_version: "2023-06-01".into(),
+            anthropic_beta: None,
         }
     }
 
