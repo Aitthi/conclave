@@ -11,7 +11,6 @@ import {
   MessageSquare,
   X,
   Pencil,
-  LoaderCircle,
 } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type {
@@ -72,11 +71,13 @@ interface RosterEntry {
   supervisorAgentId?: string;
 }
 
-// Status dot colors mapped from WorkspaceAgent.status (mirrors WorkspacePane).
+// Status dot colors — the theme's --color-status-* tokens (D6: design tokens
+// only, theme-aware; no hardcoded hex). Working state overrides these with
+// --color-status-working at the call site.
 const STATUS_COLOR: Record<WorkspaceAgent["status"], string> = {
-  running: "#30d158",
-  waiting: "#ff9f0a",
-  idle: "#c7c7cc",
+  running: "var(--color-status-running)",
+  waiting: "var(--color-status-waiting)",
+  idle: "var(--color-status-idle)",
 };
 
 // Derive a subtitle from the definition — never fabricated.
@@ -122,23 +123,6 @@ function AgentAvatar({ entry, size = "md" }: AgentAvatarProps) {
       style={{ backgroundColor: color }}
     >
       {entry.name[0]}
-    </div>
-  );
-}
-
-// Amber "working" sub-line (R-act-1, plan:working-indicator-restyle, round 2 —
-// supersedes the F2 green-halo dot). Rendered for every row; the grid-rows
-// slot only opens while `working` is true, so idle rows stay compact and the
-// slide-in is animated rather than an instant layout jump.
-function WorkLine({ working }: { working: boolean }) {
-  return (
-    <div className={`roster-working-slot${working ? " is-working" : ""}`} aria-hidden={!working}>
-      <div className="roster-working">
-        <div className="roster-working-content">
-          <LoaderCircle className="w-[11px] h-[11px] roster-working-icon" />
-          <span className="roster-working-label">working</span>
-        </div>
-      </div>
     </div>
   );
 }
@@ -220,7 +204,6 @@ function AgentRow({
             <ReportsTo supervisor={entry.supervisor} />
           </button>
         </div>
-        <WorkLine working={entry.working} />
       </div>
 
       {confirming ? (
@@ -238,16 +221,21 @@ function AgentRow({
         </button>
       ) : (
         <>
-          {/* Status dot — unchanged by working (R-act-1 now reads via the amber
-              WorkLine sub-line above, not this dot); still hidden on hover to
-              make room for the remove affordance. `self-start` keeps it pinned
-              to the name line instead of stretching to the row's full height
-              when the WorkLine slot opens. */}
+          {/* Status dot (D6): a single small dot carries working/idle — amber
+              --color-status-working with a soft glow when the agent is working,
+              else the plain --color-status-* for its status. Replaces the
+              heavier animated "working" sub-line. Hidden on hover to make room
+              for the remove affordance; `self-start` pins it to the name line. */}
           <span
             className="w-2 h-2 rounded-full shrink-0 group-hover:hidden self-start mt-0.5"
-            style={{ backgroundColor: statusColor }}
+            style={{
+              backgroundColor: entry.working ? "var(--color-status-working)" : statusColor,
+              boxShadow: entry.working
+                ? "0 0 0 3px color-mix(in srgb, var(--color-status-working) 18%, transparent)"
+                : undefined,
+            }}
             role="img"
-            aria-label={entry.status}
+            aria-label={entry.working ? "working" : entry.status}
           />
           {entry.skillsStale && (
             <span
@@ -709,7 +697,7 @@ export function Roster({
           onClick={onOpenBlackboard}
           disabled={!onOpenBlackboard}
           className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-            blackboardOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
+            blackboardOpen ? "bg-surface ring-1 ring-hair" : "hover:bg-overlay/[0.04]"
           }`}
         >
           <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
@@ -724,7 +712,7 @@ export function Roster({
           onClick={onOpenMemory}
           disabled={!onOpenMemory}
           className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-            memoryOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
+            memoryOpen ? "bg-surface ring-1 ring-hair" : "hover:bg-overlay/[0.04]"
           }`}
         >
           <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
@@ -739,7 +727,7 @@ export function Roster({
           onClick={onOpenChat}
           disabled={!onOpenChat}
           className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-            chatOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
+            chatOpen ? "bg-surface ring-1 ring-hair" : "hover:bg-overlay/[0.04]"
           }`}
         >
           <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
@@ -754,7 +742,7 @@ export function Roster({
           onClick={onOpenLaneBoard}
           disabled={!onOpenLaneBoard}
           className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-            laneBoardOpen ? "bg-overlay/[0.06]" : "hover:bg-overlay/[0.04]"
+            laneBoardOpen ? "bg-surface ring-1 ring-hair" : "hover:bg-overlay/[0.04]"
           }`}
         >
           <div className="w-7 h-7 rounded-[8px] bg-ink text-on-ink grid place-items-center ring-hair shrink-0">
