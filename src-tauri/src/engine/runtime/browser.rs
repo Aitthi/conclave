@@ -463,13 +463,36 @@ pub fn new_human_tab() -> TabId {
 /// Mark an agent's tab `ended` (read-only until the human closes it, D4b). The
 /// webview stays ALIVE — the human can still view the final page after the agent
 /// is gone; only the human's `close` tears it down.
-// D4b (the ended-badge) is DEFERRED to task `inapp-browser-ended-detection`: the
-// correct trigger is the agent-crash path (`instance.rs forward_session_output`
-// EOF branch), a fragile shared-lifecycle edit out of scope for this lane
-// (Detoro ruling on a281ebf9's D4b addendum). This registry op is ready for it.
-#[allow(dead_code)]
+///
+/// Registry-only and INTENTIONALLY app-less: the frontend `InAppBrowserView`
+/// polls `browser.status` every 2s, so flipping the registry flag is enough to
+/// repaint the ended badge — there is NO browser-state event to emit (every
+/// change, incl. `navigate`/`set_active`, propagates via that poll). Wired into
+/// the terminal agent-exit paths in `instance.rs` (crash-EOF / `stop` /
+/// `remove`); `restart` deliberately does NOT call it (D-1: the tab is reused by
+/// the respawned generation). A no-op for a human/unknown tab, and idempotent.
 pub fn mark_ended(agent_id: &str) {
     with_registry(|r| r.mark_ended(agent_id));
+}
+
+/// Test-only: seed an AGENT tab straight into the process-global registry
+/// (app-less, no native webview) so lifecycle tests in `instance.rs` can assert
+/// `mark_ended` flips it. Callers MUST use a process-unique `agent_id` (the
+/// registry is a shared `static`) — the fixture UUIDs already satisfy this.
+#[cfg(test)]
+pub(crate) fn test_seed_agent_tab(agent_id: &str) {
+    use super::browser_tabs::OwnerKind;
+    with_registry(|r| {
+        r.upsert(
+            agent_id.to_string(),
+            BrowserOwner {
+                kind: OwnerKind::Agent,
+                id: agent_id.to_string(),
+                label: agent_id.to_string(),
+            },
+            Some("https://example.test/".to_string()),
+        );
+    });
 }
 
 // ── Native webview pool (the tab-keyed multiplex) ────────────────────────────
@@ -844,6 +867,32 @@ pub async fn screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T1: `mark_ended` is idempotent (two marks = one ended tab, no panic) and
+    /// a silent no-op for an unknown id (creates nothing). Ids are process-unique
+    /// because the registry is a shared `static` seen by every test in this bin.
+    #[test]
+    fn mark_ended_is_idempotent_and_noops_unknown_id() {
+        let seeded = "t1-ended-idem-seeded";
+        let unknown = "t1-ended-idem-unknown";
+
+        test_seed_agent_tab(seeded);
+        mark_ended(seeded);
+        mark_ended(seeded); // second mark must be harmless.
+
+        mark_ended(unknown); // no seeded tab → silent no-op, no panic.
+
+        let tabs = state().tabs;
+        let seeded_tab = tabs
+            .iter()
+            .find(|t| t.tab_id == seeded)
+            .expect("seeded tab present");
+        assert!(seeded_tab.ended, "seeded agent tab must be ended");
+        assert!(
+            !tabs.iter().any(|t| t.tab_id == unknown),
+            "mark_ended must not create a tab for an unknown id"
+        );
+    }
 
     #[test]
     fn normalize_url_fills_missing_scheme_with_https() {

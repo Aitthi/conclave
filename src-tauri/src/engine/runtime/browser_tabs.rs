@@ -161,9 +161,8 @@ impl TabRegistry {
 
     /// Mark an agent's tab `ended` (read-only until the human closes it, D4b).
     /// A no-op for a human tab or an unknown id — only agent tabs can end.
-    // Consumed via `runtime::browser::mark_ended` by the deferred agent-crash
-    // hook (task `inapp-browser-ended-detection`); unit-tested here regardless.
-    #[allow(dead_code)]
+    // Live via `runtime::browser::mark_ended`, wired into the terminal
+    // agent-exit paths in `instance.rs` (task `inapp-browser-ended-detection`).
     pub fn mark_ended(&mut self, agent_id: &str) {
         if let Some(tab) = self
             .tabs
