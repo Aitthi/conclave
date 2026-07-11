@@ -1024,6 +1024,12 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
     // there is no idle status to emit.
     let _ = state.runtime.unregister(&id);
 
+    // D4b: the agent is being removed — flip its browser tab to `ended` BEFORE
+    // its row is deleted. The tab stays as a read-only view of the final page
+    // until the human closes it (browser.rs:463 contract). No-op for a tab-less
+    // agent; the frontend's 2s `browser.status` poll repaints the badge.
+    runtime::browser::mark_ended(&id);
+
     let removed = repo::workspace_agent::remove(&state.db, &id).await?;
     if !removed {
         return Err(AppError::NotFound(format!(
@@ -1161,6 +1167,11 @@ async fn forward_session_output(
                         },
                     );
                 }
+                // D4b: the owning agent self-terminated (EOF). Inside the epoch
+                // guard so a LATE EOF from a superseded (restarted) generation
+                // returns false above and does NOT mark it. App-less + no emit:
+                // the frontend's 2s `browser.status` poll repaints the badge.
+                runtime::browser::mark_ended(&instance_id);
             }
             return;
         };
@@ -1243,6 +1254,11 @@ async fn forward_session_output(
                 },
             );
         }
+        // D4b: terminal EOF for the owning agent. This shared tail is reached by
+        // BOTH the chat/`track_context` branch and the transcript sub-branch, so
+        // it covers every non-drain EOF. Epoch-guarded (a superseded late EOF
+        // returns false above). App-less; the frontend's 2s poll repaints.
+        runtime::browser::mark_ended(&instance_id);
     }
 }
 
@@ -1423,6 +1439,12 @@ pub async fn stop(state: &AppState, payload: Value) -> Result<Value, AppError> {
             status: "idle".into(),
         },
     );
+
+    // D4b: `stop` won the teardown race (unregister returned true) — flip the
+    // agent's browser tab to `ended` (read-only until the human closes it). A
+    // late EOF for this id finds a bumped epoch and skips its own mark, so this
+    // is the sole marker. No-op for a tab-less agent; the 2s poll repaints.
+    runtime::browser::mark_ended(&id);
 
     Ok(Value::Null)
 }
@@ -3079,5 +3101,169 @@ mod tests {
             .expect("get failed")
             .expect("row exists");
         assert_eq!(row.status, "idle");
+    }
+
+    /// Helper: the `ended` flag of the browser tab owned by `id`, or `None` if
+    /// no tab exists for it. Reads the process-global registry (fixture UUIDs
+    /// keep each test's tab isolated from the others sharing that static).
+    fn tab_ended(id: &str) -> Option<bool> {
+        runtime::browser::state()
+            .tabs
+            .into_iter()
+            .find(|t| t.tab_id == id)
+            .map(|t| t.ended)
+    }
+
+    /// T2: a crash-death EOF (current epoch) flips the owning agent's browser
+    /// tab to `ended`. Exercises the chat/`track_context` path, whose EOF falls
+    /// through to the shared epoch-guarded tail.
+    #[tokio::test]
+    async fn forwarder_marks_tab_ended_on_eof() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        runtime::browser::test_seed_agent_tab(&id);
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            None,
+            None,
+            rx,
+            true, // chat backend → shared epoch-guarded tail.
+            None,
+            epoch,
+        ));
+
+        drop(tx); // EOF → epoch-guarded cleanup runs.
+        task.await.expect("forwarder task panicked");
+
+        assert_eq!(
+            tab_ended(&id),
+            Some(true),
+            "crash-death EOF must mark the owning tab ended"
+        );
+    }
+
+    /// T2 (guard): a LATE EOF from a SUPERSEDED generation (its epoch no longer
+    /// matches the live one after a restart reused the id) must NOT mark the tab
+    /// ended — the same epoch guard that protects the idle transition.
+    #[tokio::test]
+    async fn forwarder_late_eof_does_not_mark_tab_ended() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        runtime::browser::test_seed_agent_tab(&id);
+
+        // Generation 1's epoch — the one the stale forwarder will carry.
+        let stale_epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register gen1");
+        // Simulate a restart: drop gen1 and register gen2 (a strictly newer
+        // epoch) on the same id. `next_epoch` is monotonic, so gen2 > gen1.
+        assert!(state.runtime.unregister(&id), "gen1 was live");
+        let _gen2 = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register gen2");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            None,
+            None,
+            rx,
+            true,
+            None,
+            stale_epoch, // superseded — unregister_epoch returns false.
+        ));
+
+        drop(tx);
+        task.await.expect("forwarder task panicked");
+
+        assert_eq!(
+            tab_ended(&id),
+            Some(false),
+            "a superseded late EOF must NOT mark the tab ended"
+        );
+    }
+
+    /// T3: `stop` flips the agent's browser tab to `ended` (it won the teardown
+    /// race). Sibling to `stop_marks_idle`.
+    #[tokio::test]
+    async fn stop_marks_tab_ended() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+
+        runtime::browser::test_seed_agent_tab(&id);
+
+        spawn(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("spawn failed");
+        assert!(state.runtime.is_live(&id));
+
+        stop(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("stop failed");
+
+        assert_eq!(
+            tab_ended(&id),
+            Some(true),
+            "stop must mark the owning tab ended"
+        );
+    }
+
+    /// T4: `restart` (D-1) does NOT mark the tab ended — the tab is reused by the
+    /// respawned generation, so marking it would wrongly lock a live agent's tab.
+    #[tokio::test]
+    async fn restart_does_not_mark_tab_ended() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        runtime::browser::test_seed_agent_tab(&id);
+        assert!(state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .is_some());
+
+        let out = restart(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("restart failed");
+        assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
+
+        assert_eq!(
+            tab_ended(&id),
+            Some(false),
+            "restart must NOT mark the tab ended (D-1)"
+        );
     }
 }
