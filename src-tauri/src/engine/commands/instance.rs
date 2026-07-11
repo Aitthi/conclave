@@ -102,12 +102,18 @@ fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Op
 }
 
 /// The `ANTHROPIC_BASE_URL` override routing an agent through the loopback
-/// context proxy — only when the agent explicitly opted in (`proxy_enabled`,
-/// NULL/absent = OFF per spec D8's double opt-in, deliberately asymmetric with
-/// `rtk_enabled`) AND the listener is actually bound. Fail-open: a down
-/// listener means a plain direct-to-Anthropic spawn, never a broken one.
-fn proxy_env(proxy_enabled: Option<bool>, active_port: Option<u16>) -> Option<(String, String)> {
-    if !proxy_enabled.unwrap_or(false) {
+/// context proxy. Claude agents default ON (`proxy_enabled` NULL/absent =
+/// ON, rtk-parity — this unblocks Phase-1 measurement); codex agents default
+/// OFF and unchanged, since `ctx_proxy` only rewrites the Anthropic
+/// `/v1/messages` shape and would break the OpenAI-protocol codex harness.
+/// Either default is overridable per-agent via `proxy_enabled`. Fail-open: a
+/// down listener means a plain direct spawn, never a broken one.
+fn proxy_env(
+    proxy_enabled: Option<bool>,
+    default_on: bool,
+    active_port: Option<u16>,
+) -> Option<(String, String)> {
+    if !proxy_enabled.unwrap_or(default_on) {
         return None;
     }
     let port = active_port?;
@@ -666,7 +672,8 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // sandbox allowlists and the env block below, so the base-URL
             // override and its loopback sandbox hole fire together or not at
             // all. `proxy_port` is Some only when the injection fired.
-            let proxy_env_var = proxy_env(def.proxy_enabled, state.ctx_proxy.active_port());
+            let proxy_env_var =
+                proxy_env(def.proxy_enabled, base == "claude", state.ctx_proxy.active_port());
             let proxy_port = proxy_env_var.is_some().then(|| state.ctx_proxy.port);
 
             let mut launch = String::from(base);
@@ -1706,24 +1713,34 @@ mod tests {
         );
     }
 
-    /// Env injection for the context proxy (agent-proxy Task 11): only the
-    /// combination "agent explicitly opted in AND listener actually bound"
-    /// yields the base-URL override — spec D8's per-agent half of the double
-    /// opt-in, defaulting OFF (asymmetric with rtk_enabled by design).
+    /// Env injection for the context proxy: Claude agents default ON
+    /// (rtk-parity), codex agents default OFF (Anthropic-only proxy would
+    /// break the OpenAI-protocol harness) — either default overridable
+    /// per-agent via `proxy_enabled`. Fail-open when the listener is down.
     #[test]
-    fn proxy_env_requires_opt_in_and_active_listener() {
+    fn proxy_env_defaults_on_for_claude_off_for_codex() {
+        // Claude default ON: NULL proxy_enabled + default_on=true → injected.
         assert_eq!(
-            proxy_env(Some(true), Some(18787)),
+            proxy_env(None, true, Some(18787)),
+            Some((
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:18787".to_string()
+            ))
+        );
+        // Codex default OFF: NULL proxy_enabled + default_on=false → never.
+        assert_eq!(proxy_env(None, false, Some(18787)), None);
+        // Explicit opt-OUT wins for Claude even with default_on=true.
+        assert_eq!(proxy_env(Some(false), true, Some(18787)), None);
+        // Explicit opt-IN wins for codex even with default_on=false.
+        assert_eq!(
+            proxy_env(Some(true), false, Some(18787)),
             Some((
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://127.0.0.1:18787".to_string()
             ))
         );
         // Opted in but listener down → no injection (fail-open).
-        assert_eq!(proxy_env(Some(true), None), None);
-        // Unset or explicit false → never, even with the listener up.
-        assert_eq!(proxy_env(None, Some(18787)), None);
-        assert_eq!(proxy_env(Some(false), Some(18787)), None);
+        assert_eq!(proxy_env(Some(true), true, None), None);
     }
 
     #[test]
