@@ -56,10 +56,10 @@ Two thresholds must not be conflated: the **byte-space trigger** (gates count_to
 `src-tauri/src/engine/commands/proxy.rs` — `checkpoint-report` groups/counts by `outcome` (below_ceiling / eligible / saturated / count_failure) and, for eligible+saturated, reports q distribution (min/median/max) + projected_post band. This is what turns raw rows into the GO/NO-GO signal.
 
 ## Gates (implementer, BEFORE READY)
-- `cd src-tauri && cargo test -p ctxopt -p conclave_lib` (run from `src-tauri/`; root fails "could not find Cargo.toml"). Do NOT pipe through `tail` (hides the conclave_lib result) and do NOT append `echo` after a pipe (masks cargo exit). Write full log + `$?` to separate files, then read them.
+- `cd src-tauri && cargo test -p ctxopt -p conclave` (run from `src-tauri/`; root fails "could not find Cargo.toml"). Do NOT pipe through `tail` (hides the conclave_lib result) and do NOT append `echo` after a pipe (masks cargo exit). Write full log + `$?` to separate files, then read them.
 - `cd src-tauri && cargo clippy --all-targets` — scope failures to THIS boundary; the repo has known pre-existing whole-workspace clippy drift OUTSIDE this boundary (e.g. `crates/ctxopt/src/analyze.rs:127` type_complexity) — do not chase it; note it in the gate.
 - Fresh lane worktree: `cargo build` once so deps are present.
-- Record: `conclave task gate <ws> infinity-turn-checkpoint-m1-fix -- cd src-tauri && cargo test -p ctxopt -p conclave_lib`.
+- Record: `conclave task gate <ws> infinity-turn-checkpoint-m1-fix -- cd src-tauri && cargo test -p ctxopt -p conclave`.
 
 ## Global constraints (inherit)
 - **NEVER alter forwarded bytes** — log mode only; the measurement path reads the body by reference and produces only metric rows.
