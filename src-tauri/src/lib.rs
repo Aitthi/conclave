@@ -30,8 +30,67 @@ async fn ipc(
         .map_err(|e| e.to_string())
 }
 
+/// Render one `panic.log` entry. Pure so the shape is unit-testable; the hook
+/// supplies live values. Ends with a `---` separator line so successive panics
+/// in one file stay visually distinct.
+fn format_panic_entry(
+    timestamp: &str,
+    thread: &str,
+    location: &str,
+    message: &str,
+    backtrace: &str,
+) -> String {
+    format!(
+        "[{timestamp}] panic on thread '{thread}' at {location}: {message}\n\
+         backtrace:\n{backtrace}\n---\n"
+    )
+}
+
+/// Diagnostics beachhead: append every Rust panic to
+/// `~/Library/Application Support/Conclave/panic.log` (timestamp, thread,
+/// location, payload, forced backtrace), then delegate to the previous hook.
+/// A Finder-launched app has no visible stderr, so without this a panic —
+/// including one that aborts the process by unwinding into FFI — leaves zero
+/// diagnosable output (two undiagnosed app deaths on 2026-07-10, task
+/// browser-crash-fix). Uses only std + existing deps (chrono, dirs); every
+/// filesystem step is best-effort so the hook itself can never panic.
+fn install_panic_beachhead() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let thread = std::thread::current();
+        let thread = thread.name().unwrap_or("<unnamed>");
+        let location = info
+            .location()
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "<unknown location>".to_owned());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let entry = format_panic_entry(&timestamp, thread, &location, &message, &backtrace);
+        if let Some(data_dir) = dirs::data_dir() {
+            let dir = data_dir.join("Conclave");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+            {
+                use std::io::Write;
+                let _ = f.write_all(entry.as_bytes());
+            }
+        }
+        prev(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_beachhead();
     tauri::Builder::default()
         .menu(menu::build)
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
@@ -83,4 +142,28 @@ pub fn run() {
                 engine::runtime::design_host::kill_on_exit();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_panic_entry;
+
+    #[test]
+    fn panic_entry_carries_every_field_and_a_separator() {
+        let entry = format_panic_entry(
+            "2026-07-11T03:00:00+00:00",
+            "tokio-runtime-worker",
+            "src/engine/runtime/browser.rs:123:9",
+            "called `Option::unwrap()` on a `None` value",
+            "0: frame_one\n1: frame_two",
+        );
+        assert!(entry.starts_with("[2026-07-11T03:00:00+00:00] panic on thread 'tokio-runtime-worker'"));
+        assert!(entry.contains("at src/engine/runtime/browser.rs:123:9: "));
+        assert!(entry.contains("called `Option::unwrap()` on a `None` value"));
+        assert!(entry.contains("backtrace:\n0: frame_one\n1: frame_two"));
+        assert!(
+            entry.ends_with("\n---\n"),
+            "entries must end with a separator line so successive panics stay distinct"
+        );
+    }
 }
