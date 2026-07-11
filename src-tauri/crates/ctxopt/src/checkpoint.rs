@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use serde_json::{json, Value};
 
+use crate::estimate::est_tokens;
 use crate::request::{index_tools, ToolCall};
 
 /// Read-only, re-runnable-for-current-state tools whose historical output may be
@@ -108,6 +109,62 @@ pub fn plan_checkpoint(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Projection {
+    pub projected_messages: Value,
+    pub gross_candidate_bytes: usize,
+    pub stub_overhead_bytes: usize,
+    pub net_saved_bytes: usize,
+    pub net_saved_tokens: usize,
+    pub projected_post_tokens: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointOutcome {
+    Saturated,
+    Eligible(Projection),
+}
+
+/// Build the projected message list and apply the min-net-saving (M) + low-water (L)
+/// pre-gate. Bounds count_tokens calls: only Eligible outcomes get sampled.
+pub fn project(
+    messages: &Value,
+    plan: &CheckpointPlan,
+    est_whole_tokens: usize,
+    min_net_saving_tokens: usize,
+    low_water_tokens: usize,
+) -> CheckpointOutcome {
+    if plan.candidates.is_empty() {
+        return CheckpointOutcome::Saturated;
+    }
+    let stubs: HashMap<&str, &str> = plan
+        .candidates
+        .iter()
+        .map(|c| (c.tool_use_id.as_str(), c.stub.as_str()))
+        .collect();
+    let mut projected = messages.clone();
+    crate::apply::stub_tool_results(&mut projected, &stubs);
+
+    let gross_candidate_bytes: usize = plan.candidates.iter().map(|c| c.gross_bytes).sum();
+    let stub_overhead_bytes: usize = plan.candidates.iter().map(|c| c.stub_bytes).sum();
+    let net_saved_bytes = gross_candidate_bytes.saturating_sub(stub_overhead_bytes);
+    let net_saved_tokens = est_tokens(net_saved_bytes);
+    let projected_post_tokens = est_whole_tokens.saturating_sub(net_saved_tokens);
+
+    if net_saved_tokens > min_net_saving_tokens && projected_post_tokens <= low_water_tokens {
+        CheckpointOutcome::Eligible(Projection {
+            projected_messages: projected,
+            gross_candidate_bytes,
+            stub_overhead_bytes,
+            net_saved_bytes,
+            net_saved_tokens,
+            projected_post_tokens,
+        })
+    } else {
+        CheckpointOutcome::Saturated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +233,54 @@ mod tests {
         assert_eq!(plan.earliest_changed_msg_index, 1); // t1 result is message #1
         assert!(plan.non_recoverable_kept_bytes > 0);   // the Bash result
         assert!(plan.candidates[0].gross_bytes > plan.candidates[0].stub_bytes);
+    }
+
+    #[test]
+    fn eligible_when_net_saving_over_m_and_post_under_l() {
+        let big = "x".repeat(8000);
+        let m = msgs(
+            vec![
+                tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big),
+                tool_pair("t2", "Read", json!({"file_path":"/b.rs"}), &big),
+            ],
+            40,
+        );
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
+        match project(&m, &plan, 500_000, 1_000, 499_000) {
+            CheckpointOutcome::Eligible(p) => {
+                assert!(p.net_saved_tokens > 1_000);
+                assert!(p.projected_post_tokens <= 499_000);
+                assert!(p.gross_candidate_bytes > p.stub_overhead_bytes);
+                assert_ne!(p.projected_messages, m);
+                assert!(p.projected_messages[1]["content"][0]["content"][0]["text"]
+                    .as_str().unwrap().starts_with("[ctxopt checkpoint:"));
+            }
+            other => panic!("expected Eligible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saturated_when_net_saving_below_m() {
+        let big = "x".repeat(8000);
+        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 40);
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
+        assert_eq!(project(&m, &plan, 500_000, 10_000_000, 499_000), CheckpointOutcome::Saturated);
+    }
+
+    #[test]
+    fn saturated_when_post_stays_above_l() {
+        let big = "x".repeat(8000);
+        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 40);
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
+        assert_eq!(project(&m, &plan, 500_000, 1, 1_000), CheckpointOutcome::Saturated);
+    }
+
+    #[test]
+    fn saturated_when_no_candidates() {
+        let big = "x".repeat(8000);
+        let m = msgs(vec![tool_pair("t1", "Read", json!({"file_path":"/a.rs"}), &big)], 2); // all in tail
+        let plan = plan_checkpoint(&m, 500_000, 450_000, 15).unwrap();
+        assert_eq!(project(&m, &plan, 500_000, 1, 499_000), CheckpointOutcome::Saturated);
     }
 
     #[test]

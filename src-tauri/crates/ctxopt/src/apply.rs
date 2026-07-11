@@ -4,11 +4,10 @@ use serde_json::{json, Value};
 
 use crate::analyze::Elision;
 
-/// Replace the `content` of every elided tool_result with its stub. Only
-/// `content` changes — every sibling key (`cache_control`, `is_error`, unknown
-/// fields) stays untouched. Returns serialized bytes saved.
-pub fn apply(messages: &mut Value, elisions: &[Elision]) -> usize {
-    let stubs: HashMap<&str, &str> = elisions.iter().map(|e| (e.tool_use_id.as_str(), e.stub.as_str())).collect();
+/// Replace the `content` of every tool_result whose id is in `stubs` with a
+/// text-only stub. Only `content` changes — every sibling key is preserved.
+/// Returns serialized bytes saved (old − new, saturating, summed).
+pub fn stub_tool_results(messages: &mut Value, stubs: &HashMap<&str, &str>) -> usize {
     let mut saved = 0usize;
     let Some(msgs) = messages.as_array_mut() else { return 0 };
     for msg in msgs {
@@ -28,6 +27,15 @@ pub fn apply(messages: &mut Value, elisions: &[Elision]) -> usize {
         }
     }
     saved
+}
+
+/// Replace the `content` of every elided tool_result with its stub. Only
+/// `content` changes — every sibling key (`cache_control`, `is_error`, unknown
+/// fields) stays untouched. Returns serialized bytes saved.
+pub fn apply(messages: &mut Value, elisions: &[Elision]) -> usize {
+    let stubs: HashMap<&str, &str> =
+        elisions.iter().map(|e| (e.tool_use_id.as_str(), e.stub.as_str())).collect();
+    stub_tool_results(messages, &stubs)
 }
 
 #[cfg(test)]
@@ -101,6 +109,17 @@ mod tests {
         apply(&mut after, &els);
         after[1]["content"][0]["content"] = json!([{"type": "text", "text": "y".repeat(2000)}]);
         assert!(validate(&before, &after, &els).is_err());
+    }
+
+    #[test]
+    fn stub_tool_results_replaces_only_named_ids() {
+        use std::collections::HashMap;
+        let mut m = fixture(); // tu_1 tool_result with 700-byte content
+        let stubs: HashMap<&str, &str> = HashMap::from([("tu_1", "[ctxopt checkpoint: elided Read /a.rs @turn 1 — re-read to restore]")]);
+        let saved = stub_tool_results(&mut m, &stubs);
+        assert!(saved > 0);
+        assert_eq!(m[1]["content"][0]["content"][0]["text"], stubs["tu_1"]);
+        assert_eq!(m[1]["content"][0]["cache_control"]["type"], "ephemeral"); // sibling key preserved
     }
 
     #[test]
