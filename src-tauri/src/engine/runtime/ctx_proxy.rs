@@ -1,6 +1,6 @@
 //! App-global loopback proxy for Anthropic API traffic.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -230,9 +230,7 @@ async fn forward_inner(
     // spawns off the forwarding path — it never derives `upstream_body`, so the
     // forwarded bytes are byte-identical whether or not this fires. The job
     // captures the exact `upstream` used for THIS forward (no async TOCTOU).
-    if is_messages_post
-        && status.is_success()
-        && state.ctx_proxy.checkpoint.load(Ordering::Acquire)
+    if is_messages_post && status.is_success() && state.ctx_proxy.checkpoint.load(Ordering::Acquire)
     {
         if let Some(job) = checkpoint_gate(&state.ctx_proxy, &body, &upstream) {
             let cred = credential_from_headers(&parts.headers);
@@ -696,20 +694,20 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
         earliest_changed_byte: saturating_i64(job.earliest_changed_byte as u64),
         earliest_changed_msg: saturating_i64(job.earliest_changed_msg_index as u64),
         r_tokens: 0,
-        gross_candidate_tokens: saturating_i64(
-            ctxopt::estimate::est_tokens(job.gross_candidate_bytes) as u64,
-        ),
+        gross_candidate_tokens: saturating_i64(ctxopt::estimate::est_tokens(
+            job.gross_candidate_bytes,
+        ) as u64),
         stub_overhead_tokens: saturating_i64(
-            ctxopt::estimate::est_tokens(job.stub_overhead_bytes) as u64,
+            ctxopt::estimate::est_tokens(job.stub_overhead_bytes) as u64
         ),
         s_net_tokens: 0,
         q: 0.0,
         projected_break_even: f64::INFINITY,
         projected_post_tokens: saturating_i64(job.projected_post_tokens as u64),
         plateau_turns: i64::from(plateau),
-        non_recoverable_kept_tokens: saturating_i64(
-            ctxopt::estimate::est_tokens(job.non_recoverable_kept_bytes) as u64,
-        ),
+        non_recoverable_kept_tokens: saturating_i64(ctxopt::estimate::est_tokens(
+            job.non_recoverable_kept_bytes,
+        ) as u64),
         provider_estimate: 1,
         count_failure: 0,
         method_version: ct::CHECKPOINT_METHOD_VERSION.to_owned(),
@@ -723,7 +721,11 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
             row.r_tokens = saturating_i64(r);
             row.s_net_tokens = saturating_i64(s_net);
             row.q = q;
-            row.projected_break_even = if q > 0.0 { 11.5 / q - 12.5 } else { f64::INFINITY };
+            row.projected_break_even = if q > 0.0 {
+                11.5 / q - 12.5
+            } else {
+                f64::INFINITY
+            };
             row.projected_post_tokens = saturating_i64(b);
         }
         Err(error) => {
@@ -1236,8 +1238,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let _ = resp.bytes().await; // ensure forward_inner ran past the gate
-        // The scheduling decision is synchronous in forward_inner; a failed status
-        // never spawns a sampler.
+                                    // The scheduling decision is synchronous in forward_inner; a failed status
+                                    // never spawns a sampler.
         let report = crate::engine::repo::proxy_checkpoint_metric::report(&state.db, 24)
             .await
             .unwrap();
