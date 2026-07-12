@@ -404,6 +404,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn quality_versions_and_limits_are_pinned() {
+        assert_eq!(QUALITY_METHOD_VERSION, "h2-shadow-quality-v1");
+        assert_eq!(QUALITY_RUBRIC_VERSION, "hybrid-quality-rubric-v1");
+        assert_eq!(PROBE_PROMPT_VERSION, "source-probes-v1");
+        assert_eq!(FAITHFULNESS_PROMPT_VERSION, "faithfulness-v1");
+        assert_eq!(REPLAY_PROMPT_VERSION, "next-action-v1");
+        assert_eq!(JUDGE_PROMPT_VERSION, "blind-next-action-v1");
+        assert_eq!(BOOTSTRAP_METHOD_VERSION, "paired-bootstrap-v1");
+        assert_eq!(MAX_PROBES, 32);
+        assert_eq!(MAX_CALLS_PER_CASE, 5);
+        assert_eq!(QUALITY_CARRIER_COOLDOWN_MS, 60_000);
+        assert_eq!(MAX_FIXTURES_PER_CARRIER, 3);
+    }
+
+    #[test]
     fn quality_tags_are_pinned_allowlisted_and_round_trip() {
         let labels: Vec<_> = QualityTag::ALL.iter().map(|tag| tag.as_str()).collect();
         assert_eq!(
@@ -522,6 +537,26 @@ mod tests {
             result,
             paired_cluster_bootstrap("campaign", "rubric", &cases).unwrap()
         );
+    }
+
+    #[test]
+    fn paired_bootstrap_pins_direction_and_percentile_edges() {
+        let cases = [
+            BehaviorCase::live("live-small", true, false),
+            BehaviorCase::live("live-large", false, true),
+            BehaviorCase::live("live-large", false, true),
+            BehaviorCase::live("live-large", false, true),
+            BehaviorCase::fixture("fixture-small", true, false),
+            BehaviorCase::fixture("fixture-large", true, true),
+            BehaviorCase::fixture("fixture-large", true, true),
+            BehaviorCase::fixture("fixture-large", false, true),
+            BehaviorCase::fixture("fixture-large", false, true),
+        ];
+
+        let result = paired_cluster_bootstrap("asymmetric-campaign", "rubric", &cases).unwrap();
+        assert_eq!(result.point_estimate, 1.0 / 3.0);
+        assert_eq!(result.ci_lower, -1.0);
+        assert_eq!(result.ci_upper, 13.0 / 18.0);
     }
 
     #[test]
