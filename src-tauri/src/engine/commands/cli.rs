@@ -963,7 +963,7 @@ fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
 
 fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
     let usage =
-        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|checkpoint <on|off>|ceiling <tokens>|report [--since-hours N]|checkpoint-report [--since-hours N]|summary-shadow <on ...|off>|summary-report [--since-hours N] [--campaign-id ID]>";
+        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|checkpoint <on|off>|ceiling <tokens>|report [--since-hours N]|checkpoint-report [--since-hours N]|summary-shadow <on ...|off>|summary-report [--since-hours N] [--campaign-id ID]|quality-shadow <on ...|off>|quality-fixtures enqueue --manifest h2-adversarial-v1|quality-report [--since-hours N] [--campaign-id ID]|quality-audit <start --campaign-id ID|stop>>";
     match argv.get(1).map(String::as_str) {
         Some("status") if argv.len() == 2 => Ok(("proxy.status", Value::Null)),
         Some("mode") if argv.len() == 3 => match argv[2].as_str() {
@@ -1128,6 +1128,100 @@ fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 params["campaignId"] = json!(campaign_id);
             }
             Ok(("proxy.summaryReport", params))
+        }
+        Some("quality-shadow") if argv.get(2).map(String::as_str) == Some("off") => {
+            if argv.len() != 3 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok(("proxy.qualityShadow", json!({"enabled":false})))
+        }
+        Some("quality-shadow") if argv.get(2).map(String::as_str) == Some("on") => {
+            let mut rest = argv[3..].to_vec();
+            let mut required = |flag: &str| -> Result<String, AppError> {
+                let (value, next) = take_flag(&rest, flag);
+                rest = next;
+                value.ok_or_else(|| AppError::Invalid(usage.into()))
+            };
+            let h1_campaign_id = required("--h1-campaign-id")?;
+            let evaluator_model = required("--evaluator-model")?;
+            let rubric_version = required("--rubric-version")?;
+            let max_cases = required("--max-cases")?;
+            if !rest.is_empty()
+                || h1_campaign_id.trim().is_empty()
+                || evaluator_model.trim().is_empty()
+                || rubric_version.trim().is_empty()
+            {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let max_cases = max_cases
+                .parse::<u64>()
+                .map_err(|_| AppError::Invalid(usage.into()))?;
+            if !(1..=1_000).contains(&max_cases) {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok((
+                "proxy.qualityShadow",
+                json!({
+                    "enabled":true,
+                    "h1CampaignId":h1_campaign_id,
+                    "evaluatorModel":evaluator_model,
+                    "rubricVersion":rubric_version,
+                    "maxCases":max_cases,
+                }),
+            ))
+        }
+        Some("quality-fixtures") if argv.get(2).map(String::as_str) == Some("enqueue") => {
+            let (manifest, rest) = take_flag(&argv[3..], "--manifest");
+            if !rest.is_empty() || manifest.as_deref() != Some("h2-adversarial-v1") {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok((
+                "proxy.qualityFixtures",
+                json!({"manifest":"h2-adversarial-v1"}),
+            ))
+        }
+        Some("quality-report") => {
+            let (since_hours, rest) = take_flag(&argv[2..], "--since-hours");
+            let (campaign_id, rest) = take_flag(&rest, "--campaign-id");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let mut params = json!({});
+            if let Some(raw) = since_hours {
+                let value = raw
+                    .parse::<i64>()
+                    .map_err(|_| AppError::Invalid(usage.into()))?;
+                if value < 0 {
+                    return Err(AppError::Invalid(usage.into()));
+                }
+                params["sinceHours"] = json!(value);
+            }
+            if let Some(campaign_id) = campaign_id {
+                if campaign_id.trim().is_empty() {
+                    return Err(AppError::Invalid(usage.into()));
+                }
+                params["campaignId"] = json!(campaign_id);
+            }
+            Ok(("proxy.qualityReport", params))
+        }
+        Some("quality-audit") if argv.get(2).map(String::as_str) == Some("stop") => {
+            if argv.len() != 3 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok(("proxy.qualityAudit", json!({"enabled":false})))
+        }
+        Some("quality-audit") if argv.get(2).map(String::as_str) == Some("start") => {
+            let (campaign_id, rest) = take_flag(&argv[3..], "--campaign-id");
+            let Some(campaign_id) = campaign_id else {
+                return Err(AppError::Invalid(usage.into()));
+            };
+            if !rest.is_empty() || campaign_id.trim().is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok((
+                "proxy.qualityAudit",
+                json!({"enabled":true,"campaignId":campaign_id}),
+            ))
         }
         _ => Err(AppError::Invalid(usage.into())),
     }
@@ -3539,7 +3633,13 @@ mod tests {
             json!({ "maxText": 500, "callerId": "agentA" })
         );
         // Non-integer and stray positional args are rejected.
-        assert!(is_invalid(&["browser", "snapshot", "agentA", "--max-text", "lots"]));
+        assert!(is_invalid(&[
+            "browser",
+            "snapshot",
+            "agentA",
+            "--max-text",
+            "lots"
+        ]));
         assert!(is_invalid(&["browser", "snapshot", "agentA", "junk"]));
     }
 
@@ -3582,7 +3682,14 @@ mod tests {
     #[test]
     fn browser_caller_id_is_positional_not_from_free_text_args() {
         assert_eq!(
-            ok_params(&["browser", "eval", "agentA", "other-agent-id", "--caller-id", "evil"]),
+            ok_params(&[
+                "browser",
+                "eval",
+                "agentA",
+                "other-agent-id",
+                "--caller-id",
+                "evil"
+            ]),
             json!({ "js": "other-agent-id --caller-id evil", "callerId": "agentA" })
         );
         assert_eq!(
@@ -3678,7 +3785,10 @@ mod tests {
             ok_params(&["proxy", "report", "--since-hours", "48"]),
             json!({ "sinceHours": 48 })
         );
-        assert_eq!(ok_method(&["proxy", "threshold", "0.25"]), "proxy.threshold");
+        assert_eq!(
+            ok_method(&["proxy", "threshold", "0.25"]),
+            "proxy.threshold"
+        );
         assert_eq!(
             ok_params(&["proxy", "threshold", "0.25"]),
             json!({ "ratio": 0.25 })
@@ -3860,6 +3970,121 @@ mod tests {
             "a",
             "--campaign-id",
             "b"
+        ]));
+    }
+
+    fn quality_on_argv() -> Vec<&'static str> {
+        vec![
+            "proxy",
+            "quality-shadow",
+            "on",
+            "--h1-campaign-id",
+            "h1-campaign",
+            "--evaluator-model",
+            "evaluator-model",
+            "--rubric-version",
+            "hybrid-quality-rubric-v1",
+            "--max-cases",
+            "100",
+        ]
+    }
+
+    #[test]
+    fn proxy_quality_commands_map_exact_allowlisted_methods_and_payloads() {
+        assert_eq!(
+            ok_method(&["proxy", "quality-shadow", "off"]),
+            "proxy.qualityShadow"
+        );
+        assert_eq!(
+            ok_params(&["proxy", "quality-shadow", "off"]),
+            json!({"enabled":false})
+        );
+        let on = quality_on_argv();
+        assert_eq!(ok_method(&on), "proxy.qualityShadow");
+        assert_eq!(
+            ok_params(&on),
+            json!({
+                "enabled":true,
+                "h1CampaignId":"h1-campaign",
+                "evaluatorModel":"evaluator-model",
+                "rubricVersion":"hybrid-quality-rubric-v1",
+                "maxCases":100,
+            })
+        );
+        assert_eq!(
+            ok_method(&[
+                "proxy",
+                "quality-fixtures",
+                "enqueue",
+                "--manifest",
+                "h2-adversarial-v1"
+            ]),
+            "proxy.qualityFixtures"
+        );
+        assert_eq!(
+            ok_params(&[
+                "proxy",
+                "quality-report",
+                "--campaign-id",
+                "quality-campaign",
+                "--since-hours",
+                "12"
+            ]),
+            json!({"campaignId":"quality-campaign","sinceHours":12})
+        );
+        assert_eq!(
+            ok_params(&[
+                "proxy",
+                "quality-audit",
+                "start",
+                "--campaign-id",
+                "quality-campaign"
+            ]),
+            json!({"enabled":true,"campaignId":"quality-campaign"})
+        );
+        assert_eq!(
+            ok_params(&["proxy", "quality-audit", "stop"]),
+            json!({"enabled":false})
+        );
+    }
+
+    #[test]
+    fn proxy_quality_commands_reject_partial_duplicate_unknown_and_bad_bounds() {
+        let mut missing = quality_on_argv();
+        missing.truncate(missing.len() - 2);
+        assert!(is_invalid(&missing));
+        let mut duplicate = quality_on_argv();
+        duplicate.extend(["--max-cases", "2"]);
+        assert!(is_invalid(&duplicate));
+        let mut unknown = quality_on_argv();
+        unknown.extend(["--credential", "secret"]);
+        assert!(is_invalid(&unknown));
+        for max in ["0", "1001", "-1", "NaN"] {
+            let mut args = quality_on_argv();
+            let pos = args.iter().position(|arg| *arg == "--max-cases").unwrap();
+            args[pos + 1] = max;
+            assert!(is_invalid(&args));
+        }
+        assert!(is_invalid(&[
+            "proxy",
+            "quality-fixtures",
+            "enqueue",
+            "--manifest",
+            "other"
+        ]));
+        assert!(is_invalid(&[
+            "proxy",
+            "quality-report",
+            "--since-hours",
+            "-1"
+        ]));
+        assert!(is_invalid(&["proxy", "quality-audit", "start"]));
+        assert!(is_invalid(&[
+            "proxy",
+            "quality-audit",
+            "stop",
+            "--campaign-id",
+            "unexpected"
         ]));
     }
 

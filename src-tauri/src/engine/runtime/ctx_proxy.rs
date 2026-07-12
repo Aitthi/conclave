@@ -332,6 +332,9 @@ pub struct ProxyRuntime {
     pub quality_in_flight: AtomicU64,
     /// Enqueued adversarial fixture IDs (ids ONLY — never a credential).
     quality_fixture_queue: Mutex<std::collections::VecDeque<String>>,
+    /// Synthetic-only ephemeral human-audit reservoir. Raw bundles never enter
+    /// any persisted runtime state and are zeroized on clear.
+    pub quality_audit: crate::engine::runtime::quality_audit::QualityAuditManager,
     /// Evaluator-auth preflight state for the current campaign.
     quality_preflight: Mutex<QualityPreflightState>,
     /// Dedicated no-redirect clients for the evaluator (60s) + preflight (20s).
@@ -387,6 +390,7 @@ impl ProxyRuntime {
             quality_credential_mismatch: AtomicU64::new(0),
             quality_in_flight: AtomicU64::new(0),
             quality_fixture_queue: Mutex::new(std::collections::VecDeque::new()),
+            quality_audit: crate::engine::runtime::quality_audit::QualityAuditManager::default(),
             quality_preflight: Mutex::new(QualityPreflightState::Pending),
             quality_client: crate::engine::runtime::quality::quality_client(),
             quality_preflight_client: crate::engine::runtime::quality::preflight_client(),
@@ -594,6 +598,7 @@ impl ProxyRuntime {
     /// reset preflight. A request already on the wire cannot be recalled.
     #[allow(dead_code)]
     pub fn disarm_quality(&self) -> QualityStatus {
+        self.quality_audit.clear();
         {
             let mut guard = self
                 .quality_campaign
@@ -720,7 +725,7 @@ impl ProxyRuntime {
 
     /// Enqueue adversarial fixture IDs (ids ONLY — never a credential).
     #[allow(dead_code)]
-    fn enqueue_quality_fixtures(&self, ids: &[String]) {
+    pub(crate) fn enqueue_quality_fixtures(&self, ids: &[String]) {
         let mut queue = self
             .quality_fixture_queue
             .lock()
@@ -2945,6 +2950,7 @@ async fn run_quality_case<T>(
     let mut acc_original_usage: Option<RoleUsage> = None;
     let mut acc_projected_hash: Option<String> = None;
     let mut acc_projected_usage: Option<RoleUsage> = None;
+    let mut pending_audit: Option<crate::engine::runtime::quality_audit::FixtureAuditBundle> = None;
 
     // Accumulated partials apply FIRST; the exit's explicit fields override.
     macro_rules! terminal {
@@ -2960,6 +2966,11 @@ async fn run_quality_case<T>(
             row.projected_replay_usage = acc_projected_usage;
             $(row.$field = $value;)*
             persist_quality_row(db, row).await;
+            if let Some(bundle) = pending_audit.take() {
+                runtime
+                    .quality_audit
+                    .offer_fixture(&config.quality_campaign_id, bundle);
+            }
             return;
         }};
     }
@@ -3252,6 +3263,28 @@ async fn run_quality_case<T>(
         (false, true) => ComparisonLabel::ProjectedWin,
         (false, false) => ComparisonLabel::BothFail,
     };
+
+    if let QualitySource::Fixture { id, tags, .. } = &candidate.source {
+        pending_audit = crate::engine::runtime::quality_audit::FixtureAuditBundle::completed(
+            case_id.clone(),
+            id,
+            tags.clone(),
+            serde_json::to_string(&candidate.original_messages).unwrap_or_default(),
+            candidate.summary.clone(),
+            &probe_set.probes,
+            original_replay.text.clone(),
+            projected_replay.text.clone(),
+            serde_json::json!({
+                "criticalHallucinations": faithfulness.critical_hallucinations,
+                "criticalOmissions": faithfulness.critical_omissions,
+                "probeRecall": faithfulness.probe_recall,
+            })
+            .to_string(),
+            judge.a,
+            judge.b,
+            label_a_is_original,
+        );
+    }
 
     // The completed row: every measurement column set, judge model recorded as
     // the evaluator model actually answering. Raw texts are dropped with this
