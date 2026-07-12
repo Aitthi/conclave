@@ -812,6 +812,10 @@ mod tests {
         }
     }
 
+    // Test-fixture builder: positional args mirror the assertion sites; a
+    // params struct here would be a refactor, not a lint fix (baseline-drift
+    // ruling b8c5d8f4).
+    #[allow(clippy::too_many_arguments)]
     fn measured_row(
         campaign_id: &str,
         conversation_hash: &str,
@@ -865,20 +869,23 @@ mod tests {
         .await
         .unwrap();
 
-        let (outcome, failure_stage, error_type, response_model, forward_tier, gen_read): (
+        // (outcome, failure_stage, error_type, response_model, forward_tier, gen_read)
+        type Row = (
             String,
             Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
             Option<i64>,
-        ) = sqlx::query_as(
-            "SELECT outcome, failure_stage, error_type, response_model, forward_price_tier, \
+        );
+        let (outcome, failure_stage, error_type, response_model, forward_tier, gen_read): Row =
+            sqlx::query_as(
+                "SELECT outcome, failure_stage, error_type, response_model, forward_price_tier, \
              gen_cache_read_tokens FROM proxy_summary_metric",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(outcome, "measured");
         assert_eq!(failure_stage, None);
         assert_eq!(error_type, None);
@@ -1145,7 +1152,10 @@ mod tests {
 
         // Scan every text column of every committed row: the hostile content
         // must never appear anywhere, and only the one legitimate row exists.
-        let rows: Vec<(
+        // (campaign_id, conversation_hash, model, response_model, method_version,
+        //  prompt_version, price_version, checkpoint_id, source_boundary_hash,
+        //  summary_hash)
+        type TextColumns = (
             String,
             String,
             String,
@@ -1156,7 +1166,8 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
-        )> = sqlx::query_as(
+        );
+        let rows: Vec<TextColumns> = sqlx::query_as(
             "SELECT campaign_id, conversation_hash, model, response_model, method_version, \
              prompt_version, price_version, checkpoint_id, source_boundary_hash, summary_hash \
              FROM proxy_summary_metric",

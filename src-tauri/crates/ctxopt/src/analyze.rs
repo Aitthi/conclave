@@ -38,7 +38,11 @@ fn edited_path(c: &ToolCall) -> Option<&str> {
     if !EDIT_TOOLS.contains(&c.name.as_str()) {
         return None;
     }
-    let key = if c.name == "NotebookEdit" { "notebook_path" } else { "file_path" };
+    let key = if c.name == "NotebookEdit" {
+        "notebook_path"
+    } else {
+        "file_path"
+    };
     c.input.get(key).and_then(Value::as_str)
 }
 
@@ -76,8 +80,16 @@ pub fn analyze(messages: &Value) -> Vec<Elision> {
         if c.name != "Read" {
             continue;
         }
-        let (Some(path), Some(text)) = (c.input.get("file_path").and_then(Value::as_str), r.text.as_deref()) else { continue };
-        read_groups.entry((path.to_string(), text)).or_default().push((r, c));
+        let (Some(path), Some(text)) = (
+            c.input.get("file_path").and_then(Value::as_str),
+            r.text.as_deref(),
+        ) else {
+            continue;
+        };
+        read_groups
+            .entry((path.to_string(), text))
+            .or_default()
+            .push((r, c));
     }
     for ((path, _), mut group) in read_groups {
         if group.len() < 2 {
@@ -91,7 +103,10 @@ pub fn analyze(messages: &Value) -> Vec<Elision> {
                 elisions.push(Elision {
                     tool_use_id: r.tool_use_id.clone(),
                     stub: stub_identical(&path, kept.msg_idx),
-                    reason: ElisionReason::IdenticalRead { path: path.clone(), kept_msg: kept.msg_idx },
+                    reason: ElisionReason::IdenticalRead {
+                        path: path.clone(),
+                        kept_msg: kept.msg_idx,
+                    },
                 });
             }
         }
@@ -106,7 +121,9 @@ pub fn analyze(messages: &Value) -> Vec<Elision> {
         if taken.contains(r.tool_use_id.as_str()) || survivors.contains(r.tool_use_id.as_str()) {
             continue;
         }
-        let Some(path) = c.input.get("file_path").and_then(Value::as_str) else { continue };
+        let Some(path) = c.input.get("file_path").and_then(Value::as_str) else {
+            continue;
+        };
         let edit_msg = calls
             .iter()
             .filter(|e| e.msg_idx > r.msg_idx && edited_path(e) == Some(path))
@@ -117,20 +134,30 @@ pub fn analyze(messages: &Value) -> Vec<Elision> {
             elisions.push(Elision {
                 tool_use_id: r.tool_use_id.clone(),
                 stub: stub_superseded(path, edit_msg),
-                reason: ElisionReason::SupersededRead { path: path.to_string(), edit_msg },
+                reason: ElisionReason::SupersededRead {
+                    path: path.to_string(),
+                    edit_msg,
+                },
             });
         }
     }
 
     // Rule 3: exact duplicates of any non-Read tool — same tool, same input,
     // byte-identical output: keep the LAST.
-    let mut dup_groups: HashMap<(String, String, &str), Vec<(&ToolResultRef, &ToolCall)>> = HashMap::new();
+    // Key = (tool name, input JSON, result text); value = the duplicate group.
+    type DupGroups<'a> = HashMap<(String, String, &'a str), Vec<(&'a ToolResultRef, &'a ToolCall)>>;
+    let mut dup_groups: DupGroups = HashMap::new();
     for &(r, c) in &paired {
         if c.name == "Read" {
             continue;
         }
-        let Some(text) = r.text.as_deref() else { continue };
-        dup_groups.entry((c.name.clone(), c.input.to_string(), text)).or_default().push((r, c));
+        let Some(text) = r.text.as_deref() else {
+            continue;
+        };
+        dup_groups
+            .entry((c.name.clone(), c.input.to_string(), text))
+            .or_default()
+            .push((r, c));
     }
     for ((tool, _, _), mut group) in dup_groups {
         if group.len() < 2 {
@@ -143,7 +170,10 @@ pub fn analyze(messages: &Value) -> Vec<Elision> {
                 elisions.push(Elision {
                     tool_use_id: r.tool_use_id.clone(),
                     stub: stub_duplicate(&tool, kept_msg),
-                    reason: ElisionReason::DuplicateResult { tool: tool.clone(), kept_msg },
+                    reason: ElisionReason::DuplicateResult {
+                        tool: tool.clone(),
+                        kept_msg,
+                    },
                 });
             }
         }
@@ -206,8 +236,18 @@ mod tests {
     fn different_bytes_no_elision() {
         let m = msgs(
             vec![
-                tool_pair("tu_1", "Read", json!({"file_path": "/a.rs"}), &"x".repeat(700)),
-                tool_pair("tu_2", "Read", json!({"file_path": "/a.rs"}), &"y".repeat(700)),
+                tool_pair(
+                    "tu_1",
+                    "Read",
+                    json!({"file_path": "/a.rs"}),
+                    &"x".repeat(700),
+                ),
+                tool_pair(
+                    "tu_2",
+                    "Read",
+                    json!({"file_path": "/a.rs"}),
+                    &"y".repeat(700),
+                ),
             ],
             12,
         );
@@ -255,7 +295,12 @@ mod tests {
         let m = msgs(
             vec![
                 tool_pair("tu_1", "Read", json!({"file_path": "/a.rs"}), &big),
-                tool_pair("tu_2", "Edit", json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}), "ok"),
+                tool_pair(
+                    "tu_2",
+                    "Edit",
+                    json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}),
+                    "ok",
+                ),
             ],
             12,
         );
@@ -276,7 +321,12 @@ mod tests {
         let big = "x".repeat(700);
         let m = msgs(
             vec![
-                tool_pair("tu_1", "Edit", json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}), "ok"),
+                tool_pair(
+                    "tu_1",
+                    "Edit",
+                    json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}),
+                    "ok",
+                ),
                 tool_pair("tu_2", "Read", json!({"file_path": "/a.rs"}), &big),
             ],
             12,
@@ -290,7 +340,12 @@ mod tests {
         let m = msgs(
             vec![
                 tool_pair("tu_1", "Read", json!({"file_path": "/a.rs"}), &big),
-                tool_pair("tu_2", "Edit", json!({"file_path": "/b.rs", "old_string": "a", "new_string": "b"}), "ok"),
+                tool_pair(
+                    "tu_2",
+                    "Edit",
+                    json!({"file_path": "/b.rs", "old_string": "a", "new_string": "b"}),
+                    "ok",
+                ),
             ],
             12,
         );
@@ -304,7 +359,12 @@ mod tests {
             vec![
                 tool_pair("tu_1", "Read", json!({"file_path": "/a.rs"}), &big),
                 tool_pair("tu_2", "Read", json!({"file_path": "/a.rs"}), &big),
-                tool_pair("tu_3", "Edit", json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}), "ok"),
+                tool_pair(
+                    "tu_3",
+                    "Edit",
+                    json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}),
+                    "ok",
+                ),
             ],
             12,
         );

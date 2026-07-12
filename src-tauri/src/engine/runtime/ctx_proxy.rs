@@ -3153,7 +3153,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_measured_row_wires_counts_and_usage_into_the_economics() {
         let (upstream, hits, last_gen, up) = start_summary_mock(GenBehavior::Ok).await;
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         let job = armed_summary_job(&rt, &upstream, summarizable_request());
@@ -3236,7 +3236,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_disarmed_before_generation_spends_nothing() {
         let (upstream, hits, _last, up) = start_summary_mock(GenBehavior::Ok).await;
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         let job = armed_summary_job(&rt, &upstream, summarizable_request());
@@ -3299,7 +3299,7 @@ mod tests {
     // that lands AFTER step 1 passed but BEFORE generation must still spend zero.
     #[tokio::test]
     async fn pipeline_disarm_after_step1_is_caught_by_the_step6_recheck() {
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         let (upstream, counts, up) = start_disarm_on_first_count_mock(rt.clone()).await;
@@ -3317,7 +3317,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_below_ceiling_when_real_a_is_small() {
         let (upstream, hits, _last, up) = start_summary_mock(GenBehavior::Ok).await;
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         let mut job = armed_summary_job(&rt, &upstream, summarizable_request());
@@ -3331,7 +3331,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_tail_boundary_failure_when_no_room_for_the_tail() {
         let (upstream, hits, _last, up) = start_summary_mock(GenBehavior::Ok).await;
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         // Small request: A (~few hundred bytes) > ceiling(1) but < 100k tail target.
@@ -3346,7 +3346,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_no_candidate_when_tail_has_no_summarizable_sources() {
         let (upstream, hits, _last, up) = start_summary_mock(GenBehavior::Ok).await;
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         // Large plain conversation (no tool results): tail search succeeds, but the
@@ -3426,7 +3426,7 @@ mod tests {
     }
 
     async fn run_armed_pipeline(upstream: &str, original: Value) -> Arc<AppState> {
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         let job = armed_summary_job(&rt, upstream, original);
@@ -3547,7 +3547,7 @@ mod tests {
         let original = json!({"model":"claude-3-5-sonnet-20241022","messages":messages});
 
         let (upstream, _hits, last_gen, up) = start_summary_mock(GenBehavior::Ok).await;
-        let mut rt = ProxyRuntime::with_port(0);
+        let rt = ProxyRuntime::with_port(0);
         rt.arm_summary(arm_req()).unwrap();
         let (state, rt) = armed_state(rt).await;
         let mut job = armed_summary_job(&rt, &upstream, original);
@@ -3714,7 +3714,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let mut state = AppState::for_tests().await;
-        let mut rt = ProxyRuntime::with_port(port);
+        let rt = ProxyRuntime::with_port(port);
         rt.ceiling.store(1, Ordering::Release); // byte trigger + real-A ceiling trivial
         if checkpoint {
             rt.checkpoint.store(true, Ordering::Release);
