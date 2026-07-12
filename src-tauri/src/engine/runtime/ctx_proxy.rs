@@ -678,9 +678,15 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
     let body_c = ct::count_tokens_body(&job.original, &prefix);
 
     let counts = async {
-        let a = ct::count_tokens(&client, &upstream, &cred, &body_a).await?;
-        let b = ct::count_tokens(&client, &upstream, &cred, &body_b).await?;
-        let c = ct::count_tokens(&client, &upstream, &cred, &body_c).await?;
+        let a = ct::count_tokens(&client, &upstream, &cred, &body_a)
+            .await
+            .map_err(|error| format!("a: {error}"))?;
+        let b = ct::count_tokens(&client, &upstream, &cred, &body_b)
+            .await
+            .map_err(|error| format!("b: {error}"))?;
+        let c = ct::count_tokens(&client, &upstream, &cred, &body_c)
+            .await
+            .map_err(|error| format!("c: {error}"))?;
         Ok::<_, String>((a, b, c))
     }
     .await;
@@ -775,6 +781,7 @@ async fn sample_checkpoint(state: Arc<AppState>, cred: CountCredential, job: Che
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::convert::Infallible;
 
     use axum::http::Method;
@@ -1129,6 +1136,111 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
+    async fn start_stage_failure_upstream(
+        fail_index: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let requests = requests.clone();
+            async move {
+                let index = requests.fetch_add(1, Ordering::SeqCst);
+                if index == fail_index {
+                    return Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"type":"error","error":{
+                                "type":"invalid_request_error",
+                                "message":"LEAK_MARKER request body and credential must stay out"
+                            }})
+                            .to_string(),
+                        ))
+                        .unwrap();
+                }
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                axum::Json(json!({ "input_tokens": body.len() })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), handle)
+    }
+
+    fn schema_messages_are_closed(messages: &Value) -> bool {
+        let Some(messages) = messages.as_array() else {
+            return false;
+        };
+        let mut seen_uses = HashSet::new();
+        let mut unmatched_uses = HashSet::new();
+        for message in messages {
+            let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let Some(id) = block.get("id").and_then(Value::as_str) else {
+                            return false;
+                        };
+                        if !seen_uses.insert(id) || !unmatched_uses.insert(id) {
+                            return false;
+                        }
+                    }
+                    Some("tool_result") => {
+                        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                            return false;
+                        };
+                        if !seen_uses.contains(id) || !unmatched_uses.remove(id) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        unmatched_uses.is_empty()
+    }
+
+    async fn start_schema_checkpoint_upstream() -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted_by_handler = accepted.clone();
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let accepted = accepted_by_handler.clone();
+            async move {
+                let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                if !schema_messages_are_closed(&body["messages"]) {
+                    return Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"type":"error","error":{
+                                "type":"invalid_request_error",
+                                "message":"tool exchange is not closed"
+                            }})
+                            .to_string(),
+                        ))
+                        .unwrap();
+                }
+                accepted.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "input_tokens": bytes.len() })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), accepted, handle)
+    }
+
     /// Fake upstream that FAILS /v1/messages with 500 (count path still answers).
     async fn start_failing_checkpoint_upstream() -> (String, tokio::task::JoinHandle<()>) {
         async fn handler(request: Request<Body>) -> Response<Body> {
@@ -1241,6 +1353,105 @@ mod tests {
         assert_eq!(report.eligible, 0);
         assert_eq!(report.count_failures, 0);
         up.abort();
+    }
+
+    #[tokio::test]
+    async fn sample_checkpoint_persists_safe_failure_stage_for_a_b_and_c() {
+        for (fail_index, stage) in [(0, "a"), (1, "b"), (2, "c")] {
+            let (upstream, upstream_handle) = start_stage_failure_upstream(fail_index).await;
+            let mut state = AppState::for_tests().await;
+            let runtime = Arc::new(eligible_runtime(0));
+            state.ctx_proxy = runtime.clone();
+            let state = Arc::new(state);
+            let mut request = high_water_request(1_000);
+            request["leak_marker"] = Value::String("RAW_REQUEST_LEAK_MARKER".into());
+            let body = serde_json::to_vec(&request).unwrap();
+            let job = checkpoint_gate(&runtime, &body, &upstream).unwrap();
+            let mut credential = test_cred();
+            credential.api_key = Some("SECRET_HEADER_LEAK_MARKER".into());
+
+            sample_checkpoint(state.clone(), credential, job).await;
+
+            let snippet: String =
+                sqlx::query_scalar("SELECT error_snippet FROM proxy_checkpoint_metric LIMIT 1")
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                snippet,
+                format!("{stage}: count_tokens HTTP 400 Bad Request: invalid_request_error")
+            );
+            for forbidden in [
+                "LEAK_MARKER",
+                "RAW_REQUEST_LEAK_MARKER",
+                "SECRET_HEADER_LEAK_MARKER",
+                "request body",
+                "credential",
+            ] {
+                assert!(
+                    !snippet.contains(forbidden),
+                    "stage {stage} leaked forbidden content {forbidden}: {snippet}"
+                );
+            }
+            upstream_handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_aware_upstream_rejects_dangling_tool_use() {
+        let (upstream, accepted, handle) = start_schema_checkpoint_upstream().await;
+        let body = json!({
+            "model":"claude-x",
+            "messages":[{"role":"assistant","content":[{
+                "type":"tool_use","id":"tu_1","name":"Read","input":{}
+            }]}]
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!("{upstream}/v1/messages/count_tokens"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn sample_checkpoint_sends_schema_valid_a_b_and_c_and_persists_metric() {
+        let (upstream, accepted, handle) = start_schema_checkpoint_upstream().await;
+        let mut state = AppState::for_tests().await;
+        let runtime = Arc::new(eligible_runtime(0));
+        state.ctx_proxy = runtime.clone();
+        let state = Arc::new(state);
+        let mut request = high_water_request(1_000);
+        request["messages"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"role":"user","content":"initial request"}));
+        let body = serde_json::to_vec(&request).unwrap();
+        let job = checkpoint_gate(&runtime, &body, &upstream).unwrap();
+        let prefix = crate::engine::runtime::count_tokens::prefix_messages(
+            &job.original["messages"],
+            job.earliest_changed_msg_index,
+        );
+        assert!(
+            !prefix.as_array().unwrap().is_empty(),
+            "accepted long-context fixture must retain a non-empty C prefix"
+        );
+        assert!(schema_messages_are_closed(&prefix));
+
+        sample_checkpoint(state.clone(), test_cred(), job).await;
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 3, "a/b/c must all pass");
+        let report = crate::engine::repo::proxy_checkpoint_metric::report(&state.db, 24)
+            .await
+            .unwrap();
+        assert_eq!(report.samples, 1);
+        assert_eq!(report.count_failures, 0);
+        handle.abort();
     }
 
     // CONTAINMENT (a): mutating the global upstream between capture and sampling

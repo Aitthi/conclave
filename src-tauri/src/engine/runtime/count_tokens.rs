@@ -6,11 +6,13 @@
 //! 0.12 does not strip x-api-key cross-host). Auth values are applied as
 //! set_sensitive HeaderValues from a fixed allowlist; missing auth makes no call.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 pub const CHECKPOINT_METHOD_VERSION: &str = "m1-count_tokens-2023-06-01";
+const TOKEN_COUNTING_BETA: &str = "token-counting-2024-11-01";
 
 /// Anthropic API error `type` enum (docs.anthropic.com/en/api/errors). On a
 /// count_tokens failure, the upstream-supplied `error.type` is persisted into a
@@ -35,9 +37,9 @@ const KNOWN_ERROR_TYPES: &[&str] = &[
 /// accidentally formatted into a log or serialized into a metric row.
 #[derive(Clone)]
 pub struct CountCredential {
-    pub api_key: Option<String>,       // x-api-key
-    pub authorization: Option<String>, // Authorization: Bearer …
-    pub anthropic_version: String,     // anthropic-version header
+    pub api_key: Option<String>,        // x-api-key
+    pub authorization: Option<String>,  // Authorization: Bearer …
+    pub anthropic_version: String,      // anthropic-version header
     pub anthropic_beta: Option<String>, // anthropic-beta (required by OAuth Bearer + [1m] context)
 }
 
@@ -71,11 +73,47 @@ pub fn count_tokens_body(request: &Value, messages: &Value) -> Value {
     body
 }
 
-/// Structurally valid prefix ending at the message boundary BEFORE `earliest_changed_msg_index`.
+fn tool_exchanges_are_closed(messages: &[Value]) -> bool {
+    let mut seen_uses = HashSet::new();
+    let mut unmatched_uses = HashSet::new();
+    for message in messages {
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let Some(id) = block.get("id").and_then(Value::as_str) else {
+                        return false;
+                    };
+                    if !seen_uses.insert(id) || !unmatched_uses.insert(id) {
+                        return false;
+                    }
+                }
+                Some("tool_result") => {
+                    let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                        return false;
+                    };
+                    if !seen_uses.contains(id) || !unmatched_uses.remove(id) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    unmatched_uses.is_empty()
+}
+
+/// Latest structurally closed prefix ending no later than the message boundary
+/// BEFORE `earliest_changed_msg_index`.
 pub fn prefix_messages(messages: &Value, earliest_changed_msg_index: usize) -> Value {
     match messages.as_array() {
         Some(arr) => {
-            let end = earliest_changed_msg_index.min(arr.len());
+            let mut end = earliest_changed_msg_index.min(arr.len());
+            while end > 0 && !tool_exchanges_are_closed(&arr[..end]) {
+                end -= 1;
+            }
             Value::Array(arr[..end].to_vec())
         }
         None => Value::Array(Vec::new()),
@@ -88,6 +126,20 @@ fn sensitive_header(value: &str) -> Option<reqwest::header::HeaderValue> {
     Some(hv)
 }
 
+fn count_beta_header(original: &str) -> String {
+    if original
+        .split(',')
+        .map(str::trim)
+        .any(|beta| beta == TOKEN_COUNTING_BETA)
+    {
+        original.to_owned()
+    } else if original.is_empty() {
+        TOKEN_COUNTING_BETA.to_owned()
+    } else {
+        format!("{original},{TOKEN_COUNTING_BETA}")
+    }
+}
+
 /// Apply ONLY the allowlisted auth headers, each marked sensitive.
 fn apply_cred(mut req: reqwest::RequestBuilder, cred: &CountCredential) -> reqwest::RequestBuilder {
     if let Some(key) = cred.api_key.as_deref().and_then(sensitive_header) {
@@ -98,9 +150,10 @@ fn apply_cred(mut req: reqwest::RequestBuilder, cred: &CountCredential) -> reqwe
     }
     // anthropic-beta is not a secret (ruling ea3df57c amendment) but is required
     // for OAuth Bearer auth to be accepted and for [1m] 1M-context. Forward the
-    // whole value verbatim — it may be a comma-separated list; never split it.
+    // caller's whole value in order and append the beta count contract once.
     if let Some(beta) = cred.anthropic_beta.as_deref() {
-        if let Ok(hv) = reqwest::header::HeaderValue::from_str(beta) {
+        let beta = count_beta_header(beta);
+        if let Some(hv) = sensitive_header(&beta) {
             req = req.header("anthropic-beta", hv);
         }
     }
@@ -108,7 +161,9 @@ fn apply_cred(mut req: reqwest::RequestBuilder, cred: &CountCredential) -> reqwe
         .header("content-type", "application/json")
 }
 
-/// POST <upstream>/v1/messages/count_tokens; returns provider input_tokens estimate.
+/// POST the stable count route without beta credentials, or the generated-SDK
+/// beta route when an anthropic-beta header was captured. Returns the provider
+/// input_tokens estimate.
 /// Missing auth → Err with NO network call.
 pub async fn count_tokens(
     client: &reqwest::Client,
@@ -119,10 +174,12 @@ pub async fn count_tokens(
     if !cred.has_auth() {
         return Err("count_tokens: missing auth credential; no request issued".to_string());
     }
-    let url = format!(
-        "{}/v1/messages/count_tokens",
-        upstream.trim_end_matches('/')
-    );
+    let route = if cred.anthropic_beta.is_some() {
+        "/v1/messages/count_tokens?beta=true"
+    } else {
+        "/v1/messages/count_tokens"
+    };
+    let url = format!("{}{route}", upstream.trim_end_matches('/'));
     let resp = apply_cred(client.post(url), cred)
         .body(body.to_string())
         .send()
@@ -191,6 +248,7 @@ mod tests {
     use axum::routing::any;
     use axum::Router;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -262,6 +320,89 @@ mod tests {
         assert_eq!(p[1]["content"], "1");
     }
 
+    fn schema_accepts_closed_tool_exchanges(messages: &Value) -> bool {
+        let Some(messages) = messages.as_array() else {
+            return false;
+        };
+        let mut seen_uses = HashSet::new();
+        let mut unmatched_uses = HashSet::new();
+        for message in messages {
+            let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        let Some(id) = block.get("id").and_then(Value::as_str) else {
+                            return false;
+                        };
+                        if !seen_uses.insert(id) || !unmatched_uses.insert(id) {
+                            return false;
+                        }
+                    }
+                    Some("tool_result") => {
+                        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                            return false;
+                        };
+                        if !seen_uses.contains(id) || !unmatched_uses.remove(id) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        unmatched_uses.is_empty()
+    }
+
+    #[test]
+    fn prefix_closes_original_tool_use_zero_result_one_repro() {
+        let msgs = json!([
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]}
+        ]);
+
+        let prefix = prefix_messages(&msgs, 1);
+
+        assert_eq!(prefix, json!([]));
+        assert!(schema_accepts_closed_tool_exchanges(&prefix));
+    }
+
+    #[test]
+    fn prefix_closes_parallel_tool_cycle_with_results_spanning_messages() {
+        let msgs = json!([
+            {"role":"user","content":"earlier question"},
+            {"role":"assistant","content":"earlier answer"},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}},
+                {"type":"tool_use","id":"tu_b","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"text","text":"result preface"},
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]},
+            {"role":"user","content":[
+                {"type":"text","text":"later result"},
+                {"type":"tool_result","tool_use_id":"tu_b","content":"B"}
+            ]}
+        ]);
+
+        let prefix = prefix_messages(&msgs, 3);
+
+        assert_eq!(
+            prefix,
+            json!([
+                {"role":"user","content":"earlier question"},
+                {"role":"assistant","content":"earlier answer"}
+            ])
+        );
+        assert!(schema_accepts_closed_tool_exchanges(&prefix));
+    }
+
     #[tokio::test]
     async fn count_tokens_returns_provider_estimate() {
         let (upstream, _hits, h) = fake_upstream().await;
@@ -277,7 +418,9 @@ mod tests {
     // Fake upstream that REQUIRES anthropic-beta: 400s with a JSON error body when
     // absent, echoes a token count when the expected beta value is present. Models
     // the OAuth/[1m] requirement the M1 sampler was blind to.
-    async fn beta_required_upstream(expected: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    async fn beta_required_upstream(
+        expected: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new().fallback(any(move |request: Request<Body>| async move {
             let ok = request
                 .headers()
@@ -310,9 +453,115 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    async fn recording_upstream() -> (
+        String,
+        Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let captured = captured.clone();
+            async move {
+                let target = request
+                    .uri()
+                    .path_and_query()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let beta = request
+                    .headers()
+                    .get("anthropic-beta")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                captured.lock().unwrap().push((target, beta));
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "input_tokens": 7 }).to_string()))
+                    .unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), requests, handle)
+    }
+
+    #[tokio::test]
+    async fn beta_credential_uses_beta_route_and_appends_token_counting_contract() {
+        let (upstream, requests, handle) = recording_upstream().await;
+        let mut credential = cred("good");
+        credential.anthropic_beta = Some("oauth-2025-04-20,context-1m-2025-08-07".into());
+        let body = json!({ "model": "claude-x", "messages": [] });
+
+        count_tokens(&count_client(), &upstream, &credential, &body)
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "/v1/messages/count_tokens?beta=true");
+        assert_eq!(
+            requests[0].1.as_deref(),
+            Some("oauth-2025-04-20,context-1m-2025-08-07,token-counting-2024-11-01")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stable_credential_uses_stable_route_without_inventing_beta_header() {
+        let (upstream, requests, handle) = recording_upstream().await;
+        let body = json!({ "model": "claude-x", "messages": [] });
+
+        count_tokens(&count_client(), &upstream, &cred("good"), &body)
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.as_slice(),
+            &[("/v1/messages/count_tokens".into(), None)]
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_token_counting_beta_is_preserved_exactly_once() {
+        let (upstream, requests, handle) = recording_upstream().await;
+        let mut credential = cred("good");
+        credential.anthropic_beta =
+            Some("oauth-2025-04-20, token-counting-2024-11-01,context-1m-2025-08-07".into());
+        let body = json!({ "model": "claude-x", "messages": [] });
+
+        count_tokens(&count_client(), &upstream, &credential, &body)
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].0, "/v1/messages/count_tokens?beta=true");
+        let beta = requests[0].1.as_deref().unwrap();
+        assert_eq!(
+            beta,
+            "oauth-2025-04-20, token-counting-2024-11-01,context-1m-2025-08-07"
+        );
+        assert_eq!(
+            beta.split(',')
+                .map(str::trim)
+                .filter(|value| *value == TOKEN_COUNTING_BETA)
+                .count(),
+            1
+        );
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn count_tokens_forwards_anthropic_beta_and_surfaces_error_type() {
-        let (upstream, h) = beta_required_upstream("oauth-2025-04-20,context-1m-2025-08-07").await;
+        let (upstream, h) = beta_required_upstream(
+            "oauth-2025-04-20,context-1m-2025-08-07,token-counting-2024-11-01",
+        )
+        .await;
         let client = count_client();
         let body = json!({ "model": "claude-x", "messages": [{"role":"user","content":"x"}] });
 
@@ -396,7 +645,9 @@ mod tests {
         let app = Router::new().fallback(any(|_req: Request<Body>| async move {
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from("RAW_HTML_LEAK <html>gateway down user-secret</html>"))
+                .body(Body::from(
+                    "RAW_HTML_LEAK <html>gateway down user-secret</html>",
+                ))
                 .unwrap()
         }));
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
