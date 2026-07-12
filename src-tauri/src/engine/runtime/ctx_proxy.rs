@@ -3326,6 +3326,12 @@ mod tests {
     use futures_util::stream;
     use serde_json::{json, Value};
 
+    #[test]
+    fn proxy_runtime_defaults_to_the_r10_300k_ceiling() {
+        let runtime = ProxyRuntime::with_port(DEFAULT_PROXY_PORT);
+        assert_eq!(runtime.ceiling.load(Ordering::Acquire), 300_000);
+    }
+
     fn tool_pair(id: &str, text: &str) -> [Value; 2] {
         [
             json!({"role":"assistant","content":[{

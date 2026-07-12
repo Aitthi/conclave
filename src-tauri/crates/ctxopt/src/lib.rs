@@ -12,6 +12,7 @@ pub const DEFAULT_CEILING_TOKENS: usize = 300_000; // C: evaluate a checkpoint a
 pub const RECENT_TAIL_MSGS: usize = 15; // keep the last ~10–20 messages verbatim (never frozen)
 pub const MIN_NET_SAVING_TOKENS: usize = 40_000; // M: floor on projected net token saving to proceed to sampling
 pub const LOW_WATER_TOKENS: usize = 200_000; // L: projected post-checkpoint tokens must land at/below this (< ceiling)
+const _: () = assert!(LOW_WATER_TOKENS < DEFAULT_CEILING_TOKENS);
 
 pub mod analyze;
 pub mod apply;
