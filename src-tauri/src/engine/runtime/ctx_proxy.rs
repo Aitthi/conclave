@@ -458,9 +458,21 @@ fn source_boundary_hash(source_ids: &[String]) -> String {
 }
 
 /// Translate a Lane A `SummaryClientError::kind()` label into Lane B's
-/// `GenerationFailureStage` plus an optional allowlisted `error_type`. The eight
-/// Anthropic error types collapse to `Non2xx` with the type recorded separately;
-/// unknown/unparsed HTTP errors are `Non2xx` with no type.
+/// `GenerationFailureStage` plus an optional allowlisted `error_type`.
+///
+/// A->D COUPLING (guard): the match arms below are bound to Lane A's `kind()`
+/// vocabulary, produced by `runtime::summary::generate_summary` — 12 fixed labels
+/// (missing_auth, timeout, transport, redirect, http_unknown_type, http_unparsed,
+/// decode, missing_model, missing_content, non_text_content, empty_text,
+/// missing_usage) plus the 8 Anthropic error types from
+/// `count_tokens::KNOWN_ERROR_TYPES` (also Lane B's `error_type` allowlist), which
+/// arrive via `SanitizedErrorType::Known`. The 8 types are listed EXPLICITLY so
+/// the wildcard is a SAFE fallback, not a smuggling path: any label this mapping
+/// has not seen (a future Lane A addition) degrades to `Non2xx`/no-`error_type`,
+/// which Lane B always accepts — it can never be an unvalidated `error_type` that
+/// `insert_terminal` rejects (silently dropping the terminal row). When Lane A's
+/// vocabulary changes, update this match AND the enumeration test
+/// `generation_failure_outcome_maps_every_client_kind`.
 fn generation_failure_outcome(
     kind: &str,
 ) -> (
@@ -469,6 +481,7 @@ fn generation_failure_outcome(
 ) {
     use crate::engine::repo::proxy_summary_metric::GenerationFailureStage as G;
     match kind {
+        // 12 fixed Lane A labels.
         "missing_auth" => (G::MissingAuth, None),
         "timeout" => (G::Timeout, None),
         "transport" => (G::Transport, None),
@@ -480,8 +493,18 @@ fn generation_failure_outcome(
         "empty_text" => (G::EmptyText, None),
         "missing_usage" => (G::MissingUsage, None),
         "http_unknown_type" | "http_unparsed" => (G::Non2xx, None),
-        // One of the eight allowlisted Anthropic error types.
-        other => (G::Non2xx, Some(other.to_owned())),
+        // The 8 allowlisted Anthropic error types → Non2xx + the type in error_type.
+        "invalid_request_error"
+        | "authentication_error"
+        | "permission_error"
+        | "not_found_error"
+        | "request_too_large"
+        | "rate_limit_error"
+        | "api_error"
+        | "overloaded_error" => (G::Non2xx, Some(kind.to_owned())),
+        // Drift-safe fallback: an unmapped kind is a bounded non-2xx with NO
+        // error_type, so it can never violate Lane B's allowlist.
+        _ => (G::Non2xx, None),
     }
 }
 
@@ -2816,19 +2839,52 @@ mod tests {
             ("missing_usage", G::MissingUsage, None),
             ("http_unknown_type", G::Non2xx, None),
             ("http_unparsed", G::Non2xx, None),
-            // The 8 allowlisted Anthropic types land in error_type, stage Non2xx.
-            ("rate_limit_error", G::Non2xx, Some("rate_limit_error")),
-            ("overloaded_error", G::Non2xx, Some("overloaded_error")),
+            // All 8 allowlisted Anthropic types land in error_type, stage Non2xx.
+            // This list mirrors count_tokens::KNOWN_ERROR_TYPES and Lane B's
+            // error_type allowlist; drift is caught by the assertion below.
             (
                 "invalid_request_error",
                 G::Non2xx,
                 Some("invalid_request_error"),
             ),
+            (
+                "authentication_error",
+                G::Non2xx,
+                Some("authentication_error"),
+            ),
+            ("permission_error", G::Non2xx, Some("permission_error")),
+            ("not_found_error", G::Non2xx, Some("not_found_error")),
+            ("request_too_large", G::Non2xx, Some("request_too_large")),
+            ("rate_limit_error", G::Non2xx, Some("rate_limit_error")),
+            ("api_error", G::Non2xx, Some("api_error")),
+            ("overloaded_error", G::Non2xx, Some("overloaded_error")),
         ];
+        // This must enumerate EXACTLY Lane A's 20-label kind() vocabulary
+        // (src/engine/runtime/summary.rs generate_summary): 12 fixed labels + 8
+        // Anthropic types. If Lane A adds a kind, the drift test below still keeps
+        // the DB safe, but this list should be updated to map it intentionally.
+        assert_eq!(cases.len(), 20, "all 20 Lane A kind() labels are mapped");
         for (kind, stage, err_type) in cases {
             let (got_stage, got_type) = generation_failure_outcome(kind);
             assert_eq!(got_stage, *stage, "stage for {kind}");
             assert_eq!(got_type.as_deref(), *err_type, "error_type for {kind}");
+        }
+    }
+
+    // The A->D coupling guard: if Lane A ever adds a kind() label this mapping has
+    // not seen, it must NOT reach the DB as an unvalidated error_type (Lane B would
+    // reject it and the terminal row would be silently dropped). An unmapped kind
+    // degrades to a bounded generation_failure/non_2xx with NO error_type.
+    #[test]
+    fn generation_failure_outcome_maps_unknown_kind_to_bounded_non2xx() {
+        use crate::engine::repo::proxy_summary_metric::GenerationFailureStage as G;
+        for unknown in ["some_future_kind_v99", "", "not_a_known_label"] {
+            let (stage, error_type) = generation_failure_outcome(unknown);
+            assert_eq!(stage, G::Non2xx, "unknown kind {unknown:?} → Non2xx");
+            assert_eq!(
+                error_type, None,
+                "unknown kind {unknown:?} must not smuggle an unvalidated error_type"
+            );
         }
     }
 
