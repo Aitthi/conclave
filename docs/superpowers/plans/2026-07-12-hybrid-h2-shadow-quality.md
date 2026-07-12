@@ -535,6 +535,13 @@ merged trait), and pinned CI tests. No network client, proxy, DB, or commands.
 > v1 header's full boundary already lists `runtime/mod.rs`; this was a per-lane
 > prose mis-split (H1 Lane A correctly included it). Lane A owns the two
 > declarations; Lane B, sequenced after A, inherits the merged `mod.rs`.
+>
+> **Lockfile corollary (Detoro ruling 2026-07-12, challenge bac46765, found by
+> Dabin):** any lane whose boundary includes `Cargo.toml` implicitly includes
+> `src-tauri/Cargo.lock` for the mechanical delta cargo generates from that
+> manifest edit — and nothing else. Reverting the lock delta makes
+> `cargo --locked` reject the manifest as stale. Lane A commits the two-line
+> root-package dependency entries for rand_chacha/rand_core.
 
 ### Lane B: evaluator/replay client (first wave, independent)
 
