@@ -106,6 +106,15 @@ impl TranscriptContextReader {
             .map_or(0, |state| state.offset)
     }
 
+    /// Test hook for the risk-ledger property the whole fix hangs on: a clone
+    /// must observe the SAME state map, or the cache never hits from the
+    /// per-poll clone in `poll_transcript_context` and the CPU regression is
+    /// back with every counter still reading innocently.
+    #[cfg(test)]
+    fn shares_state_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.scan_state, &other.scan_state)
+    }
+
     pub fn poll(
         &self,
         instance_id: &str,
@@ -1929,6 +1938,10 @@ mod tests {
         assert_eq!(setup.reader.file_opens(instance_id, &file), 1);
 
         let clone = setup.reader.clone();
+        assert!(
+            clone.shares_state_with(&setup.reader),
+            "a per-poll clone MUST share scan state, or the cache never hits"
+        );
         let second = clone
             .poll(
                 instance_id,
@@ -1938,11 +1951,13 @@ mod tests {
             )
             .expect("reading");
         assert_eq!(first, second);
-        assert_eq!(
-            setup.reader.file_opens(instance_id, &file),
-            1,
-            "second poll with no writes must not reopen the file"
-        );
+        for reader in [&setup.reader, &clone] {
+            assert_eq!(
+                reader.file_opens(instance_id, &file),
+                1,
+                "second poll with no writes must not reopen the file"
+            );
+        }
         setup.cleanup();
     }
 
