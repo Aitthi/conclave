@@ -124,6 +124,25 @@ pub fn run() {
             let timer_state = std::sync::Arc::clone(&state);
             tauri::async_runtime::spawn(engine::runtime::task_timer::run(timer_state));
 
+            // One-shot skill-sidecar GC (D1): every launch, delete
+            // `<data_dir>/Conclave/skills/<uuid>.md` files whose UUID has no
+            // live `workspace_agent` row. Retroactively cleans machines that
+            // accumulated orphans before this shipped; files only pile up
+            // across launches, so once per boot is enough (no timer).
+            let sweep_state = std::sync::Arc::clone(&state);
+            tauri::async_runtime::spawn(async move {
+                match engine::repo::workspace_agent::list_all_ids(&sweep_state.db).await {
+                    Ok(ids) => {
+                        let live: std::collections::HashSet<String> = ids.into_iter().collect();
+                        let deleted = engine::agentctx::sweep_orphan_skill_sidecars(&live);
+                        if deleted > 0 {
+                            eprintln!("[skill] startup sweep deleted {deleted} orphan sidecar(s)");
+                        }
+                    }
+                    Err(e) => eprintln!("[skill] startup sweep skipped — list_all_ids failed: {e}"),
+                }
+            });
+
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())

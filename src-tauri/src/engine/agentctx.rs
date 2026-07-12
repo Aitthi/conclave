@@ -387,10 +387,8 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
 pub fn write_skill_sidecar(instance_id: &str, body: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
 
-    let dir = dirs::data_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory"))?
-        .join("Conclave")
-        .join("skills");
+    let dir = skills_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory"))?;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -407,6 +405,119 @@ pub fn write_skill_sidecar(_instance_id: &str, _body: &str) -> std::io::Result<P
         std::io::ErrorKind::Unsupported,
         "skill sidecar files are only supported on unix",
     ))
+}
+
+/// The directory holding per-instance skill sidecar files
+/// (`<data_dir>/Conclave/skills/`). Single source of truth for that path:
+/// [`write_skill_sidecar`], [`remove_skill_sidecar`], and
+/// [`sweep_orphan_skill_sidecars`] all resolve it here so they can never drift
+/// apart across platforms (`dirs::data_dir()` differs per OS). Pure path
+/// computation — dir *creation* with owner-only perms stays in
+/// `write_skill_sidecar`. Distinct from `repo::skill::skills_dir`, which points
+/// at the bundled skill *templates*, not these generated per-agent sidecars.
+pub fn skills_dir() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("Conclave").join("skills"))
+}
+
+/// Best-effort removal of one instance's skill sidecar file (decision D2:
+/// delete-on-removal). Called from the command-layer funnels that remove a
+/// `workspace_agent` row, so the skills dir stays honest between launches
+/// rather than waiting for the next startup sweep. Never fails loudly: an
+/// already-gone file (`NotFound`) is silent, any other IO error is logged and
+/// swallowed — a locked sidecar must never abort the agent-removal path.
+#[cfg(unix)]
+pub fn remove_skill_sidecar(instance_id: &str) {
+    let Some(dir) = skills_dir() else {
+        return;
+    };
+    let path = dir.join(format!("{instance_id}.md"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("[skill] remove_skill_sidecar({instance_id}) failed: {e}"),
+    }
+}
+
+#[cfg(not(unix))]
+pub fn remove_skill_sidecar(_instance_id: &str) {}
+
+/// Delete every orphan skill sidecar in the skills dir — a file named
+/// `<uuid>.md` whose UUID matches no live `workspace_agent.id` (decision D1:
+/// one-shot startup GC that retroactively cleans machines that accumulated
+/// sidecars before this shipped). Returns the number of files actually
+/// deleted. Resolves the real skills dir, then defers to [`sweep_in_dir`];
+/// returns 0 when the dir does not exist yet (fresh machine).
+///
+/// `live_ids` is passed in (not queried here) so the pure-FS core stays
+/// DB-free and unit-testable; the caller snapshots it from
+/// `repo::workspace_agent::list_all_ids`. The mtime guard in [`sweep_in_dir`]
+/// (D3c) — not the timing of that snapshot — is what protects a sidecar whose
+/// row was inserted concurrently with the sweep.
+pub fn sweep_orphan_skill_sidecars(live_ids: &std::collections::HashSet<String>) -> usize {
+    let Some(dir) = skills_dir() else {
+        return 0;
+    };
+    sweep_in_dir(&dir, live_ids)
+}
+
+/// Pure-FS core of [`sweep_orphan_skill_sidecars`], taking `dir` explicitly so
+/// tests never touch the real data dir. Safety guards (decision D3):
+/// - (a) only regular files *directly* in `dir` — `read_dir` never recurses
+///   and non-files (subdirs, symlinks-to-dirs) are skipped;
+/// - (b) only `<uuid>.md` names — any other filename is left untouched;
+/// - (c) a file is deleted only when it is *provably* ≥ 60 s old; an unknown or
+///   future-dated mtime (clock skew, unreadable metadata) is treated as young
+///   and kept, so a sidecar just written for a `workspace_agent` row inserted
+///   after `live_ids` was snapshotted can never be swept;
+/// - (e) every delete is best-effort — a vanished or locked file is logged and
+///   skipped, never fatal to the sweep or the app.
+fn sweep_in_dir(dir: &std::path::Path, live_ids: &std::collections::HashSet<String>) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // Dir absent (fresh machine / never launched a CLI agent) — nothing to do.
+        Err(_) => return 0,
+    };
+    let mut deleted = 0usize;
+    for entry in entries.flatten() {
+        // (a) only regular files directly in the dir — never recurse into subdirs.
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => {}
+            _ => continue,
+        }
+        // (b) only `<uuid>.md` names.
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".md") else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(stem).is_err() {
+            continue;
+        }
+        // Live row → keep.
+        if live_ids.contains(stem) {
+            continue;
+        }
+        // (c) delete only when provably ≥ 60 s old; any uncertainty keeps the file.
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .map(|age| age >= std::time::Duration::from_secs(60))
+            .unwrap_or(false);
+        if !old_enough {
+            continue;
+        }
+        // (e) best-effort delete.
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => deleted += 1,
+            Err(e) => eprintln!("[skill] sweep: remove {} failed: {e}", path.display()),
+        }
+    }
+    deleted
 }
 
 /// One sanitized, single-line sentence pointing a CLI agent at its skill
@@ -1132,6 +1243,134 @@ text>`. After it confirms, stop and wait for the restart."
         let contents = std::fs::read_to_string(&path).expect("read back failed");
         assert_eq!(contents, body);
         let _ = std::fs::remove_file(&path); // test cleanup
+    }
+
+    /// A private temp dir, cleaned on drop, for the sweep/remove FS tests so
+    /// they never touch the real `<data_dir>/Conclave/skills`.
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("conclave-sidecar-gc-{}-{}", tag, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir); // clear crashed-run debris
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            TmpDir(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        /// Create a file and force its mtime this many seconds into the past,
+        /// so age-based guards can be exercised without sleeping.
+        fn write_aged(&self, name: &str, age_secs: u64) {
+            let p = self.0.join(name);
+            let f = std::fs::File::create(&p).expect("create test file");
+            if age_secs > 0 {
+                let backdated = std::time::SystemTime::now()
+                    .checked_sub(std::time::Duration::from_secs(age_secs))
+                    .expect("backdate mtime");
+                f.set_times(std::fs::FileTimes::new().set_modified(backdated))
+                    .expect("set mtime");
+            }
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn exists(dir: &std::path::Path, name: &str) -> bool {
+        dir.join(name).exists()
+    }
+
+    #[test]
+    fn sweep_deletes_only_aged_orphan_uuid_md_files() {
+        let tmp = TmpDir::new("sweep-basic");
+        let dir = tmp.path();
+        let live = "11111111-1111-4111-8111-111111111111";
+        let orphan_old = "22222222-2222-4222-8222-222222222222";
+        let orphan_young = "33333333-3333-4333-8333-333333333333";
+
+        // Live row's sidecar — must survive even though it's old.
+        tmp.write_aged(&format!("{live}.md"), 120);
+        // Orphan, provably old — the target of the sweep.
+        tmp.write_aged(&format!("{orphan_old}.md"), 120);
+        // Orphan but freshly written (< 60s) — race guard D3c must keep it.
+        tmp.write_aged(&format!("{orphan_young}.md"), 0);
+        // Not a `<uuid>.md` name — must be left untouched (guard D3b).
+        tmp.write_aged("notes.md", 120);
+        tmp.write_aged("README.txt", 120);
+        // A uuid stem but wrong extension — untouched.
+        tmp.write_aged(&format!("{orphan_old}.txt"), 120);
+        // A subdir named like an orphan — never recursed/deleted (guard D3a).
+        std::fs::create_dir(dir.join("44444444-4444-4444-8444-444444444444.md"))
+            .expect("create subdir");
+
+        let mut live_ids = std::collections::HashSet::new();
+        live_ids.insert(live.to_string());
+
+        let deleted = super::sweep_in_dir(dir, &live_ids);
+
+        assert_eq!(deleted, 1, "only the aged orphan uuid.md should be deleted");
+        assert!(exists(dir, &format!("{live}.md")), "live sidecar kept");
+        assert!(
+            !exists(dir, &format!("{orphan_old}.md")),
+            "aged orphan deleted"
+        );
+        assert!(
+            exists(dir, &format!("{orphan_young}.md")),
+            "young orphan kept (race guard)"
+        );
+        assert!(exists(dir, "notes.md"), "non-uuid name kept");
+        assert!(exists(dir, "README.txt"), "non-md file kept");
+        assert!(
+            exists(dir, &format!("{orphan_old}.txt")),
+            "uuid stem, wrong ext kept"
+        );
+        assert!(
+            exists(dir, "44444444-4444-4444-8444-444444444444.md"),
+            "uuid-named subdir kept (no recursion)"
+        );
+    }
+
+    #[test]
+    fn sweep_missing_dir_returns_zero() {
+        let tmp = TmpDir::new("sweep-missing");
+        let missing = tmp.path().join("does-not-exist");
+        let live_ids = std::collections::HashSet::new();
+        assert_eq!(super::sweep_in_dir(&missing, &live_ids), 0);
+    }
+
+    #[test]
+    fn sweep_empty_id_set_deletes_all_aged_orphans() {
+        let tmp = TmpDir::new("sweep-empty-ids");
+        let dir = tmp.path();
+        let a = "55555555-5555-4555-8555-555555555555";
+        let b = "66666666-6666-4666-8666-666666666666";
+        tmp.write_aged(&format!("{a}.md"), 120);
+        tmp.write_aged(&format!("{b}.md"), 120);
+        let live_ids = std::collections::HashSet::new();
+        assert_eq!(super::sweep_in_dir(dir, &live_ids), 2);
+        assert!(!exists(dir, &format!("{a}.md")));
+        assert!(!exists(dir, &format!("{b}.md")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_skill_sidecar_is_silent_when_missing() {
+        // A never-written id must not panic or print (best-effort NotFound).
+        super::remove_skill_sidecar("00000000-0000-4000-8000-000000000000");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_then_remove_skill_sidecar_round_trips() {
+        let id = format!("aaaaaaaa-aaaa-4aaa-8aaa-{:012x}", std::process::id());
+        let path = super::write_skill_sidecar(&id, "## Skill: X\n\nbody")
+            .expect("write sidecar");
+        assert!(path.exists(), "sidecar written");
+        super::remove_skill_sidecar(&id);
+        assert!(!path.exists(), "sidecar removed");
     }
 
     /// Regression for the app-relaunch respawn race: every agent's spawn calls
