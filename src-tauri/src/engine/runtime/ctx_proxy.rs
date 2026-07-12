@@ -3198,6 +3198,66 @@ mod tests {
         up.abort();
     }
 
+    /// Mock that disarms the runtime the instant it answers the FIRST count (A),
+    /// i.e. after the step-1 epoch check has already passed. Records count hits so
+    /// the test can prove the pipeline progressed past step 1.
+    async fn start_disarm_on_first_count_mock(
+        runtime: Arc<ProxyRuntime>,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let counts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = counts.clone();
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let (runtime, c2) = (runtime.clone(), c2.clone());
+            async move {
+                let path = request.uri().path().to_owned();
+                let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                if path == "/v1/messages/count_tokens" {
+                    let n = c2.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n == 1 {
+                        // Disarm mid-pipeline: after step 1, before the step-6 recheck.
+                        runtime.disarm_summary();
+                    }
+                    return axum::Json(json!({ "input_tokens": bytes.len() })).into_response();
+                }
+                axum::Json(json!({
+                    "model": "claude-3-5-sonnet-20241022",
+                    "content": [{"type":"text","text":"aggregate summary of tool outputs"}],
+                    "usage": gen_usage_json(),
+                }))
+                .into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), counts, handle)
+    }
+
+    // The step-6 recheck is the invariant this plan leans on hardest: a disarm
+    // that lands AFTER step 1 passed but BEFORE generation must still spend zero.
+    #[tokio::test]
+    async fn pipeline_disarm_after_step1_is_caught_by_the_step6_recheck() {
+        let mut rt = ProxyRuntime::with_port(0);
+        rt.arm_summary(arm_req()).unwrap();
+        let (state, rt) = armed_state(rt).await;
+        let (upstream, counts, up) = start_disarm_on_first_count_mock(rt.clone()).await;
+        let job = armed_summary_job(&rt, &upstream, summarizable_request());
+
+        sample_summary(state.clone(), job, test_permit()).await;
+
+        // Count A (and tail probes) ran → we were past step 1 when disarm landed;
+        // the step-6 recheck then gated generation off.
+        assert!(counts.load(Ordering::SeqCst) >= 1, "count A must have run");
+        assert_eq!(only_outcome(&state.db).await, "disarmed");
+        up.abort();
+    }
+
     #[tokio::test]
     async fn pipeline_below_ceiling_when_real_a_is_small() {
         let (upstream, hits, _last, up) = start_summary_mock(GenBehavior::Ok).await;
