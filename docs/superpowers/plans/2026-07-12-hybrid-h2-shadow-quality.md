@@ -520,14 +520,31 @@ Detoro creates/owns downstream tasks. No implementer merges their own lane.
 ### Lane A: deterministic fixtures + pure rubric/statistics (first wave)
 
 Boundary: `runtime/quality_fixtures.rs`, fixture JSON, pure quality types/
-bootstrap helpers in `runtime/quality.rs`, Cargo dependencies. Deliver loader,
-70-case manifest, tag/critical rubric, mock transport, and pinned CI tests. No
-network client, proxy, DB, or commands.
+bootstrap helpers in `runtime/quality.rs`, Cargo dependencies, **and the
+`pub mod quality; pub mod quality_fixtures;` declarations in `runtime/mod.rs`**
+(mark `#[allow(dead_code)]` until consumers wire them; Lane B extends `mod.rs`
+afterward). Deliver loader, 70-case manifest, tag/critical rubric, mock transport
+(the transport trait + `MockQualityTransport` + `evaluate_quality_case` shape are
+Lane A's deliverable — Lane B implements the real network transport against the
+merged trait), and pinned CI tests. No network client, proxy, DB, or commands.
+
+> **Boundary guard (Detoro ruling 2026-07-12, defect found by Dabin, challenge
+> a5cb41f4):** any lane that creates a NEW `runtime/` module must own the parent
+> `runtime/mod.rs` `pub mod` declaration for it — a produced module file is inert
+> and its `cargo test engine::runtime::<mod>` gate cannot compile without it. The
+> v1 header's full boundary already lists `runtime/mod.rs`; this was a per-lane
+> prose mis-split (H1 Lane A correctly included it). Lane A owns the two
+> declarations; Lane B, sequenced after A, inherits the merged `mod.rs`.
 
 ### Lane B: evaluator/replay client (first wave, independent)
 
-Boundary: network portion of `runtime/quality.rs`, `runtime/mod.rs`, narrow reuse
-helpers in `count_tokens.rs` if required. Deliver preflight + five role calls,
+Boundary: network portion of `runtime/quality.rs`, further `runtime/mod.rs`
+wiring beyond Lane A's two `pub mod` declarations, narrow reuse helpers in
+`count_tokens.rs` if required. Sequenced after Lane A merges (shared
+`quality.rs`); build against Dabin's merged transport trait +
+`evaluate_quality_case` signature as-is. Publish the exact evaluator error-kind
+set in the READY note so Lane C can define its DB `error_type` allowlist against
+real names, not plan prose. Deliver preflight + five role calls,
 strict schemas, fixed errors, usage capture, credential containment, and mock
 tests. Read the actual merged error-kind vocabulary before Lane C defines DB
 allowlists.
