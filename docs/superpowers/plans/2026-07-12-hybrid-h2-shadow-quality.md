@@ -570,6 +570,39 @@ candidate handoff after successful H1 insert, live H1 recheck, preflight,
 fixture queue/carrier loop, and one terminal row per reserved case. Do not change
 forwarded-body/rewrite paths or H1 economics math.
 
+> **Probe-category and live-tag semantics (superseding ruling e4e8e7fa on
+> challenge d6f05a5d — Tiesto found the underspecification, Aoki set the
+> semantics, merged @ Lane D `a27e334b`):** all constants pinned in
+> `ctx_proxy.rs` citing the ruling. FIXTURE cases get per-tag
+> `required_categories`: exact_error⇒ExactIdentifierOrError,
+> rejected_alternative⇒Decision, side_effecting_output⇒Mutation,
+> long_log⇒ExactIdentifierOrError, prompt_like_tool_text⇒NegativeFinding;
+> mutation_or_open_work is a post-parse `>=1 Mutation OR OpenWork` check
+> (parser cannot express OR). LIVE cases require ExactIdentifierOrError only
+> when the structural exact_error signal fires; otherwise the parser floor is
+> deliberately inert (coverage is prompt-enforced; guards = fixture
+> expectations + human audit). Semantic live tags post-parse:
+> mutation_or_open_work ⇐ ≥1 validated Mutation|OpenWork probe;
+> rejected_alternative is FIXTURE-TAG-DERIVED ONLY (live stays false until a
+> versioned RejectedAlternative probe category exists — Decision probes would
+> fake the stratum). Structural classifier (LIVE only, never over fixtures):
+> exact_error ⇐ any selected source `is_error`; long_log ⇐ tool_result
+> >4000 bytes; parallel_tool_cycle ⇐ ≥2 SELECTED sources sharing one assistant
+> `use_msg_idx`; side_effecting_output ⇐ exact normalized tool-name token in
+> {bash, write, edit, multiedit, notebookedit, exec, execute, run, write_file,
+> edit_file, run_command}; prompt_like_tool_text ⇐ case-insensitive literals
+> {system:, assistant:, human:, user:, developer:, <system, <user, <assistant,
+> </system, ignore previous, ignore all previous}. Considered-and-deferred:
+> `requiredProbeCategories` on the FixtureCase schema (cross-lane change).
+>
+> **Live-seam contract (Aoki ruling on Lane D item (b)):**
+> `evaluate_quality_case` is the deterministic fixture/test batch surface (CI
+> invokes it with `MockQualityTransport`); live orchestration performs staged
+> per-stage sends through the same `QualityTransport` trait/builders/parsers
+> because calls 2 (faithfulness) and 5 (judge) depend on earlier responses. The
+> header's `produces` anchor names the batch surface; the live path is the
+> staged-send carrier in `ctx_proxy.rs`.
+
 ### Lane E: CLI + ephemeral audit (depends C+D)
 
 Boundary: `runtime/quality_audit.rs`, `commands/proxy.rs`, `commands/cli.rs`,
