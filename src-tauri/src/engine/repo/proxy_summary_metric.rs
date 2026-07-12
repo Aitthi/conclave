@@ -595,7 +595,23 @@ pub async fn report(
         .checked_sub_signed(span)
         .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC)
         .to_rfc3339();
+    report_since(pool, &cutoff, campaign_id).await
+}
 
+/// The full H1 report for ONE campaign with NO time cutoff (H2 plan §"H1 gate
+/// and candidate handoff"): the `H1Gate` decision must see every row the
+/// campaign ever produced — a 24-hour approximation could hide an early
+/// all-miss conversation or metric-invalid row.
+pub async fn report_campaign(pool: &SqlitePool, campaign_id: &str) -> sqlx::Result<SummaryReport> {
+    let cutoff = chrono::DateTime::<Utc>::MIN_UTC.to_rfc3339();
+    report_since(pool, &cutoff, Some(campaign_id)).await
+}
+
+async fn report_since(
+    pool: &SqlitePool,
+    cutoff: &str,
+    campaign_id: Option<&str>,
+) -> sqlx::Result<SummaryReport> {
     let agg = sqlx::query_as::<_, Agg>(
         "SELECT \
            COUNT(*) AS total_admitted, \
@@ -624,7 +640,7 @@ pub async fn report(
          FROM proxy_summary_metric \
          WHERE created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2)",
     )
-    .bind(&cutoff)
+    .bind(cutoff)
     .bind(campaign_id)
     .fetch_one(pool)
     .await?;
@@ -634,7 +650,7 @@ pub async fn report(
          WHERE outcome = 'measured' AND q_h IS NOT NULL AND created_at >= ?1 \
          AND (?2 IS NULL OR campaign_id = ?2) ORDER BY q_h",
     )
-    .bind(&cutoff)
+    .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
     .await?;
@@ -644,7 +660,7 @@ pub async fn report(
          WHERE outcome = 'measured' AND n_h IS NOT NULL AND created_at >= ?1 \
          AND (?2 IS NULL OR campaign_id = ?2) ORDER BY n_h",
     )
-    .bind(&cutoff)
+    .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
     .await?;
@@ -654,7 +670,7 @@ pub async fn report(
          WHERE created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2) \
          GROUP BY price_version, model ORDER BY price_version, model",
     )
-    .bind(&cutoff)
+    .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
     .await?;
@@ -666,7 +682,7 @@ pub async fn report(
          WHERE outcome = 'measured' AND created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2) \
          GROUP BY conversation_hash ORDER BY conversation_hash",
     )
-    .bind(&cutoff)
+    .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
     .await?;
@@ -723,6 +739,48 @@ pub async fn report(
         by_price_version_and_model,
         conversation_pass_counts,
     })
+}
+
+/// Pure H1 economics gate over a campaign-scoped [`SummaryReport`] (H2 plan
+/// §"H1 gate and candidate handoff"). Feed it [`report_campaign`] output —
+/// never a time-windowed report, which could hide early rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum H1Gate {
+    /// Every economics bar passes on sufficient data.
+    Pass,
+    /// Not enough data to rule: fewer than 30 measured rows, 10 distinct
+    /// conversations, or 10 real-A rows in `[400_000, 500_000]`.
+    Inconclusive,
+    /// Minimum data exists and at least one bar fails: failure rate > 5%,
+    /// low-water pass < 90%, two-turn pass < 80%, any all-miss conversation,
+    /// or any metric-invalid row.
+    Fail,
+}
+
+/// Compute the gate. Projection/structural rejections stay separately visible
+/// in the report's own counters — they neither pass nor dilute the economics
+/// bars here, exactly as the H1 report's failure-rate denominator pins.
+pub fn h1_gate(report: &SummaryReport) -> H1Gate {
+    let sufficient =
+        report.measured >= 30 && report.distinct_conversations >= 10 && report.band_400k_500k >= 10;
+    if !sufficient {
+        return H1Gate::Inconclusive;
+    }
+    let any_all_miss = report
+        .conversation_pass_counts
+        .iter()
+        .any(|c| c.passing_candidates == 0);
+    let fails = report.failure_rate > 0.05
+        || report.pct_meets_low_water < 0.90
+        || report.pct_meets_two_turn < 0.80
+        || any_all_miss
+        || report.metric_invalid > 0;
+    if fails {
+        H1Gate::Fail
+    } else {
+        H1Gate::Pass
+    }
 }
 
 #[cfg(test)]
@@ -1594,6 +1652,145 @@ mod tests {
         assert_eq!(
             count, 0,
             "every forged attempt must be rejected, not partially committed"
+        );
+    }
+
+    /// A campaign report that clears every H1 gate bar with margin. The gate
+    /// boundary tests below mutate exactly one field each.
+    fn passing_gate_report() -> SummaryReport {
+        SummaryReport {
+            total_admitted: 40,
+            measured: 30,
+            disarmed: 0,
+            below_ceiling: 5,
+            tail_boundary_failures: 0,
+            no_candidate: 3,
+            count_failures: 1,
+            generation_failures: 0,
+            projection_rejected: 1,
+            metric_invalid: 0,
+            distinct_conversations: 10,
+            // denominator 31, 1 failure => ~0.032
+            failure_rate: 1.0 / 31.0,
+            band_400k_500k: 10,
+            pct_meets_low_water: 0.93,
+            pct_meets_two_turn: 0.86,
+            q_h_min: 0.4,
+            q_h_median: 0.6,
+            q_h_max: 0.9,
+            q_h_avg: 0.6,
+            n_h_min: 0.5,
+            n_h_median: 1.0,
+            n_h_max: 1.9,
+            n_h_avg: 1.1,
+            max_plateau_turns: 3,
+            gen_input_tokens_total: 1_000_000,
+            gen_cache_creation_tokens_total: 10_000,
+            gen_cache_read_tokens_total: 50_000,
+            gen_output_tokens_total: 20_000,
+            by_price_version_and_model: vec![],
+            conversation_pass_counts: (0..10)
+                .map(|i| ConversationPassCount {
+                    conversation_hash: fake_hash(&format!("conv-{i}")),
+                    measured_candidates: 3,
+                    passing_candidates: 2,
+                })
+                .collect(),
+        }
+    }
+
+    // H2 plan test item 3: every H1Gate threshold boundary.
+    #[test]
+    fn h1_gate_passes_the_reference_report() {
+        assert_eq!(h1_gate(&passing_gate_report()), H1Gate::Pass);
+    }
+
+    #[test]
+    fn h1_gate_is_inconclusive_below_each_data_minimum_and_decides_at_it() {
+        let mut r = passing_gate_report();
+        r.measured = 29;
+        assert_eq!(h1_gate(&r), H1Gate::Inconclusive);
+        r.measured = 30;
+        assert_eq!(h1_gate(&r), H1Gate::Pass);
+
+        let mut r = passing_gate_report();
+        r.distinct_conversations = 9;
+        assert_eq!(h1_gate(&r), H1Gate::Inconclusive);
+
+        let mut r = passing_gate_report();
+        r.band_400k_500k = 9;
+        assert_eq!(h1_gate(&r), H1Gate::Inconclusive);
+        r.band_400k_500k = 10;
+        assert_eq!(h1_gate(&r), H1Gate::Pass);
+    }
+
+    #[test]
+    fn h1_gate_fails_each_economics_bar_at_its_exact_boundary() {
+        // failure rate: 5% exactly passes, strictly above fails.
+        let mut r = passing_gate_report();
+        r.failure_rate = 0.05;
+        assert_eq!(h1_gate(&r), H1Gate::Pass);
+        r.failure_rate = 0.050001;
+        assert_eq!(h1_gate(&r), H1Gate::Fail);
+
+        // low-water: 90% exactly passes, strictly below fails.
+        let mut r = passing_gate_report();
+        r.pct_meets_low_water = 0.90;
+        assert_eq!(h1_gate(&r), H1Gate::Pass);
+        r.pct_meets_low_water = 0.899999;
+        assert_eq!(h1_gate(&r), H1Gate::Fail);
+
+        // two-turn: 80% exactly passes, strictly below fails.
+        let mut r = passing_gate_report();
+        r.pct_meets_two_turn = 0.80;
+        assert_eq!(h1_gate(&r), H1Gate::Pass);
+        r.pct_meets_two_turn = 0.799999;
+        assert_eq!(h1_gate(&r), H1Gate::Fail);
+    }
+
+    #[test]
+    fn h1_gate_fails_on_an_all_miss_conversation_or_any_metric_invalid_row() {
+        let mut r = passing_gate_report();
+        r.conversation_pass_counts[4].passing_candidates = 0;
+        assert_eq!(
+            h1_gate(&r),
+            H1Gate::Fail,
+            "one all-miss conversation must fail the gate even with passing pooled rates"
+        );
+
+        let mut r = passing_gate_report();
+        r.metric_invalid = 1;
+        assert_eq!(h1_gate(&r), H1Gate::Fail);
+    }
+
+    #[test]
+    fn h1_gate_inconclusive_takes_precedence_over_fail_signals() {
+        // Insufficient data + failing bars => Inconclusive, not Fail: the plan
+        // separates "cannot rule yet" from "ruled against".
+        let mut r = passing_gate_report();
+        r.measured = 5;
+        r.failure_rate = 0.5;
+        r.metric_invalid = 3;
+        assert_eq!(h1_gate(&r), H1Gate::Inconclusive);
+    }
+
+    // H2 plan: report_campaign applies NO time cutoff — an old row a 24-hour
+    // report would hide must still reach the gate.
+    #[tokio::test]
+    async fn report_campaign_sees_rows_a_time_windowed_report_hides() {
+        let pool = connect_in_memory().await;
+        let campaign = "camp-old";
+        let mut old = measured_row(campaign, "conv-old", "b1", 0.5, 1.0, true, true, 420_000);
+        old.created_at = "2020-01-01T00:00:00+00:00".into();
+        insert_terminal(&pool, old).await.unwrap();
+
+        let windowed = report(&pool, 24, Some(campaign)).await.unwrap();
+        assert_eq!(windowed.measured, 0, "a 24h window must hide the 2020 row");
+
+        let full = report_campaign(&pool, campaign).await.unwrap();
+        assert_eq!(
+            full.measured, 1,
+            "report_campaign must see every campaign row"
         );
     }
 }
