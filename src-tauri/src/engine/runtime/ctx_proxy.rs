@@ -135,6 +135,111 @@ impl std::fmt::Display for SummaryConfigError {
 
 impl std::error::Error for SummaryConfigError {}
 
+// ---------------------------------------------------------------------------
+// H2 shadow-quality lane (spec §11.4/§11.6 H2). Structurally parallel to the H1
+// summary lane: a SEPARATE campaign/epoch/budget/permit/cooldown, so H1 being
+// armed can neither authorise nor starve paid H2 evaluation (double-spend gate).
+// ---------------------------------------------------------------------------
+
+/// A fully-installed H2 quality campaign. `quality_campaign_id` is minted by
+/// `arm_quality`; carries NO credential (auth lives only on the per-case job).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QualityCampaignConfig {
+    pub quality_campaign_id: String,
+    pub h1_campaign_id: String,
+    pub evaluator_model: String,
+    pub rubric_version: String,
+    pub max_cases: u64,
+}
+
+/// Command-lane H2 arming request. `task_model` is the linked H1 campaign's
+/// model, supplied so arm can reject an evaluator equal to it (ruling 467ecb7a).
+/// The H1-armed / model-identical / `H1Gate::Pass` checks are the async command
+/// lane's (Lane E) and are re-enforced at every admission by Lane D.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QualityArmRequest {
+    pub h1_campaign_id: String,
+    pub evaluator_model: String,
+    pub task_model: String,
+    pub rubric_version: String,
+    pub max_cases: u64,
+}
+
+/// Evaluator-auth preflight state for the current campaign. The first qualifying
+/// carrier verifies the credential/upstream against the evaluator model; later
+/// carriers must present the SAME credential identity.
+// `Verified` is constructed by the D3 preflight step; unused within D1's slice.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum QualityPreflightState {
+    #[default]
+    Pending,
+    Verified {
+        credential_identity: String,
+        response_model: String,
+    },
+}
+
+/// Redaction-safe H2 status for `proxy status`. Never credentials/raw data.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct QualityStatus {
+    pub armed: bool,
+    pub quality_campaign_id: Option<String>,
+    pub h1_campaign_id: Option<String>,
+    pub evaluator_model: Option<String>,
+    pub rubric_version: Option<String>,
+    pub max_cases: Option<u64>,
+    pub remaining_cases: u64,
+    pub preflight_pending: bool,
+    pub fixture_queue_len: u64,
+    pub samples_dropped: u64,
+    pub h1_blocked: u64,
+    pub model_mismatch: u64,
+    pub credential_mismatch: u64,
+    pub in_flight: u64,
+}
+
+/// Why an `arm_quality` request was refused. Fails closed: any error leaves the
+/// prior OFF/ON state and epoch unchanged.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityConfigError {
+    EmptyH1Campaign,
+    EmptyEvaluatorModel,
+    EvaluatorEqualsTaskModel,
+    RubricMismatch,
+    ZeroMaxCases,
+    MaxCasesTooLarge,
+}
+
+impl QualityConfigError {
+    #[allow(dead_code)]
+    pub fn label(&self) -> &'static str {
+        match self {
+            QualityConfigError::EmptyH1Campaign => "empty_h1_campaign",
+            QualityConfigError::EmptyEvaluatorModel => "empty_evaluator_model",
+            QualityConfigError::EvaluatorEqualsTaskModel => "evaluator_equals_task_model",
+            QualityConfigError::RubricMismatch => "rubric_mismatch",
+            QualityConfigError::ZeroMaxCases => "zero_max_cases",
+            QualityConfigError::MaxCasesTooLarge => "max_cases_too_large",
+        }
+    }
+}
+
+impl std::fmt::Display for QualityConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl std::error::Error for QualityConfigError {}
+
+/// Hard ceiling on `max_cases` (plan §"Spend gate"): an absolute per-campaign
+/// bound of `1 + 5*max_cases` model calls.
+const QUALITY_MAX_CASES_CAP: u64 = 1_000;
+
 struct RewriteOutcome {
     body: Vec<u8>,
     elisions: usize,
@@ -205,6 +310,38 @@ pub struct ProxyRuntime {
     pub summary_in_flight: AtomicU64,
     /// Dedicated no-redirect client for /v1/messages generation (60s timeout).
     summary_client: reqwest::Client,
+
+    // ---- H2 shadow-quality lane (separate from every H1 field above) -------
+    /// The one in-memory armed H2 campaign, or `None` = OFF. Restart = `None`.
+    pub quality_campaign: RwLock<Option<Arc<QualityCampaignConfig>>>,
+    /// Monotonic epoch bumped on every H2 arm AND disarm; the per-case spend gate.
+    pub quality_epoch: AtomicU64,
+    /// ONE dedicated permit: paid H2 work is strictly one-at-a-time, never M1/H1.
+    quality_permits: Arc<Semaphore>,
+    /// UNIX-millis of the last scheduled quality carrier; 0 = never.
+    quality_last_sample_at_ms: AtomicU64,
+    /// Remaining reservable cases (`max_cases` at arm; decremented before spawn).
+    pub quality_remaining_cases: AtomicU64,
+    /// Eligible carriers dropped by the cooldown/permit caps (telemetry).
+    pub quality_samples_dropped: AtomicU64,
+    /// Admissions skipped because the linked H1 campaign was not `Pass`/armed.
+    pub quality_h1_blocked: AtomicU64,
+    /// Admissions skipped because `request.model != h1 config.model`.
+    pub quality_model_mismatch: AtomicU64,
+    /// Carriers skipped because their credential identity != the campaign's.
+    pub quality_credential_mismatch: AtomicU64,
+    /// Quality jobs currently between spawn and terminal persist (status only).
+    pub quality_in_flight: AtomicU64,
+    /// Enqueued adversarial fixture IDs (ids ONLY — never a credential).
+    quality_fixture_queue: Mutex<std::collections::VecDeque<String>>,
+    /// Evaluator-auth preflight state for the current campaign.
+    quality_preflight: Mutex<QualityPreflightState>,
+    /// Dedicated no-redirect clients for the evaluator (60s) + preflight (20s).
+    // Read by the D3 sample_quality pipeline; unused within D1's slice.
+    #[allow(dead_code)]
+    quality_client: reqwest::Client,
+    #[allow(dead_code)]
+    quality_preflight_client: reqwest::Client,
 }
 
 impl ProxyRuntime {
@@ -242,6 +379,20 @@ impl ProxyRuntime {
             summary_model_mismatch: AtomicU64::new(0),
             summary_in_flight: AtomicU64::new(0),
             summary_client: crate::engine::runtime::summary::summary_client(),
+            quality_campaign: RwLock::new(None),
+            quality_epoch: AtomicU64::new(0),
+            quality_permits: Arc::new(Semaphore::new(1)),
+            quality_last_sample_at_ms: AtomicU64::new(0),
+            quality_remaining_cases: AtomicU64::new(0),
+            quality_samples_dropped: AtomicU64::new(0),
+            quality_h1_blocked: AtomicU64::new(0),
+            quality_model_mismatch: AtomicU64::new(0),
+            quality_credential_mismatch: AtomicU64::new(0),
+            quality_in_flight: AtomicU64::new(0),
+            quality_fixture_queue: Mutex::new(std::collections::VecDeque::new()),
+            quality_preflight: Mutex::new(QualityPreflightState::Pending),
+            quality_client: crate::engine::runtime::quality::quality_client(),
+            quality_preflight_client: crate::engine::runtime::quality::preflight_client(),
         }
     }
 
@@ -396,6 +547,216 @@ impl ProxyRuntime {
             }
         }
     }
+
+    // ---- H2 shadow-quality control surface (consumed by the command lane E) --
+    // Structurally identical to the H1 surface above, but a SEPARATE campaign/
+    // epoch/budget so H1 ON never authorises H2 spend. Unused inside this lane's
+    // boundary until `commands/proxy.rs` (Lane E) lands, hence `dead_code`.
+
+    /// Atomically install one H2 campaign after validating its shape. Fails
+    /// closed. On success mints a fresh `quality_campaign_id`, bumps the epoch,
+    /// seeds `remaining_cases = max_cases`, clears the fixture queue, and resets
+    /// preflight to Pending — all under one write lock so a concurrent snapshot
+    /// sees a coherent state.
+    #[allow(dead_code)]
+    pub fn arm_quality(
+        &self,
+        request: QualityArmRequest,
+    ) -> Result<QualityStatus, QualityConfigError> {
+        validate_quality_arm(&request)?;
+        let quality_campaign_id = uuid::Uuid::new_v4().to_string();
+        {
+            let mut guard = self
+                .quality_campaign
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            self.quality_epoch.fetch_add(1, Ordering::AcqRel);
+            self.quality_remaining_cases
+                .store(request.max_cases, Ordering::Release);
+            self.quality_fixture_queue
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            *self
+                .quality_preflight
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = QualityPreflightState::Pending;
+            *guard = Some(Arc::new(QualityCampaignConfig {
+                quality_campaign_id,
+                h1_campaign_id: request.h1_campaign_id,
+                evaluator_model: request.evaluator_model,
+                rubric_version: request.rubric_version,
+                max_cases: request.max_cases,
+            }));
+        }
+        Ok(self.quality_status())
+    }
+
+    /// Turn H2 OFF: bump the epoch FIRST (so any queued job fails its epoch
+    /// check), then clear config, zero the budget, empty the fixture queue, and
+    /// reset preflight. A request already on the wire cannot be recalled.
+    #[allow(dead_code)]
+    pub fn disarm_quality(&self) -> QualityStatus {
+        {
+            let mut guard = self
+                .quality_campaign
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            self.quality_epoch.fetch_add(1, Ordering::AcqRel);
+            *guard = None;
+            self.quality_remaining_cases.store(0, Ordering::Release);
+            self.quality_fixture_queue
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            *self
+                .quality_preflight
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = QualityPreflightState::Pending;
+        }
+        self.quality_status()
+    }
+
+    /// Redaction-safe H2 status. Reads counters + current config; never exposes
+    /// credentials, the credential identity, or raw case data.
+    #[allow(dead_code)]
+    pub fn quality_status(&self) -> QualityStatus {
+        let guard = self
+            .quality_campaign
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let config = guard.as_ref();
+        let preflight_pending = matches!(
+            &*self
+                .quality_preflight
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            QualityPreflightState::Pending
+        );
+        QualityStatus {
+            armed: config.is_some(),
+            quality_campaign_id: config.map(|c| c.quality_campaign_id.clone()),
+            h1_campaign_id: config.map(|c| c.h1_campaign_id.clone()),
+            evaluator_model: config.map(|c| c.evaluator_model.clone()),
+            rubric_version: config.map(|c| c.rubric_version.clone()),
+            max_cases: config.map(|c| c.max_cases),
+            remaining_cases: self.quality_remaining_cases.load(Ordering::Acquire),
+            preflight_pending,
+            fixture_queue_len: self
+                .quality_fixture_queue
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len() as u64,
+            samples_dropped: self.quality_samples_dropped.load(Ordering::Acquire),
+            h1_blocked: self.quality_h1_blocked.load(Ordering::Acquire),
+            model_mismatch: self.quality_model_mismatch.load(Ordering::Acquire),
+            credential_mismatch: self.quality_credential_mismatch.load(Ordering::Acquire),
+            in_flight: self.quality_in_flight.load(Ordering::Acquire),
+        }
+    }
+
+    /// Capture the H2 epoch + config together for an admitted job.
+    #[allow(dead_code)]
+    pub fn snapshot_quality_campaign(&self) -> Option<(u64, Arc<QualityCampaignConfig>)> {
+        let guard = self
+            .quality_campaign
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let epoch = self.quality_epoch.load(Ordering::Acquire);
+        guard.as_ref().map(|config| (epoch, config.clone()))
+    }
+
+    /// True iff the SAME H2 campaign is still armed at the captured epoch.
+    #[allow(dead_code)]
+    fn quality_armed_at(&self, quality_campaign_id: &str, epoch: u64) -> bool {
+        matches!(
+            self.snapshot_quality_campaign(),
+            Some((current, config)) if current == epoch && config.quality_campaign_id == quality_campaign_id
+        )
+    }
+
+    /// One dedicated permit + a 60s carrier cooldown, distinct from H1's. Every
+    /// refusal is counted in `quality_samples_dropped`.
+    #[allow(dead_code)]
+    fn try_begin_quality_sample(&self) -> Option<OwnedSemaphorePermit> {
+        let now = now_ms();
+        let last = self.quality_last_sample_at_ms.load(Ordering::Acquire);
+        if last != 0
+            && now.saturating_sub(last)
+                < crate::engine::runtime::quality::QUALITY_CARRIER_COOLDOWN_MS
+        {
+            self.quality_samples_dropped.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        match self.quality_permits.clone().try_acquire_owned() {
+            Ok(permit) => {
+                self.quality_last_sample_at_ms.store(now, Ordering::Release);
+                Some(permit)
+            }
+            Err(_) => {
+                self.quality_samples_dropped.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Atomically reserve one case from the budget. Returns true iff a case was
+    /// available (and decremented). Never underflows (CAS loop bottoming at 0).
+    #[allow(dead_code)]
+    fn reserve_quality_case(&self) -> bool {
+        let mut current = self.quality_remaining_cases.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return false;
+            }
+            match self.quality_remaining_cases.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Enqueue adversarial fixture IDs (ids ONLY — never a credential).
+    #[allow(dead_code)]
+    fn enqueue_quality_fixtures(&self, ids: &[String]) {
+        let mut queue = self
+            .quality_fixture_queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for id in ids {
+            queue.push_back(id.clone());
+        }
+    }
+
+    /// Pop the next queued fixture id under the carrier's held permit.
+    #[allow(dead_code)]
+    fn dequeue_quality_fixture(&self) -> Option<String> {
+        self.quality_fixture_queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+    }
+
+    #[allow(dead_code)]
+    fn quality_preflight_state(&self) -> QualityPreflightState {
+        self.quality_preflight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    #[allow(dead_code)]
+    fn set_quality_preflight(&self, state: QualityPreflightState) {
+        *self
+            .quality_preflight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = state;
+    }
 }
 
 /// Validate an arm request. Order matters only for which single label a caller
@@ -432,6 +793,35 @@ fn validate_arm_request(request: &SummaryArmRequest) -> Result<(), SummaryConfig
     }
     if price.standard_cache_read_usd_per_mtok <= 0.0 || price.long_cache_read_usd_per_mtok <= 0.0 {
         return Err(SummaryConfigError::ZeroCacheReadRate);
+    }
+    Ok(())
+}
+
+/// Validate an H2 arm request's SHAPE. The H1-armed / model-identical /
+/// `H1Gate::Pass` requirements are enforced by the async command lane (Lane E)
+/// and re-checked at every admission; this is the sync fail-closed shape gate.
+#[allow(dead_code)] // reached only via `arm_quality`, Lane E's entry point.
+fn validate_quality_arm(request: &QualityArmRequest) -> Result<(), QualityConfigError> {
+    if request.h1_campaign_id.trim().is_empty() {
+        return Err(QualityConfigError::EmptyH1Campaign);
+    }
+    if request.evaluator_model.trim().is_empty() {
+        return Err(QualityConfigError::EmptyEvaluatorModel);
+    }
+    // Ruling 467ecb7a: the evaluator must differ from the H1/task model — the
+    // summarizer never grades itself.
+    if request.evaluator_model == request.task_model {
+        return Err(QualityConfigError::EvaluatorEqualsTaskModel);
+    }
+    // The arm must name the exact compiled rubric version (global constraint 6).
+    if request.rubric_version != crate::engine::runtime::quality::QUALITY_RUBRIC_VERSION {
+        return Err(QualityConfigError::RubricMismatch);
+    }
+    if request.max_cases == 0 {
+        return Err(QualityConfigError::ZeroMaxCases);
+    }
+    if request.max_cases > QUALITY_MAX_CASES_CAP {
+        return Err(QualityConfigError::MaxCasesTooLarge);
     }
     Ok(())
 }
@@ -3843,5 +4233,184 @@ mod tests {
         );
         ph.abort();
         up.abort();
+    }
+
+    // ---- H2 quality campaign control surface (D1) ----------------------------
+
+    fn quality_arm_req() -> QualityArmRequest {
+        QualityArmRequest {
+            h1_campaign_id: "11111111-1111-4111-8111-111111111111".into(),
+            evaluator_model: "claude-3-opus-20240229".into(),
+            task_model: "claude-3-5-sonnet-20241022".into(),
+            rubric_version: crate::engine::runtime::quality::QUALITY_RUBRIC_VERSION.into(),
+            max_cases: 30,
+        }
+    }
+
+    #[test]
+    fn quality_defaults_off_and_restart_forgets_campaign() {
+        let rt = ProxyRuntime::with_port(0);
+        let status = rt.quality_status();
+        assert!(!status.armed);
+        assert_eq!(status.quality_campaign_id, None);
+        assert_eq!(status.remaining_cases, 0);
+        assert!(status.preflight_pending);
+        assert_eq!(status.fixture_queue_len, 0);
+        assert!(rt.snapshot_quality_campaign().is_none());
+    }
+
+    #[test]
+    fn arm_quality_installs_campaign_seeds_budget_and_bumps_epoch() {
+        let rt = ProxyRuntime::with_port(0);
+        let status = rt.arm_quality(quality_arm_req()).expect("valid arm");
+        assert!(status.armed);
+        assert_eq!(
+            status.evaluator_model.as_deref(),
+            Some("claude-3-opus-20240229")
+        );
+        assert_eq!(status.max_cases, Some(30));
+        assert_eq!(status.remaining_cases, 30);
+        let id = status.quality_campaign_id.clone().unwrap();
+        let (epoch, config) = rt.snapshot_quality_campaign().expect("armed");
+        assert_eq!(epoch, 1);
+        assert_eq!(config.quality_campaign_id, id);
+        assert_eq!(
+            config.h1_campaign_id,
+            "11111111-1111-4111-8111-111111111111"
+        );
+        // Re-arm mints a new id and bumps the epoch again.
+        let status2 = rt.arm_quality(quality_arm_req()).unwrap();
+        assert_ne!(status2.quality_campaign_id.unwrap(), id);
+        assert_eq!(rt.snapshot_quality_campaign().unwrap().0, 2);
+    }
+
+    #[test]
+    fn disarm_quality_bumps_epoch_zeroes_budget_and_clears_queue() {
+        let rt = ProxyRuntime::with_port(0);
+        rt.arm_quality(quality_arm_req()).unwrap();
+        rt.enqueue_quality_fixtures(&["fx-1".into(), "fx-2".into()]);
+        rt.set_quality_preflight(QualityPreflightState::Verified {
+            credential_identity: "abc".into(),
+            response_model: "m".into(),
+        });
+        assert_eq!(rt.quality_status().fixture_queue_len, 2);
+
+        let status = rt.disarm_quality();
+        assert!(!status.armed);
+        assert_eq!(status.remaining_cases, 0);
+        assert_eq!(status.fixture_queue_len, 0);
+        assert!(status.preflight_pending, "preflight reset on disarm");
+        assert!(rt.snapshot_quality_campaign().is_none());
+        assert_eq!(rt.quality_epoch.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn arm_quality_rejects_invalid_shapes_and_leaves_state_unchanged() {
+        let rt = ProxyRuntime::with_port(0);
+        let cases: Vec<(QualityArmRequest, QualityConfigError)> = vec![
+            (
+                {
+                    let mut r = quality_arm_req();
+                    r.h1_campaign_id = "  ".into();
+                    r
+                },
+                QualityConfigError::EmptyH1Campaign,
+            ),
+            (
+                {
+                    let mut r = quality_arm_req();
+                    r.evaluator_model = String::new();
+                    r
+                },
+                QualityConfigError::EmptyEvaluatorModel,
+            ),
+            (
+                {
+                    let mut r = quality_arm_req();
+                    r.evaluator_model = r.task_model.clone();
+                    r
+                },
+                QualityConfigError::EvaluatorEqualsTaskModel,
+            ),
+            (
+                {
+                    let mut r = quality_arm_req();
+                    r.rubric_version = "wrong-rubric".into();
+                    r
+                },
+                QualityConfigError::RubricMismatch,
+            ),
+            (
+                {
+                    let mut r = quality_arm_req();
+                    r.max_cases = 0;
+                    r
+                },
+                QualityConfigError::ZeroMaxCases,
+            ),
+            (
+                {
+                    let mut r = quality_arm_req();
+                    r.max_cases = 1_001;
+                    r
+                },
+                QualityConfigError::MaxCasesTooLarge,
+            ),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(rt.arm_quality(request), Err(expected), "{expected:?}");
+            assert!(!rt.quality_status().armed);
+            assert_eq!(rt.quality_epoch.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn reserve_quality_case_decrements_without_underflow() {
+        let rt = ProxyRuntime::with_port(0);
+        let mut r = quality_arm_req();
+        r.max_cases = 2;
+        rt.arm_quality(r).unwrap();
+        assert!(rt.reserve_quality_case());
+        assert_eq!(rt.quality_remaining_cases.load(Ordering::Acquire), 1);
+        assert!(rt.reserve_quality_case());
+        assert_eq!(rt.quality_remaining_cases.load(Ordering::Acquire), 0);
+        // Budget exhausted: further reservations fail, never underflow.
+        assert!(!rt.reserve_quality_case());
+        assert!(!rt.reserve_quality_case());
+        assert_eq!(rt.quality_remaining_cases.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn quality_sampler_gate_and_fixture_queue_are_independent_of_h1() {
+        let rt = ProxyRuntime::with_port(0);
+        rt.arm_quality(quality_arm_req()).unwrap();
+        // H1 sampler holding its permit must not starve the H2 permit.
+        let h1 = rt.try_begin_sample();
+        let summary = rt.try_begin_summary_sample();
+        assert!(h1.is_some() && summary.is_some());
+        let quality = rt.try_begin_quality_sample();
+        assert!(quality.is_some(), "H2 permit is separate from H1/M1");
+        // The single H2 permit is now held → next attempt drops (and cooldown).
+        assert!(rt.try_begin_quality_sample().is_none());
+        assert_eq!(rt.quality_samples_dropped.load(Ordering::Acquire), 1);
+        assert_eq!(rt.summary_samples_dropped.load(Ordering::Acquire), 0);
+
+        // Fixture queue is FIFO and ids-only.
+        rt.enqueue_quality_fixtures(&["a".into(), "b".into()]);
+        assert_eq!(rt.dequeue_quality_fixture(), Some("a".into()));
+        assert_eq!(rt.dequeue_quality_fixture(), Some("b".into()));
+        assert_eq!(rt.dequeue_quality_fixture(), None);
+        drop((h1, summary, quality));
+    }
+
+    #[test]
+    fn quality_armed_at_gates_on_campaign_and_epoch() {
+        let rt = ProxyRuntime::with_port(0);
+        rt.arm_quality(quality_arm_req()).unwrap();
+        let (epoch, config) = rt.snapshot_quality_campaign().unwrap();
+        assert!(rt.quality_armed_at(&config.quality_campaign_id, epoch));
+        // A disarm bumps the epoch → the captured epoch no longer matches.
+        rt.disarm_quality();
+        assert!(!rt.quality_armed_at(&config.quality_campaign_id, epoch));
     }
 }
