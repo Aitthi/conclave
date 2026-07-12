@@ -2036,6 +2036,54 @@ mod tests {
         setup.cleanup();
     }
 
+    /// Ruling 3c0182aa: the tail overlay applies the FULL per-line scan logic
+    /// transiently — ownership flags included, not just usage. An instance
+    /// declared ONLY in the unterminated tail must already own the reading,
+    /// equal to a fresh full-scan reader, while the offset still refuses to
+    /// consume the unterminated line.
+    #[test]
+    fn instance_declared_only_in_unterminated_tail_owns_the_reading() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-tail-owner-1";
+        let file = setup.project_dir.join("session.jsonl");
+        write_jsonl_terminated(&file, &[claude_usage_line(50)]);
+        assert!(
+            setup.poll_claude(instance_id).is_none(),
+            "no owner marker yet — no reading"
+        );
+        let consumed = setup.reader.file_offset(instance_id, &file);
+
+        // The owner marker arrives as an unterminated tail line.
+        append_raw(
+            &file,
+            &claude_owner_line(instance_id, &setup.workspace).to_string(),
+        );
+        let reading = setup
+            .poll_claude(instance_id)
+            .expect("tail-declared owner must own the reading");
+        assert_eq!(reading.tokens, 50);
+        assert_eq!(
+            reading,
+            setup.fresh_full_scan(instance_id, "claude-code").unwrap()
+        );
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            consumed,
+            "the unterminated owner line is still not consumed"
+        );
+
+        // Newline lands: ownership folds into persistent state; the reading is
+        // unchanged and the line is consumed exactly once.
+        append_raw(&file, "\n");
+        let reading = setup.poll_claude(instance_id).expect("still owned");
+        assert_eq!(reading.tokens, 50);
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            std::fs::metadata(&file).unwrap().len()
+        );
+        setup.cleanup();
+    }
+
     /// Codex gets the same incremental treatment: appended token counts fold
     /// into the cached reduction and match a fresh full scan.
     #[test]
