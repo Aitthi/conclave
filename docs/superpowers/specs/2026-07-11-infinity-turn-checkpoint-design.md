@@ -1,6 +1,6 @@
-# Infinity-Turn Checkpoint (ctx-proxy Phase 2) — Design v3
+# Infinity-Turn Checkpoint (ctx-proxy Phase 2) — Design v4
 
-**Status:** COUNCIL-REVIEWED (Detoro chair, Aoki co-principal). Seven challenges filed and ACCEPTED; all folded below (decision log at tail). In-loop authority granted by human 2026-07-11; human reviews the finished result. Verdict: **rework-before-plan done; measurement-only Milestone-1 is viable under the amended metric contract.**
+**Status:** v3 COUNCIL-REVIEWED (Detoro chair, Aoki co-principal); v4 hybrid-LLM-summary addendum is a **PROPOSAL UNDER REVIEW**, not approved for implementation. In-loop authority granted by human 2026-07-11; human reviews the finished result. M1 instrumentation is viable under the amended metric contract; M2 rejected the naive checkpoint and motivated the proposed hybrid path in §10–§11.
 **Distinct from** Phase-1 dedup proxy, which is NO-GO/shelved (plan A9, commit 5ef698d).
 **Predecessor evidence:** `docs/superpowers/plans/2026-07-10-agent-proxy-phase1.md` (A9), blackboard `measure:proxy-025-verdict` / `measure:proxy-025-ruling`.
 
@@ -68,7 +68,7 @@ The proxy runtime is **app-global** (`ctx_proxy.rs:42-50`, one atomic mutated by
 
 **§7.3 — apply trial (BLOCKED until isolation §6 + accounting §7.2 settle).** Predefine the quality evaluation *before* any apply: replay matched long-context checkpoints, **baseline vs projected** context, with **blinded** next-action / task-outcome scoring; the isolated live agent is a **safety** validation only, not the primary quality measure.
 
-**Honest risks:** (a) structural recoverable S may be insufficient → escalate to hybrid LLM-summary (bigger S, adds cost/latency/quality risk) — Milestone-1 tells us first; (b) accounting (§7.2) unverified; (c) quality equivalence is measured, never assumed.
+**Honest risks:** (a) M2 confirmed structural recoverable S is insufficient for the naive checkpoint; §10 records the NO-GO and §11 proposes hybrid LLM-summary, which may produce a bigger S but adds generation cost and a materially harder quality proof; (b) accounting (§7.2) is unverified; (c) quality equivalence is measured, never assumed.
 
 ## 8. Testing
 
@@ -78,7 +78,95 @@ Unit (`ctxopt`): deterministic checkpoint (same input → same frozen set), reco
 
 Milestone-1 boundary: `src-tauri/crates/ctxopt/` (checkpoint policy + recoverability classifier, alongside dedup), `ctx_proxy.rs` (trigger/ceiling wiring, metric emission), `commands/proxy.rs` (`checkpoint`/`ceiling`), CLI argv mapping, metric migration if a sibling table is used. Exact paths finalized in the plan. **Deferred (apply-path, not Milestone-1):** per-agent isolation design (§6), accounting resolution (§7.2), a content-addressed snapshot store for exact-output recovery (§3), and any collective manifest/breakpoint representation with its own narrowly-proven validator.
 
-## Decision log — council rulings 2026-07-11 (Detoro chair)
+## 10. M2 verdict — naive prefix-checkpoint NO-GO (2026-07-12)
+
+M2 measured 25 successful `count_tokens` samples across four conversations at a 100k ceiling (`count_failure=0`). `q` ranged **0.146–0.526**, average **0.273**; zero samples reached the **0.793** threshold required for cache break-even within two subsequent turns. The implied break-even was 9–66 turns. Evidence is on parent task `infinity-turn-checkpoint` and blackboard `measure:proxy-m2-q`.
+
+This is structural, not an instrumentation miss: observed proxy traffic was approximately **99.8% `cache_read`**. Most tokens belong to a stable cached prefix; the narrow rerunnable-tool classifier exposes only a small fraction as safely droppable. Rewriting that small fraction invalidates a much larger cache suffix, and dropping more bytes without preserving their meaning would increase quality risk. The naive apply path is therefore shelved. The sampler remains useful as the token-level measurement substrate for the hybrid hypothesis below.
+
+The 100k acquisition ceiling is a caveat, not a reason to reverse the verdict: M2 did not sample the 400–500k degradation band. Hybrid may proceed to shadow measurement only if its final GO decision includes real samples in that band; 100k samples may calibrate the instrument but cannot establish the product claim.
+
+## 11. Hybrid LLM-summary proposal (REVIEW-GATED; no build authorized)
+
+### 11.1 Hypothesis and safety boundary
+
+The hybrid path replaces **semantic content**, not just rerunnable bytes: an LLM condenses an old, closed span of tool results into a structured summary that remains on the wire, while deterministic tombstones replace the other covered result bodies. This can address the low-q failure only if old tool results contain substantial semantic redundancy that a summary can preserve much more compactly.
+
+The first proposal deliberately stays inside the existing structural proof:
+
+- **Eligible source:** textual `tool_result.content` in complete tool-use/result cycles before the recent tail. Unlike the naive policy, results from non-rerunnable tools (`Bash`, `WebFetch`, etc.) may be summarized because their material facts are retained, not discarded. The summarizer receives the paired tool name/input and enough surrounding user/assistant text to interpret each result, but that surrounding text is reference context, not removable content.
+- **Kept verbatim:** system prompt, tool definitions, every user block, every assistant block and `tool_use` input, the 80–100k-token recent tail, non-text/image/document result blocks, malformed or unmatched tool cycles, and any result for which the accepted summary would not be strictly smaller.
+- **Summary placement:** one target `tool_result.content` near the end of the frozen span carries the structured aggregate summary; the other covered result contents become short deterministic `[ctxopt summary <checkpoint-id>: covered by aggregate @turn N]` tombstones. The candidate is rejected unless the carrier and every tombstoned result individually shrink. Message count, roles, block types, key sets, tool IDs, and all sibling fields remain unchanged, so `ctxopt::validate` can continue to prove that only selected `tool_result.content` shrank.
+- **No arbitrary message splice in v1:** deleting user/assistant turns or inserting a synthetic summary message would weaken the current equivalence guard and erase instructions/decisions that M2 did not prove safe to remove. Whole-message compaction is a separate future design requiring a new validator and its own quality evidence.
+
+The summary contract is factual and reference-oriented, not narrative. It must retain: user constraints and acceptance criteria mentioned by a result; decisions and rejected alternatives; exact identifiers, paths, commands, versions, errors, and numeric findings needed later; mutations already performed; unresolved questions/blockers; negative results; and provenance as covered `tool_use_id` references. It must say `unknown` rather than infer. Tool output is delimited as untrusted data so prompt-like text inside a result cannot override the summarization instruction.
+
+An accepted summary is **immutable**. The first accepted bytes, source-boundary hash, prompt version, and summarizer model version form a checkpoint record; later turns reuse those exact bytes. The same frozen span is never regenerated, because a regenerated paraphrase would thrash the cache. A later checkpoint may summarize only newly frozen material or create a new aggregate that includes the prior summary under an explicit generation bump. Apply remains blocked on the identity/isolation and harness-accounting gates in §6/§7.2; an in-memory ledger is sufficient for shadow measurement but not for an infinity-turn product claim.
+
+### 11.2 Why this might beat low q — and why 99.8% cache-read may still defeat it
+
+Naive `q` was capped by the bytes labeled rerunnable. Hybrid expands the candidate pool to old textual tool results whose **meaning** may be compressible even when the original output is not reproducible. Large logs, repeated file reads, search results, build output, and superseded investigation trails can therefore contribute to saving. If those dominate the invalidated suffix, hybrid `q_h` can be much larger than M2's 0.146–0.526.
+
+However, 99.8% `cache_read` is not evidence that the prefix is irrelevant. It says the prefix is stable and currently cheap to reuse; the agent may still depend on it. Hybrid deliberately exchanges byte-level recoverability for a semantic-sufficiency claim, so it raises rather than removes the quality burden. It also invalidates that cheap prefix once, just like the naive rewrite. If the retained user/assistant/tool-use bytes dominate, if the summary must preserve most tool-result facts, or if behavioral replay shows that omitted detail changes the next action, hybrid is also a NO-GO. No compression ratio can overrule a quality failure.
+
+### 11.3 Token and dollar economics
+
+For one candidate, measured with the existing provider estimator:
+
+- `A` = tokens in the original request.
+- `C` = tokens in the globally closed prefix before the earliest changed result (reuse `count_tokens::prefix_messages`).
+- `R = A − C` = invalidated cache suffix.
+- `B_h` = tokens in the projected request containing the aggregate summary and tombstones.
+- `S_h = A − B_h` = net tokens saved, already net of the aggregate summary and tombstone overhead.
+- `q_h = S_h / R` = physical rewrite efficiency. It is the analog of q, but is **not** sufficient for a GO because it excludes the generation call and semantic loss.
+
+Let `p_w` and `p_r` be the actual per-token cache-write and cache-read prices for the forwarded model, and let `C_gen` be the measured dollar cost of the one-off summary call, including uncached input, cache creation/read, and output tokens at the summarizer model's rates. The incremental cost of the rewritten turn is:
+
+`Δ0 = p_w × (R − S_h) − p_r × R + C_gen`
+
+Each later stable turn saves `p_r × S_h`, so the number of **subsequent** turns required to amortize the checkpoint is:
+
+`n_h = max(0, Δ0 / (p_r × S_h))`
+
+Under the prior normalized Anthropic cache ratios (`p_w = 1.25 p_i`, `p_r = 0.10 p_i`) and `g = C_gen / (p_i × R)`, this becomes:
+
+`n_h = max(0, 11.5/q_h − 12.5 + 10g/q_h)`
+
+This is the new break-even metric. The earlier `q ≥ 0.793` rule is recovered only when `g = 0`; summary generation makes the required compression stricter. The summary request should preserve the original byte-identical prefix/cache markers where the API contract permits and append a no-tools summarization instruction after a closed cycle, because it may reuse the cache that dominates live traffic. That reuse is **not assumed**: the summary response's actual `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens` determine `C_gen`. If the summary call cannot reuse the prefix, or if its output price dominates, the economics may be impossible even with excellent compression.
+
+Prices are versioned inputs to the report, not constants in code. Store token usage, model IDs, prompt version, and price-schedule version separately so historical measurements can be recomputed. The quality objective may justify a bounded cost premium, but that exception must be an explicit product ruling; the measurement report must not relabel a negative `n_h` result as a cost win.
+
+### 11.4 Quality preservation and validation
+
+There are three independent gates, all fail-closed for the candidate and fail-open for forwarding:
+
+1. **Structural gate:** closed tool cycles; recent tail and protected bytes identical; every changed result strictly smaller; current `ctxopt::validate` passes; projected request passes provider `count_tokens`. Any failure discards the candidate and forwards the original request.
+2. **Faithfulness gate:** a verifier sees the source span and summary, checks every summary claim against cited `tool_use_id` evidence, and scores a source-derived probe set covering constraints, decisions, mutations, exact identifiers/errors, negative findings, and open work. A critical hallucination or omission rejects the candidate. Verifier model/version and rubric are pinned and recorded; the summarizer cannot grade itself.
+3. **Behavioral gate:** on a no-side-effect replay, call the task model with the original and projected contexts, tools disabled, to produce the next-action plan. Blind randomized judging compares correctness, constraint adherence, and selected next action; neither tools nor mutations are executed. This tests what matters—the agent's behavior—not prose similarity. A stratified human audit of accepted, rejected, and near-threshold cases checks judge drift.
+
+Raw requests, raw summaries, credentials, and verifier prompts must not enter the metric database or logs. A shadow job holds them only in memory for the duration of generation/count/verification, then persists bounded numeric scores, content hashes, model/prompt versions, token usage, failure stage, and allowlisted error types. The summarizer and verifier use the exact upstream captured for the forwarded request, a no-redirect client, lifted sensitive headers with the same containment rules as `count_tokens`, no tools, explicit timeouts, no retries on forwarded latency, and a global semaphore/cooldown. They are off the forwarding path and cannot delay or alter the real request.
+
+### 11.5 Integration seams (anticipated, not authorized)
+
+- `src-tauri/crates/ctxopt/`: add a pure summary-span planner beside `checkpoint.rs`; identify globally closed cycles, protected blocks, carrier/tombstone placement, byte-stable checkpoint IDs, and projection diagnostics. Reuse `apply::stub_tool_results` and the existing strict `validate`; do not add network/model code to this crate.
+- `src-tauri/src/engine/runtime/ctx_proxy.rs`: retain the cheap byte trigger and global off-path queue. Extend `CheckpointJob` (or add a distinct `SummaryJob`) with the source boundary/hash and captured upstream, invoke a dedicated summarizer/verifier client asynchronously, build the projection, run a/b/c counts, and persist one terminal outcome for every admitted job. Forwarded bytes remain untouched throughout shadow milestones.
+- `src-tauri/src/engine/runtime/count_tokens.rs`: reuse `CountCredential`, no-redirect client policy, `count_tokens_body`, the beta route/header handling, safe error taxonomy, and the globally closed `prefix_messages` C boundary. The hybrid measurement still computes `R=A−C` and `S_h=A−B_h`; it must not regress to `bytes/4` authority.
+- Runtime generation code belongs in a separate `summary.rs` so count-only security and error handling remain narrow. It constructs the cache-preserving, no-tools request; records actual usage needed for `C_gen`; and returns content or a bounded content-free error stage.
+- Persist hybrid rows in a sibling `proxy_summary_metric` table (or a versioned schema with an unambiguous method discriminator), not as naive M2 rows. Required fields: A/B/C/R/S_h/q_h; summary/tombstone tokens; generation usage by cache bucket and output; `C_gen`, price version, `n_h`; projected post tokens; plateau; faithfulness/probe/behavior scores; prompt/summarizer/verifier versions; outcome/failure stage; source-boundary and summary hashes. Never persist bodies.
+
+### 11.6 Ordered live measurement plan and GO/NO-GO bars
+
+**H0 — deterministic fixtures, no model traffic.** Prove closed-cycle selection, protected-byte identity, carrier/tombstone shrink rules, structural validation, byte-stable reuse, prompt-injection fixtures, count-prefix closure, and fail-open forwarding. A single structural mismatch is a stop.
+
+**H1 — shadow token/economics measurement, no forwarded-byte change.** Re-arm the existing sampler after app relaunch, generate candidate summaries off-path, and reuse M1's a/b/c instrument. Acquire at least **30 successful candidates across at least 10 conversations**, including at least **10 candidates whose real A is in the 400–500k degradation band**; 100k samples are calibration only. Report distributions by conversation, never only pooled averages. Advance to H2 only if: count/generation failure ≤5%; at least 90% of candidates land at or below the defined low-water L; at least 80% have `n_h ≤ 2` using measured `C_gen`; and no conversation has all candidates miss. These retain M2's two-turn cost standard while charging the new call honestly.
+
+**H2 — shadow quality validation, still no forwarded-byte change.** Evaluate at least **100 stratified cases** across live in-memory candidates plus adversarial/replayable fixtures; include side-effecting outputs, long logs, exact error diagnosis, rejected alternatives, parallel tool cycles, and prompt-like text inside tool output. GO requires: zero critical hallucinations; zero critical omissions; source-probe recall ≥98%; no structural failures; and blinded next-action non-inferiority whose 95% confidence lower bound is no worse than **−5 percentage points** versus original context. Any critical loss is a design failure, not something compression economics can average away.
+
+**H3 — isolated apply safety trial.** Still BLOCKED until §6 identity/isolation and §7.2 harness accounting are settled. Only after H1+H2 pass may one isolated agent reuse the exact accepted summary bytes. Monitor task outcome, re-read/recovery attempts, latency, cache usage, `n_h` versus observed plateau, and emergency fail-open. The live trial is a safety check, not the primary quality proof.
+
+The hybrid decision replaces the single q threshold with a vector: **`q_h` for physical compression, `n_h` for cost-adjusted amortization, and faithfulness/behavioral non-inferiority for quality.** H1 or H2 failure is NO-GO for apply. Passing them authorizes an apply-path design review, not implementation by implication.
+
+## Decision log — council rulings (Detoro chair)
 
 All seven of Aoki's challenges ACCEPTED after evidence verification; credit Aoki.
 - **R1 (22ec8a2b) recoverability:** dropped "lossless"; split capability-resident (accepted lossy) vs exact-output (needs snapshot). §3.
@@ -89,3 +177,4 @@ All seven of Aoki's challenges ACCEPTED after evidence verification; credit Aoki
 - **R6 (c19ef7b0) accounting+quality:** §7.2 upgraded to a design gate (mock-upstream accounting experiment); predefined blinded quality eval. §7.
 - **R7 (da69a2b7) token counting:** gate is token-level but telemetry is `bytes/4` + whole-request usage; defined a `count_tokens` a/b/c sampling algorithm (S_net=a−b, R=a−c, q=S_net/R), async/queued, credential verified as a plan prerequisite; plateau redefined as observed. §7.1/§8.
 - **R8 (4f3aa72a + c08a3cf1) M1 0-sample defect (Detoro chair + Aoki co-principal, post-implementation):** the shipped M1 gate applied M/L in `bytes/4` space and dropped `Saturated` with no metric row → 0 interpretable samples on real (~4.7× over-estimated) cache-heavy traffic. Ruling: `bytes/4` is a sample-trigger + diagnostic only; classify **after** `count_tokens` into `below_ceiling|eligible|saturated`; **always** persist a row (`outcome` column added); remove the bytes/4 M/L pre-gate. §4/§7.1. Fix task: `infinity-turn-checkpoint-m1-fix`.
+- **R9 (74bbaf61, 2026-07-12; credit Aoki) first hybrid safety boundary:** preserve the proven strict validator and summarize only old, closed-cycle `tool_result.content`; keep user/assistant/message structure verbatim. Expanding candidates to all old tool results is a hypothesis, not proof of value, so measured summarizer cost is binding in `n_h`. Whole-message splicing is deferred pending a new validator and separate quality proof. §11.1/§11.3.
