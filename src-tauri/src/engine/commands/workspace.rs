@@ -167,6 +167,9 @@ pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError>
     for inst in &instances {
         let _ = state.runtime.unregister(&inst.id);
         repo::workspace_agent::remove(&state.db, &inst.id).await?;
+        // D2: the row is gone — delete its skill sidecar so the skills dir
+        // doesn't accrue an orphan until the next startup sweep.
+        crate::engine::agentctx::remove_skill_sidecar(&inst.id);
     }
 
     repo::workspace::delete(&state.db, &req.workspace_id).await?;

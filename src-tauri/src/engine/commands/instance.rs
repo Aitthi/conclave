@@ -1036,6 +1036,10 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
         )));
     }
 
+    // D2: the row is gone — delete its skill sidecar so the skills dir doesn't
+    // accrue an orphan until the next startup sweep.
+    crate::engine::agentctx::remove_skill_sidecar(&id);
+
     Ok(Value::Null)
 }
 

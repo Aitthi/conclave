@@ -115,6 +115,18 @@ pub async fn list_by_workspace(
         .map_err(cb_err)
 }
 
+/// Every `workspace_agent.id` across ALL workspaces (no workspace filter).
+/// Consumed by the startup skill-sidecar sweep
+/// ([`crate::engine::agentctx::sweep_orphan_skill_sidecars`]) to tell a live
+/// instance's sidecar from an orphan left behind by a deleted row — the skills
+/// dir is app-global, so the sweep needs the app-global id set, not a
+/// per-workspace slice.
+pub async fn list_all_ids(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar("SELECT id FROM workspace_agent")
+        .fetch_all(pool)
+        .await
+}
+
 /// Return the ordered rank for a position level.
 ///
 /// Unknown values (and `NULL`, which callers represent by not calling this
@@ -923,6 +935,34 @@ mod tests {
         instantiate(pool, workspace_id, &def.id)
             .await
             .expect("instantiate named agent")
+    }
+
+    #[tokio::test]
+    async fn list_all_ids_returns_every_instance_across_workspaces() {
+        let pool = connect_in_memory().await;
+        let ws1 = workspace::create(&pool, "WS1", "/tmp/ws1", None)
+            .await
+            .expect("create ws1");
+        let ws2 = workspace::create(&pool, "WS2", "/tmp/ws2", None)
+            .await
+            .expect("create ws2");
+        let a = instance_named(&pool, &ws1.id, "A").await;
+        let b = instance_named(&pool, &ws1.id, "B").await;
+        let c = instance_named(&pool, &ws2.id, "C").await;
+
+        let ids = list_all_ids(&pool).await.expect("list_all_ids");
+        let set: std::collections::HashSet<_> = ids.iter().cloned().collect();
+        assert_eq!(set.len(), 3, "one id per instance, all workspaces: {ids:?}");
+        assert!(set.contains(&a.id));
+        assert!(set.contains(&b.id));
+        assert!(set.contains(&c.id));
+
+        // After removing one, it drops out of the id set — the sweep's whole
+        // premise (an orphaned sidecar's row is gone).
+        assert!(remove(&pool, &b.id).await.expect("remove b"));
+        let ids = list_all_ids(&pool).await.expect("list_all_ids after remove");
+        assert!(!ids.contains(&b.id), "removed instance absent: {ids:?}");
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]
