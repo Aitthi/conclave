@@ -106,12 +106,12 @@ memory remember`; your skills file carries the full tool table."
 
 /// The strategic-compact "save" prompt — injected as a normal user turn (NOT a
 /// system prompt) when the user triggers a compact. It tells the agent to write
-/// its own handoff and persist it through `conclave snapshot save`, which is the
-/// signal the compact loop waits on before clearing. Kept to a single line (no
-/// embedded newlines) so a TUI submits it as one prompt, mirroring `inject`.
+/// its own handoff and persist it through `conclave snapshot save`. Kept to a
+/// single line (no embedded newlines) so a TUI submits it as one prompt,
+/// mirroring `inject`.
 #[must_use]
 pub fn compact_save_prompt() -> String {
-    "[conclave compact] Your context is about to be cleared to free space. Write the RICHEST \
+    "[conclave compact] Checkpoint your context NOW (human-triggered). Write the RICHEST \
 handoff you can for a reader with ZERO memory of this conversation — follow your Strategic \
 Compact skill's seven sections if you have it, else cover: the exact next step and any \
 half-finished edit FIRST, then goal/authority/peers, every decision with its why, open threads \
@@ -119,24 +119,9 @@ with your defaults, hard-won gotchas and failed approaches, done work as commit 
 pointers. Do not economize tokens — the only limit is a HARD CAP of 10k tokens (~40,000 \
 characters). REFERENCE commit SHAs and file paths instead of pasting their contents, and REDACT \
 secrets (API keys, tokens, passwords). Then persist it by running this single command (do not \
-just print it): `conclave snapshot save <your full handoff text>`. After it confirms, stop and \
-wait."
-        .to_string()
-}
-
-/// The strategic-compact "restore" prompt — injected after `/clear` so the agent
-/// reloads the handoff it just saved and continues instead of starting over.
-/// Single line, same rationale as [`compact_save_prompt`].
-#[must_use]
-pub fn compact_restore_prompt() -> String {
-    "[conclave compact] Your context was just cleared. FIRST: if your system prompt names a \
-standing-instructions file, re-read that file now — the clear erased its content from your \
-context, and your skills live in it. Then restore your working state: run \
-`conclave snapshot last` to read the handoff you saved a moment ago, then VERIFY it against \
-reality before acting — git log the SHAs it names and re-read the blackboard keys it watches; \
-peers may have moved the world while you were gone. Then continue the task from the EXACT next \
-step it describes. Do not restart work that the handoff says is done, and do not re-open \
-decisions it records."
+just print it): `conclave snapshot save <your full handoff text>`. After it confirms, tell the \
+human in one line that the handoff is saved, then CONTINUE your current work — your context will \
+NOT be cleared automatically; the snapshot is a restore point for later."
         .to_string()
 }
 
@@ -833,14 +818,12 @@ mod tests {
     }
 
     #[test]
-    fn compact_prompts_are_single_line_and_name_the_commands() {
+    fn compact_prompt_is_single_line_and_names_the_command() {
         let save = super::compact_save_prompt();
-        let restore = super::compact_restore_prompt();
         assert!(!save.contains('\n'), "save prompt must be one line");
-        assert!(!restore.contains('\n'), "restore prompt must be one line");
-        // Each must name the exact command the agent has to run.
         assert!(save.contains("conclave snapshot save"));
-        assert!(restore.contains("conclave snapshot last"));
+        assert!(save.contains("CONTINUE"), "{save}");
+        assert!(save.contains("NOT be cleared automatically"), "{save}");
     }
 
     #[test]
@@ -1001,26 +984,22 @@ text>`. After it confirms, stop and wait for the restart."
         assert!(s.contains("clear"), "{s}");
     }
 
-    /// Restore prompts drive the agent straight into `conclave snapshot last`
+    /// The resume prompt drives the agent straight into `conclave snapshot last`
     /// + continue-the-task. Without an explicit first step to re-read the
     ///   standing-instructions file, the agent resumes work skill-less — the
-    ///   exact "forgets skills after /clear" bug. Both fresh-context prompts
-    ///   must name that step BEFORE the snapshot restore.
+    ///   exact "forgets skills after /clear" bug. The fresh-context prompt must
+    ///   name that step BEFORE the snapshot restore.
     #[test]
     fn fresh_context_restore_prompts_order_skill_file_reread_first() {
-        for p in [
-            super::compact_restore_prompt(),
-            super::resume_restore_prompt(),
-        ] {
-            assert!(p.contains("standing-instructions"), "{p}");
-            assert!(p.contains("re-read"), "{p}");
-            let reread = p.find("re-read").unwrap();
-            let snapshot = p.find("conclave snapshot last").unwrap();
-            assert!(
-                reread < snapshot,
-                "re-read must come before snapshot restore: {p}"
-            );
-        }
+        let p = super::resume_restore_prompt();
+        assert!(p.contains("standing-instructions"), "{p}");
+        assert!(p.contains("re-read"), "{p}");
+        let reread = p.find("re-read").unwrap();
+        let snapshot = p.find("conclave snapshot last").unwrap();
+        assert!(
+            reread < snapshot,
+            "re-read must come before snapshot restore: {p}"
+        );
     }
 
     /// The invariant the whole feature exists to protect: appending the skill

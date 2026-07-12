@@ -12,12 +12,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
-/// How long a compact stays armed. A never-saving agent must not leave a stale
-/// arm that later hijacks an unrelated manual `snapshot save` into a `/clear`.
-/// The restart arm shares this TTL — same "stale arm must not hijack a later
-/// unrelated save" rationale, and a restart's kill is even more destructive
-/// than a `/clear`.
-const COMPACT_PENDING_TTL: Duration = Duration::from_secs(300);
+/// How long a restart stays armed. A never-saving agent must not leave a stale
+/// arm that later hijacks an unrelated manual `snapshot save` into a restart.
+const RESTART_PENDING_TTL: Duration = Duration::from_secs(300);
 
 pub struct AppState {
     /// Live, migration-applied SQLite connection pool.
@@ -65,19 +62,10 @@ pub struct AppState {
     /// App-global loopback context-proxy runtime and conversation ledger.
     pub ctx_proxy: std::sync::Arc<crate::engine::runtime::ctx_proxy::ProxyRuntime>,
 
-    /// Instances with a compact ARMED: the agent's next `conclave snapshot save`
-    /// is the trigger that fires `/clear` + restore. Keyed by instance id → arm
-    /// time. This is what makes `/clear` run strictly AFTER the save completes
-    /// (the save handler consumes the arm), instead of racing a poll. A TTL
-    /// (`COMPACT_PENDING_TTL`) guards against a never-saving agent leaving a stale
-    /// arm that a later unrelated manual save would trip.
-    compact_pending: Mutex<HashMap<String, Instant>>,
-
     /// Instances with a restart ARMED: the agent's next `conclave snapshot save`
-    /// triggers kill → respawn → resume instead of `/clear` + restore (see
-    /// `commands::instance::restart`). Same consume-once + TTL discipline as
-    /// `compact_pending`; kept as a SEPARATE map so arming a restart can never
-    /// be consumed as a compact (or vice versa).
+    /// triggers kill → respawn → resume (see `commands::instance::restart`).
+    /// Keyed by instance id → arm time, with consume-once + TTL discipline so
+    /// a stale arm cannot hijack a later unrelated save.
     restart_pending: Mutex<HashMap<String, Instant>>,
 }
 
@@ -102,7 +90,6 @@ impl AppState {
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
             ctx_proxy: std::sync::Arc::new(crate::engine::runtime::ctx_proxy::ProxyRuntime::new()),
-            compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
     }
@@ -150,26 +137,6 @@ impl AppState {
         }
     }
 
-    /// Arm a compact for `instance_id`: the agent's next handoff save triggers
-    /// `/clear` + restore (see `commands::snapshot`). Overwrites any prior arm.
-    pub fn mark_compact_pending(&self, instance_id: &str) {
-        if let Ok(mut m) = self.compact_pending.lock() {
-            m.insert(instance_id.to_owned(), Instant::now());
-        }
-    }
-
-    /// Consume a pending compact for `instance_id`. Returns `true` iff one was
-    /// armed AND is still within [`COMPACT_PENDING_TTL`]; always removes the entry
-    /// (so a stale, expired arm is cleared rather than lingering).
-    pub fn take_compact_pending(&self, instance_id: &str) -> bool {
-        if let Ok(mut m) = self.compact_pending.lock() {
-            if let Some(armed) = m.remove(instance_id) {
-                return armed.elapsed() < COMPACT_PENDING_TTL;
-            }
-        }
-        false
-    }
-
     /// Arm a restart for `instance_id`: the agent's next handoff save triggers
     /// kill → respawn → resume (see `commands::instance::restart`). Overwrites
     /// any prior arm.
@@ -179,12 +146,11 @@ impl AppState {
         }
     }
 
-    /// Consume a pending restart for `instance_id` — same semantics as
-    /// [`Self::take_compact_pending`] (consume-once, TTL-guarded).
+    /// Consume a pending restart for `instance_id` (consume-once, TTL-guarded).
     pub fn take_restart_pending(&self, instance_id: &str) -> bool {
         if let Ok(mut m) = self.restart_pending.lock() {
             if let Some(armed) = m.remove(instance_id) {
-                return armed.elapsed() < COMPACT_PENDING_TTL;
+                return armed.elapsed() < RESTART_PENDING_TTL;
             }
         }
         false
@@ -195,7 +161,7 @@ impl AppState {
     /// deadline `take_restart_pending` actually holds it to, rather than a
     /// hand-copied literal that could silently drift from the real constant.
     pub fn restart_pending_ttl(&self) -> Duration {
-        COMPACT_PENDING_TTL
+        RESTART_PENDING_TTL
     }
 }
 
@@ -219,7 +185,6 @@ impl AppState {
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
             ctx_proxy: std::sync::Arc::new(crate::engine::runtime::ctx_proxy::ProxyRuntime::new()),
-            compact_pending: Mutex::new(HashMap::new()),
             restart_pending: Mutex::new(HashMap::new()),
         }
     }

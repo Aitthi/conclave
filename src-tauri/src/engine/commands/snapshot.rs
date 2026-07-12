@@ -4,11 +4,11 @@
 //! snapshot is created from the UI / CLI; an `auto` snapshot is created by the
 //! output forwarder when the context estimate crosses the auto-compact threshold
 //! (≈90%); a `handoff` snapshot carries the agent's own self-written context and
-//! is created by the strategic-compact loop (`save` / `compact`).
+//! is created when an agent saves its strategic-compact handoff.
 //!
 //! Handlers: `create` (manual marker) · `list` · `read` · `save` (agent writes a
-//! handoff) · `last` (read the latest handoff back) · `compact` (the full
-//! save→clear→restore loop) · `delete` / `send` (the Memory list's row actions).
+//! handoff) · `last` (read the latest handoff back) · `compact` (ask the agent
+//! to save a handoff) · `delete` / `send` (the Memory list's row actions).
 //!
 //! # honesty seams
 //!
@@ -25,7 +25,6 @@ use repo::snapshot::{NewSnapshot, SnapshotRow};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
 
@@ -282,10 +281,6 @@ pub async fn send(state: &AppState, payload: Value) -> Result<Value, AppError> {
 
 // ── Strategic-compact loop (agent self-handoff) ───────────────────────────────
 
-/// Settle pause around `/clear` so the harness finishes one input (rendering the
-/// "saved" output, then clearing) before the next is typed.
-const COMPACT_SETTLE_MS: u64 = 2_000;
-
 /// Payload for `snapshot.save` — the agent's own handoff text, instance-keyed.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -299,13 +294,6 @@ struct SaveReq {
 #[serde(rename_all = "camelCase")]
 struct InstanceReq {
     instance_id: String,
-}
-
-/// The harness command that clears a CLI agent's conversation history. Claude
-/// Code and Codex both use `/clear`; centralised so a future divergence is a
-/// one-line edit. (Runtime-verify per harness — clearing is destructive.)
-fn clear_command(_cli_kind: Option<&str>) -> &'static str {
-    "/clear"
 }
 
 /// Type a line into a live agent's stdin and submit it. A TUI's Enter is CR
@@ -323,7 +311,7 @@ pub(crate) async fn submit_line(runtime: &Runtime, instance_id: &str, text: &str
 /// Persist the agent's self-written handoff as a `handoff` snapshot (M4.2's
 /// deferred `carried_forward`, now filled). Instance-keyed: a spawned agent knows
 /// its own `CONCLAVE_INSTANCE_ID`, not its session id. The real text lands in
-/// `carried_forward`; [`last`] reads it back verbatim after `/clear`.
+/// `carried_forward`; [`last`] reads it back verbatim when a later resume needs it.
 pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: SaveReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -356,14 +344,9 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     )
     .await?;
 
-    // If a restart or compact is armed for this agent, THIS save is the trigger:
-    // now that the handoff is durably persisted, fire the destructive tail.
-    // Doing it here — not in a poll from `compact`/`restart` — is what
-    // guarantees the kill / `/clear` runs strictly AFTER the save completes
-    // (the agent has finished writing and called us). Detached so the agent's
-    // `snapshot save` returns promptly. Restart is checked FIRST: it is the
-    // stronger operation, and the two arms live in separate maps so a compact
-    // arm can never be consumed as a restart (or vice versa).
+    // If a restart is armed for this agent, THIS save is the trigger: now that
+    // the handoff is durably persisted, fire the kill → respawn → resume tail.
+    // Detached so the agent's `snapshot save` returns promptly.
     if state.take_restart_pending(&req.instance_id) {
         if let Some(app) = state.app().cloned() {
             tauri::async_runtime::spawn(super::instance::run_respawn_resume(
@@ -371,12 +354,6 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
                 req.instance_id.clone(),
                 true, // kill the live process first — the handoff is saved.
             ));
-        }
-    } else if state.take_compact_pending(&req.instance_id) {
-        if let Some(clear_cmd) = resolve_clear_cmd(&state.db, &req.instance_id).await {
-            let runtime = state.runtime.clone();
-            let instance_id = req.instance_id.clone();
-            tauri::async_runtime::spawn(run_clear_restore(runtime, instance_id, clear_cmd));
         }
     }
 
@@ -410,16 +387,9 @@ pub async fn last(state: &AppState, payload: Value) -> Result<Value, AppError> {
     serde_json::to_value(&row).map_err(|e| AppError::Internal(e.to_string()))
 }
 
-/// Arm the strategic-compact loop for a live CLI agent and inject the "save your
-/// handoff" prompt. Maps to `snapshot.compact`. Returns IMMEDIATELY.
-///
-/// The `/clear` + restore are NOT driven from here — they fire from the
-/// [`save`] handler when the agent actually calls `conclave snapshot save` (we
-/// arm the agent via [`AppState::mark_compact_pending`]). That ordering is the
-/// whole point: `/clear` runs strictly AFTER the save completes, never racing it.
-///
-/// SAFETY: because the clear is gated on a real save, an agent that ignores the
-/// prompt is simply never cleared — Conclave never destroys uncaptured context.
+/// Inject the strategic-compact "save your handoff" prompt into a live CLI
+/// agent. Maps to `snapshot.compact` and returns immediately. Compact is a
+/// non-destructive checkpoint: nothing is cleared or restored after the save.
 pub async fn compact(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: InstanceReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -441,9 +411,6 @@ pub async fn compact(state: &AppState, payload: Value) -> Result<Value, AppError
         )));
     }
 
-    // Arm FIRST, then inject — so a fast agent that saves the instant it reads the
-    // prompt still finds the arm set when its `save` lands.
-    state.mark_compact_pending(&req.instance_id);
     submit_line(
         &state.runtime,
         &req.instance_id,
@@ -495,31 +462,6 @@ pub async fn resume(state: &AppState, payload: Value) -> Result<Value, AppError>
     )
     .await;
     Ok(json!({ "status": "resuming", "instanceId": req.instance_id }))
-}
-
-/// Resolve the harness-specific clear command for an instance (`instance → def →
-/// cli_kind`). `None` if the instance/def is gone — the caller then skips the
-/// clear rather than guessing.
-async fn resolve_clear_cmd(db: &SqlitePool, instance_id: &str) -> Option<String> {
-    let inst = repo::workspace_agent::get(db, instance_id).await.ok()??;
-    let def = repo::agent_definition::get(db, &inst.agent_def_id)
-        .await
-        .ok()??;
-    Some(clear_command(def.cli_kind.as_deref()).to_string())
-}
-
-/// Clear the harness, settle, then inject the restore prompt. Run as a detached
-/// task from [`save`] once the handoff is persisted, so `/clear` lands strictly
-/// after the save. Self-contained (owned clones) so it outlives the JSON-RPC call.
-async fn run_clear_restore(runtime: Arc<Runtime>, instance_id: String, clear_cmd: String) {
-    // Let the agent render its "saved" output and settle, THEN clear.
-    tokio::time::sleep(Duration::from_millis(COMPACT_SETTLE_MS)).await;
-    if !runtime.is_live(&instance_id) {
-        return; // agent exited between the save and now — nothing to clear.
-    }
-    submit_line(&runtime, &instance_id, &clear_cmd).await;
-    tokio::time::sleep(Duration::from_millis(COMPACT_SETTLE_MS)).await;
-    submit_line(&runtime, &instance_id, &agentctx::compact_restore_prompt()).await;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -824,32 +766,12 @@ mod tests {
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
-    /// The compact arm is consumed exactly once: take is true only after a mark,
-    /// and a second take is empty (so a later manual save can't re-trip a clear).
+    /// The restart arm is consumed exactly once.
     #[tokio::test]
-    async fn compact_pending_arm_is_consumed_once() {
-        let state = AppState::for_tests().await;
-        assert!(!state.take_compact_pending("i1"), "nothing armed yet");
-        state.mark_compact_pending("i1");
-        assert!(state.take_compact_pending("i1"), "armed → first take true");
-        assert!(
-            !state.take_compact_pending("i1"),
-            "second take is empty — arm consumed"
-        );
-    }
-
-    /// The restart arm mirrors the compact arm's consume-once semantics AND is
-    /// isolated from it: arming a restart must not be consumable as a compact
-    /// (or vice versa) — the two tails are very different in destructiveness.
-    #[tokio::test]
-    async fn restart_pending_arm_is_consumed_once_and_isolated() {
+    async fn restart_pending_arm_is_consumed_once() {
         let state = AppState::for_tests().await;
         assert!(!state.take_restart_pending("i1"), "nothing armed yet");
         state.mark_restart_pending("i1");
-        assert!(
-            !state.take_compact_pending("i1"),
-            "a restart arm must not be consumable as a compact"
-        );
         assert!(state.take_restart_pending("i1"), "armed → first take true");
         assert!(
             !state.take_restart_pending("i1"),
@@ -920,12 +842,5 @@ mod tests {
             .await
             .expect("resume failed");
         assert_eq!(out.get("status").and_then(Value::as_str), Some("resuming"));
-    }
-
-    #[test]
-    fn clear_command_is_slash_clear() {
-        assert_eq!(clear_command(Some("claude-code")), "/clear");
-        assert_eq!(clear_command(Some("codex")), "/clear");
-        assert_eq!(clear_command(None), "/clear");
     }
 }

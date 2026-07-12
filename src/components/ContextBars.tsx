@@ -21,6 +21,13 @@ import { computeSkillsStale } from "../lib/skills";
 import { timeHint } from "../lib/timeHint";
 import { DeferredNote } from "./DeferredNote";
 import type { SessionSnapshots } from "../lib/useSessionSnapshots";
+import {
+  Popover,
+  PopoverContent,
+  PopoverDescription,
+  PopoverTitle,
+  PopoverTrigger,
+} from "./ui/popover";
 
 // ---------------------------------------------------------------------------
 // Center-pane top/bottom context bars — slim, click-to-open popovers that
@@ -479,8 +486,9 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
   // ── Snapshot actions (Memory section), moved verbatim — local UI state only;
   //    the fetched list/hasHandoff/error live in the shared `snapshots` prop. ─
   const [snapshotBusy, setSnapshotBusy] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [compactOpen, setCompactOpen] = useState(false);
   const [compacting, setCompacting] = useState(false);
+  const snapshotIdsBeforeCompact = useRef<Set<string>>(new Set());
   const [selectedSnap, setSelectedSnap] = useState<string | null>(null);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
 
@@ -488,8 +496,9 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
   // combined reset effect for this slice of state.
   useEffect(() => {
     setSnapshotBusy(false);
-    setConfirming(false);
+    setCompactOpen(false);
     setCompacting(false);
+    snapshotIdsBeforeCompact.current.clear();
     setSelectedSnap(null);
     setRowBusy(null);
   }, [sessionId]);
@@ -515,7 +524,8 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
   }, [sessionId, snapshots]);
 
   const doCompact = useCallback(() => {
-    setConfirming(false);
+    snapshotIdsBeforeCompact.current = new Set(snapshots.snapshots.map((snapshot) => snapshot.id));
+    setCompactOpen(false);
     snapshots.setSnapshotError(false);
     setCompacting(true);
     ipc.snapshot.compact({ instanceId }).catch((err: unknown) => {
@@ -528,6 +538,21 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
       }
     });
   }, [instanceId, snapshots]);
+
+  // A newly persisted handoff is the successful end of compact. The event-backed
+  // snapshots prop refetches after `snapshot:created`, so compare against the ids
+  // captured immediately before asking the agent to save.
+  useEffect(() => {
+    if (
+      compacting &&
+      snapshots.snapshots.some(
+        (snapshot) =>
+          snapshot.type === "handoff" && !snapshotIdsBeforeCompact.current.has(snapshot.id),
+      )
+    ) {
+      setCompacting(false);
+    }
+  }, [compacting, snapshots.snapshots]);
 
   // Failsafe: if the agent never writes its handoff, no `snapshot:created`
   // ever fires and "Compacting…" would pulse forever.
@@ -631,17 +656,6 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
 
   const lastHandoff = snapshots.snapshots.find((s) => s.type === "handoff");
 
-  const onCompactClick = () => {
-    if (def.type === "cli") {
-      if (!confirming && !compacting) {
-        setConfirming(true);
-        setOpenPopover("snapshots");
-      }
-    } else {
-      doSnapshot();
-    }
-  };
-
   return (
     <div
       ref={barRef}
@@ -675,16 +689,57 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
 
       <span className="w-px h-3.5 bg-overlay/[0.1] shrink-0" />
 
-      <button
-        onClick={onCompactClick}
-        disabled={snapshotBusy || compacting}
-        title={def.type === "cli" ? "Compact: save a handoff, clear the agent, then restore from it" : "Create a manual snapshot"}
-        className={`w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-accent disabled:opacity-40 shrink-0${
-          compacting ? " animate-pulse" : ""
-        }`}
-      >
-        <Zap className="w-[14px] h-[14px]" />
-      </button>
+      {def.type === "cli" ? (
+        <Popover
+          open={compactOpen}
+          onOpenChange={(open) => {
+            setCompactOpen(open);
+            if (open) setOpenPopover(null);
+          }}
+        >
+          <PopoverTrigger
+            disabled={snapshotBusy || compacting}
+            title="Compact: ask the agent to save a handoff snapshot"
+            className={`w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-accent disabled:opacity-40 shrink-0${
+              compacting ? " animate-pulse" : ""
+            }`}
+          >
+            <Zap className="w-[14px] h-[14px]" />
+          </PopoverTrigger>
+          <PopoverContent side="top" align="center" sideOffset={6}>
+            <PopoverTitle>Compact — save a handoff</PopoverTitle>
+            <PopoverDescription className="mt-1.5">
+              The agent will write a handoff snapshot of its work. It will NOT be cleared or
+              restored automatically.
+            </PopoverDescription>
+            <div className="mt-3 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setCompactOpen(false)}
+                className="h-7 rounded-md px-2.5 text-[11px] text-text-tertiary hover:bg-overlay/[0.05] hover:text-text-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={doCompact}
+                className="h-7 rounded-md bg-accent px-2.5 text-[11px] font-medium text-white hover:brightness-105"
+              >
+                Save handoff
+              </button>
+            </div>
+          </PopoverContent>
+        </Popover>
+      ) : (
+        <button
+          onClick={doSnapshot}
+          disabled={snapshotBusy || compacting}
+          title="Create a manual snapshot"
+          className="w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-accent disabled:opacity-40 shrink-0"
+        >
+          <Zap className="w-[14px] h-[14px]" />
+        </button>
+      )}
 
       {/* Context meter — compact chip (R4), honest-labelled estimate. */}
       {showMeter && meterTokens != null && meterLimit != null && (
@@ -710,33 +765,9 @@ export function ContextBottomBar({ def, instanceId, session, snapshots }: Contex
             <span>{snapshots.snapshots.length}</span>
           </div>
 
-          {confirming && (
-            <div className="text-[10.5px] text-text-secondary leading-snug pb-0.5 space-y-1">
-              <div>
-                The agent will summarize its work, then be cleared and resume from that handoff.
-                Continue?
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={doCompact}
-                  className="text-[11px] font-medium text-accent hover:underline flex items-center gap-1"
-                >
-                  <Camera className="w-3 h-3" />
-                  Compact
-                </button>
-                <button
-                  onClick={() => setConfirming(false)}
-                  className="text-[11px] text-text-tertiary hover:text-text-secondary"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
           {compacting && (
             <div className="text-[10.5px] text-text-secondary leading-snug pb-0.5">
-              Asking the agent to save its handoff, then clearing &amp; restoring — watch its
-              terminal.
+              Asking the agent to save its handoff — watch its terminal.
             </div>
           )}
           {snapshots.snapshotError && (
