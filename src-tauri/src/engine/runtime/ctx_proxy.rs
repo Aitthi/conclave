@@ -6083,4 +6083,543 @@ mod tests {
         assert_eq!(status.credential_mismatch, 1);
         assert_eq!(status.fixture_queue_len, 1, "queue untouched");
     }
+
+    // ---- D5: disarm races, spend bound, live handoff E2E ----------------------
+
+    /// Test-only transport that disarms H2 after its Nth send returns — the
+    /// per-call `bail_if_disarmed` recheck must stop the case there.
+    struct DisarmingTransport {
+        inner: MockQualityTransport,
+        runtime: Arc<ProxyRuntime>,
+        disarm_after: usize,
+        sent: std::sync::atomic::AtomicUsize,
+    }
+
+    impl quality::QualityTransport for DisarmingTransport {
+        type Error = quality::MockQualityError;
+
+        fn send(
+            &self,
+            call: quality::QualityCall,
+        ) -> quality::QualityTransportFuture<'_, Self::Error> {
+            let n = self.sent.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.disarm_after {
+                self.runtime.disarm_quality();
+            }
+            self.inner.send(call)
+        }
+    }
+
+    #[tokio::test]
+    async fn disarm_between_any_two_calls_stops_the_case_with_one_disarmed_row() {
+        // Test plan item 4: a disarm landing after call k (k = 1..=4) must stop
+        // the case at the NEXT pre-call recheck — exactly k calls, one row.
+        let valid_responses = [
+            provider_text_response(&scripted_probe_payload()),
+            provider_text_response(&scripted_faithfulness_payload()),
+            provider_text_response(&scripted_replay_payload("first")),
+            provider_text_response(&scripted_replay_payload("second")),
+        ];
+        for k in 1..=4usize {
+            let state = armed_h2_state().await;
+            let candidate = quality_candidate();
+            verify_preflight(&state, &candidate);
+            let (epoch, config) = state.ctx_proxy.snapshot_quality_campaign().unwrap();
+            let transport = DisarmingTransport {
+                inner: MockQualityTransport::scripted(valid_responses[..k].to_vec()),
+                runtime: state.ctx_proxy.clone(),
+                disarm_after: k,
+                sent: std::sync::atomic::AtomicUsize::new(0),
+            };
+            run_quality_case(&state, epoch, &config, candidate, &transport).await;
+            assert_eq!(
+                transport.sent.load(Ordering::SeqCst),
+                k,
+                "disarm after call {k} makes no further calls"
+            );
+            let rows = sqlx::query_as::<_, (String,)>("SELECT outcome FROM proxy_quality_metric")
+                .fetch_all(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![("disarmed".to_owned(),)],
+                "exactly one disarmed row for k={k}"
+            );
+        }
+    }
+
+    /// Probe payload spanning all six categories, cited to `cite`; satisfies
+    /// any required-category set plus the mutation_or_open_work OR-check.
+    fn six_category_probe_payload(cite: &str) -> Value {
+        let probe = |id: &str, category: &str| {
+            json!({
+                "id": id, "category": category,
+                "question": format!("q-{id}"), "expected_answer": format!("a-{id}"),
+                "cited_tool_use_ids": [cite], "critical": true,
+            })
+        };
+        json!({"probes": [
+            probe("p1", "constraint"),
+            probe("p2", "decision"),
+            probe("p3", "mutation"),
+            probe("p4", "exact_identifier_or_error"),
+            probe("p5", "negative_finding"),
+            probe("p6", "open_work"),
+        ]})
+    }
+
+    fn six_probe_faithfulness_payload(cite: &str) -> Value {
+        json!({
+            "claims": [
+                {"text": "c1", "supported": true, "cited_tool_use_ids": [cite], "critical": true},
+            ],
+            "omissions": [],
+            "probes": (1..=6)
+                .map(|i| json!({"id": format!("p{i}"), "retained": true}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn passing_judge_payload() -> Value {
+        json!({
+            "a": {"correct": true, "constraint_adherent": true, "next_action_match": true},
+            "b": {"correct": true, "constraint_adherent": true, "next_action_match": true},
+        })
+    }
+
+    fn five_valid_responses(cite: &str) -> Vec<Value> {
+        vec![
+            provider_text_response(&six_category_probe_payload(cite)),
+            provider_text_response(&six_probe_faithfulness_payload(cite)),
+            provider_text_response(&scripted_replay_payload("plan-one")),
+            provider_text_response(&scripted_replay_payload("plan-two")),
+            provider_text_response(&passing_judge_payload()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn spend_is_bounded_at_five_calls_per_reserved_case_and_budget_gates_the_next() {
+        // Test plan item 5: live case (5 calls) + one fixture case (5 calls)
+        // exhaust max_cases=2; the next fixture is refused UNRESERVED with zero
+        // calls, so the campaign total stays ≤ 5 × maxCases (+1 preflight,
+        // covered separately).
+        let state = Arc::new(AppState::for_tests().await);
+        let h1 = state.ctx_proxy.arm_summary(arm_req()).unwrap();
+        let mut req = quality_arm_req();
+        req.h1_campaign_id = h1.campaign_id.unwrap();
+        req.max_cases = 2;
+        state.ctx_proxy.arm_quality(req).unwrap();
+        let live = quality_candidate();
+        verify_preflight(&state, &live);
+        let (epoch, config) = state.ctx_proxy.snapshot_quality_campaign().unwrap();
+
+        let fixtures = crate::engine::runtime::quality_fixtures::load_h2_adversarial_manifest()
+            .expect("manifest loads");
+        let fixture = &fixtures[0];
+        let fixture_cite = fixture
+            .plan
+            .selected_tool_use_ids()
+            .first()
+            .map(|id| (*id).to_owned())
+            .expect("fixture has selected sources");
+        state.ctx_proxy.enqueue_quality_fixtures(&[
+            fixture.case.id.clone(),
+            fixtures[1].case.id.clone(), // must never run: budget is exhausted
+        ]);
+
+        let mut responses = five_valid_responses("tu_1");
+        responses.extend(five_valid_responses(&fixture_cite));
+        let transport = MockQualityTransport::scripted(responses);
+
+        assert!(state.ctx_proxy.reserve_quality_case(), "live reserve");
+        run_quality_case(&state, epoch, &config, live, &transport).await;
+        run_fixture_carrier_loop(
+            &state,
+            epoch,
+            &config,
+            "http://127.0.0.1:9",
+            &test_credential(),
+            "claude-3-5-sonnet-20241022",
+            &transport,
+        )
+        .await;
+
+        assert_eq!(transport.calls().len(), 10, "5 calls per reserved case");
+        let status = state.ctx_proxy.quality_status();
+        assert_eq!(status.remaining_cases, 0, "never refunded");
+        assert_eq!(status.samples_dropped, 1, "third case refused unreserved");
+        assert_eq!(status.fixture_queue_len, 0);
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT source_kind, outcome FROM proxy_quality_metric ORDER BY source_kind",
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("fixture".to_owned(), "completed".to_owned()),
+                ("live".to_owned(), "completed".to_owned()),
+            ],
+            "both reserved cases completed"
+        );
+    }
+
+    // ---- H2 end-to-end through forward_inner (test plan items 1, 6, 12) ------
+
+    struct H2UpstreamCounters {
+        gen: Arc<std::sync::atomic::AtomicUsize>,
+        evaluator: Arc<std::sync::atomic::AtomicUsize>,
+        preflight: Arc<std::sync::atomic::AtomicUsize>,
+        fail_preflight: Arc<std::sync::atomic::AtomicBool>,
+        probe_body: Arc<Mutex<Option<String>>>,
+        forwarded: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    /// Mock upstream covering the FULL H1+H2 surface: count_tokens, forwarded
+    /// SSE (bytes recorded), H1 generation, evaluator preflight, and the five
+    /// quality roles (discriminated by their pinned instruction markers).
+    async fn start_h2_e2e_upstream() -> (String, H2UpstreamCounters, tokio::task::JoinHandle<()>) {
+        let counters = H2UpstreamCounters {
+            gen: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            evaluator: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            preflight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fail_preflight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            probe_body: Arc::new(Mutex::new(None)),
+            forwarded: Arc::new(Mutex::new(None)),
+        };
+        let (gen, eval, pre, failp, probe_body, fw) = (
+            counters.gen.clone(),
+            counters.evaluator.clone(),
+            counters.preflight.clone(),
+            counters.fail_preflight.clone(),
+            counters.probe_body.clone(),
+            counters.forwarded.clone(),
+        );
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let (gen, eval, pre, failp, probe_body, fw) = (
+                gen.clone(),
+                eval.clone(),
+                pre.clone(),
+                failp.clone(),
+                probe_body.clone(),
+                fw.clone(),
+            );
+            async move {
+                let path = request.uri().path().to_owned();
+                let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                if path == "/v1/messages/count_tokens" {
+                    return axum::Json(json!({ "input_tokens": bytes.len() })).into_response();
+                }
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let evaluator_json = |payload: &Value| {
+                    axum::Json(json!({
+                        "model": "claude-3-opus-20240229",
+                        "content": [{"type":"text","text":payload.to_string()}],
+                        "usage": {
+                            "input_tokens": 5, "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0, "output_tokens": 7,
+                        },
+                    }))
+                    .into_response()
+                };
+                if text.contains("You are producing a factual") {
+                    gen.fetch_add(1, Ordering::SeqCst);
+                    return axum::Json(json!({
+                        "model": "claude-3-5-sonnet-20241022",
+                        "content": [{"type":"text","text":"aggregate summary of tool outputs"}],
+                        "usage": gen_usage_json(),
+                    }))
+                    .into_response();
+                }
+                if text.contains("\"max_tokens\":1") {
+                    pre.fetch_add(1, Ordering::SeqCst);
+                    if failp.load(Ordering::SeqCst) {
+                        return Response::builder()
+                            .status(StatusCode::UNAUTHORIZED)
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                json!({"type":"error","error":{"type":"authentication_error","message":"no"}})
+                                    .to_string(),
+                            ))
+                            .unwrap();
+                    }
+                    return evaluator_json(&json!({"pong": true}));
+                }
+                if text.contains("source-only recall probes") {
+                    eval.fetch_add(1, Ordering::SeqCst);
+                    *probe_body.lock().unwrap() = Some(text);
+                    return evaluator_json(&six_category_probe_payload("s1"));
+                }
+                if text.contains("verifying a candidate summary") {
+                    eval.fetch_add(1, Ordering::SeqCst);
+                    return evaluator_json(&six_probe_faithfulness_payload("s1"));
+                }
+                if text.contains("bounded next-action plan") {
+                    eval.fetch_add(1, Ordering::SeqCst);
+                    return evaluator_json(&scripted_replay_payload("replayed"));
+                }
+                if text.contains("Two candidate next-action plans") {
+                    eval.fetch_add(1, Ordering::SeqCst);
+                    return evaluator_json(&passing_judge_payload());
+                }
+                // The forwarded request: record its exact bytes, stream success.
+                *fw.lock().unwrap() = Some(bytes.to_vec());
+                let chunks = stream::unfold(0, |index| async move {
+                    if index == 2 {
+                        return None;
+                    }
+                    Some((
+                        Ok::<_, Infallible>(Bytes::from(format!("data: {index}\n\n"))),
+                        index + 1,
+                    ))
+                });
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(chunks))
+                    .unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), counters, handle)
+    }
+
+    /// Seed enough passing Measured rows that `h1_gate` rules Pass for the
+    /// armed campaign, including one passing row for `conversation_hash` so the
+    /// live sample's own economics can never create an all-miss conversation.
+    async fn seed_passing_h1_campaign(
+        db: &sqlx::SqlitePool,
+        job: &SummaryJob,
+        live_conversation_hash: &str,
+    ) {
+        use crate::engine::repo::proxy_summary_metric::{insert_terminal, SummaryOutcome};
+        let mut hashes: Vec<String> = (0..30)
+            .map(|i| sha256_hex(format!("seed-conv-{i}").as_bytes()))
+            .collect();
+        hashes.push(live_conversation_hash.to_owned());
+        for hash in hashes {
+            let mut row = base_summary_row(job, hash);
+            row.outcome = SummaryOutcome::Measured;
+            row.source_boundary_hash = Some(sha256_hex(b"seed-boundary"));
+            row.a_tokens = Some(450_000); // inside the [400k, 500k] real-A band
+            row.meets_low_water = Some(true);
+            row.meets_two_turn = Some(true);
+            insert_terminal(db, row).await.unwrap();
+        }
+    }
+
+    fn reset_shadow_cooldowns(rt: &ProxyRuntime) {
+        rt.summary_last_sample_at_ms.store(0, Ordering::Release);
+        rt.quality_last_sample_at_ms.store(0, Ordering::Release);
+    }
+
+    async fn quality_outcome_counts(db: &sqlx::SqlitePool) -> Vec<(String, i64)> {
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT outcome, COUNT(*) FROM proxy_quality_metric GROUP BY outcome ORDER BY outcome",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    async fn wait_until<F: Fn() -> bool>(what: &str, predicate: F) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !predicate() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    async fn wait_for_quality_outcome(db: &sqlx::SqlitePool, outcome: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if quality_outcome_counts(db)
+                    .await
+                    .iter()
+                    .any(|(o, _)| o == outcome)
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for quality outcome {outcome}"));
+    }
+
+    async fn wait_for_summary_measured(db: &sqlx::SqlitePool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if summary_outcome_counts(db)
+                    .await
+                    .iter()
+                    .any(|(o, _)| o == "measured")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for a measured summary row");
+    }
+
+    #[tokio::test]
+    async fn e2e_live_handoff_completes_only_after_measured_and_stops_when_h1_fails() {
+        use crate::engine::repo::proxy_summary_metric::{
+            insert_terminal, MetricInvalidStage, SummaryOutcome,
+        };
+        let (upstream, counters, up) = start_h2_e2e_upstream().await;
+        let (proxy, state, ph) = start_summary_proxy(&upstream, true, false).await;
+        let request = summarizable_request();
+        let body = serde_json::to_vec(&request).unwrap();
+        let live_conversation_hash =
+            sha256_hex(&serde_json::to_vec(&request["messages"][0]).unwrap());
+
+        // Phase A (item 1): H1 armed ALONE → measured row, zero H2 anything.
+        send_eligible(&proxy, &body).await;
+        wait_for_summary_measured(&state.db).await;
+        assert!(quality_outcome_counts(&state.db).await.is_empty());
+        assert_eq!(counters.evaluator.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.preflight.load(Ordering::SeqCst), 0);
+
+        // Phase B (item 12): seed a passing campaign, arm H2 linked, verify the
+        // carrier identity, and drive one eligible request end to end.
+        let job = admission_job(&state);
+        seed_passing_h1_campaign(&state.db, &job, &live_conversation_hash).await;
+        let mut req = quality_arm_req();
+        req.h1_campaign_id = job.campaign_id.clone();
+        state.ctx_proxy.arm_quality(req).unwrap();
+        let carrier_credential = CountCredential {
+            api_key: Some("k".into()),
+            authorization: None,
+            anthropic_version: "2023-06-01".into(),
+            anthropic_beta: None,
+        };
+        state
+            .ctx_proxy
+            .set_quality_preflight(QualityPreflightState::Verified {
+                credential_identity: quality::credential_identity_hash(
+                    upstream.trim_end_matches('/'),
+                    &carrier_credential,
+                ),
+                response_model: "claude-3-opus-20240229".into(),
+            });
+        reset_shadow_cooldowns(&state.ctx_proxy);
+        send_eligible(&proxy, &body).await;
+        wait_for_quality_outcome(&state.db, "completed").await;
+        // Forward bytes stayed identical while the whole shadow chain ran.
+        assert_eq!(counters.forwarded.lock().unwrap().clone().unwrap(), body);
+        // Budget decremented exactly once, before the spawn (item 5).
+        let status = state.ctx_proxy.quality_status();
+        assert_eq!(status.remaining_cases, quality_arm_req().max_cases - 1);
+        assert_eq!(counters.evaluator.load(Ordering::SeqCst), 5);
+        // Item 7 privacy edge: the probe request never contains the summary.
+        let probe_body = counters.probe_body.lock().unwrap().clone().unwrap();
+        assert!(
+            !probe_body.contains("aggregate summary of tool outputs"),
+            "probe call must not see the candidate summary"
+        );
+        let live_row = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT source_kind, outcome, comparison FROM proxy_quality_metric",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            live_row,
+            ("live".into(), "completed".into(), Some("tie".into()))
+        );
+
+        // Phase C (item 12 tail): a later H1 metric-invalid row flips the gate
+        // to Fail — the NEXT admission blocks with zero further H2 calls.
+        let mut poison = base_summary_row(&job, sha256_hex(b"poison"));
+        poison.outcome = SummaryOutcome::MetricInvalid(MetricInvalidStage::RZero);
+        insert_terminal(&state.db, poison).await.unwrap();
+        reset_shadow_cooldowns(&state.ctx_proxy);
+        let blocked_before = state.ctx_proxy.quality_status().h1_blocked;
+        send_eligible(&proxy, &body).await;
+        let rt = state.ctx_proxy.clone();
+        wait_until("phase C h1_blocked", || {
+            rt.quality_status().h1_blocked > blocked_before
+        })
+        .await;
+        assert_eq!(
+            counters.evaluator.load(Ordering::SeqCst),
+            5,
+            "no further evaluator calls after H1 turned Fail"
+        );
+        assert_eq!(
+            quality_outcome_counts(&state.db).await,
+            vec![("completed".to_owned(), 1)]
+        );
+        ph.abort();
+        up.abort();
+    }
+
+    #[tokio::test]
+    async fn e2e_first_carrier_preflights_then_failure_variant_auto_disarms() {
+        // Success: the first qualifying carrier consumes its case as
+        // preflight_ok and marks the campaign verified — zero role calls.
+        let (upstream, counters, up) = start_h2_e2e_upstream().await;
+        let (proxy, state, ph) = start_summary_proxy(&upstream, true, false).await;
+        let request = summarizable_request();
+        let body = serde_json::to_vec(&request).unwrap();
+        let live_conversation_hash =
+            sha256_hex(&serde_json::to_vec(&request["messages"][0]).unwrap());
+        let job = admission_job(&state);
+        seed_passing_h1_campaign(&state.db, &job, &live_conversation_hash).await;
+        let mut req = quality_arm_req();
+        req.h1_campaign_id = job.campaign_id.clone();
+        state.ctx_proxy.arm_quality(req).unwrap();
+        send_eligible(&proxy, &body).await;
+        wait_for_quality_outcome(&state.db, "preflight_ok").await;
+        assert_eq!(counters.preflight.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.evaluator.load(Ordering::SeqCst), 0);
+        let status = state.ctx_proxy.quality_status();
+        assert!(!status.preflight_pending, "campaign is verified");
+        assert_eq!(status.remaining_cases, quality_arm_req().max_cases - 1);
+        ph.abort();
+        up.abort();
+
+        // Failure: an authentication_error preflight persists ONE bounded row
+        // and auto-disarms the campaign.
+        let (upstream, counters, up) = start_h2_e2e_upstream().await;
+        counters.fail_preflight.store(true, Ordering::SeqCst);
+        let (proxy, state, ph) = start_summary_proxy(&upstream, true, false).await;
+        let job = admission_job(&state);
+        seed_passing_h1_campaign(&state.db, &job, &live_conversation_hash).await;
+        let mut req = quality_arm_req();
+        req.h1_campaign_id = job.campaign_id.clone();
+        state.ctx_proxy.arm_quality(req).unwrap();
+        send_eligible(&proxy, &body).await;
+        wait_for_quality_outcome(&state.db, "preflight_failure").await;
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT outcome, failure_stage, failure_kind, error_type FROM proxy_quality_metric",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                "preflight_failure".into(),
+                Some("preflight".into()),
+                Some("non_2xx".into()),
+                Some("authentication_error".into())
+            )
+        );
+        assert!(!state.ctx_proxy.quality_status().armed, "auto-disarmed");
+        assert_eq!(counters.evaluator.load(Ordering::SeqCst), 0);
+        ph.abort();
+        up.abort();
+    }
 }
