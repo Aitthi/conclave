@@ -376,6 +376,15 @@ pub async fn quality_report(state: &AppState, payload: Value) -> Result<Value, A
             "proxy.qualityReport: sinceHours must be non-negative".into(),
         ));
     }
+    if request
+        .campaign_id
+        .as_deref()
+        .is_some_and(|campaign_id| campaign_id.trim().is_empty())
+    {
+        return Err(AppError::Invalid(
+            "proxy.qualityReport: campaignId must not be empty".into(),
+        ));
+    }
     let report = crate::engine::repo::proxy_quality_metric::report(
         &state.db,
         request.since_hours,
@@ -432,6 +441,11 @@ pub async fn quality_audit(state: &AppState, payload: Value) -> Result<Value, Ap
     let campaign_id = request
         .campaign_id
         .ok_or_else(|| AppError::Invalid("proxy.qualityAudit: campaignId is required".into()))?;
+    if campaign_id.trim().is_empty() {
+        return Err(AppError::Invalid(
+            "proxy.qualityAudit: campaignId must not be empty".into(),
+        ));
+    }
     let current = state
         .ctx_proxy
         .snapshot_quality_campaign()
@@ -663,6 +677,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status["qualityShadow"], false);
+        assert_eq!(status["qualityPreflightState"], "off");
         assert!(status["qualityCampaignId"].is_null());
         assert_eq!(status["qualityRemainingCases"], 0);
         assert_eq!(status["qualityFixtureQueueLength"], 0);
@@ -679,6 +694,63 @@ mod tests {
             .await
             .is_err());
         assert!(!state.ctx_proxy.quality_status().armed);
+    }
+
+    #[test]
+    fn quality_status_preflight_state_is_exactly_off_pending_or_verified() {
+        let status = |armed, preflight_pending| QualityStatus {
+            armed,
+            quality_campaign_id: armed.then(|| "quality-campaign".into()),
+            h1_campaign_id: armed.then(|| "h1-campaign".into()),
+            evaluator_model: armed.then(|| "evaluator-model".into()),
+            rubric_version: armed.then(|| "hybrid-quality-rubric-v1".into()),
+            max_cases: armed.then_some(100),
+            remaining_cases: u64::from(armed) * 100,
+            preflight_pending,
+            fixture_queue_len: 0,
+            samples_dropped: 0,
+            h1_blocked: 0,
+            model_mismatch: 0,
+            credential_mismatch: 0,
+            in_flight: 0,
+        };
+
+        assert_eq!(
+            quality_status_value(status(false, true))["qualityPreflightState"],
+            "off"
+        );
+        assert_eq!(
+            quality_status_value(status(true, true))["qualityPreflightState"],
+            "pending"
+        );
+        assert_eq!(
+            quality_status_value(status(true, false))["qualityPreflightState"],
+            "verified"
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_handlers_reject_empty_campaign_filters_at_ipc_boundary() {
+        let state = AppState::for_tests().await;
+        for campaign_id in ["", " \t"] {
+            let report = router::dispatch(
+                &state,
+                "proxy.qualityReport",
+                json!({"campaignId": campaign_id}),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(report, AppError::Invalid(_)));
+
+            let audit = router::dispatch(
+                &state,
+                "proxy.qualityAudit",
+                json!({"enabled": true, "campaignId": campaign_id}),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(audit, AppError::Invalid(_)));
+        }
     }
 
     #[test]
@@ -744,13 +816,9 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("http://127.0.0.1:"));
-        let stopped = router::dispatch(
-            &state,
-            "proxy.qualityAudit",
-            json!({"enabled":false}),
-        )
-        .await
-        .unwrap();
+        let stopped = router::dispatch(&state, "proxy.qualityAudit", json!({"enabled":false}))
+            .await
+            .unwrap();
         assert_eq!(stopped["qualityAuditActive"], false);
     }
 
@@ -804,7 +872,10 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(state.ctx_proxy.quality_audit.offer_fixture(&campaign_id, bundle));
+        assert!(state
+            .ctx_proxy
+            .quality_audit
+            .offer_fixture(&campaign_id, bundle));
         assert_eq!(state.ctx_proxy.quality_audit.status().selected, 1);
         let report = router::dispatch(
             &state,
@@ -817,13 +888,9 @@ mod tests {
         assert_eq!(report["goBars"]["go"], false);
         assert!(state.ctx_proxy.quality_status().armed);
 
-        let off = router::dispatch(
-            &state,
-            "proxy.qualityShadow",
-            json!({"enabled":false}),
-        )
-        .await
-        .unwrap();
+        let off = router::dispatch(&state, "proxy.qualityShadow", json!({"enabled":false}))
+            .await
+            .unwrap();
         assert_eq!(off["qualityShadow"], false);
         assert_eq!(off["qualityFixtureQueueLength"], 0);
         let audit = state.ctx_proxy.quality_audit.status();
