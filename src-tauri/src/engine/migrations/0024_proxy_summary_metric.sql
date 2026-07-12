@@ -81,8 +81,9 @@ CREATE TABLE IF NOT EXISTS proxy_summary_metric (
     )),
     failure_stage TEXT CHECK (failure_stage IS NULL OR failure_stage IN (
         'count_a', 'count_b', 'count_c',
-        'tool_use', 'non_text', 'empty_text', 'missing_usage', 'timeout',
-        'redirect', 'non_2xx', 'decode_error',
+        'missing_auth', 'transport', 'timeout', 'redirect', 'non_2xx',
+        'decode_error', 'missing_model', 'missing_content', 'non_text',
+        'empty_text', 'missing_usage',
         'messages_not_array', 'no_eligible_results', 'replacement_did_not_shrink',
         'structural_validation', 'plan_does_not_match_messages',
         'r_zero', 's_h_zero', 's_h_gt_r'

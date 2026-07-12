@@ -85,30 +85,55 @@ impl PlanRejectStage {
     }
 }
 
-/// Generation-call failure sub-stage (plan step 6).
+/// Generation-call failure sub-stage. Built from Lane A's actual merged
+/// `runtime::summary::SummaryClientError::kind()` vocabulary (commit
+/// `0a11dc2`, verified directly against `generate_summary`'s call sites —
+/// not the plan's step-6 prose, which this lane could not cross-check against
+/// Lane A's real implementation at the time it was written):
+/// `missing_auth`, `timeout`, `transport`, `redirect`, the 8 allowlisted
+/// Anthropic error types (`SanitizedErrorType::Known`) plus
+/// `http_unknown_type`/`http_unparsed` (all four map to `Non2xx` — the
+/// allowlisted type, when known, is recorded separately in `error_type`),
+/// `decode`, `missing_model`, `missing_content`, `non_text_content`, `empty_text`,
+/// `missing_usage`. There is no reachable `tool_use` case: Lane A's block-type
+/// check treats ANY non-`"text"` content block (a real tool_use block would
+/// never occur given `tool_choice:"none"`, ruling `0807943e`) as
+/// `non_text_content`, so a dedicated `ToolUse` bucket was dead — removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationFailureStage {
-    ToolUse,
+    MissingAuth,
+    Transport,
+    Timeout,
+    Redirect,
+    /// Any non-2xx response: `error_type` carries the allowlisted Anthropic
+    /// type when the upstream body parsed as one of the 8 known types;
+    /// `None` for `http_unknown_type`/`http_unparsed`.
+    Non2xx,
+    /// Lane A's `decode` kind (response body failed to parse as JSON).
+    DecodeError,
+    MissingModel,
+    MissingContent,
+    /// Lane A's `non_text_content` kind (a content block whose `type` was
+    /// not `"text"`).
     NonText,
     EmptyText,
     MissingUsage,
-    Timeout,
-    Redirect,
-    Non2xx,
-    DecodeError,
 }
 
 impl GenerationFailureStage {
     fn as_str(self) -> &'static str {
         match self {
-            Self::ToolUse => "tool_use",
-            Self::NonText => "non_text",
-            Self::EmptyText => "empty_text",
-            Self::MissingUsage => "missing_usage",
+            Self::MissingAuth => "missing_auth",
+            Self::Transport => "transport",
             Self::Timeout => "timeout",
             Self::Redirect => "redirect",
             Self::Non2xx => "non_2xx",
             Self::DecodeError => "decode_error",
+            Self::MissingModel => "missing_model",
+            Self::MissingContent => "missing_content",
+            Self::NonText => "non_text",
+            Self::EmptyText => "empty_text",
+            Self::MissingUsage => "missing_usage",
         }
     }
 }
@@ -272,13 +297,72 @@ pub struct SummaryMetricInsert {
     pub error_type: Option<String>,
 }
 
+/// SHA-256 hex digest length (`conversation_hash`, `source_boundary_hash`,
+/// `summary_hash` — plan §"Persistence": "SHA-256 of the first message
+/// bytes" / "SHA-256 of the accepted summary").
+const SHA256_HEX_LEN: usize = 64;
+
+/// `ctxopt::summary::stable_checkpoint_id`'s exact format: a 16-hex-char
+/// FNV-1a identity key (`format!("{hash:016x}")`). Not a security digest —
+/// still hex-only, so a non-hex value is a strong signal of raw content.
+const CHECKPOINT_ID_HEX_LEN: usize = 16;
+
+/// `true` iff `s` is exactly `len` lowercase ASCII hex digits. A hash/id
+/// column holding anything else — spaces, punctuation, mixed case, forged
+/// delimiters — is a strong signal the caller passed real content (a raw
+/// summary, a tool-output snippet) instead of its hash.
+fn is_lowercase_hex_of_len(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Insert one terminal row. Requires exactly one [`SummaryOutcome`] (there is
 /// no other way to construct a row). For `Measured` outcomes, derives
 /// `plateau_turns` transactionally: the same `(campaign_id, conversation_hash,
 /// source_boundary_hash)` as the immediately preceding `measured` row for that
 /// conversation increments the plateau; a changed boundary resets it to zero
 /// (plan step 10).
+///
+/// Fail-closed shape validation (Mellow review finding 1, HIGH — privacy):
+/// `conversation_hash`/`source_boundary_hash`/`summary_hash` must be 64-char
+/// lowercase SHA-256 hex digests and `checkpoint_id` must be ctxopt's 16-char
+/// lowercase hex identity key. This is the backstop against a caller
+/// accidentally passing real content (a raw summary, a tool-output snippet)
+/// into a column that must only ever hold its hash.
 pub async fn insert_terminal(pool: &SqlitePool, m: SummaryMetricInsert) -> sqlx::Result<()> {
+    if !is_lowercase_hex_of_len(&m.conversation_hash, SHA256_HEX_LEN) {
+        return Err(sqlx::Error::Protocol(
+            "[proxy_summary_metric] conversation_hash must be a 64-char lowercase SHA-256 hex \
+             digest"
+                .into(),
+        ));
+    }
+    if let Some(h) = m.summary_hash.as_deref() {
+        if !is_lowercase_hex_of_len(h, SHA256_HEX_LEN) {
+            return Err(sqlx::Error::Protocol(
+                "[proxy_summary_metric] summary_hash must be a 64-char lowercase SHA-256 hex \
+                 digest"
+                    .into(),
+            ));
+        }
+    }
+    if let Some(h) = m.source_boundary_hash.as_deref() {
+        if !is_lowercase_hex_of_len(h, SHA256_HEX_LEN) {
+            return Err(sqlx::Error::Protocol(
+                "[proxy_summary_metric] source_boundary_hash must be a 64-char lowercase \
+                 SHA-256 hex digest"
+                    .into(),
+            ));
+        }
+    }
+    if let Some(id) = m.checkpoint_id.as_deref() {
+        if !is_lowercase_hex_of_len(id, CHECKPOINT_ID_HEX_LEN) {
+            return Err(sqlx::Error::Protocol(
+                "[proxy_summary_metric] checkpoint_id must be a 16-char lowercase hex identity \
+                 key"
+                .into(),
+            ));
+        }
+    }
     if let Some(et) = m.error_type.as_deref() {
         if !KNOWN_ERROR_TYPES.contains(&et) {
             return Err(sqlx::Error::Protocol(format!(
@@ -646,6 +730,30 @@ mod tests {
     use super::*;
     use crate::engine::db::connect_in_memory;
 
+    /// Deterministic 64-bit FNV-1a of a human-readable seed. Not a real
+    /// SHA-256 — just a stable, syntactically valid, per-seed-distinct value
+    /// for fixtures now that `insert_terminal` validates hash-shaped columns.
+    fn fake_hash_raw(seed: &str) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in seed.bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    /// 64 lowercase hex chars (SHA-256 shape) for `conversation_hash`/
+    /// `source_boundary_hash`/`summary_hash` fixtures.
+    fn fake_hash(seed: &str) -> String {
+        format!("{:016x}", fake_hash_raw(seed)).repeat(4)
+    }
+
+    /// 16 lowercase hex chars (ctxopt `stable_checkpoint_id` shape) for
+    /// `checkpoint_id` fixtures.
+    fn fake_checkpoint_id(seed: &str) -> String {
+        format!("{:016x}", fake_hash_raw(seed))
+    }
+
     fn base_row(
         campaign_id: &str,
         conversation_hash: &str,
@@ -654,7 +762,7 @@ mod tests {
         SummaryMetricInsert {
             created_at: chrono::Utc::now().to_rfc3339(),
             campaign_id: campaign_id.into(),
-            conversation_hash: conversation_hash.into(),
+            conversation_hash: fake_hash(conversation_hash),
             model: "claude-x".into(),
             response_model: None,
             method_version: "h1-shadow-summary-v1".into(),
@@ -716,8 +824,8 @@ mod tests {
     ) -> SummaryMetricInsert {
         let mut m = base_row(campaign_id, conversation_hash, SummaryOutcome::Measured);
         m.response_model = Some("claude-x".into());
-        m.checkpoint_id = Some("ckpt-1".into());
-        m.source_boundary_hash = Some(source_boundary_hash.into());
+        m.checkpoint_id = Some(fake_checkpoint_id("ckpt-1"));
+        m.source_boundary_hash = Some(fake_hash(source_boundary_hash));
         m.summary_hash = Some("a".repeat(64));
         m.earliest_changed_msg = Some(3);
         m.runtime_prefix_messages = Some(12);
@@ -846,6 +954,51 @@ mod tests {
         assert_eq!(stage.as_deref(), Some("timeout"));
     }
 
+    // Cross-lane contract (Mellow review finding 2): every GenerationFailureStage
+    // variant must round-trip through the real migration 0024 CHECK constraint —
+    // this is what would have caught the missing missing_auth/transport/
+    // missing_model/missing_content buckets before Lane D hit them.
+    #[tokio::test]
+    async fn insert_terminal_persists_every_generation_failure_stage_variant() {
+        let pool = connect_in_memory().await;
+        let stages = [
+            GenerationFailureStage::MissingAuth,
+            GenerationFailureStage::Transport,
+            GenerationFailureStage::Timeout,
+            GenerationFailureStage::Redirect,
+            GenerationFailureStage::Non2xx,
+            GenerationFailureStage::DecodeError,
+            GenerationFailureStage::MissingModel,
+            GenerationFailureStage::MissingContent,
+            GenerationFailureStage::NonText,
+            GenerationFailureStage::EmptyText,
+            GenerationFailureStage::MissingUsage,
+        ];
+        for (i, stage) in stages.iter().enumerate() {
+            insert_terminal(
+                &pool,
+                base_row(
+                    "camp-1",
+                    &format!("conv-{i}"),
+                    SummaryOutcome::GenerationFailure(*stage),
+                ),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("stage {stage:?} must be accepted by the CHECK: {e}"));
+        }
+
+        let persisted: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT failure_stage FROM proxy_summary_metric ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let expected: Vec<Option<String>> = stages
+            .iter()
+            .map(|s| Some(s.as_str().to_string()))
+            .collect();
+        assert_eq!(persisted, expected);
+    }
+
     #[tokio::test]
     async fn insert_terminal_persists_no_candidate_and_projection_rejected_stage_labels_only() {
         let pool = connect_in_memory().await;
@@ -870,12 +1023,11 @@ mod tests {
         .await
         .unwrap();
 
-        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT outcome, failure_stage FROM proxy_summary_metric ORDER BY conversation_hash",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT outcome, failure_stage FROM proxy_summary_metric ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             rows[0],
             ("no_candidate".into(), Some("structural_validation".into()))
@@ -938,6 +1090,96 @@ mod tests {
         );
     }
 
+    // PRIVACY (Mellow review finding 1, HIGH): unlike error_type/outcome/
+    // failure_stage, the hash-shaped columns (conversation_hash,
+    // source_boundary_hash, summary_hash, checkpoint_id) had NO shape
+    // validation — insert_terminal accepted raw text verbatim in place of a
+    // hash. This is the literal hostile-mock-content scan the plan's
+    // Persistence section asks for: every hash-shaped field must reject raw
+    // content, and nothing hostile may reach a committed row.
+    #[tokio::test]
+    async fn insert_terminal_rejects_hostile_raw_content_in_hash_shaped_fields_and_persists_nothing(
+    ) {
+        let pool = connect_in_memory().await;
+        const HOSTILE: &str =
+            "RAW SUMMARY TEXT dumped verbatim <<<SOURCE-MARKER>>> api key sk-live-hostile-secret";
+
+        let mut bad_conversation =
+            measured_row("camp-1", "conv-1", "b1", 0.5, 1.0, true, true, 420_000);
+        bad_conversation.conversation_hash = HOSTILE.into();
+        assert!(
+            insert_terminal(&pool, bad_conversation).await.is_err(),
+            "a non-hex conversation_hash must be rejected"
+        );
+
+        let mut bad_summary = measured_row("camp-1", "conv-1", "b1", 0.5, 1.0, true, true, 420_000);
+        bad_summary.summary_hash = Some(HOSTILE.into());
+        assert!(
+            insert_terminal(&pool, bad_summary).await.is_err(),
+            "a non-hex summary_hash must be rejected"
+        );
+
+        let mut bad_boundary =
+            measured_row("camp-1", "conv-1", "b1", 0.5, 1.0, true, true, 420_000);
+        bad_boundary.source_boundary_hash = Some(HOSTILE.into());
+        assert!(
+            insert_terminal(&pool, bad_boundary).await.is_err(),
+            "a non-hex source_boundary_hash must be rejected"
+        );
+
+        let mut bad_checkpoint =
+            measured_row("camp-1", "conv-1", "b1", 0.5, 1.0, true, true, 420_000);
+        bad_checkpoint.checkpoint_id = Some(HOSTILE.into());
+        assert!(
+            insert_terminal(&pool, bad_checkpoint).await.is_err(),
+            "a non-hex checkpoint_id must be rejected"
+        );
+
+        // A legitimate row (real-shaped hashes) still succeeds.
+        insert_terminal(
+            &pool,
+            measured_row("camp-1", "conv-1", "b1", 0.5, 1.0, true, true, 420_000),
+        )
+        .await
+        .unwrap();
+
+        // Scan every text column of every committed row: the hostile content
+        // must never appear anywhere, and only the one legitimate row exists.
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT campaign_id, conversation_hash, model, response_model, method_version, \
+             prompt_version, price_version, checkpoint_id, source_boundary_hash, summary_hash \
+             FROM proxy_summary_metric",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "only the one legitimate row must commit");
+        let dump = format!("{rows:?}");
+        assert!(
+            !dump.contains("RAW SUMMARY TEXT"),
+            "hostile content leaked into a committed row: {dump}"
+        );
+        assert!(
+            !dump.contains("sk-live-hostile-secret"),
+            "a credential-shaped marker leaked into a committed row: {dump}"
+        );
+        assert!(
+            !dump.contains("SOURCE-MARKER"),
+            "a source marker leaked into a committed row: {dump}"
+        );
+    }
+
     #[tokio::test]
     async fn insert_terminal_measured_row_without_source_boundary_hash_is_rejected() {
         let pool = connect_in_memory().await;
@@ -989,8 +1231,9 @@ mod tests {
 
         let plateaus: Vec<i64> = sqlx::query_scalar(
             "SELECT plateau_turns FROM proxy_summary_metric \
-             WHERE campaign_id = 'camp-1' AND conversation_hash = 'conv-1' ORDER BY id",
+             WHERE campaign_id = 'camp-1' AND conversation_hash = ?1 ORDER BY id",
         )
+        .bind(fake_hash("conv-1"))
         .fetch_all(&pool)
         .await
         .unwrap();
@@ -998,8 +1241,9 @@ mod tests {
 
         let other_conv: i64 = sqlx::query_scalar(
             "SELECT plateau_turns FROM proxy_summary_metric \
-             WHERE campaign_id = 'camp-1' AND conversation_hash = 'conv-2'",
+             WHERE campaign_id = 'camp-1' AND conversation_hash = ?1",
         )
+        .bind(fake_hash("conv-2"))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1100,7 +1344,7 @@ mod tests {
         let all_miss = r
             .conversation_pass_counts
             .iter()
-            .find(|c| c.conversation_hash == "conv-all-miss")
+            .find(|c| c.conversation_hash == fake_hash("conv-all-miss"))
             .expect("conv-all-miss must appear in the per-conversation distribution");
         assert_eq!(all_miss.measured_candidates, 1);
         assert_eq!(
@@ -1111,7 +1355,7 @@ mod tests {
         let pass = r
             .conversation_pass_counts
             .iter()
-            .find(|c| c.conversation_hash == "conv-pass")
+            .find(|c| c.conversation_hash == fake_hash("conv-pass"))
             .unwrap();
         assert_eq!(pass.measured_candidates, 2);
         assert_eq!(pass.passing_candidates, 2);
