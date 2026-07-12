@@ -439,9 +439,13 @@ after the human records an initial judgment, preventing hindsight bias. Persist
 only case id, audit bucket, `agree|disagree`, rubric version, and timestamp in a
 small audit table; no comments/free text.
 
-Selection is deterministic and stratified from fixture results: four automated
-accepts, four rejects, four cases nearest the probe/behavior thresholds. The 12
-collectively cover all seven tags. H2 cannot GO with fewer than 12 completed
+Selection is deterministic and stratified from manifest `expectedBehaviorClass`:
+four expected accepts, four expected rejects, four expected near-threshold
+cases. The 12 collectively cover all seven tags. (Amended per Aoki's Lane E
+ruling: automated results are the blinded subject being audited, so a pipeline
+misjudgment must surface as a DISAGREEMENT rather than redefine the selection
+bucket — manifest strata are the only deterministically-fillable reading.
+Noticed by Mellow at Lane E review.) H2 cannot GO with fewer than 12 completed
 audits or any unresolved disagreement; a disagreement requires a new rubric/
 prompt version and a new campaign, not an edited row.
 
