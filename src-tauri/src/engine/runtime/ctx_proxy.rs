@@ -6440,7 +6440,7 @@ mod tests {
             let mut row = base_summary_row(job, hash);
             row.outcome = SummaryOutcome::Measured;
             row.source_boundary_hash = Some(sha256_hex(b"seed-boundary"));
-            row.a_tokens = Some(450_000); // inside the [400k, 500k] real-A band
+            row.a_tokens = Some(300_000); // inside the [250k, 350k] real-A band
             row.meets_low_water = Some(true);
             row.meets_two_turn = Some(true);
             insert_terminal(db, row).await.unwrap();

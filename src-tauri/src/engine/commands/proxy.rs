@@ -611,7 +611,7 @@ mod tests {
             metric_invalid: 0,
             distinct_conversations: 10,
             failure_rate: 1.0 / 31.0,
-            band_400k_500k: 10,
+            band_250k_350k: 10,
             pct_meets_low_water: 0.93,
             pct_meets_two_turn: 0.86,
             q_h_min: 0.4,
