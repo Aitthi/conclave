@@ -477,6 +477,13 @@ fn summary_status_value(status: SummaryStatus) -> Value {
 }
 
 fn quality_status_value(status: QualityStatus) -> Value {
+    let preflight_state = if !status.armed {
+        "off"
+    } else if status.preflight_pending {
+        "pending"
+    } else {
+        "verified"
+    };
     json!({
         "qualityShadow": status.armed,
         "qualityCampaignId": status.quality_campaign_id,
@@ -485,7 +492,7 @@ fn quality_status_value(status: QualityStatus) -> Value {
         "qualityRubricVersion": status.rubric_version,
         "qualityMaxCases": status.max_cases,
         "qualityRemainingCases": status.remaining_cases,
-        "qualityPreflightPending": status.preflight_pending,
+        "qualityPreflightState": preflight_state,
         "qualityFixtureQueueLength": status.fixture_queue_len,
         "qualitySamplesDropped": status.samples_dropped,
         "qualityH1Blocked": status.h1_blocked,
@@ -749,6 +756,8 @@ mod tests {
 
     #[tokio::test]
     async fn quality_report_is_read_only_and_off_clears_audit_and_queue() {
+        use crate::engine::runtime::quality::{JudgeScores, QualityTag};
+
         let state = AppState::for_tests().await;
         let armed = state
             .ctx_proxy
@@ -775,6 +784,28 @@ mod tests {
         )
         .await
         .unwrap();
+        let scores = JudgeScores {
+            correct: true,
+            constraint_adherent: true,
+            next_action_match: true,
+        };
+        let bundle = crate::engine::runtime::quality_audit::FixtureAuditBundle::completed(
+            uuid::Uuid::new_v4().to_string(),
+            "exact-error-01",
+            vec![QualityTag::ExactError],
+            "[]".into(),
+            "summary".into(),
+            &[],
+            "original".into(),
+            "projected".into(),
+            "{}".into(),
+            scores,
+            scores,
+            true,
+        )
+        .unwrap();
+        assert!(state.ctx_proxy.quality_audit.offer_fixture(&campaign_id, bundle));
+        assert_eq!(state.ctx_proxy.quality_audit.status().selected, 1);
         let report = router::dispatch(
             &state,
             "proxy.qualityReport",
@@ -795,7 +826,9 @@ mod tests {
         .unwrap();
         assert_eq!(off["qualityShadow"], false);
         assert_eq!(off["qualityFixtureQueueLength"], 0);
-        assert!(!state.ctx_proxy.quality_audit.status().active);
+        let audit = state.ctx_proxy.quality_audit.status();
+        assert!(!audit.active);
+        assert_eq!(audit.selected, 0);
     }
 
     #[tokio::test]

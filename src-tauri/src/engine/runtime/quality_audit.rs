@@ -142,7 +142,12 @@ fn wipe_string(value: &mut String) {
     // SAFETY: overwriting every byte with NUL preserves UTF-8 validity. The
     // length/capacity are unchanged until `clear`, so the raw bytes are erased
     // before the allocation can be released or reused.
-    unsafe { value.as_mut_vec().fill(0) };
+    unsafe {
+        for byte in value.as_mut_vec() {
+            std::ptr::write_volatile(byte, 0);
+        }
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     value.clear();
 }
 
@@ -805,6 +810,9 @@ mod tests {
             .unwrap()
             .contains("default-src 'none'"));
         assert_eq!(first.headers()[header::REFERRER_POLICY], "no-referrer");
+        let blinded = first.text().await.unwrap();
+        assert!(!blinded.contains("was original"));
+        assert!(!blinded.contains("was projected"));
         let repeated = client.get(&start.url).send().await.unwrap();
         assert_eq!(repeated.status(), reqwest::StatusCode::NOT_FOUND);
 
@@ -872,5 +880,83 @@ mod tests {
         assert_eq!(manager.raw_bytes(), 0);
         assert!(!manager.status().active);
         drop(start);
+    }
+
+    #[test]
+    fn completed_bundle_uses_the_manifest_bucket_and_has_no_live_constructor() {
+        let scores = JudgeScores {
+            correct: true,
+            constraint_adherent: true,
+            next_action_match: true,
+        };
+        for (fixture_id, expected) in [
+            ("side-effecting-output-01", AuditBucket::Accepted),
+            ("exact-error-01", AuditBucket::Rejected),
+            ("rejected-alternative-01", AuditBucket::NearThreshold),
+        ] {
+            let bundle = FixtureAuditBundle::completed(
+                uuid::Uuid::new_v4().to_string(),
+                fixture_id,
+                vec![QualityTag::ExactError],
+                "[]".into(),
+                "summary".into(),
+                &[],
+                "original".into(),
+                "projected".into(),
+                "{}".into(),
+                scores,
+                scores,
+                true,
+            )
+            .unwrap();
+            assert_eq!(bundle.bucket, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn twelfth_submission_completes_and_zeroizes_the_session() {
+        let (manager, start, writer) = started(Duration::from_secs(60)).await;
+        for index in 0..12 {
+            let bucket = match index % 3 {
+                0 => AuditBucket::Accepted,
+                1 => AuditBucket::Rejected,
+                _ => AuditBucket::NearThreshold,
+            };
+            assert!(manager.offer_fixture(
+                "campaign",
+                bundle(index, bucket, vec![QualityTag::ALL[index % QualityTag::ALL.len()]])
+            ));
+        }
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client.get(&start.url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
+        );
+        let origin = start.url.split("/audit/").next().unwrap();
+        for index in 0..12 {
+            let (token, case_id) = {
+                let state = manager.inner.lock().unwrap();
+                let session = state.session.as_ref().unwrap();
+                (
+                    session.session_token.clone(),
+                    session.entries[index].bundle.case_id.clone(),
+                )
+            };
+            let response = client
+                .post(format!("{origin}/audit/review"))
+                .form(&[
+                    ("session_token", token.as_str()),
+                    ("case_id", case_id.as_str()),
+                    ("verdict", "agree"),
+                ])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!manager.status().active);
+        assert_eq!(manager.raw_bytes(), 0);
+        assert_eq!(writer.writes.lock().unwrap().len(), 12);
     }
 }
