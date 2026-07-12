@@ -31,6 +31,9 @@ pub mod embedder;
 pub mod provider;
 pub mod pty;
 pub mod sandbox_config;
+// Lane A lands before its Lane D production consumer.
+#[allow(dead_code)]
+pub mod summary;
 pub mod task_timer;
 pub mod transcript_context;
 // T2 lands the codec before the T4 exact-search consumer.
