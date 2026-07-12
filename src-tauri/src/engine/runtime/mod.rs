@@ -30,6 +30,10 @@ pub mod design_host;
 pub mod embedder;
 pub mod provider;
 pub mod pty;
+#[allow(dead_code)]
+pub mod quality;
+#[allow(dead_code)]
+pub mod quality_fixtures;
 pub mod sandbox_config;
 // Lane A lands before its Lane D production consumer.
 #[allow(dead_code)]
