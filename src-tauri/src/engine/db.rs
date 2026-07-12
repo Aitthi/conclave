@@ -277,6 +277,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 24 {
+        sqlx::raw_sql(include_str!("migrations/0024_proxy_summary_metric.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 24;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -433,7 +442,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 23, "migrate() from v13 must reach schema v23");
+        assert_eq!(version, 24, "migrate() from v13 must reach schema v24");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -648,7 +657,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("table-count query failed");
-        assert_eq!(count, 28, "expected 28 tables, got {count}");
+        assert_eq!(count, 29, "expected 29 tables, got {count}");
     }
 
     /// Running migrate twice must not error and must leave user_version == 19.
@@ -676,15 +685,15 @@ mod tests {
         .await
         .expect("table-count query failed");
         assert_eq!(
-            count, 28,
-            "expected 28 tables after idempotent run, got {count}"
+            count, 29,
+            "expected 29 tables after idempotent run, got {count}"
         );
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 23, "user_version should be 23");
+        assert_eq!(version, 24, "user_version should be 24");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -887,7 +896,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -978,7 +987,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1088,7 +1097,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
