@@ -58,8 +58,8 @@ behavioral replay, a live apply trial, or any rewrite mode.
   credentials, upstream error bodies, or upstream `error.message`.
 - No automatic arming after migration, restart, command replay, or restoring
   prior app state.
-- No synthetic “GO” from 100k calibration traffic. The 400–500k real-token band
-  remains binding.
+- No synthetic “GO” from 100k calibration traffic. The 250–350k real-token band
+  remains binding (spec R10, human directive 2026-07-12; originally 400–500k).
 - No changes to `ctxopt` closure logic. The separate planned task
   `hybrid-summary-min-size-floor` may refine candidate selection before H1
   integration, but runtime code still consumes the public H0 planner.
@@ -338,7 +338,8 @@ mock errors and source markers to prove no body/summary content was persisted.
 `SummaryReport` returns campaign-aware distributions and the exact H1 numerator/
 denominators: total admitted; terminal outcomes; successful candidates;
 distinct conversations; count/generation failure rate; candidates in the
-400k–500k A band; percent with B≤L; percent with n_h≤2; q_h and n_h
+250k–350k A band (spec R10; report field `band_250k_350k`, originally
+`band_400k_500k` over 400k–500k); percent with B≤L; percent with n_h≤2; q_h and n_h
 min/median/max/average; price-version/model grouping; cache bucket totals; max
 plateau; dropped/model-mismatch counters from status are reported separately.
 No pooled percentage is allowed to hide an all-miss conversation: include a
@@ -441,15 +442,20 @@ For the failure bar, the denominator is
 separately and cannot dilute the rate. A pricing/metric failure prevents a row
 from being `measured` and must be zero before GO.
 
-### 400–500k data-availability dependency
+### In-band (250–350k) data-availability dependency
+
+> Amended 2026-07-12 (spec R10, human directive): the binding band was lowered
+> from 400–500k to **250–350k** and the default sampler ceiling from 450k to
+> **300k**, precisely because this section's risk materialized — organic traffic
+> rarely reaches 400–500k. The structure of the two outcomes below is unchanged.
 
 M2 rarely observed organic conversations in the degradation band. H1 therefore
 cannot promise a completion date or substitute 100k rows. The implementation
 ships two honest outcomes:
 
 1. **Organic acquisition:** the human arms and waits for real opted-in agent
-   conversations to reach 400–500k. This requires no payload persistence but may
-   never produce ten band samples.
+   conversations to reach the 250–350k band. This requires no payload
+   persistence but may never produce ten band samples.
 2. **Controlled real-work campaign:** if organic data is insufficient, the human
    must separately authorize the tasks, duration, agents, and spend for long
    real conversations. Replaying repeated/synthetic filler is not acceptable for
@@ -507,8 +513,8 @@ is a later human spend/operations decision.
   count closure/provider tokens are the authorities.
 - Persist summaries for later review: rejected in H1 for privacy and scope. H2
   must define its own consented/ephemeral quality evidence path.
-- Generate synthetic 400–500k filler for the GO denominator: rejected because
-  it biases compressibility and does not represent real agent dependence.
+- Generate synthetic in-band (250–350k) filler for the GO denominator: rejected
+  because it biases compressibility and does not represent real agent dependence.
 
 ## Escalation and completion
 
