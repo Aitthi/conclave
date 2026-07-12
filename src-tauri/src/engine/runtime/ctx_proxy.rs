@@ -2754,7 +2754,7 @@ async fn admit_live_quality_case(
 }
 
 /// The H2 quality carrier (one permit, spawned off-path): runs the admitted
-/// live case. The fixture carrier loop lands with D4.
+/// live case, then rides the same permit through the fixture queue.
 async fn sample_quality(state: Arc<AppState>, job: QualityJob, permit: OwnedSemaphorePermit) {
     let _permit = permit;
     let _in_flight = QualityInFlightGuard::new(state.ctx_proxy.clone());
@@ -2763,12 +2763,138 @@ async fn sample_quality(state: Arc<AppState>, job: QualityJob, permit: OwnedSema
         config,
         candidate,
     } = job;
+    // The carrier identity outlives the live candidate: fixture cases reuse the
+    // SAME captured upstream/credential/task model (never a stored one).
+    let carrier_upstream = candidate.upstream.clone();
+    let carrier_credential = candidate.credential.clone();
+    let carrier_task_model = candidate.task_model.clone();
     let transport = crate::engine::runtime::quality::ProviderQualityTransport::new(
         state.ctx_proxy.quality_client.clone(),
-        &candidate.upstream,
-        candidate.credential.clone(),
+        &carrier_upstream,
+        carrier_credential.clone(),
     );
     run_quality_case(&state, quality_epoch, &config, candidate, &transport).await;
+    run_fixture_carrier_loop(
+        &state,
+        quality_epoch,
+        &config,
+        &carrier_upstream,
+        &carrier_credential,
+        &carrier_task_model,
+        &transport,
+    )
+    .await;
+}
+
+/// D4: after the live case, the same carrier evaluates up to
+/// `MAX_FIXTURES_PER_CARRIER` queued fixture ids (plan §"Deterministic fixture
+/// path"), rechecking epoch, credential identity, and budget BETWEEN cases
+/// (test plan item 13) — all BEFORE reserving, so a refusal owes no terminal
+/// row. Ids only ride the queue; a dequeued id that no longer resolves is
+/// dropped with a log line and consumes nothing.
+#[allow(clippy::too_many_arguments)] // carrier identity is deliberately explicit
+async fn run_fixture_carrier_loop<T>(
+    state: &Arc<AppState>,
+    quality_epoch: u64,
+    config: &QualityCampaignConfig,
+    upstream: &str,
+    credential: &CountCredential,
+    task_model: &str,
+    transport: &T,
+) where
+    T: crate::engine::runtime::quality::QualityTransport,
+    T::Error: ToQualityFailure,
+{
+    use crate::engine::runtime::quality;
+    let runtime = &state.ctx_proxy;
+    for _ in 0..quality::MAX_FIXTURES_PER_CARRIER {
+        if !runtime.quality_armed_at(&config.quality_campaign_id, quality_epoch) {
+            return;
+        }
+        if let QualityPreflightState::Verified {
+            credential_identity,
+            ..
+        } = runtime.quality_preflight_state()
+        {
+            if credential_identity != quality::credential_identity_hash(upstream, credential) {
+                runtime
+                    .quality_credential_mismatch
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        let Some(fixture_id) = runtime.dequeue_quality_fixture() else {
+            return;
+        };
+        let Some(candidate) =
+            fixture_candidate(&fixture_id, config, upstream, credential, task_model)
+        else {
+            eprintln!("[ctx-proxy] unknown quality fixture id dropped: {fixture_id}");
+            continue; // consumed nothing; the dequeue still counts toward the cap
+        };
+        if !runtime.reserve_quality_case() {
+            runtime
+                .quality_samples_dropped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        run_quality_case(state, quality_epoch, config, candidate, transport).await;
+    }
+}
+
+/// Resolve a queued fixture id into a case candidate. Fixture tags are
+/// manifest-declared (never classified — ruling e4e8e7fa); the synthetic
+/// original request carries the carrier task model so replays exercise the
+/// same model the campaign measures. Returns `None` for an unknown id.
+fn fixture_candidate(
+    fixture_id: &str,
+    config: &QualityCampaignConfig,
+    upstream: &str,
+    credential: &CountCredential,
+    task_model: &str,
+) -> Option<QualityCandidate> {
+    use crate::engine::runtime::{quality, quality_fixtures};
+    let fixtures = match quality_fixtures::load_h2_adversarial_manifest() {
+        Ok(fixtures) => fixtures,
+        Err(error) => {
+            eprintln!("[ctx-proxy] quality fixture manifest failed to load: {error}");
+            return None;
+        }
+    };
+    let fixture = fixtures
+        .into_iter()
+        .find(|fixture| fixture.case.id == fixture_id)?;
+    let ids: Vec<String> = fixture
+        .plan
+        .selected_tool_use_ids()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    Some(QualityCandidate {
+        source: quality::QualitySource::Fixture {
+            id: fixture.case.id.clone(),
+            family: fixture.case.family.clone(),
+            tags: fixture.case.tags.clone(),
+        },
+        h1_campaign_id: config.h1_campaign_id.clone(),
+        conversation_hash: fixture.original_hash.clone(),
+        checkpoint_id: fixture.plan.checkpoint_id.clone(),
+        source_boundary_hash: source_boundary_hash(&ids),
+        summary_hash: fixture.summary_hash.clone(),
+        task_model: task_model.to_owned(),
+        summarizer_response_model: None,
+        upstream: upstream.to_owned(),
+        credential: credential.clone(),
+        original_request: serde_json::json!({
+            "model": task_model,
+            "messages": fixture.case.original_messages.clone(),
+        }),
+        original_messages: fixture.case.original_messages.clone(),
+        plan: fixture.plan,
+        summary: fixture.case.aggregate_summary.clone(),
+        source_envelope: fixture.source_envelope,
+        selected_tool_use_ids: ids,
+    })
 }
 
 /// Execute ONE reserved quality case to its single terminal row. Every exit
@@ -5817,5 +5943,144 @@ mod tests {
                 "fixture".into()
             )
         );
+    }
+
+    // ---- D4: fixture carrier loop --------------------------------------------
+
+    #[tokio::test]
+    async fn fixture_carrier_loop_dequeues_at_most_three_and_owes_one_row_per_reserved_case() {
+        let state = armed_h2_state().await;
+        let credential = test_credential();
+        let upstream = "http://127.0.0.1:9";
+        state
+            .ctx_proxy
+            .set_quality_preflight(QualityPreflightState::Verified {
+                credential_identity: quality::credential_identity_hash(upstream, &credential),
+                response_model: "claude-eval-1".into(),
+            });
+        let (epoch, config) = state.ctx_proxy.snapshot_quality_campaign().unwrap();
+
+        // Real manifest ids, one bogus id in the middle; the cap counts
+        // DEQUEUES, so the fourth id must stay queued.
+        let fixtures = crate::engine::runtime::quality_fixtures::load_h2_adversarial_manifest()
+            .expect("manifest loads");
+        let known: Vec<String> = fixtures.iter().take(3).map(|f| f.case.id.clone()).collect();
+        state.ctx_proxy.enqueue_quality_fixtures(&[
+            known[0].clone(),
+            "no-such-fixture".into(),
+            known[1].clone(),
+            known[2].clone(),
+        ]);
+
+        // Every fixture case fails its probe parse → one bounded row per
+        // reserved case, one transport call each, loop keeps going.
+        let transport = MockQualityTransport::scripted([
+            provider_text_response(&json!({"nope": 1})),
+            provider_text_response(&json!({"nope": 2})),
+        ]);
+        run_fixture_carrier_loop(
+            &state,
+            epoch,
+            &config,
+            upstream,
+            &credential,
+            "claude-3-5-sonnet-20241022",
+            &transport,
+        )
+        .await;
+
+        assert_eq!(transport.calls().len(), 2, "bogus id consumed no call");
+        let status = state.ctx_proxy.quality_status();
+        assert_eq!(status.fixture_queue_len, 1, "cap is three dequeues");
+        assert_eq!(status.remaining_cases, quality_arm_req().max_cases - 2);
+        let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT source_kind, outcome, fixture_id FROM proxy_quality_metric ORDER BY fixture_id",
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let mut expected_ids = vec![known[0].clone(), known[1].clone()];
+        expected_ids.sort();
+        for (row, expected_id) in rows.iter().zip(expected_ids) {
+            assert_eq!(row.0, "fixture");
+            assert_eq!(row.1, "call_failure");
+            assert_eq!(row.2.as_deref(), Some(expected_id.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_carrier_loop_stops_on_exhausted_budget_and_wrong_identity() {
+        // Budget: one remaining case → the second fixture is dropped unreserved.
+        let state = Arc::new(AppState::for_tests().await);
+        let h1 = state.ctx_proxy.arm_summary(arm_req()).unwrap();
+        let mut req = quality_arm_req();
+        req.h1_campaign_id = h1.campaign_id.unwrap();
+        req.max_cases = 1;
+        state.ctx_proxy.arm_quality(req).unwrap();
+        let credential = test_credential();
+        let upstream = "http://127.0.0.1:9";
+        state
+            .ctx_proxy
+            .set_quality_preflight(QualityPreflightState::Verified {
+                credential_identity: quality::credential_identity_hash(upstream, &credential),
+                response_model: "claude-eval-1".into(),
+            });
+        let (epoch, config) = state.ctx_proxy.snapshot_quality_campaign().unwrap();
+        let fixtures = crate::engine::runtime::quality_fixtures::load_h2_adversarial_manifest()
+            .expect("manifest loads");
+        state
+            .ctx_proxy
+            .enqueue_quality_fixtures(&[fixtures[0].case.id.clone(), fixtures[1].case.id.clone()]);
+        let transport =
+            MockQualityTransport::scripted([provider_text_response(&json!({"nope": 1}))]);
+        run_fixture_carrier_loop(
+            &state,
+            epoch,
+            &config,
+            upstream,
+            &credential,
+            "claude-3-5-sonnet-20241022",
+            &transport,
+        )
+        .await;
+        let status = state.ctx_proxy.quality_status();
+        assert_eq!(transport.calls().len(), 1);
+        assert_eq!(status.remaining_cases, 0);
+        assert_eq!(status.samples_dropped, 1, "unreserved refusal is a counter");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proxy_quality_metric")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "no row is owed for the unreserved fixture");
+
+        // Identity: a verified campaign refuses a different carrier credential
+        // BEFORE dequeuing anything — zero calls, queue intact.
+        let state = armed_h2_state().await;
+        state
+            .ctx_proxy
+            .set_quality_preflight(QualityPreflightState::Verified {
+                credential_identity: "someone-else".into(),
+                response_model: "claude-eval-1".into(),
+            });
+        let (epoch, config) = state.ctx_proxy.snapshot_quality_campaign().unwrap();
+        state
+            .ctx_proxy
+            .enqueue_quality_fixtures(&[fixtures[0].case.id.clone()]);
+        let transport = MockQualityTransport::scripted([]);
+        run_fixture_carrier_loop(
+            &state,
+            epoch,
+            &config,
+            upstream,
+            &credential,
+            "claude-3-5-sonnet-20241022",
+            &transport,
+        )
+        .await;
+        let status = state.ctx_proxy.quality_status();
+        assert!(transport.calls().is_empty());
+        assert_eq!(status.credential_mismatch, 1);
+        assert_eq!(status.fixture_queue_len, 1, "queue untouched");
     }
 }
