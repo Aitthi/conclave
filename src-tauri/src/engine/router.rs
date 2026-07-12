@@ -159,6 +159,8 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "proxy.checkpoint" => proxy::set_checkpoint(state, payload).await,
         "proxy.ceiling" => proxy::set_ceiling(state, payload).await,
         "proxy.checkpointReport" => proxy::checkpoint_report(state, payload).await,
+        "proxy.summaryShadow" => proxy::summary_shadow(state, payload).await,
+        "proxy.summaryReport" => proxy::summary_report(state, payload).await,
 
         // ── unknown ───────────────────────────────────────────────────────
         other => Err(AppError::NotFound(format!("unknown command: {other}"))),

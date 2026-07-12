@@ -963,7 +963,7 @@ fn take_switch(words: &[String], flag: &str) -> (bool, Vec<String>) {
 
 fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
     let usage =
-        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|checkpoint <on|off>|ceiling <tokens>|report [--since-hours N]|checkpoint-report [--since-hours N]>";
+        "cli: proxy <status|mode <off|log|rewrite>|threshold <ratio>|checkpoint <on|off>|ceiling <tokens>|report [--since-hours N]|checkpoint-report [--since-hours N]|summary-shadow <on ...|off>|summary-report [--since-hours N] [--campaign-id ID]>";
     match argv.get(1).map(String::as_str) {
         Some("status") if argv.len() == 2 => Ok(("proxy.status", Value::Null)),
         Some("mode") if argv.len() == 3 => match argv[2].as_str() {
@@ -1030,6 +1030,104 @@ fn map_proxy_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 params["sinceHours"] = json!(value);
             }
             Ok(("proxy.checkpointReport", params))
+        }
+        Some("summary-shadow") if argv.get(2).map(String::as_str) == Some("off") => {
+            if argv.len() != 3 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok(("proxy.summaryShadow", json!({"enabled":false})))
+        }
+        Some("summary-shadow") if argv.get(2).map(String::as_str) == Some("on") => {
+            let mut rest = argv[3..].to_vec();
+            let mut required = |flag: &str| -> Result<String, AppError> {
+                let (value, next) = take_flag(&rest, flag);
+                rest = next;
+                value.ok_or_else(|| AppError::Invalid(usage.into()))
+            };
+            let model = required("--model")?;
+            let price_version = required("--price-version")?;
+            let standard_input = required("--standard-input-usd-per-mtok")?;
+            let standard_cache_write = required("--standard-cache-write-usd-per-mtok")?;
+            let standard_cache_read = required("--standard-cache-read-usd-per-mtok")?;
+            let standard_output = required("--standard-output-usd-per-mtok")?;
+            let threshold = required("--long-context-threshold")?;
+            let long_input = required("--long-input-usd-per-mtok")?;
+            let long_cache_write = required("--long-cache-write-usd-per-mtok")?;
+            let long_cache_read = required("--long-cache-read-usd-per-mtok")?;
+            let long_output = required("--long-output-usd-per-mtok")?;
+            if !rest.is_empty() || model.trim().is_empty() || price_version.trim().is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let rate = |raw: &str| -> Result<f64, AppError> {
+                let value = raw
+                    .parse::<f64>()
+                    .map_err(|_| AppError::Invalid(usage.into()))?;
+                if !value.is_finite() || value < 0.0 {
+                    return Err(AppError::Invalid(usage.into()));
+                }
+                Ok(value)
+            };
+            let standard_input = rate(&standard_input)?;
+            let standard_cache_write = rate(&standard_cache_write)?;
+            let standard_cache_read = rate(&standard_cache_read)?;
+            let standard_output = rate(&standard_output)?;
+            let long_input = rate(&long_input)?;
+            let long_cache_write = rate(&long_cache_write)?;
+            let long_cache_read = rate(&long_cache_read)?;
+            let long_output = rate(&long_output)?;
+            if standard_cache_read == 0.0 || long_cache_read == 0.0 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let long_context_threshold = threshold
+                .parse::<u64>()
+                .map_err(|_| AppError::Invalid(usage.into()))?;
+            if long_context_threshold == 0 {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            Ok((
+                "proxy.summaryShadow",
+                json!({
+                    "enabled":true,
+                    "model":model,
+                    "priceVersion":price_version,
+                    "standardInputUsdPerMtok":standard_input,
+                    "standardCacheWriteUsdPerMtok":standard_cache_write,
+                    "standardCacheReadUsdPerMtok":standard_cache_read,
+                    "standardOutputUsdPerMtok":standard_output,
+                    "longContextThreshold":long_context_threshold,
+                    "longInputUsdPerMtok":long_input,
+                    "longCacheWriteUsdPerMtok":long_cache_write,
+                    "longCacheReadUsdPerMtok":long_cache_read,
+                    "longOutputUsdPerMtok":long_output,
+                }),
+            ))
+        }
+        Some("summary-report") => {
+            let (since_hours, rest) = take_flag(&argv[2..], "--since-hours");
+            let (campaign_id, rest) = take_flag(&rest, "--campaign-id");
+            if !rest.is_empty() {
+                return Err(AppError::Invalid(usage.into()));
+            }
+            let mut params = json!({});
+            if let Some(raw) = since_hours {
+                let value = raw.parse::<i64>().map_err(|_| {
+                    AppError::Invalid(
+                        "cli: proxy summary-report: --since-hours expects a non-negative integer"
+                            .into(),
+                    )
+                })?;
+                if value < 0 {
+                    return Err(AppError::Invalid(
+                        "cli: proxy summary-report: --since-hours expects a non-negative integer"
+                            .into(),
+                    ));
+                }
+                params["sinceHours"] = json!(value);
+            }
+            if let Some(campaign_id) = campaign_id {
+                params["campaignId"] = json!(campaign_id);
+            }
+            Ok(("proxy.summaryReport", params))
         }
         _ => Err(AppError::Invalid(usage.into())),
     }
@@ -3617,6 +3715,152 @@ mod tests {
         assert!(is_invalid(&["proxy", "report", "--since-hours", "-1"]));
         assert!(is_invalid(&["proxy", "threshold", "half"]));
         assert!(is_invalid(&["proxy", "threshold"]));
+    }
+
+    fn summary_on_argv() -> Vec<&'static str> {
+        vec![
+            "proxy",
+            "summary-shadow",
+            "on",
+            "--model",
+            "claude-sonnet-5[1m]",
+            "--price-version",
+            "anthropic-2026-07-12",
+            "--standard-input-usd-per-mtok",
+            "3",
+            "--standard-cache-write-usd-per-mtok",
+            "3.75",
+            "--standard-cache-read-usd-per-mtok",
+            "0.30",
+            "--standard-output-usd-per-mtok",
+            "15",
+            "--long-context-threshold",
+            "200000",
+            "--long-input-usd-per-mtok",
+            "6",
+            "--long-cache-write-usd-per-mtok",
+            "7.5",
+            "--long-cache-read-usd-per-mtok",
+            "0.60",
+            "--long-output-usd-per-mtok",
+            "22.5",
+        ]
+    }
+
+    #[test]
+    fn proxy_summary_shadow_exact_on_and_off_map_to_allowlisted_method() {
+        assert_eq!(
+            ok_method(&["proxy", "summary-shadow", "off"]),
+            "proxy.summaryShadow"
+        );
+        assert_eq!(
+            ok_params(&["proxy", "summary-shadow", "off"]),
+            json!({"enabled":false})
+        );
+
+        let args = summary_on_argv();
+        assert_eq!(ok_method(&args), "proxy.summaryShadow");
+        assert_eq!(
+            ok_params(&args),
+            json!({
+                "enabled":true,
+                "model":"claude-sonnet-5[1m]",
+                "priceVersion":"anthropic-2026-07-12",
+                "standardInputUsdPerMtok":3.0,
+                "standardCacheWriteUsdPerMtok":3.75,
+                "standardCacheReadUsdPerMtok":0.30,
+                "standardOutputUsdPerMtok":15.0,
+                "longContextThreshold":200000,
+                "longInputUsdPerMtok":6.0,
+                "longCacheWriteUsdPerMtok":7.5,
+                "longCacheReadUsdPerMtok":0.60,
+                "longOutputUsdPerMtok":22.5,
+            })
+        );
+    }
+
+    #[test]
+    fn proxy_summary_shadow_rejects_partial_duplicate_unknown_and_invalid_values() {
+        let replace = |args: &mut Vec<&'static str>, flag: &str, value: &'static str| {
+            let pos = args.iter().position(|arg| *arg == flag).unwrap();
+            args[pos + 1] = value;
+        };
+        let mut missing = summary_on_argv();
+        missing.truncate(missing.len() - 2);
+        assert!(is_invalid(&missing));
+        assert!(is_invalid(&[
+            "proxy",
+            "summary-shadow",
+            "off",
+            "--model",
+            "unexpected"
+        ]));
+
+        let mut duplicate = summary_on_argv();
+        duplicate.extend(["--model", "other"]);
+        assert!(is_invalid(&duplicate));
+
+        let mut unknown = summary_on_argv();
+        unknown.extend(["--surprise", "1"]);
+        assert!(is_invalid(&unknown));
+
+        let mut zero_read = summary_on_argv();
+        replace(&mut zero_read, "--standard-cache-read-usd-per-mtok", "0");
+        assert!(is_invalid(&zero_read));
+
+        let mut negative = summary_on_argv();
+        replace(&mut negative, "--long-output-usd-per-mtok", "-1");
+        assert!(is_invalid(&negative));
+
+        let mut non_finite = summary_on_argv();
+        replace(&mut non_finite, "--standard-input-usd-per-mtok", "NaN");
+        assert!(is_invalid(&non_finite));
+
+        for (flag, value) in [
+            ("--model", ""),
+            ("--price-version", ""),
+            ("--long-context-threshold", "0"),
+            ("--long-cache-read-usd-per-mtok", "0"),
+            ("--long-input-usd-per-mtok", "inf"),
+        ] {
+            let mut args = summary_on_argv();
+            replace(&mut args, flag, value);
+            assert!(is_invalid(&args), "must reject {flag}={value:?}");
+        }
+    }
+
+    #[test]
+    fn proxy_summary_report_maps_optional_filters_and_rejects_bad_flags() {
+        assert_eq!(
+            ok_method(&["proxy", "summary-report"]),
+            "proxy.summaryReport"
+        );
+        assert_eq!(ok_params(&["proxy", "summary-report"]), json!({}));
+        assert_eq!(
+            ok_params(&[
+                "proxy",
+                "summary-report",
+                "--campaign-id",
+                "campaign-1",
+                "--since-hours",
+                "12"
+            ]),
+            json!({"sinceHours":12,"campaignId":"campaign-1"})
+        );
+        assert!(is_invalid(&[
+            "proxy",
+            "summary-report",
+            "--since-hours",
+            "-1"
+        ]));
+        assert!(is_invalid(&[
+            "proxy",
+            "summary-report",
+            "--campaign-id",
+            "a",
+            "--campaign-id",
+            "b"
+        ]));
     }
 
     #[test]
