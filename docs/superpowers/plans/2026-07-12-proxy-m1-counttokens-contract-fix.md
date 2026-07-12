@@ -108,20 +108,18 @@ allowlisted error type after the label. Do not broaden persisted content.
 From `src-tauri/`:
 
 ```sh
-cargo fmt --check
+rustfmt --edition 2021 --check src/engine/runtime/count_tokens.rs src/engine/runtime/ctx_proxy.rs
 cargo test -p ctxopt -p conclave
 cargo clippy -p ctxopt -p conclave --all-targets -- -D warnings
 ```
 
 If repository-wide clippy has pre-existing out-of-boundary warnings, record
 the exact warnings and additionally run clippy with warnings allowed to prove
-there are no new errors. If workspace `cargo fmt --check` fails solely on
-pre-existing out-of-boundary files, record that failing gate and run
-`rustfmt --edition 2021 --check src/engine/runtime/count_tokens.rs
-src/engine/runtime/ctx_proxy.rs` as the passing boundary-format proof. Never
-rewrite out-of-boundary files to make a workspace formatting gate green
-(Dabin challenge `5110f07a`, accepted). No UI files are touched, so the UI
-Pixel Gate does not apply.
+there are no new errors. Workspace `cargo fmt --check` is intentionally not a
+gate for this lane: on the base SHA it reports pre-existing diffs across clean
+out-of-boundary files and can only be satisfied by violating the immutable
+boundary. Never rewrite those files (Dabin challenge `5110f07a`, accepted).
+No UI files are touched, so the UI Pixel Gate does not apply.
 
 ## READY note contract
 
