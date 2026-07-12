@@ -2069,6 +2069,18 @@ mod tests {
         assert_eq!(incremental, fresh);
         assert_eq!(incremental.tokens, 202);
         assert_eq!(incremental.limit, 2_000);
+        // ...and equals the classic one-shot lines() scan too — old and new
+        // semantics agree on a fully terminated file.
+        let classic = scan_codex_file(
+            &file,
+            instance_id,
+            &setup.workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            200_000,
+        )
+        .map(ScannedReading::into_reading)
+        .expect("classic reading");
+        assert_eq!(incremental, classic);
 
         // Idle codex poll short-circuits too.
         let opens = setup.reader.file_opens(instance_id, &file);
