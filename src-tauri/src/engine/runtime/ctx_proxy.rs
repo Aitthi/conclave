@@ -920,6 +920,10 @@ fn classify_metric(
     None
 }
 
+fn meets_summary_low_water(projected_post_tokens: u64, low_water: usize) -> bool {
+    (projected_post_tokens as usize) <= low_water
+}
+
 /// The H1 economics output for one measured candidate.
 struct SummaryEconomics {
     forward_tier: crate::engine::repo::proxy_summary_metric::PriceTier,
@@ -2222,7 +2226,7 @@ async fn sample_summary(state: Arc<AppState>, job: SummaryJob, permit: OwnedSema
     }
     let q_h = s_h as f64 / r as f64;
     let economics = compute_economics(a, r, s_h, &usage, &job.price);
-    let meets_low_water = (b as usize) <= job.low_water;
+    let meets_low_water = meets_summary_low_water(b, job.low_water);
     let meets_two_turn = economics.n_h <= 2.0;
 
     // Step 10: persist the measured row (plateau is derived by Lane B). Unlike
@@ -3322,6 +3326,12 @@ mod tests {
     use futures_util::stream;
     use serde_json::{json, Value};
 
+    #[test]
+    fn proxy_runtime_defaults_to_the_r10_300k_ceiling() {
+        let runtime = ProxyRuntime::with_port(DEFAULT_PROXY_PORT);
+        assert_eq!(runtime.ceiling.load(Ordering::Acquire), 300_000);
+    }
+
     fn tool_pair(id: &str, text: &str) -> [Value; 2] {
         [
             json!({"role":"assistant","content":[{
@@ -4348,6 +4358,23 @@ mod tests {
         assert_eq!(classify_metric(400_000, 0), Some(M::SHZero));
         assert_eq!(classify_metric(100_000, 200_000), Some(M::SHGreaterThanR));
         assert_eq!(classify_metric(400_000, 200_000), None); // valid
+    }
+
+    #[test]
+    fn default_low_water_bar_is_non_vacuous_for_an_in_band_candidate() {
+        let a_tokens = 300_000;
+        let misses_low_water = 250_000;
+        let meets_low_water = 200_000;
+        assert!((250_000..=350_000).contains(&a_tokens));
+        assert!(misses_low_water < a_tokens, "B_h must be a valid saving");
+        assert!(!meets_summary_low_water(
+            misses_low_water,
+            ctxopt::LOW_WATER_TOKENS
+        ));
+        assert!(meets_summary_low_water(
+            meets_low_water,
+            ctxopt::LOW_WATER_TOKENS
+        ));
     }
 
     #[test]
@@ -6440,7 +6467,7 @@ mod tests {
             let mut row = base_summary_row(job, hash);
             row.outcome = SummaryOutcome::Measured;
             row.source_boundary_hash = Some(sha256_hex(b"seed-boundary"));
-            row.a_tokens = Some(450_000); // inside the [400k, 500k] real-A band
+            row.a_tokens = Some(300_000); // inside the [250k, 350k] real-A band
             row.meets_low_water = Some(true);
             row.meets_two_turn = Some(true);
             insert_terminal(db, row).await.unwrap();

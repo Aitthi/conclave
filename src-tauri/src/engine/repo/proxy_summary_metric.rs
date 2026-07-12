@@ -520,8 +520,8 @@ pub struct SummaryReport {
     /// plan-pinned GO-bar formula — `below_ceiling`, `no_candidate`,
     /// `projection_rejected`, `disarmed`, and queue drops never dilute it.
     pub failure_rate: f64,
-    /// `measured` rows with real `a_tokens` in `[400_000, 500_000]`.
-    pub band_400k_500k: i64,
+    /// `measured` rows with real `a_tokens` in `[250_000, 350_000]`.
+    pub band_250k_350k: i64,
     pub pct_meets_low_water: f64,
     pub pct_meets_two_turn: f64,
     pub q_h_min: f64,
@@ -557,7 +557,7 @@ struct Agg {
     projection_rejected: i64,
     metric_invalid: i64,
     distinct_conversations: i64,
-    band_400k_500k: i64,
+    band_250k_350k: i64,
     meets_low_water_count: i64,
     meets_two_turn_count: i64,
     max_plateau_turns: i64,
@@ -626,8 +626,8 @@ async fn report_since(
            COALESCE(SUM(outcome = 'metric_invalid'), 0) AS metric_invalid, \
            COUNT(DISTINCT CASE WHEN outcome = 'measured' THEN conversation_hash END) \
              AS distinct_conversations, \
-           COALESCE(SUM(outcome = 'measured' AND a_tokens BETWEEN 400000 AND 500000), 0) \
-             AS band_400k_500k, \
+           COALESCE(SUM(outcome = 'measured' AND a_tokens BETWEEN 250000 AND 350000), 0) \
+             AS band_250k_350k, \
            COALESCE(SUM(outcome = 'measured' AND meets_low_water = 1), 0) \
              AS meets_low_water_count, \
            COALESCE(SUM(outcome = 'measured' AND meets_two_turn = 1), 0) \
@@ -720,7 +720,7 @@ async fn report_since(
         metric_invalid: agg.metric_invalid,
         distinct_conversations: agg.distinct_conversations,
         failure_rate,
-        band_400k_500k: agg.band_400k_500k,
+        band_250k_350k: agg.band_250k_350k,
         pct_meets_low_water,
         pct_meets_two_turn,
         q_h_min,
@@ -750,7 +750,7 @@ pub enum H1Gate {
     /// Every economics bar passes on sufficient data.
     Pass,
     /// Not enough data to rule: fewer than 30 measured rows, 10 distinct
-    /// conversations, or 10 real-A rows in `[400_000, 500_000]`.
+    /// conversations, or 10 real-A rows in `[250_000, 350_000]`.
     Inconclusive,
     /// Minimum data exists and at least one bar fails: failure rate > 5%,
     /// low-water pass < 90%, two-turn pass < 80%, any all-miss conversation,
@@ -763,7 +763,7 @@ pub enum H1Gate {
 /// bars here, exactly as the H1 report's failure-rate denominator pins.
 pub fn h1_gate(report: &SummaryReport) -> H1Gate {
     let sufficient =
-        report.measured >= 30 && report.distinct_conversations >= 10 && report.band_400k_500k >= 10;
+        report.measured >= 30 && report.distinct_conversations >= 10 && report.band_250k_350k >= 10;
     if !sufficient {
         return H1Gate::Inconclusive;
     }
@@ -1334,13 +1334,13 @@ mod tests {
         // conv-pass: two measured rows that both pass both bars.
         insert_terminal(
             &pool,
-            measured_row("camp-1", "conv-pass", "b1", 0.8, 1.0, true, true, 450_000),
+            measured_row("camp-1", "conv-pass", "b1", 0.8, 1.0, true, true, 300_000),
         )
         .await
         .unwrap();
         insert_terminal(
             &pool,
-            measured_row("camp-1", "conv-pass", "b1", 0.9, 1.2, true, true, 420_000),
+            measured_row("camp-1", "conv-pass", "b1", 0.9, 1.2, true, true, 320_000),
         )
         .await
         .unwrap();
@@ -1357,7 +1357,7 @@ mod tests {
                 5.0,
                 false,
                 false,
-                480_000,
+                340_000,
             ),
         )
         .await
@@ -1403,8 +1403,8 @@ mod tests {
         // failure_rate denominator is measured + count_failure + generation_failure = 5.
         assert!((r.failure_rate - (2.0 / 5.0)).abs() < 1e-9);
         assert_eq!(
-            r.band_400k_500k, 3,
-            "all three measured rows have a_tokens in [400k,500k]"
+            r.band_250k_350k, 3,
+            "all three measured rows have a_tokens in [250k,350k]"
         );
         // pct bars: 2 of 3 measured rows pass both.
         assert!((r.pct_meets_low_water - (2.0 / 3.0)).abs() < 1e-9);
@@ -1457,6 +1457,38 @@ mod tests {
 
         let all = report(&pool, 24, None).await.unwrap();
         assert_eq!(all.measured, 3);
+    }
+
+    #[tokio::test]
+    async fn report_counts_the_250k_350k_band_as_a_closed_interval() {
+        let pool = connect_in_memory().await;
+        for (i, a_tokens) in [249_999, 250_000, 350_000, 350_001, 450_000]
+            .into_iter()
+            .enumerate()
+        {
+            insert_terminal(
+                &pool,
+                measured_row(
+                    "camp-band",
+                    &format!("conv-{i}"),
+                    &format!("boundary-{i}"),
+                    0.5,
+                    1.0,
+                    true,
+                    true,
+                    a_tokens,
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let r = report(&pool, 24, Some("camp-band")).await.unwrap();
+        assert_eq!(r.measured, 5);
+        assert_eq!(
+            r.band_250k_350k, 2,
+            "250k and 350k are in-band; 249,999, 350,001, and the old 450k band are not"
+        );
     }
 
     #[tokio::test]
@@ -1595,7 +1627,7 @@ mod tests {
               long_cache_read_usd_per_mtok, long_output_usd_per_mtok, \
               long_context_threshold, outcome) \
              VALUES ('2026-01-01T00:00:00Z', 'c', 'h', 'm', 'mv', 'pv', 'pricev', 100000, \
-              500000, 1, 1, 1, 1, 1, 1, 1, 1, 200000, \
+              300000, 1, 1, 1, 1, 1, 1, 1, 1, 200000, \
               '<script>alert(1)</script>')",
         )
         .execute(&pool)
@@ -1615,7 +1647,7 @@ mod tests {
               long_cache_read_usd_per_mtok, long_output_usd_per_mtok, \
               long_context_threshold, outcome, failure_stage) \
              VALUES ('2026-01-01T00:00:00Z', 'c', 'h', 'm', 'mv', 'pv', 'pricev', 100000, \
-              500000, 1, 1, 1, 1, 1, 1, 1, 1, 200000, \
+              300000, 1, 1, 1, 1, 1, 1, 1, 1, 200000, \
               'count_failure', 'DROP TABLE proxy_summary_metric;--')",
         )
         .execute(&pool)
@@ -1635,7 +1667,7 @@ mod tests {
               long_cache_read_usd_per_mtok, long_output_usd_per_mtok, \
               long_context_threshold, outcome, failure_stage, error_type) \
              VALUES ('2026-01-01T00:00:00Z', 'c', 'h', 'm', 'mv', 'pv', 'pricev', 100000, \
-              500000, 1, 1, 1, 1, 1, 1, 1, 1, 200000, \
+              300000, 1, 1, 1, 1, 1, 1, 1, 1, 200000, \
               'count_failure', 'count_a', 'leaked upstream body: sk-live-hostile')",
         )
         .execute(&pool)
@@ -1672,7 +1704,7 @@ mod tests {
             distinct_conversations: 10,
             // denominator 31, 1 failure => ~0.032
             failure_rate: 1.0 / 31.0,
-            band_400k_500k: 10,
+            band_250k_350k: 10,
             pct_meets_low_water: 0.93,
             pct_meets_two_turn: 0.86,
             q_h_min: 0.4,
@@ -1718,9 +1750,9 @@ mod tests {
         assert_eq!(h1_gate(&r), H1Gate::Inconclusive);
 
         let mut r = passing_gate_report();
-        r.band_400k_500k = 9;
+        r.band_250k_350k = 9;
         assert_eq!(h1_gate(&r), H1Gate::Inconclusive);
-        r.band_400k_500k = 10;
+        r.band_250k_350k = 10;
         assert_eq!(h1_gate(&r), H1Gate::Pass);
     }
 
