@@ -40,6 +40,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 axum = "0.8"
 keyring = { version = "3", features = ["apple-native"] }
 sha2 = "0.10"
+rand_chacha = "0.9"
+rand_core = "0.9"
 unicode-normalization = "0.1"
 # Default features disabled: `hf-hub-native-tls`/`ort-download-binaries-native-tls`
 # pull in a second TLS stack (OpenSSL) alongside the rustls-tls `reqwest` already
