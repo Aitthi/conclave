@@ -36,8 +36,7 @@ const TRANSCRIPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 // ── Restart · resume constants ────────────────────────────────────────────────
 
 /// Settle after the agent's handoff save before killing its process, so the
-/// harness finishes rendering the "saved" confirmation (mirrors the compact
-/// loop's `COMPACT_SETTLE_MS`).
+/// harness finishes rendering the "saved" confirmation.
 const RESTART_SETTLE_MS: u64 = 2_000;
 
 /// Delay between respawning the CLI and typing the resume prompt into it. A
