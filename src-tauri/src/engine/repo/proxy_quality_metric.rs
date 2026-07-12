@@ -480,6 +480,20 @@ fn validate(m: &QualityMetricInsert) -> sqlx::Result<()> {
                 (Some(o), Some(p)) => (o, p),
                 _ => return Err(protocol("a completed row requires both plan verdicts")),
             };
+            // Overall pass IS the conjunction of the three dimensions (plan
+            // call 5: "Overall pass is all three true") — both directions, so
+            // a forged pass can't inflate the GO pass-rate columns and a
+            // forged fail can't deflate them (Mellow review, ruling on
+            // hybrid-h2-lane-c).
+            for (verdict, side) in [(original, "original"), (projected, "projected")] {
+                let expected =
+                    verdict.correct && verdict.constraint_adherent && verdict.next_action_match;
+                if verdict.pass != expected {
+                    return Err(protocol(format!(
+                        "{side} overall pass is inconsistent with its three dimension booleans"
+                    )));
+                }
+            }
             let comparison = m
                 .comparison
                 .ok_or_else(|| protocol("a completed row requires a comparison label"))?;
@@ -1700,6 +1714,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0, "every rejected insert must persist nothing");
+    }
+
+    // Mellow's review bypass (ruling on hybrid-h2-lane-c): a forged
+    // PlanVerdict whose overall pass contradicts its three dimension booleans
+    // previously persisted through the real insert_terminal — and the GO
+    // pass-rate columns read exactly those values. Both directions, both
+    // sides, must now reject.
+    #[tokio::test]
+    async fn overall_pass_inconsistent_with_its_dimensions_is_rejected() {
+        let pool = connect_in_memory().await;
+
+        // The exact reproduced bypass: pass=true with all three dims false.
+        let mut forged_pass = completed_case("camp", "case-1", "conv-1", true, true);
+        forged_pass.original = Some(PlanVerdict {
+            correct: false,
+            constraint_adherent: false,
+            next_action_match: false,
+            pass: true,
+        });
+        assert!(
+            insert_terminal(&pool, forged_pass).await.is_err(),
+            "original pass=true with all dimensions false must be rejected"
+        );
+
+        // Inverse direction: a forged fail can't deflate the rate either.
+        let mut forged_fail = completed_case("camp", "case-2", "conv-1", true, false);
+        forged_fail.projected = Some(PlanVerdict {
+            correct: true,
+            constraint_adherent: true,
+            next_action_match: true,
+            pass: false,
+        });
+        assert!(
+            insert_terminal(&pool, forged_fail).await.is_err(),
+            "projected pass=false with all dimensions true must be rejected"
+        );
+
+        // One failing dimension with pass=true is equally forged.
+        let mut one_dim = completed_case("camp", "case-3", "conv-1", true, true);
+        one_dim.original = Some(PlanVerdict {
+            correct: true,
+            constraint_adherent: false,
+            next_action_match: true,
+            pass: true,
+        });
+        assert!(insert_terminal(&pool, one_dim).await.is_err());
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM proxy_quality_metric")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "no forged verdict may persist");
     }
 
     // PRIVACY (Global constraint #8): hostile raw content in any hash/id
