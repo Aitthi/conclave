@@ -108,7 +108,7 @@ allowlisted error type after the label. Do not broaden persisted content.
 From `src-tauri/`:
 
 ```sh
-rustfmt --edition 2021 --check src/engine/runtime/count_tokens.rs src/engine/runtime/ctx_proxy.rs
+$(rustup which rustfmt) --check --edition 2021 src/engine/runtime/count_tokens.rs src/engine/runtime/ctx_proxy.rs
 cargo test -p ctxopt -p conclave
 cargo clippy -p ctxopt -p conclave --all-targets -- -D warnings
 ```
