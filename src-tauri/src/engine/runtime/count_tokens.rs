@@ -44,7 +44,7 @@ pub struct CountCredential {
 }
 
 impl CountCredential {
-    fn has_auth(&self) -> bool {
+    pub(crate) fn has_auth(&self) -> bool {
         self.api_key.is_some() || self.authorization.is_some()
     }
 }
@@ -126,6 +126,32 @@ fn sensitive_header(value: &str) -> Option<reqwest::header::HeaderValue> {
     Some(hv)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SanitizedErrorType {
+    Known(&'static str),
+    Unknown,
+    Unparsed,
+}
+
+pub(crate) fn sanitize_error_type(body: &str) -> SanitizedErrorType {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return SanitizedErrorType::Unparsed;
+    };
+    let candidate = value
+        .get("error")
+        .and_then(|error| error.get("type"))
+        .and_then(Value::as_str);
+    match candidate.and_then(|candidate| {
+        KNOWN_ERROR_TYPES
+            .iter()
+            .copied()
+            .find(|known| *known == candidate)
+    }) {
+        Some(known) => SanitizedErrorType::Known(known),
+        None => SanitizedErrorType::Unknown,
+    }
+}
+
 fn count_beta_header(original: &str) -> String {
     if original
         .split(',')
@@ -140,8 +166,14 @@ fn count_beta_header(original: &str) -> String {
     }
 }
 
-/// Apply ONLY the allowlisted auth headers, each marked sensitive.
-fn apply_cred(mut req: reqwest::RequestBuilder, cred: &CountCredential) -> reqwest::RequestBuilder {
+/// Apply ONLY the allowlisted credential headers. `beta` is explicit so count
+/// calls can append their protocol beta while generation preserves the captured
+/// value byte-for-byte and in order.
+pub(crate) fn apply_credential_headers(
+    mut req: reqwest::RequestBuilder,
+    cred: &CountCredential,
+    beta: Option<&str>,
+) -> reqwest::RequestBuilder {
     if let Some(key) = cred.api_key.as_deref().and_then(sensitive_header) {
         req = req.header("x-api-key", key);
     }
@@ -150,10 +182,10 @@ fn apply_cred(mut req: reqwest::RequestBuilder, cred: &CountCredential) -> reqwe
     }
     // anthropic-beta is not a secret (ruling ea3df57c amendment) but is required
     // for OAuth Bearer auth to be accepted and for [1m] 1M-context. Forward the
-    // caller's whole value in order and append the beta count contract once.
-    if let Some(beta) = cred.anthropic_beta.as_deref() {
-        let beta = count_beta_header(beta);
-        if let Some(hv) = sensitive_header(&beta) {
+    // caller-supplied beta value is chosen by the caller of this helper: count
+    // appends its protocol beta; generation preserves the captured bytes.
+    if let Some(beta) = beta {
+        if let Some(hv) = sensitive_header(beta) {
             req = req.header("anthropic-beta", hv);
         }
     }
@@ -180,7 +212,8 @@ pub async fn count_tokens(
         "/v1/messages/count_tokens"
     };
     let url = format!("{}{route}", upstream.trim_end_matches('/'));
-    let resp = apply_cred(client.post(url), cred)
+    let count_beta = cred.anthropic_beta.as_deref().map(count_beta_header);
+    let resp = apply_credential_headers(client.post(url), cred, count_beta.as_deref())
         .body(body.to_string())
         .send()
         .await
@@ -196,21 +229,14 @@ pub async fn count_tokens(
         // surfaced; an unknown/absent type or a non-JSON body degrades to a
         // status-only label, never raw bytes.
         let body = resp.text().await.unwrap_or_default();
-        return Err(match serde_json::from_str::<Value>(&body) {
-            // Parseable JSON: keep error.type ONLY if it is an allowlisted enum
-            // literal; any other value (hostile, novel, or absent) → status-only.
-            Ok(v) => match v
-                .get("error")
-                .and_then(|e| e.get("type"))
-                .and_then(Value::as_str)
-            {
-                Some(t) if KNOWN_ERROR_TYPES.contains(&t) => {
-                    format!("count_tokens HTTP {status}: {t}")
-                }
-                _ => format!("count_tokens HTTP {status} (unknown type)"),
-            },
-            // Body was not JSON at all → status only, never raw bytes.
-            Err(_) => format!("count_tokens HTTP {status} (unparsed)"),
+        return Err(match sanitize_error_type(&body) {
+            SanitizedErrorType::Known(error_type) => {
+                format!("count_tokens HTTP {status}: {error_type}")
+            }
+            SanitizedErrorType::Unknown => {
+                format!("count_tokens HTTP {status} (unknown type)")
+            }
+            SanitizedErrorType::Unparsed => format!("count_tokens HTTP {status} (unparsed)"),
         });
     }
     let value: Value = resp.json().await.map_err(|e| e.to_string())?;
