@@ -3,7 +3,9 @@ use std::sync::atomic::Ordering;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::engine::runtime::ctx_proxy::{SummaryArmRequest, SummaryPriceSchedule, SummaryStatus};
+use crate::engine::runtime::ctx_proxy::{
+    QualityArmRequest, QualityStatus, SummaryArmRequest, SummaryPriceSchedule, SummaryStatus,
+};
 use crate::engine::runtime::ctx_proxy::{MODE_LOG, MODE_OFF, MODE_REWRITE};
 use crate::engine::{AppError, AppState};
 
@@ -57,6 +59,36 @@ struct SummaryReportReq {
     campaign_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QualityShadowReq {
+    enabled: bool,
+    h1_campaign_id: Option<String>,
+    evaluator_model: Option<String>,
+    rubric_version: Option<String>,
+    max_cases: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QualityFixturesReq {
+    manifest: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QualityReportReq {
+    since_hours: Option<i64>,
+    campaign_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QualityAuditReq {
+    enabled: bool,
+    campaign_id: Option<String>,
+}
+
 pub async fn status(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     Ok(status_value(state))
 }
@@ -79,9 +111,8 @@ pub async fn set_mode(state: &AppState, payload: Value) -> Result<Value, AppErro
 }
 
 pub async fn set_threshold(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req: ThresholdReq = serde_json::from_value(payload).map_err(|error| {
-        AppError::Invalid(format!("proxy.threshold: bad payload: {error}"))
-    })?;
+    let req: ThresholdReq = serde_json::from_value(payload)
+        .map_err(|error| AppError::Invalid(format!("proxy.threshold: bad payload: {error}")))?;
     if !req.ratio.is_finite() || !(0.05..=0.95).contains(&req.ratio) {
         return Err(AppError::Invalid(
             "proxy.threshold: ratio must be a number in [0.05, 0.95]".into(),
@@ -230,6 +261,197 @@ pub async fn summary_report(state: &AppState, payload: Value) -> Result<Value, A
         .map_err(|error| AppError::Internal(format!("proxy.summaryReport: {error}")))
 }
 
+pub async fn quality_shadow(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let request: QualityShadowReq = serde_json::from_value(payload)
+        .map_err(|error| AppError::Invalid(format!("proxy.qualityShadow: bad payload: {error}")))?;
+    if !request.enabled {
+        if request.h1_campaign_id.is_some()
+            || request.evaluator_model.is_some()
+            || request.rubric_version.is_some()
+            || request.max_cases.is_some()
+        {
+            return Err(AppError::Invalid(
+                "proxy.qualityShadow: off accepts no arm fields".into(),
+            ));
+        }
+        return Ok(quality_status_value(state.ctx_proxy.disarm_quality()));
+    }
+
+    let missing = || AppError::Invalid("proxy.qualityShadow: all arm fields are required".into());
+    let h1_campaign_id = request.h1_campaign_id.ok_or_else(missing)?;
+    let evaluator_model = request.evaluator_model.ok_or_else(missing)?;
+    let rubric_version = request.rubric_version.ok_or_else(missing)?;
+    let max_cases = request.max_cases.ok_or_else(missing)?;
+    let summary_status = state.ctx_proxy.summary_status();
+    let h1_report =
+        crate::engine::repo::proxy_summary_metric::report_campaign(&state.db, &h1_campaign_id)
+            .await?;
+    let task_model = validate_h1_quality_arm(&summary_status, &h1_report, &h1_campaign_id)?;
+    let status = state
+        .ctx_proxy
+        .arm_quality(QualityArmRequest {
+            h1_campaign_id,
+            evaluator_model,
+            task_model,
+            rubric_version,
+            max_cases,
+        })
+        .map_err(|error| AppError::Invalid(format!("proxy.qualityShadow: {}", error.label())))?;
+    // Re-arm replaces the campaign; no raw audit material from the prior
+    // campaign may survive a successful state transition.
+    state.ctx_proxy.quality_audit.clear();
+    Ok(quality_status_value(status))
+}
+
+fn validate_h1_quality_arm(
+    status: &SummaryStatus,
+    report: &crate::engine::repo::proxy_summary_metric::SummaryReport,
+    requested_campaign_id: &str,
+) -> Result<String, AppError> {
+    use crate::engine::repo::proxy_summary_metric::{h1_gate, H1Gate};
+
+    if !status.armed || status.campaign_id.as_deref() != Some(requested_campaign_id) {
+        return Err(AppError::Invalid(
+            "proxy.qualityShadow: linked H1 campaign is not currently armed".into(),
+        ));
+    }
+    let task_model = status.model.clone().ok_or_else(|| {
+        AppError::Invalid("proxy.qualityShadow: linked H1 model is unavailable".into())
+    })?;
+    if report.by_price_version_and_model.is_empty()
+        || report
+            .by_price_version_and_model
+            .iter()
+            .any(|group| group.model != task_model)
+    {
+        return Err(AppError::Invalid(
+            "proxy.qualityShadow: linked H1 rows are not model-identical".into(),
+        ));
+    }
+    if h1_gate(report) != H1Gate::Pass {
+        return Err(AppError::Invalid(format!(
+            "proxy.qualityShadow: linked H1 gate is {}",
+            match h1_gate(report) {
+                H1Gate::Pass => "pass",
+                H1Gate::Inconclusive => "inconclusive",
+                H1Gate::Fail => "fail",
+            }
+        )));
+    }
+    Ok(task_model)
+}
+
+pub async fn quality_fixtures(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let request: QualityFixturesReq = serde_json::from_value(payload)
+        .map_err(|error| AppError::Invalid(format!("proxy.qualityFixtures: {error}")))?;
+    if request.manifest != "h2-adversarial-v1" {
+        return Err(AppError::Invalid(
+            "proxy.qualityFixtures: unknown manifest".into(),
+        ));
+    }
+    if !state.ctx_proxy.quality_status().armed {
+        return Err(AppError::Invalid(
+            "proxy.qualityFixtures: H2 is not armed".into(),
+        ));
+    }
+    let fixtures = crate::engine::runtime::quality_fixtures::load_h2_adversarial_manifest()
+        .map_err(|error| AppError::Internal(format!("proxy.qualityFixtures: {error}")))?;
+    let ids: Vec<String> = fixtures
+        .into_iter()
+        .map(|fixture| fixture.case.id)
+        .collect();
+    state.ctx_proxy.enqueue_quality_fixtures(&ids);
+    Ok(quality_status_value(state.ctx_proxy.quality_status()))
+}
+
+pub async fn quality_report(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let request = if payload.is_null() {
+        QualityReportReq::default()
+    } else {
+        serde_json::from_value::<QualityReportReq>(payload)
+            .map_err(|error| AppError::Invalid(format!("proxy.qualityReport: {error}")))?
+    };
+    if request.since_hours.is_some_and(|hours| hours < 0) {
+        return Err(AppError::Invalid(
+            "proxy.qualityReport: sinceHours must be non-negative".into(),
+        ));
+    }
+    let report = crate::engine::repo::proxy_quality_metric::report(
+        &state.db,
+        request.since_hours,
+        request.campaign_id.as_deref(),
+    )
+    .await?;
+    let (h1_armed, h1_gate) = linked_h1_gate(state, request.campaign_id.as_deref()).await;
+    let bars = crate::engine::repo::proxy_quality_metric::evaluate_go(&report, h1_armed, h1_gate);
+    let mut value = serde_json::to_value(report)
+        .map_err(|error| AppError::Internal(format!("proxy.qualityReport: {error}")))?;
+    value["goBars"] = serde_json::to_value(bars)
+        .map_err(|error| AppError::Internal(format!("proxy.qualityReport: {error}")))?;
+    Ok(value)
+}
+
+async fn linked_h1_gate(
+    state: &AppState,
+    quality_campaign_id: Option<&str>,
+) -> (bool, crate::engine::repo::proxy_summary_metric::H1Gate) {
+    use crate::engine::repo::proxy_summary_metric::{h1_gate, report_campaign, H1Gate};
+    let Some(quality_campaign_id) = quality_campaign_id else {
+        return (false, H1Gate::Inconclusive);
+    };
+    let Some((_, quality)) = state.ctx_proxy.snapshot_quality_campaign() else {
+        return (false, H1Gate::Inconclusive);
+    };
+    if quality.quality_campaign_id != quality_campaign_id {
+        return (false, H1Gate::Inconclusive);
+    }
+    let Some((_, summary)) = state.ctx_proxy.snapshot_summary_campaign() else {
+        return (false, H1Gate::Inconclusive);
+    };
+    if summary.campaign_id != quality.h1_campaign_id {
+        return (false, H1Gate::Inconclusive);
+    }
+    match report_campaign(&state.db, &summary.campaign_id).await {
+        Ok(report) => (true, h1_gate(&report)),
+        Err(_) => (true, H1Gate::Fail),
+    }
+}
+
+pub async fn quality_audit(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let request: QualityAuditReq = serde_json::from_value(payload)
+        .map_err(|error| AppError::Invalid(format!("proxy.qualityAudit: {error}")))?;
+    if !request.enabled {
+        if request.campaign_id.is_some() {
+            return Err(AppError::Invalid(
+                "proxy.qualityAudit: stop accepts no campaign id".into(),
+            ));
+        }
+        state.ctx_proxy.quality_audit.clear();
+        return Ok(audit_status_value(state));
+    }
+    let campaign_id = request
+        .campaign_id
+        .ok_or_else(|| AppError::Invalid("proxy.qualityAudit: campaignId is required".into()))?;
+    let current = state
+        .ctx_proxy
+        .snapshot_quality_campaign()
+        .ok_or_else(|| AppError::Invalid("proxy.qualityAudit: H2 is not armed".into()))?;
+    if current.1.quality_campaign_id != campaign_id {
+        return Err(AppError::Invalid(
+            "proxy.qualityAudit: campaign is not the armed H2 campaign".into(),
+        ));
+    }
+    let started = state
+        .ctx_proxy
+        .quality_audit
+        .start(state.db.clone(), campaign_id)
+        .await
+        .map_err(|error| AppError::Internal(format!("proxy.qualityAudit: {error}")))?;
+    let mut value = audit_status_value(state);
+    value["auditUrl"] = json!(started.url);
+    Ok(value)
+}
+
 fn summary_status_value(status: SummaryStatus) -> Value {
     let price = status.price.as_ref();
     json!({
@@ -251,6 +473,35 @@ fn summary_status_value(status: SummaryStatus) -> Value {
         "summarySamplesDropped": status.samples_dropped,
         "summaryModelMismatch": status.model_mismatch,
         "summaryInFlight": status.in_flight,
+    })
+}
+
+fn quality_status_value(status: QualityStatus) -> Value {
+    json!({
+        "qualityShadow": status.armed,
+        "qualityCampaignId": status.quality_campaign_id,
+        "qualityH1CampaignId": status.h1_campaign_id,
+        "qualityEvaluatorModel": status.evaluator_model,
+        "qualityRubricVersion": status.rubric_version,
+        "qualityMaxCases": status.max_cases,
+        "qualityRemainingCases": status.remaining_cases,
+        "qualityPreflightPending": status.preflight_pending,
+        "qualityFixtureQueueLength": status.fixture_queue_len,
+        "qualitySamplesDropped": status.samples_dropped,
+        "qualityH1Blocked": status.h1_blocked,
+        "qualityModelMismatch": status.model_mismatch,
+        "qualityCredentialMismatch": status.credential_mismatch,
+        "qualityInFlight": status.in_flight,
+    })
+}
+
+fn audit_status_value(state: &AppState) -> Value {
+    let status = state.ctx_proxy.quality_audit.status();
+    json!({
+        "qualityAuditActive": status.active,
+        "qualityAuditSelected": status.selected,
+        "qualityAuditSubmitted": status.submitted,
+        "qualityAuditExpiresInSeconds": status.expires_in_seconds,
     })
 }
 
@@ -283,12 +534,29 @@ fn status_value(state: &AppState) -> Value {
             .expect("summary status is an object")
             .clone(),
     );
+    let quality = quality_status_value(runtime.quality_status());
+    value.as_object_mut().expect("status is an object").extend(
+        quality
+            .as_object()
+            .expect("quality status is an object")
+            .clone(),
+    );
+    let audit = audit_status_value(state);
+    value.as_object_mut().expect("status is an object").extend(
+        audit
+            .as_object()
+            .expect("audit status is an object")
+            .clone(),
+    );
     value
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::repo::proxy_summary_metric::{
+        ConversationPassCount, SummaryGroupCount, SummaryReport,
+    };
     use crate::engine::router;
 
     fn summary_arm_payload() -> Value {
@@ -308,6 +576,51 @@ mod tests {
         })
     }
 
+    fn passing_h1_report(model: &str) -> SummaryReport {
+        SummaryReport {
+            total_admitted: 40,
+            measured: 30,
+            disarmed: 0,
+            below_ceiling: 5,
+            tail_boundary_failures: 0,
+            no_candidate: 3,
+            count_failures: 1,
+            generation_failures: 0,
+            projection_rejected: 1,
+            metric_invalid: 0,
+            distinct_conversations: 10,
+            failure_rate: 1.0 / 31.0,
+            band_400k_500k: 10,
+            pct_meets_low_water: 0.93,
+            pct_meets_two_turn: 0.86,
+            q_h_min: 0.4,
+            q_h_median: 0.6,
+            q_h_max: 0.9,
+            q_h_avg: 0.6,
+            n_h_min: 0.5,
+            n_h_median: 1.0,
+            n_h_max: 1.9,
+            n_h_avg: 1.1,
+            max_plateau_turns: 3,
+            gen_input_tokens_total: 1_000_000,
+            gen_cache_creation_tokens_total: 10_000,
+            gen_cache_read_tokens_total: 50_000,
+            gen_output_tokens_total: 20_000,
+            by_price_version_and_model: vec![SummaryGroupCount {
+                price_version: "price-v1".into(),
+                model: model.into(),
+                count: 40,
+            }],
+            conversation_pass_counts: (0..10)
+                .map(|index| ConversationPassCount {
+                    conversation_hash: format!("conversation-{index}"),
+                    measured_candidates: 3,
+                    passing_candidates: 2,
+                })
+                .collect(),
+        }
+    }
+
     #[tokio::test]
     async fn summary_shadow_is_off_by_default_and_status_is_redaction_safe() {
         let state = AppState::for_tests().await;
@@ -324,9 +637,165 @@ mod tests {
         assert_eq!(status["summaryModelMismatch"], 0);
         assert_eq!(status["summaryInFlight"], 0);
         let serialized = status.to_string().to_ascii_lowercase();
-        for forbidden in ["credential", "authorization", "api_key", "prompt", "source"] {
+        assert_eq!(status["qualityCredentialMismatch"], 0);
+        for forbidden in [
+            "credentialidentity",
+            "authorization",
+            "api_key",
+            "prompt",
+            "source",
+        ] {
             assert!(!serialized.contains(forbidden), "leaked key: {forbidden}");
         }
+    }
+
+    #[tokio::test]
+    async fn quality_status_is_off_by_default_and_arm_requires_current_passing_h1() {
+        let state = AppState::for_tests().await;
+        let status = router::dispatch(&state, "proxy.status", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(status["qualityShadow"], false);
+        assert!(status["qualityCampaignId"].is_null());
+        assert_eq!(status["qualityRemainingCases"], 0);
+        assert_eq!(status["qualityFixtureQueueLength"], 0);
+        assert_eq!(status["qualityAuditActive"], false);
+
+        let payload = json!({
+            "enabled":true,
+            "h1CampaignId":"missing-h1",
+            "evaluatorModel":"evaluator-model",
+            "rubricVersion":"hybrid-quality-rubric-v1",
+            "maxCases":100,
+        });
+        assert!(router::dispatch(&state, "proxy.qualityShadow", payload)
+            .await
+            .is_err());
+        assert!(!state.ctx_proxy.quality_status().armed);
+    }
+
+    #[test]
+    fn quality_arm_h1_validation_pins_pass_campaign_and_model_identity() {
+        let status = SummaryStatus {
+            armed: true,
+            campaign_id: Some("h1-campaign".into()),
+            model: Some("task-model".into()),
+            price: None,
+            tail_target_tokens: 100_000,
+            max_output_tokens: 8_192,
+            samples_dropped: 0,
+            model_mismatch: 0,
+            in_flight: 0,
+        };
+        let report = passing_h1_report("task-model");
+        assert_eq!(
+            validate_h1_quality_arm(&status, &report, "h1-campaign").unwrap(),
+            "task-model"
+        );
+        let mut wrong_model = report.clone();
+        wrong_model.by_price_version_and_model[0].model = "other-model".into();
+        assert!(validate_h1_quality_arm(&status, &wrong_model, "h1-campaign").is_err());
+        let mut inconclusive = report;
+        inconclusive.measured = 29;
+        assert!(validate_h1_quality_arm(&status, &inconclusive, "h1-campaign").is_err());
+    }
+
+    #[tokio::test]
+    async fn fixture_enqueue_and_audit_start_are_zero_call_control_operations() {
+        let state = AppState::for_tests().await;
+        let armed = state
+            .ctx_proxy
+            .arm_quality(QualityArmRequest {
+                h1_campaign_id: "h1-campaign".into(),
+                evaluator_model: "evaluator-model".into(),
+                task_model: "task-model".into(),
+                rubric_version: "hybrid-quality-rubric-v1".into(),
+                max_cases: 100,
+            })
+            .unwrap();
+        let campaign_id = armed.quality_campaign_id.unwrap();
+        let status = router::dispatch(
+            &state,
+            "proxy.qualityFixtures",
+            json!({"manifest":"h2-adversarial-v1"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status["qualityFixtureQueueLength"], 70);
+        assert_eq!(status["qualityRemainingCases"], 100);
+        assert_eq!(status["qualityInFlight"], 0);
+
+        let audit = router::dispatch(
+            &state,
+            "proxy.qualityAudit",
+            json!({"enabled":true,"campaignId":campaign_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit["qualityAuditActive"], true);
+        assert!(audit["auditUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:"));
+        let stopped = router::dispatch(
+            &state,
+            "proxy.qualityAudit",
+            json!({"enabled":false}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stopped["qualityAuditActive"], false);
+    }
+
+    #[tokio::test]
+    async fn quality_report_is_read_only_and_off_clears_audit_and_queue() {
+        let state = AppState::for_tests().await;
+        let armed = state
+            .ctx_proxy
+            .arm_quality(QualityArmRequest {
+                h1_campaign_id: "h1-campaign".into(),
+                evaluator_model: "evaluator-model".into(),
+                task_model: "task-model".into(),
+                rubric_version: "hybrid-quality-rubric-v1".into(),
+                max_cases: 100,
+            })
+            .unwrap();
+        let campaign_id = armed.quality_campaign_id.unwrap();
+        router::dispatch(
+            &state,
+            "proxy.qualityFixtures",
+            json!({"manifest":"h2-adversarial-v1"}),
+        )
+        .await
+        .unwrap();
+        router::dispatch(
+            &state,
+            "proxy.qualityAudit",
+            json!({"enabled":true,"campaignId":campaign_id.clone()}),
+        )
+        .await
+        .unwrap();
+        let report = router::dispatch(
+            &state,
+            "proxy.qualityReport",
+            json!({"campaignId":campaign_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["terminalCases"], 0);
+        assert_eq!(report["goBars"]["go"], false);
+        assert!(state.ctx_proxy.quality_status().armed);
+
+        let off = router::dispatch(
+            &state,
+            "proxy.qualityShadow",
+            json!({"enabled":false}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(off["qualityShadow"], false);
+        assert_eq!(off["qualityFixtureQueueLength"], 0);
+        assert!(!state.ctx_proxy.quality_audit.status().active);
     }
 
     #[tokio::test]

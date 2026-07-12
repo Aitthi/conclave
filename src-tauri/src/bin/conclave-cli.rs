@@ -132,6 +132,11 @@ Subcommands:
   proxy summary-shadow off
   proxy summary-shadow on --model <exact-request-model> --price-version <immutable-version-label> --standard-input-usd-per-mtok <rate> --standard-cache-write-usd-per-mtok <rate> --standard-cache-read-usd-per-mtok <rate> --standard-output-usd-per-mtok <rate> --long-context-threshold <tokens> --long-input-usd-per-mtok <rate> --long-cache-write-usd-per-mtok <rate> --long-cache-read-usd-per-mtok <rate> --long-output-usd-per-mtok <rate>
   proxy summary-report [--since-hours N] [--campaign-id ID]
+  proxy quality-shadow off
+  proxy quality-shadow on --h1-campaign-id <passing-h1-id> --evaluator-model <different-model> --rubric-version hybrid-quality-rubric-v1 --max-cases <1..1000>
+  proxy quality-fixtures enqueue --manifest h2-adversarial-v1
+  proxy quality-report [--since-hours N] [--campaign-id ID]
+  proxy quality-audit start --campaign-id ID | stop
   rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
@@ -5700,6 +5705,9 @@ mod tests {
             "proxy summary-shadow on --model <exact-request-model> --price-version <immutable-version-label>"
         ));
         assert!(USAGE.contains("proxy summary-report [--since-hours N] [--campaign-id ID]"));
+        assert!(USAGE.contains("proxy quality-shadow on --h1-campaign-id"));
+        assert!(USAGE.contains("proxy quality-fixtures enqueue --manifest h2-adversarial-v1"));
+        assert!(USAGE.contains("proxy quality-audit start --campaign-id ID | stop"));
     }
 
     // ── browser: caller-id injection + screenshot path resolution ──────────
@@ -5749,8 +5757,8 @@ mod tests {
 
     #[test]
     fn expand_browser_screenshot_resolves_relative_path_to_absolute_after_id() {
-        let out = expand_self_args(v(&["browser", "screenshot", "shot.png"]), Some("agentX"))
-            .unwrap();
+        let out =
+            expand_self_args(v(&["browser", "screenshot", "shot.png"]), Some("agentX")).unwrap();
         assert_eq!(out.len(), 4);
         assert_eq!(out[2], "agentX"); // caller id at argv[2]
         assert!(
@@ -5767,9 +5775,15 @@ mod tests {
 
     #[test]
     fn expand_browser_screenshot_leaves_absolute_path_unchanged_after_id() {
-        let out = expand_self_args(v(&["browser", "screenshot", "/tmp/shot.png"]), Some("agentX"))
-            .unwrap();
-        assert_eq!(out, v(&["browser", "screenshot", "agentX", "/tmp/shot.png"]));
+        let out = expand_self_args(
+            v(&["browser", "screenshot", "/tmp/shot.png"]),
+            Some("agentX"),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            v(&["browser", "screenshot", "agentX", "/tmp/shot.png"])
+        );
     }
 
     #[test]

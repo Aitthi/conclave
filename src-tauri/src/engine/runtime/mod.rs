@@ -32,6 +32,7 @@ pub mod provider;
 pub mod pty;
 #[allow(dead_code)]
 pub mod quality;
+pub mod quality_audit;
 #[allow(dead_code)]
 pub mod quality_fixtures;
 pub mod sandbox_config;
