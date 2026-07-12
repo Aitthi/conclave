@@ -129,6 +129,9 @@ Subcommands:
   code callers|callees|refs|impact <name>     semantic cross-references
   code rename|rewrite [--apply]               AST-validated edits (dry-run default)
   proxy status | mode <off|log|rewrite> | threshold <ratio> | checkpoint <on|off> | ceiling <tokens> | report [--since-hours N] | checkpoint-report [--since-hours N]
+  proxy summary-shadow off
+  proxy summary-shadow on --model <exact-request-model> --price-version <immutable-version-label> --standard-input-usd-per-mtok <rate> --standard-cache-write-usd-per-mtok <rate> --standard-cache-read-usd-per-mtok <rate> --standard-output-usd-per-mtok <rate> --long-context-threshold <tokens> --long-input-usd-per-mtok <rate> --long-cache-write-usd-per-mtok <rate> --long-cache-read-usd-per-mtok <rate> --long-output-usd-per-mtok <rate>
+  proxy summary-report [--since-hours N] [--campaign-id ID]
   rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
@@ -4154,7 +4157,7 @@ mod tests {
     use super::{
         expand_self_args, inject_code_path, parse_min_plan_header, plan_check_files_and_total,
         read_checkout_file, render_plan_check_result, sha256_hex, validate_slug, GUARD_HOOK,
-        GUARD_MARKER,
+        GUARD_MARKER, USAGE,
     };
     use std::path::{Path, PathBuf};
 
@@ -5691,6 +5694,12 @@ mod tests {
     fn proxy_commands_pass_through_for_plain_cli_exec() {
         let input = v(&["proxy", "report", "--since-hours", "48"]);
         assert_eq!(expand_self_args(input.clone(), None).unwrap(), input);
+        let summary = v(&["proxy", "summary-report", "--campaign-id", "campaign-1"]);
+        assert_eq!(expand_self_args(summary.clone(), None).unwrap(), summary);
+        assert!(USAGE.contains(
+            "proxy summary-shadow on --model <exact-request-model> --price-version <immutable-version-label>"
+        ));
+        assert!(USAGE.contains("proxy summary-report [--since-hours N] [--campaign-id ID]"));
     }
 
     // ── browser: caller-id injection + screenshot path resolution ──────────
