@@ -14,8 +14,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// A discovered transcript source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,14 +63,47 @@ pub struct TranscriptContextReading {
     pub source_kind: TranscriptSourceKind,
 }
 
+/// Reader with per-file incremental scan state.
+///
+/// The engine clones one reader per poll into `spawn_blocking`
+/// (`instance.rs::poll_transcript_context`), so the state MUST be `Arc`-shared
+/// across clones — a per-clone cache would never hit and the meter would
+/// silently fall back to full re-parsing every 2s (the ~320% CPU incident this
+/// state exists to fix). The map is keyed by `(instance_id, path)`: production
+/// builds one reader per agent instance, but the key still carries the
+/// instance so a reader shared across instances (as some tests do) can never
+/// serve one agent a reduction accumulated under another agent's ownership
+/// rules. Workspace and start time are constant per (reader, instance).
 #[derive(Debug, Clone)]
 pub struct TranscriptContextReader {
     config: TranscriptContextConfig,
+    scan_state: Arc<Mutex<HashMap<(String, PathBuf), FileScanState>>>,
 }
 
 impl TranscriptContextReader {
     pub fn new(config: TranscriptContextConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            scan_state: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[cfg(test)]
+    fn file_opens(&self, instance_id: &str, path: &Path) -> u64 {
+        self.scan_state
+            .lock()
+            .unwrap()
+            .get(&(instance_id.to_owned(), path.to_path_buf()))
+            .map_or(0, |state| state.opens)
+    }
+
+    #[cfg(test)]
+    fn file_offset(&self, instance_id: &str, path: &Path) -> u64 {
+        self.scan_state
+            .lock()
+            .unwrap()
+            .get(&(instance_id.to_owned(), path.to_path_buf()))
+            .map_or(0, |state| state.offset)
     }
 
     pub fn poll(
@@ -105,17 +139,20 @@ impl TranscriptContextReader {
             self.config.claude_projects_root.clone()
         };
         let mut best: Option<ScannedReading> = None;
+        let mut states = self.scan_state.lock().unwrap();
         for path in collect_jsonl_files(&scan_root, started_at) {
-            let Some(reading) = scan_claude_file(
+            let state = states
+                .entry((instance_id.to_owned(), path.clone()))
+                .or_insert_with(|| FileScanState::new(ScanAcc::Claude(ClaudeAcc::default())));
+            let reading = scan_file_incremental(
                 &path,
                 instance_id,
                 workspace_folder,
                 started_at,
                 self.config.fallback_limit,
-            ) else {
-                continue;
-            };
-            best = choose_newer(best, Some(reading));
+                state,
+            );
+            best = choose_newer(best, reading);
         }
         best.map(ScannedReading::into_reading)
     }
@@ -130,20 +167,168 @@ impl TranscriptContextReader {
         // Codex stores sessions under date buckets, not per-cwd, so there is no
         // dir to scope to — but the mtime filter still skips every rollout that
         // was last written before this agent started, i.e. every closed session.
+        let mut states = self.scan_state.lock().unwrap();
         for path in collect_jsonl_files(&self.config.codex_sessions_root, started_at) {
-            let Some(reading) = scan_codex_file(
+            let state = states
+                .entry((instance_id.to_owned(), path.clone()))
+                .or_insert_with(|| FileScanState::new(ScanAcc::Codex(CodexAcc::default())));
+            let reading = scan_file_incremental(
                 &path,
                 instance_id,
                 workspace_folder,
                 started_at,
                 self.config.fallback_limit,
-            ) else {
-                continue;
-            };
-            best = choose_newer(best, Some(reading));
+                state,
+            );
+            best = choose_newer(best, reading);
         }
         best.map(ScannedReading::into_reading)
     }
+}
+
+/// Per-file incremental scan state (see [`TranscriptContextReader`] for why it
+/// is `Arc`-shared). `offset` is advanced ONLY through the last COMPLETE
+/// newline-terminated line — a partial tail line (writer mid-append) is left
+/// unconsumed and re-read on the next poll, so a torn write can never corrupt
+/// the accumulated reduction (risk ledger: torn reads).
+#[derive(Debug)]
+struct FileScanState {
+    offset: u64,
+    len: u64,
+    mtime: Option<DateTime<Utc>>,
+    /// How many times the file was actually opened (test hook for the
+    /// unchanged-file short-circuit).
+    opens: u64,
+    cached: Option<ScannedReading>,
+    acc: ScanAcc,
+}
+
+impl FileScanState {
+    fn new(acc: ScanAcc) -> Self {
+        Self {
+            offset: 0,
+            len: 0,
+            mtime: None,
+            opens: 0,
+            cached: None,
+            acc,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ScanAcc {
+    Claude(ClaudeAcc),
+    Codex(CodexAcc),
+}
+
+/// Stat-first incremental scan: an unchanged file (same length and mtime as
+/// the previous poll) is answered from the cached reduction without an open;
+/// a grown file is parsed from the consumed offset only; a shrunken file
+/// (rotation, or Claude Code rewriting a session on compaction) resets the
+/// state and rescans from zero. The reduction is written so that the reading
+/// for any (file, instance) always equals what a fresh scan from byte 0 with
+/// the same complete-line rule would produce.
+fn scan_file_incremental(
+    path: &Path,
+    instance_id: &str,
+    workspace_folder: &Path,
+    started_at: DateTime<Utc>,
+    fallback_limit: i64,
+    state: &mut FileScanState,
+) -> Option<ScannedReading> {
+    let meta = fs::metadata(path).ok()?;
+    let len = meta.len();
+    let mtime = file_modified_at(path);
+    if state.opens > 0 && len == state.len && mtime == state.mtime {
+        return state.cached.clone();
+    }
+    if len < state.offset {
+        // Rewritten/truncated in place: everything we consumed is stale.
+        state.offset = 0;
+        match &mut state.acc {
+            ScanAcc::Claude(acc) => *acc = ClaudeAcc::default(),
+            ScanAcc::Codex(acc) => *acc = CodexAcc::default(),
+        }
+    }
+    state.opens += 1;
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(state.offset)).ok()?;
+    let mut reader = BufReader::new(file);
+    let workspace_text = workspace_folder.to_string_lossy();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tail: Option<String> = None;
+    loop {
+        buf.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut buf) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        if buf.last() != Some(&b'\n') {
+            // Partial tail: NEVER consumed into persistent state (the writer
+            // may be mid-line — risk ledger: torn reads). It is overlaid
+            // transiently below so a flushed-but-unterminated record still
+            // counts this poll, exactly as the old full `lines()` scan did
+            // (ruling f674c8d1).
+            tail = Some(String::from_utf8_lossy(&buf).into_owned());
+            break;
+        }
+        state.offset += n as u64;
+        let text = String::from_utf8_lossy(&buf);
+        let line = text.trim_end_matches(['\r', '\n']);
+        match &mut state.acc {
+            ScanAcc::Claude(acc) => acc.ingest_line(line, instance_id, workspace_text.as_ref()),
+            ScanAcc::Codex(acc) => acc.ingest_line(
+                line,
+                instance_id,
+                workspace_text.as_ref(),
+                path,
+                started_at,
+                fallback_limit,
+            ),
+        }
+    }
+    state.len = len;
+    state.mtime = mtime;
+    // Finalize over (persistent state + transient tail). A torn/invalid tail
+    // simply parses to nothing; when its newline lands on a later poll the
+    // record folds into persistent state exactly once. Caching the overlaid
+    // result is sound: the short-circuit only replays it while len and mtime
+    // are unchanged, i.e. while the tail bytes are still identical.
+    state.cached = match &state.acc {
+        ScanAcc::Claude(acc) => {
+            let acc = match &tail {
+                Some(line) => {
+                    let mut probe = acc.clone();
+                    probe.ingest_line(line, instance_id, workspace_text.as_ref());
+                    probe
+                }
+                None => acc.clone(),
+            };
+            acc.finalize(path, started_at, fallback_limit)
+        }
+        ScanAcc::Codex(acc) => {
+            let acc = match &tail {
+                Some(line) => {
+                    let mut probe = acc.clone();
+                    probe.ingest_line(
+                        line,
+                        instance_id,
+                        workspace_text.as_ref(),
+                        path,
+                        started_at,
+                        fallback_limit,
+                    );
+                    probe
+                }
+                None => acc.clone(),
+            };
+            acc.finalize()
+        }
+    };
+    state.cached.clone()
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +424,86 @@ fn claude_model_context_window(model: &str) -> Option<i64> {
     None
 }
 
+/// Per-line reduction of a Claude Code transcript. Everything the reading
+/// depends on is folded in incrementally so a suffix scan continues exactly
+/// where the previous one stopped: ownership flags are monotonic, and
+/// `last_model_window` keeps the latest RECOGNIZED model's window — a
+/// `<synthetic>` or unknown id maps to None and leaves the previous window in
+/// place, so mid-session noise never drops us back to the fallback.
+///
+/// `latest_usage` replaces the old per-requestId map (ruling f674c8d1): every
+/// usage insert carries a strictly increasing line number, so the map's
+/// max-by-line_no was ALWAYS its most recent insert — the retried-requestId
+/// de-dup could never change the winner, only overwrite a key that had already
+/// lost. A single `(line_no, tokens)` scalar is the same reduction, O(1) per
+/// poll instead of an unbounded map held per file all session.
+#[derive(Debug, Default, Clone)]
+struct ClaudeAcc {
+    line_no: usize,
+    saw_workspace: bool,
+    saw_instance: bool,
+    last_model_window: Option<i64>,
+    latest_usage: Option<(usize, i64)>,
+}
+
+impl ClaudeAcc {
+    fn ingest_line(&mut self, line: &str, instance_id: &str, workspace_text: &str) {
+        self.line_no += 1;
+        if !self.saw_workspace && line.contains(workspace_text) {
+            self.saw_workspace = true;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+        if !self.saw_instance && claude_value_declares_owner(&value, instance_id) {
+            self.saw_instance = true;
+        }
+        if value.get("type").and_then(Value::as_str) != Some("assistant") {
+            return;
+        }
+        let Some(message) = value.get("message") else {
+            return;
+        };
+        if let Some(window) = message
+            .get("model")
+            .and_then(Value::as_str)
+            .and_then(claude_model_context_window)
+        {
+            self.last_model_window = Some(window);
+        }
+        let Some(usage) = message.get("usage") else {
+            return;
+        };
+        self.latest_usage = Some((self.line_no, sum_claude_usage(usage)));
+    }
+
+    fn finalize(
+        &self,
+        path: &Path,
+        started_at: DateTime<Utc>,
+        fallback_limit: i64,
+    ) -> Option<ScannedReading> {
+        if !self.saw_workspace || !self.saw_instance {
+            return None;
+        }
+        let (_, tokens) = self.latest_usage?;
+        let observed_at = file_modified_at(path)?;
+        if observed_at < started_at {
+            return None;
+        }
+        Some(ScannedReading {
+            tokens,
+            limit: self.last_model_window.unwrap_or(fallback_limit),
+            observed_at,
+            source_kind: TranscriptSourceKind::ClaudeCode,
+        })
+    }
+}
+
+/// One-shot full scan (no persistent state). The polling path uses
+/// [`scan_file_incremental`]; this stays for callers/tests that want the
+/// classic read-everything semantics, including an unterminated final line.
+#[cfg(test)]
 fn scan_claude_file(
     path: &Path,
     instance_id: &str,
@@ -249,100 +514,47 @@ fn scan_claude_file(
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let workspace_text = workspace_folder.to_string_lossy();
-    let mut saw_workspace = false;
-    let mut saw_instance = false;
-    let mut latest_by_key: HashMap<String, (usize, i64)> = HashMap::new();
-    // Latest RECOGNIZED model's window. A `<synthetic>` or unknown id maps to
-    // None and leaves the previous recognized window in place, so mid-session
-    // noise never drops us back to the fallback.
-    let mut last_model_window: Option<i64> = None;
-    let mut line_no = 0usize;
-
+    let mut acc = ClaudeAcc::default();
     for line in reader.lines().map_while(Result::ok) {
-        line_no += 1;
-        if !saw_workspace && line.contains(workspace_text.as_ref()) {
-            saw_workspace = true;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if !saw_instance && claude_value_declares_owner(&value, instance_id) {
-            saw_instance = true;
-        }
-        if value.get("type").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        if let Some(window) = message
-            .get("model")
-            .and_then(Value::as_str)
-            .and_then(claude_model_context_window)
-        {
-            last_model_window = Some(window);
-        }
-        let Some(usage) = message.get("usage") else {
-            continue;
-        };
-        let tokens = sum_claude_usage(usage);
-        let key = value
-            .get("requestId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| message.get("id").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_else(|| format!("line:{line_no}"));
-        latest_by_key.insert(key, (line_no, tokens));
+        acc.ingest_line(&line, instance_id, workspace_text.as_ref());
     }
-
-    if !saw_workspace || !saw_instance || latest_by_key.is_empty() {
-        return None;
-    }
-
-    let (_, tokens) = latest_by_key
-        .into_values()
-        .max_by_key(|(line_no, _)| *line_no)?;
-    let observed_at = file_modified_at(path)?;
-    if observed_at < started_at {
-        return None;
-    }
-    Some(ScannedReading {
-        tokens,
-        limit: last_model_window.unwrap_or(fallback_limit),
-        observed_at,
-        source_kind: TranscriptSourceKind::ClaudeCode,
-    })
+    acc.finalize(path, started_at, fallback_limit)
 }
 
-fn scan_codex_file(
-    path: &Path,
-    instance_id: &str,
-    workspace_folder: &Path,
-    started_at: DateTime<Utc>,
-    fallback_limit: i64,
-) -> Option<ScannedReading> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let workspace_text = workspace_folder.to_string_lossy();
-    let mut saw_workspace = false;
-    let mut saw_instance = false;
-    let mut best: Option<ScannedReading> = None;
+/// Per-line reduction of a Codex rollout. Ownership flags are monotonic and
+/// `best` keeps the LAST admissible token_count (later lines simply overwrite),
+/// so a suffix scan continues the same reduction a full scan would compute.
+#[derive(Debug, Default, Clone)]
+struct CodexAcc {
+    saw_workspace: bool,
+    saw_instance: bool,
+    best: Option<ScannedReading>,
+}
 
-    for line in reader.lines().map_while(Result::ok) {
-        if !saw_workspace && line.contains(workspace_text.as_ref()) {
-            saw_workspace = true;
+impl CodexAcc {
+    fn ingest_line(
+        &mut self,
+        line: &str,
+        instance_id: &str,
+        workspace_text: &str,
+        path: &Path,
+        started_at: DateTime<Utc>,
+        fallback_limit: i64,
+    ) {
+        if !self.saw_workspace && line.contains(workspace_text) {
+            self.saw_workspace = true;
         }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return;
         };
-        if !saw_instance && codex_value_declares_owner(&value, instance_id) {
-            saw_instance = true;
+        if !self.saw_instance && codex_value_declares_owner(&value, instance_id) {
+            self.saw_instance = true;
         }
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
-            continue;
+            return;
         }
         if value.pointer("/payload/type").and_then(Value::as_str) != Some("token_count") {
-            continue;
+            return;
         }
 
         if let Some(cwd) = value
@@ -369,19 +581,19 @@ fn scan_codex_file(
                     .and_then(Value::as_str)
             })
         {
-            if cwd == workspace_text.as_ref() {
-                saw_workspace = true;
+            if cwd == workspace_text {
+                self.saw_workspace = true;
             }
         }
 
         let Some(info) = value.pointer("/payload/info") else {
-            continue;
+            return;
         };
         let Some(tokens) = info
             .pointer("/last_token_usage/total_tokens")
             .and_then(Value::as_i64)
         else {
-            continue;
+            return;
         };
         let limit = info
             .pointer("/model_context_window")
@@ -393,9 +605,9 @@ fn scan_codex_file(
             .and_then(parse_ts)
             .unwrap_or_else(|| file_modified_at(path).unwrap_or_else(Utc::now));
         if observed_at < started_at {
-            continue;
+            return;
         }
-        best = Some(ScannedReading {
+        self.best = Some(ScannedReading {
             tokens,
             limit,
             observed_at,
@@ -403,11 +615,39 @@ fn scan_codex_file(
         });
     }
 
-    if saw_workspace && saw_instance {
-        best
-    } else {
-        None
+    fn finalize(&self) -> Option<ScannedReading> {
+        if self.saw_workspace && self.saw_instance {
+            self.best.clone()
+        } else {
+            None
+        }
     }
+}
+
+/// One-shot full scan (no persistent state); see [`scan_claude_file`].
+#[cfg(test)]
+fn scan_codex_file(
+    path: &Path,
+    instance_id: &str,
+    workspace_folder: &Path,
+    started_at: DateTime<Utc>,
+    fallback_limit: i64,
+) -> Option<ScannedReading> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let workspace_text = workspace_folder.to_string_lossy();
+    let mut acc = CodexAcc::default();
+    for line in reader.lines().map_while(Result::ok) {
+        acc.ingest_line(
+            &line,
+            instance_id,
+            workspace_text.as_ref(),
+            path,
+            started_at,
+            fallback_limit,
+        );
+    }
+    acc.finalize()
 }
 
 fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
@@ -1435,5 +1675,390 @@ mod tests {
         let _ = std::fs::remove_dir_all(&codex_root);
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&other_workspace);
+    }
+
+    // ---- Incremental scan state (transcript-context-cpu-fix) -----------------
+
+    /// `write_jsonl` deliberately leaves the final line unterminated; the
+    /// incremental tests need real appender semantics: every record ends in
+    /// a newline, exactly as Claude Code / Codex write them.
+    fn write_jsonl_terminated(path: &Path, lines: &[Value]) {
+        let mut body = String::new();
+        for line in lines {
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
+        std::fs::write(path, body).expect("write jsonl");
+    }
+
+    fn append_raw(path: &Path, text: &str) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open for append");
+        file.write_all(text.as_bytes()).expect("append");
+    }
+
+    fn append_jsonl_terminated(path: &Path, lines: &[Value]) {
+        for line in lines {
+            append_raw(path, &format!("{line}\n"));
+        }
+    }
+
+    struct IncrementalSetup {
+        claude_root: PathBuf,
+        codex_root: PathBuf,
+        workspace: PathBuf,
+        project_dir: PathBuf,
+        reader: TranscriptContextReader,
+    }
+
+    impl IncrementalSetup {
+        fn new() -> Self {
+            let claude_root = tmp_root("claude-root");
+            let codex_root = tmp_root("codex-root");
+            let workspace = tmp_root("workspace");
+            let project_dir = claude_project_dir(&claude_root, &workspace);
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let reader = TranscriptContextReader::new(TranscriptContextConfig {
+                claude_projects_root: claude_root.clone(),
+                codex_sessions_root: codex_root.clone(),
+                fallback_limit: 200_000,
+            });
+            Self {
+                claude_root,
+                codex_root,
+                workspace,
+                project_dir,
+                reader,
+            }
+        }
+
+        fn poll_claude(&self, instance_id: &str) -> Option<TranscriptContextReading> {
+            self.reader.poll(
+                instance_id,
+                &self.workspace,
+                "claude-code",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+        }
+
+        fn poll_codex(&self, instance_id: &str) -> Option<TranscriptContextReading> {
+            self.reader.poll(
+                instance_id,
+                &self.workspace,
+                "codex",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+        }
+
+        /// A fresh reader with NO accumulated state over the same roots — the
+        /// full-rescan oracle every incremental reading must equal.
+        fn fresh_full_scan(
+            &self,
+            instance_id: &str,
+            cli_kind: &str,
+        ) -> Option<TranscriptContextReading> {
+            TranscriptContextReader::new(TranscriptContextConfig {
+                claude_projects_root: self.claude_root.clone(),
+                codex_sessions_root: self.codex_root.clone(),
+                fallback_limit: 200_000,
+            })
+            .poll(
+                instance_id,
+                &self.workspace,
+                cli_kind,
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+        }
+
+        fn cleanup(&self) {
+            let _ = std::fs::remove_dir_all(&self.claude_root);
+            let _ = std::fs::remove_dir_all(&self.codex_root);
+            let _ = std::fs::remove_dir_all(&self.workspace);
+        }
+    }
+
+    /// Pinned test 1: incremental reading over appends equals a fresh reader's
+    /// full scan — the invariant every other behavior hangs off.
+    #[test]
+    fn incremental_append_matches_fresh_reader_full_scan() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-inc-1";
+        let file = setup.project_dir.join("session.jsonl");
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(50),
+            ],
+        );
+        assert_eq!(setup.poll_claude(instance_id).unwrap().tokens, 50);
+
+        let mut later = claude_usage_line(80);
+        later["requestId"] = json!("req-2");
+        append_jsonl_terminated(&file, &[later]);
+        let incremental = setup.poll_claude(instance_id).expect("reading");
+        let fresh = setup
+            .fresh_full_scan(instance_id, "claude-code")
+            .expect("fresh reading");
+        assert_eq!(incremental, fresh, "incremental must equal full rescan");
+        assert_eq!(incremental.tokens, 80);
+        setup.cleanup();
+    }
+
+    /// Pinned test 2 (per ruling f674c8d1): a torn tail is never parsed into
+    /// state and never errors; a complete-but-unterminated record counts
+    /// transiently (old lines() behavior) without advancing the offset; once
+    /// the newline lands it folds into persistent state exactly once.
+    #[test]
+    fn partial_tail_line_is_overlaid_transiently_and_never_torn() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-tail-1";
+        let file = setup.project_dir.join("session.jsonl");
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(50),
+            ],
+        );
+        assert_eq!(setup.poll_claude(instance_id).unwrap().tokens, 50);
+        let consumed = setup.reader.file_offset(instance_id, &file);
+        assert_eq!(consumed, std::fs::metadata(&file).unwrap().len());
+
+        // Torn write: the first half of a record, no newline.
+        let mut record = claude_usage_line(80);
+        record["requestId"] = json!("req-tail");
+        let record_text = record.to_string();
+        let (head, rest) = record_text.split_at(record_text.len() / 2);
+        append_raw(&file, head);
+        let reading = setup
+            .poll_claude(instance_id)
+            .expect("reading survives torn tail");
+        assert_eq!(reading.tokens, 50, "torn tail contributes nothing");
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            consumed,
+            "torn tail is not consumed"
+        );
+
+        // The record completes but the newline has not landed yet: it counts
+        // transiently, exactly as the old full scan would have read it, while
+        // the offset still refuses to move past an unterminated line.
+        append_raw(&file, rest);
+        let reading = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!(reading.tokens, 80, "flushed record counts this poll");
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            consumed,
+            "unterminated record is still not consumed"
+        );
+
+        // Newline lands: consumed exactly once, reading unchanged and equal to
+        // a fresh full rescan.
+        append_raw(&file, "\n");
+        let reading = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!(reading.tokens, 80);
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            std::fs::metadata(&file).unwrap().len(),
+            "terminated record is consumed"
+        );
+        assert_eq!(
+            reading,
+            setup.fresh_full_scan(instance_id, "claude-code").unwrap()
+        );
+        setup.cleanup();
+    }
+
+    /// Pinned test 3: a shrunken file (rotation, or Claude Code rewriting the
+    /// session on compaction) resets the state and rescans from zero.
+    #[test]
+    fn truncated_or_rewritten_file_resets_state_and_matches_full_rescan() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-trunc-1";
+        let file = setup.project_dir.join("session.jsonl");
+        let mut second = claude_usage_line(80);
+        second["requestId"] = json!("req-2");
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(50),
+                second,
+            ],
+        );
+        assert_eq!(setup.poll_claude(instance_id).unwrap().tokens, 80);
+
+        // Rewrite shorter: new content, fewer bytes than the consumed offset.
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(30),
+            ],
+        );
+        let reading = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!(reading.tokens, 30, "state reset, new content wins");
+        assert_eq!(
+            reading,
+            setup.fresh_full_scan(instance_id, "claude-code").unwrap()
+        );
+        setup.cleanup();
+    }
+
+    /// Pinned test 4: an unchanged file is answered from the cached reduction
+    /// without reopening — including through a CLONED reader, which is how the
+    /// engine actually calls poll (state must be Arc-shared or the cache is a
+    /// mirage).
+    #[test]
+    fn unchanged_file_short_circuits_without_reopening() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-idle-1";
+        let file = setup.project_dir.join("session.jsonl");
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(50),
+            ],
+        );
+        let first = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!(setup.reader.file_opens(instance_id, &file), 1);
+
+        let clone = setup.reader.clone();
+        let second = clone
+            .poll(
+                instance_id,
+                &setup.workspace,
+                "claude-code",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("reading");
+        assert_eq!(first, second);
+        assert_eq!(
+            setup.reader.file_opens(instance_id, &file),
+            1,
+            "second poll with no writes must not reopen the file"
+        );
+        setup.cleanup();
+    }
+
+    /// Pinned test 5: ownership seen once stays seen — later appends are read
+    /// as a suffix (offset already past the owner marker) and the reading is
+    /// still owned by the instance.
+    #[test]
+    fn saw_instance_stays_owned_across_incremental_appends() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-mono-1";
+        let file = setup.project_dir.join("session.jsonl");
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(50),
+            ],
+        );
+        assert_eq!(setup.poll_claude(instance_id).unwrap().tokens, 50);
+        let consumed = setup.reader.file_offset(instance_id, &file);
+
+        for (req, tokens) in [("req-2", 60), ("req-3", 70)] {
+            let mut line = claude_usage_line(tokens);
+            line["requestId"] = json!(req);
+            append_jsonl_terminated(&file, &[line]);
+            let reading = setup.poll_claude(instance_id).expect("still owned");
+            assert_eq!(reading.tokens, tokens);
+        }
+        assert!(
+            setup.reader.file_offset(instance_id, &file) > consumed,
+            "appends were consumed as a suffix, never rescanned from zero"
+        );
+        setup.cleanup();
+    }
+
+    /// Pinned test 6: choose_newer across files is preserved — the file whose
+    /// reading is newest wins, even as per-file results come from caches.
+    #[test]
+    fn newer_reading_in_second_file_still_wins() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-multi-1";
+        let first = setup.project_dir.join("first.jsonl");
+        let second = setup.project_dir.join("second.jsonl");
+        write_jsonl_terminated(
+            &first,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(10),
+            ],
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_jsonl_terminated(
+            &second,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(99),
+            ],
+        );
+        assert_eq!(
+            setup.poll_claude(instance_id).unwrap().tokens,
+            99,
+            "newer second file wins"
+        );
+
+        // Appending to the FIRST file makes it the newest observation; the
+        // cached second-file reading must lose to the refreshed first.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut line = claude_usage_line(111);
+        line["requestId"] = json!("req-2");
+        append_jsonl_terminated(&first, &[line]);
+        assert_eq!(
+            setup.poll_claude(instance_id).unwrap().tokens,
+            111,
+            "refreshed first file wins on recency"
+        );
+        setup.cleanup();
+    }
+
+    /// Codex gets the same incremental treatment: appended token counts fold
+    /// into the cached reduction and match a fresh full scan.
+    #[test]
+    fn codex_incremental_append_matches_fresh_reader() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-codex-inc-1";
+        let file = setup.codex_root.join("rollout.jsonl");
+        write_jsonl_terminated(
+            &file,
+            &[
+                codex_owner_line(instance_id),
+                codex_token_line("2099-01-01T00:00:01Z", 101, 1_000, &setup.workspace),
+            ],
+        );
+        assert_eq!(setup.poll_codex(instance_id).unwrap().tokens, 101);
+        assert_eq!(setup.reader.file_opens(instance_id, &file), 1);
+
+        append_jsonl_terminated(
+            &file,
+            &[codex_token_line(
+                "2099-01-01T00:00:02Z",
+                202,
+                2_000,
+                &setup.workspace,
+            )],
+        );
+        let incremental = setup.poll_codex(instance_id).expect("reading");
+        let fresh = setup
+            .fresh_full_scan(instance_id, "codex")
+            .expect("fresh reading");
+        assert_eq!(incremental, fresh);
+        assert_eq!(incremental.tokens, 202);
+        assert_eq!(incremental.limit, 2_000);
+
+        // Idle codex poll short-circuits too.
+        let opens = setup.reader.file_opens(instance_id, &file);
+        let _ = setup.poll_codex(instance_id);
+        assert_eq!(setup.reader.file_opens(instance_id, &file), opens);
+        setup.cleanup();
     }
 }
