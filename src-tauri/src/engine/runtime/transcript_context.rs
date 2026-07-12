@@ -2084,6 +2084,55 @@ mod tests {
         setup.cleanup();
     }
 
+    /// Ruling 3c0182aa, model-window variant: a model id carried only by an
+    /// unterminated tail record already moves the limit this poll — the
+    /// overlay runs the full reduction, not a usage-only one.
+    #[test]
+    fn model_window_declared_only_in_unterminated_tail_moves_the_limit() {
+        let setup = IncrementalSetup::new();
+        let instance_id = "inst-tail-model-1";
+        let file = setup.project_dir.join("session.jsonl");
+        write_jsonl_terminated(
+            &file,
+            &[
+                claude_owner_line(instance_id, &setup.workspace),
+                claude_usage_line(50),
+            ],
+        );
+        let reading = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!(reading.limit, 200_000, "no model id yet — fallback limit");
+        let consumed = setup.reader.file_offset(instance_id, &file);
+
+        append_raw(
+            &file,
+            &claude_usage_line_with_model("req-tail-model", 80, "claude-fable-5[1m]").to_string(),
+        );
+        let reading = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!(reading.tokens, 80);
+        assert_eq!(
+            reading.limit, 1_000_000,
+            "tail-carried model id must move the window this poll"
+        );
+        assert_eq!(
+            reading,
+            setup.fresh_full_scan(instance_id, "claude-code").unwrap()
+        );
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            consumed,
+            "the unterminated record is still not consumed"
+        );
+
+        append_raw(&file, "\n");
+        let reading = setup.poll_claude(instance_id).expect("reading");
+        assert_eq!((reading.tokens, reading.limit), (80, 1_000_000));
+        assert_eq!(
+            setup.reader.file_offset(instance_id, &file),
+            std::fs::metadata(&file).unwrap().len()
+        );
+        setup.cleanup();
+    }
+
     /// Codex gets the same incremental treatment: appended token counts fold
     /// into the cached reduction and match a fresh full scan.
     #[test]
