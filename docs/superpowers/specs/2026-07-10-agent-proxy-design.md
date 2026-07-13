@@ -26,6 +26,7 @@ without any loss of agent capability.
 | D8 | ~~Double opt-in rollout: global mode defaults to `log` (measure only; flip with `conclave proxy mode rewrite`), and each agent needs `proxy_enabled` (new nullable column, default off) before its spawn env gets `ANTHROPIC_BASE_URL`~~ **SUPERSEDED 2026-07-11** (human directive, task `proxy-default-on-claude`, merge `ee8b448`): the per-agent half is now **default-ON for Claude** (`proxy_enabled` NULL/absent = ON, rtk-parity, overridable to OFF per agent), gated to Claude via `base == "claude"` in `instance.rs` `proxy_env` — codex stays default-OFF (Anthropic-only proxy would break its OpenAI protocol). Global mode still defaults to `log`. | ~~Default-on rejected for v1: no fleet-wide blast radius before A/B evidence~~ — reversed: opt-in stalled Phase-1 measurement (only 2 hand-opted agents ever routed through the proxy); `log` mode has zero rewrite blast radius, so a fleet-wide default-ON in log mode is safe and is what makes the A/B evidence collectable at all |
 | D9 | v1 config lives on `ProxyRuntime` atomics (CLI-adjustable, reset on restart) + the per-agent column. No per-workspace bb keys yet | bb `config:*` keys rejected for v1: proxy is app-global; a request can't be attributed to a workspace cheaply. Revisit in Phase 2 |
 | D10 | Conversation identity = longest prefix match over per-message hashes (client resends full history verbatim; its bytes are stable). In-memory LRU ledger, cap 64 conversations | Requiring a session header rejected: harness sends none we control |
+| D11 | Whenever Conclave injects its trusted loopback `ANTHROPIC_BASE_URL`, it atomically injects `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`. The loopback host is not an Anthropic hostname, but the built-in proxy's production upstream is fixed to `https://api.anthropic.com`; the assertion preserves Claude Code's direct-path first-party and prompt-cache eligibility. Four proxied transcripts on 2026-07-13 showed periodic 15,098–15,236 uncached-token bursts while two direct transcripts held at 1–2 uncached tokens; request bytes were unchanged in all 5,459 historical log-mode rows. | `ENABLE_PROMPT_CACHING_1H` rejected because it forces a TTL policy and can change cache-write economics. `HTTPS_PROXY` rejected because opaque CONNECT routing prevents Conclave from inspecting and optimizing `/v1/messages`. If the runtime upstream becomes configurable, the assertion must become conditional on an allowlisted first-party upstream. |
 
 ## Architecture (Phase 1)
 
@@ -48,9 +49,12 @@ claude/codex CLI ──ANTHROPIC_BASE_URL──► engine listener (axum, loopba
   unit-tested.
 - Engine module `src-tauri/src/engine/runtime/ctx_proxy.rs` hosts the axum service;
   `Arc<ProxyRuntime>` on `AppState` (both ctors, like `code_cache`).
-- Spawn path: `instance.rs` env block (755-785) pushes `ANTHROPIC_BASE_URL` when the
-  agent's `proxy_enabled` is true AND the listener is up. `sandbox_config.rs` network
-  allowlists gain the loopback port (both Claude settings and Codex overrides).
+- Spawn path: `instance.rs` atomically pushes `ANTHROPIC_BASE_URL` and
+  `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` when the agent's effective
+  `proxy_enabled` selection is true AND the listener is up. Both proxy-owned values
+  are appended after custom and secret env so they win same-name entries;
+  credentials remain untouched. `sandbox_config.rs` network allowlists gain the
+  loopback port (both Claude settings and Codex overrides).
 - Auth headers are forwarded untouched and never logged or persisted. Request/response
   bodies are never persisted — metrics rows carry counts only.
 
@@ -93,8 +97,10 @@ preserved. Validator proves post-state: identical message/block structure, all
 ## Risks
 
 - `ANTHROPIC_BASE_URL` + OAuth: Claude Code sends its bearer token to whatever base
-  URL is set; the gist proves the redirect works. Verify once on a live agent before
-  flipping any agent's `proxy_enabled` (Task 11 gate).
+  URL is set. Conclave injects the route and first-party assertion only as an atomic
+  pair while the live built-in proxy targets the fixed Anthropic upstream; if that
+  upstream becomes configurable, the assertion must be restricted to an allowlist
+  in the same change. Credentials are forwarded untouched and never persisted.
 - Engine restart while an agent runs → agent's base URL dead. Mitigated: opt-in only,
   and the listener outlives sessions (engine process = GUI app lifetime).
 - Harness self-compaction shrinks history → ledger prefix mismatch → treated as a new

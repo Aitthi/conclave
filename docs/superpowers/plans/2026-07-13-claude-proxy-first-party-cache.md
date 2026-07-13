@@ -109,6 +109,18 @@ Run and record each gate on the final commit:
 4. `cargo fmt --manifest-path src-tauri/Cargo.toml --check`
 5. `git diff --check`
 
+Ruling `c4c48a4f` (Aoki, 2026-07-13): gate 4 already exits 1 on clean main at
+`7579c887d550`, reporting rustfmt drift in eight out-of-boundary files plus an
+unrelated pre-existing hunk at `instance.rs:66`. Preserve this task's boundary,
+manually keep only the newly changed `instance.rs` hunks rustfmt-clean, record the
+red gate faithfully on the final commit, and record evidence that its findings are a
+strict subset of the clean-main baseline with zero new findings. Superseding ruling
+`c4c82b9f` clarifies that, after path normalization and excluding only baseline hunks
+intersecting intentionally changed lines, every untouched finding must be
+byte-identical. All other gates must be green. Credit Dabin for tripping the original
+boundary/acceptance conflict and correcting the literal-equivalence invariant before
+commit.
+
 READY must name the immutable commit SHA, changed files, and gate ids. Live
 before/after token verification requires rebuilding/relaunching Conclave and fresh
 Claude traffic, so it is a post-merge operational verification rather than a lane
@@ -127,3 +139,9 @@ workload.
   invariant or make the assertion conditional in the same change that relaxes it.
 - Existing running Claude processes keep their spawn environment. The fix affects
   only agents spawned after the rebuilt Conclave app is relaunched.
+- Repository-wide rustfmt drift predates this lane. Gate 4 remains a known red
+  baseline under ruling `c4c48a4f`; accepting new formatter output or expanding the
+  boundary here would hide unrelated churn. Under superseding ruling `c4c82b9f`, the
+  equivalence gate must prove this lane adds no rustfmt finding beyond clean main
+  `7579c887d550` and leaves every untouched finding byte-identical after path
+  normalization.
