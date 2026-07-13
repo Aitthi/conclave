@@ -100,26 +100,48 @@ fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Op
     stored.unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind))
 }
 
-/// The `ANTHROPIC_BASE_URL` override routing an agent through the loopback
-/// context proxy. Claude agents default ON (`proxy_enabled` NULL/absent =
-/// ON, rtk-parity — this unblocks Phase-1 measurement); codex agents default
-/// OFF and unchanged, since `ctx_proxy` only rewrites the Anthropic
-/// `/v1/messages` shape and would break the OpenAI-protocol codex harness.
-/// Either default is overridable per-agent via `proxy_enabled`. Fail-open: a
-/// down listener means a plain direct spawn, never a broken one.
+/// The atomic environment contract routing an agent through the loopback
+/// context proxy. `ANTHROPIC_BASE_URL` selects the route, while
+/// `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` tells Claude Code that the
+/// non-Anthropic loopback host still terminates at the built-in proxy's fixed
+/// first-party Anthropic upstream. If the runtime upstream ever becomes user
+/// configurable, the assertion must become conditional on an allowlisted
+/// first-party upstream in the same change.
+///
+/// Claude agents default ON (`proxy_enabled` NULL/absent = ON, rtk-parity —
+/// this unblocks Phase-1 measurement); codex agents default OFF and unchanged,
+/// since `ctx_proxy` only rewrites the Anthropic `/v1/messages` shape and would
+/// break the OpenAI-protocol codex harness. Either default is overridable
+/// per-agent via `proxy_enabled`. Fail-open: a down listener means a plain
+/// direct spawn, never a broken one.
 fn proxy_env(
     proxy_enabled: Option<bool>,
     default_on: bool,
     active_port: Option<u16>,
-) -> Option<(String, String)> {
+) -> Option<[(String, String); 2]> {
     if !proxy_enabled.unwrap_or(default_on) {
         return None;
     }
     let port = active_port?;
-    Some((
-        "ANTHROPIC_BASE_URL".to_string(),
-        format!("http://127.0.0.1:{port}"),
-    ))
+    Some([
+        (
+            "ANTHROPIC_BASE_URL".to_string(),
+            format!("http://127.0.0.1:{port}"),
+        ),
+        (
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL".to_string(),
+            "1".to_string(),
+        ),
+    ])
+}
+
+fn append_proxy_env(
+    extra_env: &mut Vec<(String, String)>,
+    proxy_env: Option<[(String, String); 2]>,
+) {
+    if let Some(proxy_env) = proxy_env {
+        extra_env.extend(proxy_env);
+    }
 }
 
 // ── Request types ────────────────────────────────────────────────────────────
@@ -673,9 +695,12 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // so the base-URL override and its loopback sandbox hole fire
             // together or not at all. `proxy_port` is Some only when the
             // injection fired.
-            let proxy_env_var =
-                proxy_env(def.proxy_enabled, base == "claude", state.ctx_proxy.active_port());
-            let proxy_port = proxy_env_var.is_some().then(|| state.ctx_proxy.port);
+            let proxy_env_vars = proxy_env(
+                def.proxy_enabled,
+                base == "claude",
+                state.ctx_proxy.active_port(),
+            );
+            let proxy_port = proxy_env_vars.is_some().then(|| state.ctx_proxy.port);
 
             let mut launch = String::from(base);
 
@@ -858,12 +883,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     }
                 }
             }
-            // Context-proxy base URL, pushed LAST so it wins over any
-            // `custom_env` value of the same name (spec D8; the decision was
-            // made above, beside the sandbox allowlist threading).
-            if let Some(kv) = proxy_env_var {
-                extra_env.push(kv);
-            }
+            // Atomic context-proxy route + first-party assertion, extended LAST
+            // so both values win over same-name `custom_env` or secret entries
+            // (spec D8/D11; the decision was made above, beside the sandbox
+            // allowlist threading).
+            append_proxy_env(&mut extra_env, proxy_env_vars);
 
             // Launch the CLI INSIDE the user's login + interactive shell, the way
             // VS Code's integrated terminal does (it spawns the shell, not the
@@ -1746,28 +1770,59 @@ mod tests {
     /// per-agent via `proxy_enabled`. Fail-open when the listener is down.
     #[test]
     fn proxy_env_defaults_on_for_claude_off_for_codex() {
-        // Claude default ON: NULL proxy_enabled + default_on=true → injected.
-        assert_eq!(
-            proxy_env(None, true, Some(18787)),
-            Some((
+        let expected = [
+            (
                 "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:18787".to_string()
-            ))
-        );
+                "http://127.0.0.1:18787".to_string(),
+            ),
+            (
+                "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL".to_string(),
+                "1".to_string(),
+            ),
+        ];
+
+        // Claude default ON: NULL proxy_enabled + default_on=true → injected.
+        assert_eq!(proxy_env(None, true, Some(18787)), Some(expected.clone()));
         // Codex default OFF: NULL proxy_enabled + default_on=false → never.
         assert_eq!(proxy_env(None, false, Some(18787)), None);
         // Explicit opt-OUT wins for Claude even with default_on=true.
         assert_eq!(proxy_env(Some(false), true, Some(18787)), None);
+        // Explicit opt-OUT also stays off when the default is already off.
+        assert_eq!(proxy_env(Some(false), false, Some(18787)), None);
         // Explicit opt-IN wins for codex even with default_on=false.
         assert_eq!(
             proxy_env(Some(true), false, Some(18787)),
-            Some((
-                "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:18787".to_string()
-            ))
+            Some(expected.clone())
+        );
+        // Explicit opt-IN stays on when the default is already on.
+        assert_eq!(
+            proxy_env(Some(true), true, Some(18787)),
+            Some(expected.clone())
         );
         // Opted in but listener down → no injection (fail-open).
         assert_eq!(proxy_env(Some(true), true, None), None);
+        // Defaulted on but listener down is also a plain direct spawn.
+        assert_eq!(proxy_env(None, true, None), None);
+
+        // First-party eligibility must not force Claude Code's cache TTL policy.
+        assert!(expected
+            .iter()
+            .all(|(key, _)| key != "ENABLE_PROMPT_CACHING_1H"));
+
+        // Proxy-owned values are appended after same-name user values, so
+        // `spawn_cli`'s ordered Command::env calls leave the atomic pair in force.
+        let mut extra_env = vec![
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://third-party.example".to_string(),
+            ),
+            (
+                "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL".to_string(),
+                "0".to_string(),
+            ),
+        ];
+        append_proxy_env(&mut extra_env, Some(expected.clone()));
+        assert_eq!(&extra_env[2..], expected.as_slice());
     }
 
     #[test]
