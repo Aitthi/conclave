@@ -175,17 +175,22 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
 
 ## Idle time is oversight time
 
-- `conclave task watch <ws> <slug>` every lane you own. Watchers wake only on
-  decision-demanding events — a `review`/`abandoned`/`merged` transition, a failing
-  gate, a challenge or its ruling, a note prefixed `READY`/`BLOCKED`/`ESCALATION`;
-  routine progress records silently, so pull it with `task brief`. Review landed
-  commits against the plan, one commit old, not one phase old.
-- Do not hover. Review on the implementer's cadence, not a timer — the stall engine
-  already pages you when a claimed lane goes quiet for 10 minutes.
+- Register each owned lane once with `conclave task watch <ws> <slug>`. This is a
+  push subscription, not a wait command. After registering, end your current turn.
+- Do not monitor progress with `sleep`, repeated `task watch`, `msg list`, `task brief`, or `agent list`.
+  Resume only when Conclave injects a `READY`/`BLOCKED`/`ESCALATION` note, an
+  actionable task transition, a failing gate, a stall alert, a direct agent
+  message, or human input.
+- After one of those events, use `task brief` for the routine progress context you
+  need, or use it while diagnosing a reported stall. Do not periodically pull it.
+  Review landed commits against the plan, one commit old, not one phase old.
+- Do not hover. The stall engine already pages you when a claimed lane goes quiet
+  for 10 minutes.
 - `conclave agent list <ws>` reports `working`/`lastActivityAt` — read it BEFORE
-  interrupting or declaring a lane stalled. It also reports `model`/`cliKind`:
-  consult it before delegating work that needs a specific model, or asking a peer
-  for something outside its harness (a `codex` agent is not a `claude-code` one).
+  interrupting or declaring a lane stalled after an injected alert or direct
+  report. It also reports `model`/`cliKind`: consult it before delegating work that
+  needs a specific model, or asking a peer for something outside its harness (a
+  `codex` agent is not a `claude-code` one).
 - Read context meters by source: chat agents report engine usage; CLI agents report
   transcript-observed usage from harness logs — not PTY scrollback, and it does not
   reset because Conclave wrote a snapshot marker.

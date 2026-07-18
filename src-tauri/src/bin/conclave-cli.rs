@@ -3019,7 +3019,11 @@ fn resolve_task_create_plan_file(argv: Vec<String>) -> Result<Vec<String>, Strin
     Ok(out)
 }
 
+const WATCH_SUBSCRIBED_MESSAGE: &str =
+    "Subscribed. Do not poll. End your turn; Conclave will inject actionable events.";
+
 /// How `main` renders a successful result row.
+#[derive(Debug, PartialEq, Eq)]
 enum OutMode {
     /// One-line confirmation (`tell` / `snapshot save`) — never echo the payload.
     Terse,
@@ -3043,6 +3047,9 @@ enum OutMode {
     MsgList,
     /// A human-readable task resume packet (`task brief`).
     TaskBrief,
+    /// A one-line anti-polling instruction (`task watch`). The engine response
+    /// stays untouched on the wire; only the successful CLI rendering differs.
+    WatchSubscribed,
     /// A compact fresh-context orientation packet (`orient`).
     Orient,
     /// One-line gate confirmation (`task gate`) — the log excerpt already
@@ -3053,6 +3060,50 @@ enum OutMode {
     PlanCheck,
     /// Pretty-printed JSON (everything else).
     Json,
+}
+
+/// Select the renderer from the expanded wire argv. Self-keyed task commands
+/// have an actor id inserted at argv[2], but their verb remains at argv[1].
+fn select_out_mode(argv: &[String], gate_exit_code: Option<i32>) -> OutMode {
+    let is_snapshot = argv.first().map(String::as_str) == Some("snapshot");
+    let sub = argv.get(1).map(String::as_str);
+
+    if argv.first().map(String::as_str) == Some("tell") || (is_snapshot && sub == Some("save")) {
+        OutMode::Terse
+    } else if is_snapshot && sub == Some("last") {
+        OutMode::Handoff
+    } else if argv.first().map(String::as_str) == Some("restart") {
+        OutMode::Instruction
+    } else if argv.first().map(String::as_str) == Some("artifact") {
+        match sub {
+            Some("add") => OutMode::ArtifactId,
+            Some("list") => OutMode::ArtifactList,
+            Some("get") => OutMode::ArtifactGet,
+            _ => OutMode::Json,
+        }
+    } else if argv.first().map(String::as_str) == Some("position") && sub == Some("set") {
+        OutMode::PositionRow
+    } else if argv.first().map(String::as_str) == Some("org") {
+        OutMode::OrgTree
+    } else if argv.first().map(String::as_str) == Some("msg") {
+        OutMode::MsgList
+    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("brief") {
+        OutMode::TaskBrief
+    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("watch") {
+        OutMode::WatchSubscribed
+    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("plan-check") {
+        OutMode::PlanCheck
+    } else if argv.first().map(String::as_str) == Some("orient") {
+        OutMode::Orient
+    } else if gate_exit_code.is_some() {
+        OutMode::GateResult
+    } else {
+        OutMode::Json
+    }
+}
+
+fn render_watch_subscribed() -> String {
+    format!("{WATCH_SUBSCRIBED_MESSAGE}\n")
 }
 
 /// A party's display label for the transcript: the enriched `<key>Name` when
@@ -3893,41 +3944,7 @@ async fn main() -> ExitCode {
     // - `snapshot last` exists precisely SO the agent reads its handoff — print
     //   the carried-forward content, not the JSON row.
     let is_snapshot = argv.first().map(String::as_str) == Some("snapshot");
-    let sub = argv.get(1).map(String::as_str);
-    let out_mode = if argv.first().map(String::as_str) == Some("tell")
-        || (is_snapshot && sub == Some("save"))
-    {
-        OutMode::Terse
-    } else if is_snapshot && sub == Some("last") {
-        OutMode::Handoff
-    } else if argv.first().map(String::as_str) == Some("restart") {
-        OutMode::Instruction
-    } else if argv.first().map(String::as_str) == Some("artifact") {
-        // `add` prints just the id; `list` a content-free table; `get` a
-        // metadata header + the full body. (See the render match below.)
-        match sub {
-            Some("add") => OutMode::ArtifactId,
-            Some("list") => OutMode::ArtifactList,
-            Some("get") => OutMode::ArtifactGet,
-            _ => OutMode::Json,
-        }
-    } else if argv.first().map(String::as_str) == Some("position") && sub == Some("set") {
-        OutMode::PositionRow
-    } else if argv.first().map(String::as_str) == Some("org") {
-        OutMode::OrgTree
-    } else if argv.first().map(String::as_str) == Some("msg") {
-        OutMode::MsgList
-    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("brief") {
-        OutMode::TaskBrief
-    } else if argv.first().map(String::as_str) == Some("task") && sub == Some("plan-check") {
-        OutMode::PlanCheck
-    } else if argv.first().map(String::as_str) == Some("orient") {
-        OutMode::Orient
-    } else if gate_exit_code.is_some() {
-        OutMode::GateResult
-    } else {
-        OutMode::Json
-    };
+    let out_mode = select_out_mode(&argv, gate_exit_code);
 
     let path = match socket_path() {
         Some(p) => p,
@@ -4121,6 +4138,7 @@ async fn main() -> ExitCode {
                 render_msg_transcript(rows)
             }
             OutMode::TaskBrief => render_task_brief(result),
+            OutMode::WatchSubscribed => render_watch_subscribed(),
             // `orient` → the compact text packet; pretty JSON of the same
             // data overshoots the plan's byte target (see `render_orient`).
             OutMode::Orient => render_orient(result),
@@ -4657,6 +4675,29 @@ mod tests {
                 "task {verb} must require self"
             );
         }
+    }
+
+    #[test]
+    fn task_watch_selects_dedicated_anti_polling_output() {
+        let expanded = expand_self_args(v(&["task", "watch", "ws1", "t1"]), Some("self1")).unwrap();
+        assert_eq!(
+            super::select_out_mode(&expanded, None),
+            super::OutMode::WatchSubscribed
+        );
+        assert_eq!(
+            super::render_watch_subscribed(),
+            "Subscribed. Do not poll. End your turn; Conclave will inject actionable events.\n"
+        );
+    }
+
+    #[test]
+    fn leadership_skill_defines_watch_as_one_time_push_subscription() {
+        let skill = include_str!("../../skills/leadership/SKILL.md");
+        assert!(skill.contains("Register each owned lane once"));
+        assert!(skill.contains("After registering, end your current turn."));
+        assert!(skill.contains(
+            "Do not monitor progress with `sleep`, repeated `task watch`, `msg list`, `task brief`, or `agent list`."
+        ));
     }
 
     #[test]
