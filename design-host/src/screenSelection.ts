@@ -14,3 +14,12 @@ export function parseHashScreen(hash: string): string | null {
   const match = /^#\/(.+)$/.exec(hash);
   return match ? decodeURIComponent(match[1]) : null;
 }
+
+// Screen-id filter behind the switcher popover's search box. Case-insensitive
+// substring; a blank (or whitespace-only) query means "everything", so the list
+// never collapses just because the user pressed space.
+export function filterScreens(ids: string[], query: string): string[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return ids;
+  return ids.filter((id) => id.toLowerCase().includes(needle));
+}
