@@ -9,6 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { filterScreens, parseHashScreen, pickInitialScreen } from "./screenSelection";
 
 type ScreenLoader = () => Promise<{ default: ComponentType }>;
@@ -473,9 +474,14 @@ function ScreenHost({ loader }: { loader: ScreenLoader | undefined }) {
 
   if (loadError) return <CrashCard message={loadError} />;
   if (!Comp) return null;
+  // Screens are promised ordinary react-router-dom (README workspace deps), so the
+  // host must supply a router context; MemoryRouter keeps the canvas URL and the
+  // #/<screen> hash contract untouched.
   return (
-    <ErrorBoundary>
-      <Comp />
-    </ErrorBoundary>
+    <MemoryRouter>
+      <ErrorBoundary>
+        <Comp />
+      </ErrorBoundary>
+    </MemoryRouter>
   );
 }
