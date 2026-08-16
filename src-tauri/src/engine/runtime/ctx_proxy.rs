@@ -4518,7 +4518,10 @@ mod tests {
     }
 
     /// The API's placement rule for mid-conversation `{"role":"system"}`
-    /// messages, as reproduced against api.anthropic.com on 2026-08-16.
+    /// messages. Only the SUCCESSOR clause — end the array or precede an
+    /// `assistant` turn — was reproduced against api.anthropic.com on
+    /// 2026-08-16; the `index == 0` clause is taken from the API docs and has no
+    /// recorded probe.
     fn messages_accept_mid_conversation_system(messages: &Value) -> bool {
         let Some(messages) = messages.as_array() else {
             return false;
@@ -6041,6 +6044,93 @@ mod tests {
         assert_eq!(row.4, Some(0.75));
         assert_eq!(row.5, Some(1));
         assert_eq!(row.6.as_deref(), Some("claude-eval-1"));
+    }
+
+    /// The same candidate, with the trailing mid-conversation system message
+    /// Claude Code emits. The plan was computed over the earlier indices and the
+    /// projection keys off tool_use ids, so appending here leaves both intact.
+    fn quality_candidate_ending_on_a_system_message() -> QualityCandidate {
+        let mut candidate = quality_candidate();
+        let mut messages = candidate
+            .original_messages
+            .as_array()
+            .cloned()
+            .expect("messages array");
+        messages.push(json!({"role":"system","content":[{"type":"text","text":"operator note"}]}));
+        let messages = Value::Array(messages);
+        candidate.original_request["messages"] = messages.clone();
+        candidate.original_messages = messages;
+        candidate
+    }
+
+    /// Regression for challenge 67070896: `build_replay_call` (twice) and
+    /// `build_judge_call` push their instruction turn onto a caller-supplied
+    /// array. An original ending on a system message made all three the row-4
+    /// failure class — H2 had simply never run against a real conversation.
+    #[tokio::test]
+    async fn quality_calls_never_append_a_turn_after_a_trailing_system_message() {
+        let state = armed_h2_state().await;
+        let candidate = quality_candidate_ending_on_a_system_message();
+        verify_preflight(&state, &candidate);
+        let (epoch, config) = state.ctx_proxy.snapshot_quality_campaign().unwrap();
+        let transport = MockQualityTransport::scripted([
+            provider_text_response(&scripted_probe_payload()),
+            provider_text_response(&scripted_faithfulness_payload()),
+            provider_text_response(&scripted_replay_payload("from-first-response")),
+            provider_text_response(&scripted_replay_payload("from-second-response")),
+            provider_text_response(&json!({
+                "a": {"correct": true, "constraint_adherent": true, "next_action_match": true},
+                "b": {"correct": true, "constraint_adherent": true, "next_action_match": false},
+            })),
+        ]);
+
+        run_quality_case(&state, epoch, &config, candidate, &transport).await;
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 5, "exactly five calls");
+        for call in &calls {
+            let messages = &call.request["messages"];
+            assert!(
+                messages_accept_mid_conversation_system(messages),
+                "{:?} call must stay a legal request: {:?}",
+                call.role,
+                messages
+                    .as_array()
+                    .map(|m| m.iter().map(|x| x["role"].clone()).collect::<Vec<_>>())
+            );
+            assert_eq!(
+                messages
+                    .as_array()
+                    .and_then(|m| m.last())
+                    .map(|m| &m["role"]),
+                Some(&json!("user")),
+                "{:?} call still ends on its appended instruction turn",
+                call.role
+            );
+        }
+
+        // Both replay contexts are guarded identically, so A/B stays comparable.
+        let replay_lens: Vec<usize> = calls
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call.role,
+                    QualityRole::OriginalReplay | QualityRole::ProjectedReplay
+                )
+            })
+            .map(|call| call.request["messages"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(replay_lens.len(), 2);
+        assert_eq!(
+            replay_lens[0], replay_lens[1],
+            "original and projected replays drop the same trailing messages"
+        );
+
+        let outcome = sqlx::query_scalar::<_, String>("SELECT outcome FROM proxy_quality_metric")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(outcome, "completed");
     }
 
     #[tokio::test]

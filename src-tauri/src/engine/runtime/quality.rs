@@ -10,6 +10,8 @@ use rand_core::{RngCore, SeedableRng};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::engine::runtime::count_tokens as ct;
+
 pub const QUALITY_METHOD_VERSION: &str = "h2-shadow-quality-v1";
 pub const QUALITY_RUBRIC_VERSION: &str = "hybrid-quality-rubric-v1";
 pub const PROBE_PROMPT_VERSION: &str = "source-probes-v1";
@@ -801,7 +803,13 @@ pub fn build_replay_call(
             request[key] = value.clone();
         }
     }
-    let mut replay_messages = messages.as_array().cloned().unwrap_or_default();
+    // The replayed context is the GUARDED array: appending the instruction turn
+    // after a trailing mid-conversation `{"role":"system"}` message is a 400
+    // `invalid_request_error` (the H1 row-4 failure class). Both replay calls run
+    // this identically, so the original and projected contexts stay A/B
+    // comparable — the same trailing messages are dropped from each.
+    let guarded = ct::messages_before_appended_user(messages);
+    let mut replay_messages = guarded.as_array().cloned().unwrap_or_default();
     replay_messages.push(serde_json::json!({"role": "user", "content": REPLAY_INSTRUCTION}));
     request["messages"] = Value::Array(replay_messages);
     QualityCall::new(role, request)
@@ -828,11 +836,11 @@ pub fn build_judge_call(
             request[key] = value.clone();
         }
     }
-    let mut messages = original_request
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    // Same guard as the replay builders: the judge's context is the original
+    // array cut back to a legal cut point for the appended instruction turn.
+    let guarded =
+        ct::messages_before_appended_user(original_request.get("messages").unwrap_or(&Value::Null));
+    let mut messages = guarded.as_array().cloned().unwrap_or_default();
     let payload = serde_json::json!({
         "probes": probes_json(probes),
         "plan_a": plan_a,
@@ -2043,6 +2051,118 @@ mod tests {
         assert_eq!(probes[0]["id"], "p1");
         assert_eq!(probes[0]["category"], "mutation");
         assert_eq!(probes[0]["critical"], true);
+    }
+
+    /// A request whose messages end on the mid-conversation system message
+    /// Claude Code emits (beta `mid-conversation-system-2026-04-07`).
+    fn request_ending_on_a_system_message() -> Value {
+        let mut request = original_task_request();
+        request["messages"] = json!([
+            {"role": "user", "content": "original context"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_a", "name": "Bash", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_a", "content": "out"}
+            ]},
+            {"role": "system", "content": [{"type": "text", "text": "operator note"}]}
+        ]);
+        request
+    }
+
+    /// The API rule: a mid-conversation system message must end `messages` or be
+    /// followed by an `assistant` turn. Only the successor clause is live-verified
+    /// (2026-08-16); `index == 0` comes from the API docs.
+    fn appended_turn_is_legal(request: &Value) -> bool {
+        let messages = request["messages"].as_array().expect("messages array");
+        messages.iter().enumerate().all(|(index, message)| {
+            if message["role"] != json!("system") {
+                return true;
+            }
+            index != 0
+                && messages
+                    .get(index + 1)
+                    .is_none_or(|next| next["role"] == json!("assistant"))
+        })
+    }
+
+    /// Challenge 67070896: the replay builder appends onto a caller-supplied
+    /// array, so an original ending on a system message 400s.
+    #[test]
+    fn replay_call_guards_a_context_ending_on_a_system_message() {
+        let original = request_ending_on_a_system_message();
+
+        let call = build_replay_call(
+            QualityRole::OriginalReplay,
+            &original,
+            &original["messages"],
+        );
+
+        assert!(
+            appended_turn_is_legal(&call.request),
+            "replay context must be cut back before the instruction turn: {:?}",
+            call.request["messages"]
+        );
+        let messages = call.request["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            4,
+            "only the trailing system message is dropped"
+        );
+        assert_eq!(messages.last().unwrap()["role"], "user");
+        assert_eq!(
+            messages.last().unwrap()["content"],
+            REPLAY_INSTRUCTION,
+            "the instruction turn is still appended"
+        );
+    }
+
+    /// The projected context shares the original's tail, so both replay calls
+    /// must drop the same trailing messages or the A/B comparison is skewed.
+    #[test]
+    fn both_replay_calls_drop_the_same_trailing_messages() {
+        let original = request_ending_on_a_system_message();
+        let mut projected = original["messages"].as_array().cloned().unwrap();
+        projected[2]["content"][0]["content"] = json!("tombstone");
+        let projected = Value::Array(projected);
+
+        let original_call = build_replay_call(
+            QualityRole::OriginalReplay,
+            &original,
+            &original["messages"],
+        );
+        let projected_call = build_replay_call(QualityRole::ProjectedReplay, &original, &projected);
+
+        for call in [&original_call, &projected_call] {
+            assert!(appended_turn_is_legal(&call.request));
+        }
+        assert_eq!(
+            original_call.request["messages"].as_array().unwrap().len(),
+            projected_call.request["messages"].as_array().unwrap().len(),
+        );
+    }
+
+    /// Same defect in the judge builder, pinned independently of the replay one.
+    #[test]
+    fn judge_call_guards_a_context_ending_on_a_system_message() {
+        let original = request_ending_on_a_system_message();
+
+        let call = build_judge_call(
+            "claude-eval-1",
+            &original,
+            &sample_probes(),
+            "plan a",
+            "plan b",
+        );
+
+        assert!(
+            appended_turn_is_legal(&call.request),
+            "judge context must be cut back before the instruction turn: {:?}",
+            call.request["messages"]
+        );
+        let messages = call.request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.last().unwrap()["role"], "user");
     }
 
     #[test]

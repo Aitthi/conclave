@@ -137,6 +137,18 @@ fn is_system_message(message: &Value) -> bool {
 ///
 /// [`prefix_messages`] stays the cache-identity authority for the C count; this
 /// is the boundary the generation REQUEST must use.
+///
+/// The two conditions are checked TOGETHER on each step, not in two passes:
+/// dropping a trailing system message can re-open a tool exchange (a system
+/// message may carry `tool_result` blocks), so a sequential
+/// close-then-trim refactor emits a prefix with a dangling `tool_use`. Pinned by
+/// `walk_back_rechecks_tool_closure_after_dropping_a_system_message`.
+///
+/// Only the TRAILING message is inspected, so a LEADING system message passes
+/// through untouched. That is intentional and harmless here: such an original is
+/// rejected upstream (`messages.0`) before H1 or H2 ever sees it, and taking a
+/// prefix preserves the legality of every interior system message, whose
+/// successor is unchanged.
 pub fn prefix_messages_before_appended_user(
     messages: &Value,
     earliest_changed_msg_index: usize,
@@ -153,6 +165,19 @@ pub fn prefix_messages_before_appended_user(
         }
         None => Value::Array(Vec::new()),
     }
+}
+
+/// The whole of `messages`, cut back to the last position where appending one
+/// `{"role":"user"}` turn still yields a request the API accepts.
+///
+/// Same rule and same walk-back as [`prefix_messages_before_appended_user`],
+/// with no projection boundary to respect: this is the guard for callers that
+/// append an instruction turn onto a caller-supplied array rather than onto a
+/// cache prefix (the H2 replay and judge builders). A valid original already has
+/// its tool exchanges closed, so in practice this drops only the trailing
+/// mid-conversation system message.
+pub fn messages_before_appended_user(messages: &Value) -> Value {
+    prefix_messages_before_appended_user(messages, usize::MAX)
 }
 
 fn sensitive_header(value: &str) -> Option<reqwest::header::HeaderValue> {
@@ -418,9 +443,12 @@ mod tests {
 
     /// The API rule for mid-conversation `{"role":"system"}` messages: one may
     /// not open `messages`, and must either end the array or be followed by an
-    /// `assistant` turn. Verified against the live API on 2026-08-16 — the
-    /// violation reads `messages.N: role 'system' must precede an 'assistant'
-    /// message or end the array`.
+    /// `assistant` turn.
+    ///
+    /// Only the SUCCESSOR clause was verified against the live API (2026-08-16):
+    /// the violation reads `messages.N: role 'system' must precede an
+    /// 'assistant' message or end the array`. The `index == 0` clause is taken
+    /// from the API docs and has no recorded probe.
     fn schema_accepts_mid_conversation_system(messages: &Value) -> bool {
         let Some(messages) = messages.as_array() else {
             return false;
@@ -484,6 +512,79 @@ mod tests {
         assert!(schema_accepts_mid_conversation_system(&with_appended_user(
             &gen_prefix
         )));
+    }
+
+    /// Separating fixture from Mellow's mutation run (challenge fd2194f3): the
+    /// two conditions must be re-checked TOGETHER on each step. A sequential
+    /// close-then-trim refactor passes every other test here yet returns
+    /// `[user, assistant(tool_use tu_a)]` — a dangling `tool_use` — because
+    /// dropping the trailing system message re-opens the exchange it closed.
+    #[test]
+    fn walk_back_rechecks_tool_closure_after_dropping_a_system_message() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"system","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]},
+            {"role":"assistant","content":"acknowledged"}
+        ]);
+
+        let gen_prefix = prefix_messages_before_appended_user(&msgs, 3);
+
+        assert_eq!(
+            gen_prefix,
+            json!([{"role":"user","content":"initial request"}]),
+            "dropping the system message re-opens tu_a, so the walk-back must continue"
+        );
+        assert!(
+            schema_accepts_closed_tool_exchanges(&gen_prefix),
+            "a two-pass close-then-trim leaves tu_a unmatched"
+        );
+        assert!(schema_accepts_mid_conversation_system(&with_appended_user(
+            &gen_prefix
+        )));
+    }
+
+    /// The H2 builders guard a whole caller-supplied array, not a cache prefix.
+    #[test]
+    fn whole_message_array_guard_drops_only_the_trailing_system_message() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]},
+            {"role":"system","content":[{"type":"text","text":"operator note"}]}
+        ]);
+
+        let guarded = messages_before_appended_user(&msgs);
+
+        assert_eq!(guarded.as_array().unwrap().len(), 3);
+        assert!(schema_accepts_closed_tool_exchanges(&guarded));
+        assert!(schema_accepts_mid_conversation_system(&with_appended_user(
+            &guarded
+        )));
+    }
+
+    #[test]
+    fn whole_message_array_guard_is_a_no_op_on_a_legal_original() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"system","content":[{"type":"text","text":"operator note"}]},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]}
+        ]);
+
+        assert_eq!(messages_before_appended_user(&msgs), msgs);
     }
 
     #[test]
