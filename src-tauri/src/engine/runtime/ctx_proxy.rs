@@ -3034,6 +3034,17 @@ async fn run_quality_case<T>(
             Err(error) => {
                 // Atomically disarm FIRST (zero further H2 anywhere), then
                 // record the bounded outcome. No probe/replay/judge calls.
+                //
+                // DEBUGGING A CAMPAIGN THAT DISARMED ITSELF HERE: a preflight
+                // `rate_limit_error` is not necessarily quota. An OAuth carrier
+                // refuses ANY body with no top-level `system` with exactly that
+                // label — a first-party identity gate wearing a misleading name
+                // (live-verified; probe table in
+                // docs/superpowers/plans/2026-08-16-h2-preflight-text-free.md).
+                // quality.rs::FIRST_PARTY_SYSTEM is what keeps this side of the
+                // gate; if the accepted identity ever changes, the first
+                // qualifying carrier disarms H2 permanently for the campaign and
+                // the metric row will say `rate_limit_error`.
                 runtime.disarm_quality();
                 terminal!(
                     outcome: QualityOutcome::PreflightFailure(map_quality_failure(&error)),

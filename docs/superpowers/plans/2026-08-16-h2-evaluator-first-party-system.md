@@ -76,3 +76,28 @@ introduces. Same implementer (Tiësto) carries the context.
 - `cd src-tauri && cargo test engine::runtime::quality`
 - `cd src-tauri && cargo test engine::runtime::ctx_proxy`
 - `git diff --check`
+
+## Outcome (2026-08-16, lane `lane/h2-evaluator-first-party-system-v2`, Tiësto)
+
+- `PREFLIGHT_SYSTEM` renamed **`FIRST_PARTY_SYSTEM`** — the name now covers
+  its two callers — and moved next to `evaluator_request`, which is where a
+  reader meets it first. `evaluator_request` sets `"system"` from it, so
+  calls 1 and 2 carry the same line the preflight does; nothing else in
+  those bodies moved.
+- No new live probe was needed: the axis was already measured live with a
+  role-call-shaped body (`max_tokens: 32`, long instruction content) —
+  without `system` → 429 `rate_limit_error`, byte-identical body with the
+  first-party line → 200. Full table in
+  `2026-08-16-h2-preflight-text-free.md` "Probe outcome".
+- Three tests pin the result: every fresh body (preflight + calls 1/2)
+  emits an IDENTICAL system block; calls 1/2 carry the line; calls 3/4/5
+  forward the ORIGINAL request's `system` and never the constant.
+- `preflight_evaluator`'s doc comment now states what a green preflight
+  does NOT predict (the role calls' text/JSON parse path, their size, and
+  calls 3/4/5's model + replayed `system`).
+- Breadcrumb added at the `ctx_proxy.rs` disarm-first site (comment only):
+  a preflight `rate_limit_error` may be the identity gate, not quota.
+- Mutation-verified, 6/6 caught: system line dropped from
+  `evaluator_request`; a drifted second copy of the string; system dropped
+  from the preflight; the constant emptied; the replay builder leaking the
+  constant; the judge builder leaking the constant.
