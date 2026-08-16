@@ -1308,6 +1308,41 @@ mod tests {
         );
     }
 
+    /// The local allowlist duplicates `runtime::summary`'s vocabulary for the
+    /// layering reason documented on [`KNOWN_STOP_REASONS`] — and duplication
+    /// is only safe while it is CHECKED. Unlike the `error_type` sibling
+    /// (`count_tokens::KNOWN_ERROR_TYPES` is private, so it cannot be pinned)
+    /// this pair is both public. The drift failure is quiet and backwards:
+    /// upstream gains a stop_reason, `summary.rs` learns it, this list does
+    /// not, the writer emits a label `insert_terminal` then REJECTS, and the
+    /// evidence row is silently lost.
+    #[test]
+    fn the_local_stop_reason_allowlist_matches_the_runtime_vocabulary() {
+        use crate::engine::runtime::summary::{
+            END_TURN_STOP_REASON, KNOWN_STOP_REASONS as RUNTIME_STOP_REASONS, UNKNOWN_STOP_REASON,
+        };
+        let mut expected: Vec<&str> = RUNTIME_STOP_REASONS.to_vec();
+        expected.push(UNKNOWN_STOP_REASON);
+        expected.sort_unstable();
+        let mut actual: Vec<&str> = KNOWN_STOP_REASONS.to_vec();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "the write allowlist must be runtime::summary's vocabulary plus its \
+             unknown sentinel — a missing label makes insert_terminal drop a real row"
+        );
+        // The aggregate predicates are SQL text and cannot reference a Rust
+        // const, so pin the one literal they hard-code.
+        assert_eq!(
+            END_TURN_STOP_REASON, "end_turn",
+            "clean_stop!()/truncated_stop!() hard-code this value in SQL"
+        );
+        assert!(
+            RUNTIME_STOP_REASONS.contains(&END_TURN_STOP_REASON),
+            "the clean-finish label must itself be an allowlisted value"
+        );
+    }
+
     /// Sibling of the `error_type` allowlist (Mellow finding (a)): before this,
     /// `stop_reason`'s content-freedom rested entirely on ONE call site handing
     /// over an `Option<&'static str>`. The write boundary now rejects anything

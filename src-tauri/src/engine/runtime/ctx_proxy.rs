@@ -2285,7 +2285,9 @@ async fn sample_summary(state: Arc<AppState>, job: SummaryJob, permit: OwnedSema
     // Deliberately NOT a counted refusal: the count is already observable as
     // `truncated` in `proxy summary-report`, and a new `QualityStatus` field
     // would reach `commands/proxy.rs`, outside this lane's boundary.
-    if stop_reason.is_some_and(|reason| reason != "end_turn") {
+    if stop_reason
+        .is_some_and(|reason| reason != crate::engine::runtime::summary::END_TURN_STOP_REASON)
+    {
         return;
     }
     // Cheap armed probe next so the common H2-off path clones nothing; the
