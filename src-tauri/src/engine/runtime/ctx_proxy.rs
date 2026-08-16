@@ -2274,9 +2274,25 @@ async fn sample_summary(state: Arc<AppState>, job: SummaryJob, permit: OwnedSema
         return;
     }
 
-    // Step 11: H2 candidate handoff. Cheap armed probe first so the common
-    // H2-off path clones nothing; the full admission chain (H1 linkage, live
-    // H1Gate::Pass, identity, cooldown, budget) runs in the admit fn.
+    // Step 11: H2 candidate handoff. A TRUNCATED generation never gets here.
+    // H1 already refuses to count that summary (h1-stop-reason-guard, 22946e7)
+    // and the campaign-level `H1Gate` re-checked in `admit_live_quality_case`
+    // structurally cannot catch it: the gate is computed from CLEAN rows only,
+    // so a healthy campaign passes while THIS candidate is cut off — and H2
+    // would spend five role calls judging a summary H1 itself discards.
+    // Same semantics as the SQL `clean_stop!()`: absent (legacy, or a response
+    // with no `stop_reason`) passes; any other recorded reason is truncation.
+    // Deliberately NOT a counted refusal: the count is already observable as
+    // `truncated` in `proxy summary-report`, and a new `QualityStatus` field
+    // would reach `commands/proxy.rs`, outside this lane's boundary.
+    if stop_reason
+        .is_some_and(|reason| reason != crate::engine::runtime::summary::END_TURN_STOP_REASON)
+    {
+        return;
+    }
+    // Cheap armed probe next so the common H2-off path clones nothing; the
+    // full admission chain (H1 linkage, live H1Gate::Pass, identity, cooldown,
+    // budget) runs in the admit fn.
     if runtime.snapshot_quality_campaign().is_none() {
         return;
     }
@@ -6684,6 +6700,9 @@ mod tests {
         evaluator: Arc<std::sync::atomic::AtomicUsize>,
         preflight: Arc<std::sync::atomic::AtomicUsize>,
         fail_preflight: Arc<std::sync::atomic::AtomicBool>,
+        /// When set, the H1 generation answers with `stop_reason:"max_tokens"`
+        /// — a summary that parses fine but is CUT OFF.
+        truncate_gen: Arc<std::sync::atomic::AtomicBool>,
         probe_body: Arc<Mutex<Option<String>>>,
         forwarded: Arc<Mutex<Option<Vec<u8>>>>,
     }
@@ -6697,23 +6716,26 @@ mod tests {
             evaluator: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             preflight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fail_preflight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            truncate_gen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             probe_body: Arc::new(Mutex::new(None)),
             forwarded: Arc::new(Mutex::new(None)),
         };
-        let (gen, eval, pre, failp, probe_body, fw) = (
+        let (gen, eval, pre, failp, trunc, probe_body, fw) = (
             counters.gen.clone(),
             counters.evaluator.clone(),
             counters.preflight.clone(),
             counters.fail_preflight.clone(),
+            counters.truncate_gen.clone(),
             counters.probe_body.clone(),
             counters.forwarded.clone(),
         );
         let app = Router::new().fallback(any(move |request: Request<Body>| {
-            let (gen, eval, pre, failp, probe_body, fw) = (
+            let (gen, eval, pre, failp, trunc, probe_body, fw) = (
                 gen.clone(),
                 eval.clone(),
                 pre.clone(),
                 failp.clone(),
+                trunc.clone(),
                 probe_body.clone(),
                 fw.clone(),
             );
@@ -6737,12 +6759,20 @@ mod tests {
                 };
                 if text.contains("You are producing a factual") {
                     gen.fetch_add(1, Ordering::SeqCst);
-                    return axum::Json(json!({
+                    let mut body = json!({
                         "model": "claude-3-5-sonnet-20241022",
                         "content": [{"type":"text","text":"aggregate summary of tool outputs"}],
                         "usage": gen_usage_json(),
-                    }))
-                    .into_response();
+                    });
+                    // The real API always reports a stop_reason; emitting one
+                    // on BOTH paths is what pins that a clean generation still
+                    // reaches the H2 handoff.
+                    body["stop_reason"] = if trunc.load(Ordering::SeqCst) {
+                        json!("max_tokens")
+                    } else {
+                        json!("end_turn")
+                    };
+                    return axum::Json(body).into_response();
                 }
                 if text.contains("\"max_tokens\":1") {
                     pre.fetch_add(1, Ordering::SeqCst);
@@ -6881,6 +6911,107 @@ mod tests {
         })
         .await
         .expect("timed out waiting for a measured summary row");
+    }
+
+    /// Mellow's acceptance fixture (challenge 3a2afb6f): with H2 fully armed,
+    /// linked, preflight-verified and the campaign gate PASSING, a truncated
+    /// generation must produce zero quality rows and zero role calls. The
+    /// campaign-level `H1Gate` cannot catch this on its own — it is computed
+    /// from clean rows only, so it passes while this one candidate is cut off.
+    #[tokio::test]
+    async fn e2e_a_truncated_summary_never_becomes_a_quality_case() {
+        let (upstream, counters, up) = start_h2_e2e_upstream().await;
+        let (proxy, state, ph) = start_summary_proxy(&upstream, true, false).await;
+        let request = summarizable_request();
+        let body = serde_json::to_vec(&request).unwrap();
+        let live_conversation_hash =
+            sha256_hex(&serde_json::to_vec(&request["messages"][0]).unwrap());
+
+        // Arm H2 exactly as the passing e2e does, so the ONLY difference
+        // between this test and a completed case is the stop_reason.
+        let job = admission_job(&state);
+        seed_passing_h1_campaign(&state.db, &job, &live_conversation_hash).await;
+        let mut req = quality_arm_req();
+        req.h1_campaign_id = job.campaign_id.clone();
+        state.ctx_proxy.arm_quality(req).unwrap();
+        let carrier_credential = CountCredential {
+            api_key: Some("k".into()),
+            authorization: None,
+            anthropic_version: "2023-06-01".into(),
+            anthropic_beta: None,
+        };
+        state
+            .ctx_proxy
+            .set_quality_preflight(QualityPreflightState::Verified {
+                credential_identity: quality::credential_identity_hash(
+                    upstream.trim_end_matches('/'),
+                    &carrier_credential,
+                ),
+                response_model: "claude-3-opus-20240229".into(),
+            });
+        reset_shadow_cooldowns(&state.ctx_proxy);
+
+        // The generation now stops at max_tokens.
+        counters.truncate_gen.store(true, Ordering::SeqCst);
+        send_eligible(&proxy, &body).await;
+
+        // The 31 seeded rows all have a NULL stop_reason, so waiting on "any
+        // measured row" would return before the LIVE row lands. Wait for the
+        // only row that can carry a stop_reason: the one this request wrote.
+        let live_stop_reason = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let found: Option<String> = sqlx::query_scalar(
+                    "SELECT stop_reason FROM proxy_summary_metric \
+                     WHERE outcome = 'measured' AND stop_reason IS NOT NULL",
+                )
+                .fetch_optional(&state.db)
+                .await
+                .unwrap()
+                .flatten();
+                if let Some(reason) = found {
+                    return reason;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for the live measured row");
+
+        // The H1 row still lands with its spend visible (recorded decision:
+        // truncated rows STAY `measured`) and carries the bounded label…
+        assert_eq!(live_stop_reason, "max_tokens");
+
+        // …but the H2 gate was PASSING and the handoff still refused.
+        assert_eq!(
+            crate::engine::repo::proxy_summary_metric::h1_gate(
+                &crate::engine::repo::proxy_summary_metric::report_campaign(
+                    &state.db,
+                    &job.campaign_id
+                )
+                .await
+                .unwrap()
+            ),
+            crate::engine::repo::proxy_summary_metric::H1Gate::Pass,
+            "the campaign gate must be passing, or this fixture proves nothing"
+        );
+        assert!(
+            quality_outcome_counts(&state.db).await.is_empty(),
+            "zero quality rows"
+        );
+        assert_eq!(
+            counters.evaluator.load(Ordering::SeqCst),
+            0,
+            "zero role calls"
+        );
+        assert_eq!(
+            state.ctx_proxy.quality_status().remaining_cases,
+            quality_arm_req().max_cases,
+            "no budget may be reserved for a summary H1 itself discards"
+        );
+        // The forwarded request is byte-identical regardless.
+        assert_eq!(counters.forwarded.lock().unwrap().clone().unwrap(), body);
+        up.abort();
+        ph.abort();
     }
 
     #[tokio::test]
