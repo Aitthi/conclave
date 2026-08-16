@@ -19,10 +19,17 @@ process generation's reading.
   (`TranscriptMeterState { tokens: session_row.context_tokens ... }`).
 - The frontend seeds from the same stale `session.contextTokens`
   (src/components/ContextBars.tsx:614-618) and shows it until the NEW
-  transcript produces a first reading. The reader correctly ignores old data
-  (file mtime filter, transcript_context.rs:398; row filter `observed_at <
-  started_at`, transcript_context.rs:500), so the stale value can persist for
-  a long idle stretch.
+  transcript produces a first reading.
+- AMENDED (challenge 0de7ac29, found by Dew — the original premise "the
+  reader correctly ignores old data" was WRONG for respawns): the reader's
+  two filters (file mtime, transcript_context.rs:398; row `observed_at <
+  started_at`, transcript_context.rs:500) anchor on `session.started_at`,
+  which is written ONCE at session-row creation (repo/session.rs:132) and
+  never updated on respawn. instance.rs:927-929 parses that ancient value
+  into `TranscriptPollContext.started_at`, so BOTH filters admit the prior
+  generation's .jsonl, `choose_newer` (transcript_context.rs:362-378) picks
+  the old file, and the first poll re-persists the stale count — a bare
+  zero-reset would flash 0% then snap back.
 
 ## Fix (engine only; no frontend change)
 
@@ -36,6 +43,15 @@ with `started_at` and the resolved `limit`):
    limit, estimated: true }` so an already-open UI repaints immediately.
 3. Seed `TranscriptMeterState.tokens = 0` (instance.rs:1206-1210) instead of
    the stale session value.
+4. Re-anchor the poll context to the PROCESS start (challenge 0de7ac29,
+   ruled accepted): capture `let started_at = Utc::now();` immediately
+   before `runtime::pty::spawn_cli` and pass it to
+   `TranscriptPollContext::new`, replacing the
+   `DateTime::parse_from_rfc3339(&session.started_at)` at
+   instance.rs:927-929. Old generations' files (mtime frozen at death) then
+   fail the mtime filter; the new child's file passes as soon as it appends.
+   Steps 1-3 stay required — with the re-anchor the first polls return None
+   and would otherwise leave the stale row untouched.
 
 Scope rules:
 - CLI/transcript branch ONLY. Chat sessions (`track_context` estimate branch)
