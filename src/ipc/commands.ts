@@ -88,9 +88,6 @@ export interface Commands {
       /** Token filter (rtk) toggle — omitted/`null` means enabled (default ON).
        *  Claude agents only; the engine ignores it for other cli kinds. */
       rtkEnabled?: boolean;
-      /** Context proxy toggle — omitted/`null` means enabled (default ON).
-       *  Claude agents only; the engine ignores it for other cli kinds. */
-      proxyEnabled?: boolean;
       toolIds?: string[];
       skillIds?: string[];
       // Position System seed (D1/D2, pinned interface contract): omit to leave

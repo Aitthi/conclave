@@ -22,23 +22,13 @@
 pub mod browser;
 pub mod browser_tabs;
 pub mod chat;
-pub mod count_tokens;
-pub mod ctx_proxy;
 pub mod design_host;
 // The memory-v1 embedder seam lands before its T3/T4 consumers.
 #[allow(dead_code)]
 pub mod embedder;
 pub mod provider;
 pub mod pty;
-#[allow(dead_code)]
-pub mod quality;
-pub mod quality_audit;
-#[allow(dead_code)]
-pub mod quality_fixtures;
 pub mod sandbox_config;
-// Lane A lands before its Lane D production consumer.
-#[allow(dead_code)]
-pub mod summary;
 pub mod task_timer;
 pub mod transcript_context;
 // T2 lands the codec before the T4 exact-search consumer.

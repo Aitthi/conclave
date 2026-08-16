@@ -84,12 +84,6 @@ struct SaveAgentReq {
     /// rtk (Claude Code hook) toggle. Absent or `Some(true)` = enabled;
     /// `Some(false)` = disabled (Lane A ⇄ Lane C wire contract).
     rtk_enabled: Option<bool>,
-    /// Context-proxy toggle (agent-proxy spec D8, superseded 2026-07-11). The
-    /// default is decided at spawn in `instance.rs::proxy_env`, not here:
-    /// Claude agents default ON (NULL/absent = ON, rtk-parity), codex default
-    /// OFF. `Some(false)` opts a Claude agent out; `Some(true)` opts a codex
-    /// agent in. Stored verbatim; this save path does not impose a default.
-    proxy_enabled: Option<bool>,
 }
 
 /// Payload for `agentDef.delete`.
@@ -318,7 +312,6 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         context_window: nonblank(req.context_window),
         selected_builtin_skill_ids,
         rtk_enabled: req.rtk_enabled,
-        proxy_enabled: req.proxy_enabled,
     };
 
     // Capture the previously-stored secret key NAMES (UPDATE only) so we can
