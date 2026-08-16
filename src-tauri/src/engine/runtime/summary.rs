@@ -21,11 +21,40 @@ pub struct SummaryUsage {
     pub output_tokens: u64,
 }
 
+/// The bounded `stop_reason` vocabulary. `gen_body` caps output at
+/// [`SUMMARY_MAX_OUTPUT_TOKENS`] and adaptive thinking eats into that budget,
+/// so a generation CAN stop mid-summary; the economics must be able to tell
+/// that apart from a clean finish.
+pub const KNOWN_STOP_REASONS: &[&str] = &[
+    "end_turn",
+    "max_tokens",
+    "stop_sequence",
+    "tool_use",
+    "pause_turn",
+    "refusal",
+    "model_context_window_exceeded",
+];
+
+/// Where an unrecognised `stop_reason` lands. It is deliberately NOT `None`:
+/// absent means "no such field, treat the row the legacy way", while unknown
+/// means "this may not have finished cleanly", and those must not collapse
+/// into the same value. Mapping to a fixed label also keeps upstream bytes out
+/// of the metric row (global constraint #7 — privacy).
+pub const UNKNOWN_STOP_REASON: &str = "other";
+
+/// The clean-finish label. Every other value keeps a row out of the economics
+/// aggregates (see `repo::proxy_summary_metric`).
+pub const END_TURN_STOP_REASON: &str = "end_turn";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedSummary {
     pub text: String,
     pub response_model: String,
     pub usage: SummaryUsage,
+    /// `None` only when the response carried no string `stop_reason` at all.
+    /// The `&'static str` is load-bearing: it makes it impossible for upstream
+    /// bytes to reach the metric column through this field.
+    pub stop_reason: Option<&'static str>,
 }
 
 /// Content-free generation failure. Construction is private so callers can
@@ -64,6 +93,20 @@ pub fn summary_client() -> reqwest::Client {
         .timeout(Duration::from_secs(60))
         .build()
         .expect("summary client builder cannot fail")
+}
+
+/// Map the response's `stop_reason` onto the bounded vocabulary. A missing or
+/// non-string field is `None` (not an error — the field is not load-bearing
+/// for parsing); an unrecognised one is [`UNKNOWN_STOP_REASON`].
+fn sanitize_stop_reason(response: &Value) -> Option<&'static str> {
+    let raw = response.get("stop_reason").and_then(Value::as_str)?;
+    Some(
+        KNOWN_STOP_REASONS
+            .iter()
+            .copied()
+            .find(|known| *known == raw)
+            .unwrap_or(UNKNOWN_STOP_REASON),
+    )
 }
 
 fn required_usage(usage: &Value, key: &str) -> Result<u64, SummaryClientError> {
@@ -137,6 +180,15 @@ pub async fn generate_summary(
             // cache-identical to the original request.
             Some("thinking") | Some("redacted_thinking") => continue,
             Some("text") => {
+                // STRICT, per block: ANY blank text block aborts the whole
+                // response with `empty_text` — not just a response whose text
+                // is blank once joined. This deliberately differs from
+                // `quality.rs::extract_text_response`, which concatenates
+                // first and trims the JOINED string. H1 parses one
+                // free-prose summary where a blank block means the generation
+                // came apart; H2 parses a JSON answer that must survive
+                // whatever block split the provider chose. Do not "align"
+                // them without re-deciding both call sites.
                 let block_text = block
                     .get("text")
                     .and_then(Value::as_str)
@@ -158,6 +210,7 @@ pub async fn generate_summary(
     Ok(GeneratedSummary {
         text: text.join("\n"),
         response_model,
+        stop_reason: sanitize_stop_reason(&response),
         usage: SummaryUsage {
             input_tokens: required_usage(usage, "input_tokens")?,
             cache_creation_input_tokens: required_usage(usage, "cache_creation_input_tokens")?,
@@ -288,6 +341,67 @@ mod tests {
             response["usage"] = usage;
         }
         response.to_string()
+    }
+
+    /// `stop_reason` is the economics guard's only input: a `max_tokens`
+    /// generation is a truncated non-summary that would score BETTER than a
+    /// real one. Unknown values must not collapse into `None` — `None` means
+    /// "legacy row, keep counting it".
+    #[tokio::test]
+    async fn stop_reason_is_mapped_onto_the_bounded_vocabulary() {
+        let cases: [(Value, Option<&str>); 6] = [
+            (json!("end_turn"), Some("end_turn")),
+            (json!("max_tokens"), Some("max_tokens")),
+            (json!("refusal"), Some("refusal")),
+            // Never stored verbatim: an unrecognised value becomes the fixed
+            // sentinel, which reads as "not a clean finish" downstream.
+            (json!("PRIVATE_UPSTREAM_MARKER"), Some(UNKNOWN_STOP_REASON)),
+            // Absent / non-string → no opinion recorded.
+            (Value::Null, None),
+            (json!(7), None),
+        ];
+        for (raw, expected) in cases {
+            let mut response: Value = serde_json::from_str(&success_body(
+                json!([{"type":"text","text":"ok"}]),
+                Some(complete_usage()),
+            ))
+            .unwrap();
+            response["stop_reason"] = raw.clone();
+            let (upstream, hits, _server) =
+                fixed_upstream(StatusCode::OK, response.to_string(), Duration::ZERO).await;
+            let generated = generate_summary(
+                &summary_client(),
+                &upstream,
+                &api_key_credential(),
+                &json!({}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(generated.stop_reason, expected, "raw stop_reason {raw}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// A response with no `stop_reason` key at all parses fine and records
+    /// `None` — the field is not load-bearing for parsing.
+    #[tokio::test]
+    async fn a_missing_stop_reason_is_none_and_not_an_error() {
+        let (upstream, _hits, _server) = fixed_upstream(
+            StatusCode::OK,
+            success_body(json!([{"type":"text","text":"ok"}]), Some(complete_usage())),
+            Duration::ZERO,
+        )
+        .await;
+        let generated = generate_summary(
+            &summary_client(),
+            &upstream,
+            &api_key_credential(),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(generated.stop_reason, None);
+        assert_eq!(generated.text, "ok");
     }
 
     fn complete_usage() -> Value {

@@ -601,6 +601,7 @@ mod tests {
         SummaryReport {
             total_admitted: 40,
             measured: 30,
+            truncated: 0,
             disarmed: 0,
             below_ceiling: 5,
             tail_boundary_failures: 0,

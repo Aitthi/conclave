@@ -1872,6 +1872,9 @@ fn base_summary_row(
         conversation_hash,
         model: job.model.clone(),
         response_model: None,
+        // Filled by `gen_usage` on every row that reached a generation with
+        // usage; a row that terminated earlier has no stop_reason to record.
+        stop_reason: None,
         method_version: crate::engine::runtime::summary::SUMMARY_METHOD_VERSION.to_owned(),
         prompt_version: crate::engine::runtime::summary::SUMMARY_PROMPT_VERSION.to_owned(),
         price_version: price.price_version.clone(),
@@ -2137,9 +2140,16 @@ async fn sample_summary(state: Arc<AppState>, job: SummaryJob, permit: OwnedSema
     let response_model = generated.response_model.clone();
     let summary_hash = sha256_hex(generated.text.as_bytes());
     let usage = generated.usage;
+    // Every row that gets usage also gets the stop_reason: a generation that
+    // stopped at `max_tokens` produced a TRUNCATED summary, which is shorter,
+    // so it scores a better q_h than a real one. The row stays `measured` —
+    // the guard is in the aggregation (repo::proxy_summary_metric) so the
+    // evidence survives.
+    let stop_reason = generated.stop_reason;
     let gen_usage = |mut row: SummaryMetricInsert| -> SummaryMetricInsert {
         row.response_model = Some(response_model.clone());
         row.summary_hash = Some(summary_hash.clone());
+        row.stop_reason = stop_reason.map(str::to_owned);
         row.gen_input_tokens = Some(saturating_i64(usage.input_tokens));
         row.gen_cache_creation_tokens = Some(saturating_i64(usage.cache_creation_input_tokens));
         row.gen_cache_read_tokens = Some(saturating_i64(usage.cache_read_input_tokens));
@@ -4514,6 +4524,12 @@ mod tests {
         /// `thinking` field: a leading `thinking` block, then the text
         /// (verified live 2026-08-16; `proxy_summary_metric` row 5).
         ThinkingThenText,
+        /// A generation that ran out of the 8192-token output budget: valid
+        /// blocks, parseable text, but the summary is CUT OFF.
+        TruncatedAtMaxTokens,
+        /// The same happy body as [`GenBehavior::Ok`] but carrying the
+        /// `end_turn` stop_reason a real clean finish reports.
+        EndTurn,
         Status(u16),
         /// Behaves like the real API: 400 `invalid_request_error` when a
         /// mid-conversation `{"role":"system"}` message neither ends `messages`
@@ -4595,6 +4611,20 @@ mod tests {
                             {"type":"thinking","thinking":"LEAK_MARKER reasoning","signature":"s"},
                             {"type":"text","text":"aggregate summary of tool outputs"}
                         ],
+                        "usage": gen_usage_json(),
+                    }))
+                    .into_response(),
+                    GenBehavior::EndTurn => axum::Json(json!({
+                        "model": "claude-3-5-sonnet-20241022",
+                        "content": [{"type":"text","text":"aggregate summary of tool outputs"}],
+                        "stop_reason": "end_turn",
+                        "usage": gen_usage_json(),
+                    }))
+                    .into_response(),
+                    GenBehavior::TruncatedAtMaxTokens => axum::Json(json!({
+                        "model": "claude-3-5-sonnet-20241022",
+                        "content": [{"type":"text","text":"aggregate summary of tool outp"}],
+                        "stop_reason": "max_tokens",
                         "usage": gen_usage_json(),
                     }))
                     .into_response(),
@@ -5113,6 +5143,61 @@ mod tests {
             gen.get("thinking").is_none(),
             "gen_body must not set `thinking`: it breaks generation-prefix cache identity"
         );
+        up.abort();
+    }
+
+    /// The plan's acceptance: a `max_tokens` generation must be IMPOSSIBLE to
+    /// enter the q_h/n_h aggregates, and the report must show that it happened.
+    /// The row itself stays `measured` — the guard is in the aggregation, so
+    /// the evidence survives instead of being thrown away.
+    #[tokio::test]
+    async fn a_truncated_generation_is_recorded_but_kept_out_of_the_economics() {
+        let (upstream, hits, _last, up) =
+            start_summary_mock(GenBehavior::TruncatedAtMaxTokens).await;
+        let state = run_armed_pipeline(&upstream, summarizable_request()).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // The row lands, keeps its outcome, and carries the bounded label.
+        assert_eq!(only_outcome(&state.db).await, "measured");
+        let stop_reason: Option<String> =
+            sqlx::query_scalar("SELECT stop_reason FROM proxy_summary_metric")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
+
+        // …but the economics cannot see it.
+        let report = crate::engine::repo::proxy_summary_metric::report(&state.db, 24, None)
+            .await
+            .unwrap();
+        assert_eq!(report.total_admitted, 1, "the evidence is still on file");
+        assert_eq!(report.measured, 0, "a cut-off summary is not a measurement");
+        assert_eq!(report.truncated, 1, "and the report says so");
+        assert_eq!(report.q_h_max, 0.0, "no q_h entered the aggregate");
+        assert_eq!(report.n_h_max, 0.0, "no n_h entered the aggregate");
+        assert_eq!(report.distinct_conversations, 0);
+        assert!(report.conversation_pass_counts.is_empty());
+        up.abort();
+    }
+
+    /// The same pipeline on a clean finish still records the label and still
+    /// counts — the guard must not swallow good rows.
+    #[tokio::test]
+    async fn a_clean_generation_records_end_turn_and_still_counts() {
+        let (upstream, _hits, _last, up) = start_summary_mock(GenBehavior::EndTurn).await;
+        let state = run_armed_pipeline(&upstream, summarizable_request()).await;
+        assert_eq!(only_outcome(&state.db).await, "measured");
+        let stop_reason: Option<String> =
+            sqlx::query_scalar("SELECT stop_reason FROM proxy_summary_metric")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+        let report = crate::engine::repo::proxy_summary_metric::report(&state.db, 24, None)
+            .await
+            .unwrap();
+        assert_eq!(report.measured, 1);
+        assert_eq!(report.truncated, 0);
         up.abort();
     }
 

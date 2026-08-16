@@ -289,6 +289,12 @@ pub struct SummaryMetricInsert {
     pub meets_low_water: Option<bool>,
     pub meets_two_turn: Option<bool>,
 
+    /// Bounded label from `runtime::summary` (`KNOWN_STOP_REASONS` or
+    /// `UNKNOWN_STOP_REASON`); `None` when the response carried no
+    /// `stop_reason`. Anything other than `end_turn` keeps the row out of the
+    /// economics aggregates — see [`report_since`].
+    pub stop_reason: Option<String>,
+
     // terminal state
     pub outcome: SummaryOutcome,
     /// Upstream `error.type` for `CountFailure`/`GenerationFailure` rows
@@ -414,11 +420,12 @@ pub async fn insert_terminal(pool: &SqlitePool, m: SummaryMetricInsert) -> sqlx:
          long_input_usd_per_mtok, long_cache_write_usd_per_mtok, \
          long_cache_read_usd_per_mtok, long_output_usd_per_mtok, long_context_threshold, \
          forward_price_tier, generation_price_tier, c_gen_usd, n_h, \
-         meets_low_water, meets_two_turn, \
+         meets_low_water, meets_two_turn, stop_reason, \
          outcome, failure_stage, error_type) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, \
-         ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51)",
+         ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, \
+         ?52)",
     )
     .bind(m.created_at)
     .bind(m.campaign_id)
@@ -468,6 +475,7 @@ pub async fn insert_terminal(pool: &SqlitePool, m: SummaryMetricInsert) -> sqlx:
     .bind(m.n_h)
     .bind(m.meets_low_water.map(i64::from))
     .bind(m.meets_two_turn.map(i64::from))
+    .bind(m.stop_reason)
     .bind(m.outcome.label())
     .bind(m.outcome.stage_label())
     .bind(m.error_type)
@@ -504,7 +512,14 @@ pub struct ConversationPassCount {
 #[serde(rename_all = "camelCase")]
 pub struct SummaryReport {
     pub total_admitted: i64,
+    /// `measured` rows whose generation finished cleanly — the only rows any
+    /// aggregate below is computed from.
     pub measured: i64,
+    /// `measured` rows with a recorded non-`end_turn` `stop_reason`
+    /// (`max_tokens` above all). Excluded from every aggregate below and
+    /// surfaced here so a run cannot silently lose samples: a non-zero value
+    /// means the 8192-token generation cap is biting.
+    pub truncated: i64,
     pub disarmed: i64,
     pub below_ceiling: i64,
     pub tail_boundary_failures: i64,
@@ -541,6 +556,30 @@ pub struct SummaryReport {
     pub conversation_pass_counts: Vec<ConversationPassCount>,
 }
 
+/// A `measured` row may enter the economics aggregates only when its
+/// generation finished cleanly. `NULL` is "no `stop_reason` recorded" —
+/// historical rows and any response that omitted the field — and keeps the
+/// pre-0026 behaviour so the guard never rewrites the past.
+///
+/// These are macros rather than `const`s because sqlx only accepts literal SQL
+/// (`SqlSafeStr`); expanding through `concat!` keeps one definition per
+/// predicate AND leaves every query a compile-time literal.
+macro_rules! clean_stop {
+    () => {
+        "(stop_reason IS NULL OR stop_reason = 'end_turn')"
+    };
+}
+
+/// The complement over `measured` rows: a generation that stopped for any
+/// other recorded reason (`max_tokens` above all). Counted and reported, never
+/// aggregated — a truncated summary is shorter, which makes s_h and q_h look
+/// BETTER than a real one, so admitting it would bias the GO bar optimistically.
+macro_rules! truncated_stop {
+    () => {
+        "(stop_reason IS NOT NULL AND stop_reason <> 'end_turn')"
+    };
+}
+
 /// SQL-computable aggregates (everything except q_h/n_h median, which SQLite
 /// lacks — pulled and sorted in Rust below, same pattern as
 /// `proxy_checkpoint_metric::report`).
@@ -548,6 +587,7 @@ pub struct SummaryReport {
 struct Agg {
     total_admitted: i64,
     measured: i64,
+    truncated: i64,
     disarmed: i64,
     below_ceiling: i64,
     tail_boundary_failures: i64,
@@ -612,10 +652,18 @@ async fn report_since(
     cutoff: &str,
     campaign_id: Option<&str>,
 ) -> sqlx::Result<SummaryReport> {
-    let agg = sqlx::query_as::<_, Agg>(
+    // `measured` and every derived aggregate below are CLEAN-stop only; the
+    // gen_* spend totals deliberately are not — a truncated generation still
+    // cost real money and must stay visible in the spend accounting.
+    let agg = sqlx::query_as::<_, Agg>(concat!(
         "SELECT \
            COUNT(*) AS total_admitted, \
-           COALESCE(SUM(outcome = 'measured'), 0) AS measured, \
+           COALESCE(SUM(outcome = 'measured' AND ",
+        clean_stop!(),
+        "), 0) AS measured, \
+           COALESCE(SUM(outcome = 'measured' AND ",
+        truncated_stop!(),
+        "), 0) AS truncated, \
            COALESCE(SUM(outcome = 'disarmed'), 0) AS disarmed, \
            COALESCE(SUM(outcome = 'below_ceiling'), 0) AS below_ceiling, \
            COALESCE(SUM(outcome = 'tail_boundary_failure'), 0) AS tail_boundary_failures, \
@@ -624,42 +672,50 @@ async fn report_since(
            COALESCE(SUM(outcome = 'generation_failure'), 0) AS generation_failures, \
            COALESCE(SUM(outcome = 'projection_rejected'), 0) AS projection_rejected, \
            COALESCE(SUM(outcome = 'metric_invalid'), 0) AS metric_invalid, \
-           COUNT(DISTINCT CASE WHEN outcome = 'measured' THEN conversation_hash END) \
-             AS distinct_conversations, \
-           COALESCE(SUM(outcome = 'measured' AND a_tokens BETWEEN 250000 AND 350000), 0) \
-             AS band_250k_350k, \
-           COALESCE(SUM(outcome = 'measured' AND meets_low_water = 1), 0) \
-             AS meets_low_water_count, \
-           COALESCE(SUM(outcome = 'measured' AND meets_two_turn = 1), 0) \
-             AS meets_two_turn_count, \
+           COUNT(DISTINCT CASE WHEN outcome = 'measured' AND ",
+        clean_stop!(),
+        " THEN conversation_hash END) AS distinct_conversations, \
+           COALESCE(SUM(outcome = 'measured' AND ",
+        clean_stop!(),
+        " AND a_tokens BETWEEN 250000 AND 350000), 0) AS band_250k_350k, \
+           COALESCE(SUM(outcome = 'measured' AND ",
+        clean_stop!(),
+        " AND meets_low_water = 1), 0) AS meets_low_water_count, \
+           COALESCE(SUM(outcome = 'measured' AND ",
+        clean_stop!(),
+        " AND meets_two_turn = 1), 0) AS meets_two_turn_count, \
            COALESCE(MAX(plateau_turns), 0) AS max_plateau_turns, \
            COALESCE(SUM(gen_input_tokens), 0) AS gen_input_tokens_total, \
            COALESCE(SUM(gen_cache_creation_tokens), 0) AS gen_cache_creation_tokens_total, \
            COALESCE(SUM(gen_cache_read_tokens), 0) AS gen_cache_read_tokens_total, \
            COALESCE(SUM(gen_output_tokens), 0) AS gen_output_tokens_total \
          FROM proxy_summary_metric \
-         WHERE created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2)",
-    )
+         WHERE created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2)"
+    ))
     .bind(cutoff)
     .bind(campaign_id)
     .fetch_one(pool)
     .await?;
 
-    let qs: Vec<f64> = sqlx::query_scalar(
+    let qs: Vec<f64> = sqlx::query_scalar(concat!(
         "SELECT q_h FROM proxy_summary_metric \
-         WHERE outcome = 'measured' AND q_h IS NOT NULL AND created_at >= ?1 \
-         AND (?2 IS NULL OR campaign_id = ?2) ORDER BY q_h",
-    )
+         WHERE outcome = 'measured' AND ",
+        clean_stop!(),
+        " AND q_h IS NOT NULL AND created_at >= ?1 \
+         AND (?2 IS NULL OR campaign_id = ?2) ORDER BY q_h"
+    ))
     .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
     .await?;
 
-    let ns: Vec<f64> = sqlx::query_scalar(
+    let ns: Vec<f64> = sqlx::query_scalar(concat!(
         "SELECT n_h FROM proxy_summary_metric \
-         WHERE outcome = 'measured' AND n_h IS NOT NULL AND created_at >= ?1 \
-         AND (?2 IS NULL OR campaign_id = ?2) ORDER BY n_h",
-    )
+         WHERE outcome = 'measured' AND ",
+        clean_stop!(),
+        " AND n_h IS NOT NULL AND created_at >= ?1 \
+         AND (?2 IS NULL OR campaign_id = ?2) ORDER BY n_h"
+    ))
     .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
@@ -675,13 +731,15 @@ async fn report_since(
     .fetch_all(pool)
     .await?;
 
-    let conversation_pass_counts: Vec<ConversationPassCount> = sqlx::query_as(
+    let conversation_pass_counts: Vec<ConversationPassCount> = sqlx::query_as(concat!(
         "SELECT conversation_hash, COUNT(*) AS measured_candidates, \
            COALESCE(SUM(meets_low_water = 1 AND meets_two_turn = 1), 0) AS passing_candidates \
          FROM proxy_summary_metric \
-         WHERE outcome = 'measured' AND created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2) \
-         GROUP BY conversation_hash ORDER BY conversation_hash",
-    )
+         WHERE outcome = 'measured' AND ",
+        clean_stop!(),
+        " AND created_at >= ?1 AND (?2 IS NULL OR campaign_id = ?2) \
+         GROUP BY conversation_hash ORDER BY conversation_hash"
+    ))
     .bind(cutoff)
     .bind(campaign_id)
     .fetch_all(pool)
@@ -710,6 +768,7 @@ async fn report_since(
     Ok(SummaryReport {
         total_admitted: agg.total_admitted,
         measured: agg.measured,
+        truncated: agg.truncated,
         disarmed: agg.disarmed,
         below_ceiling: agg.below_ceiling,
         tail_boundary_failures: agg.tail_boundary_failures,
@@ -823,6 +882,7 @@ mod tests {
             conversation_hash: fake_hash(conversation_hash),
             model: "claude-x".into(),
             response_model: None,
+            stop_reason: None,
             method_version: "h1-shadow-summary-v1".into(),
             prompt_version: "aggregate-tool-results-v1".into(),
             price_version: "2026-07-price-v1".into(),
@@ -915,6 +975,66 @@ mod tests {
         m.meets_low_water = Some(meets_low_water);
         m.meets_two_turn = Some(meets_two_turn);
         m
+    }
+
+    /// The 9f128b7 parser fix made truncation reachable: a generation stopped
+    /// at `max_tokens` yields a SHORTER summary, so s_h and q_h look better
+    /// than a real one. Such a row must be impossible to aggregate, must still
+    /// be visible as evidence, and must not disturb rows recorded before the
+    /// column existed.
+    #[tokio::test]
+    async fn truncated_rows_are_counted_but_never_aggregated() {
+        let pool = connect_in_memory().await;
+        let cases: [(&str, Option<&str>, f64, f64); 4] = [
+            ("conv-clean", Some("end_turn"), 0.6, 1.5),
+            // Both of these must vanish from every aggregate: an explicit
+            // truncation and an unrecognised reason mapped to the sentinel.
+            ("conv-truncated", Some("max_tokens"), 0.9, 9.9),
+            ("conv-unknown", Some("other"), 0.95, 9.95),
+            // Legacy row written before migration 0026 — NULL keeps the
+            // pre-guard behaviour and still counts.
+            ("conv-legacy", None, 0.5, 1.0),
+        ];
+        for (conversation, stop_reason, q_h, n_h) in cases {
+            let mut row = measured_row("camp-1", conversation, "b1", q_h, n_h, true, true, 300_000);
+            row.stop_reason = stop_reason.map(str::to_owned);
+            insert_terminal(&pool, row).await.unwrap();
+        }
+
+        let report = report_campaign(&pool, "camp-1").await.unwrap();
+
+        // Evidence is preserved: all four rows are still in the table.
+        assert_eq!(report.total_admitted, 4);
+        assert_eq!(report.measured, 2, "only end_turn and legacy rows count");
+        assert_eq!(report.truncated, 2, "the report must show it happened");
+
+        // Nothing derived from `measured` may see the truncated rows.
+        assert_eq!(report.distinct_conversations, 2);
+        assert_eq!(report.band_250k_350k, 2);
+        assert_eq!(
+            report.conversation_pass_counts.len(),
+            2,
+            "per-conversation pass counts are measured-row scoped too"
+        );
+        assert!(
+            (report.q_h_max - 0.6).abs() < 1e-9,
+            "0.9/0.95 must not leak"
+        );
+        assert!(
+            (report.n_h_max - 1.5).abs() < 1e-9,
+            "9.9/9.95 must not leak"
+        );
+        assert!((report.q_h_min - 0.5).abs() < 1e-9);
+        assert!((report.pct_meets_two_turn - 1.0).abs() < 1e-9);
+        assert!((report.pct_meets_low_water - 1.0).abs() < 1e-9);
+
+        // Spend accounting deliberately does NOT filter: a truncated
+        // generation still cost real money and must stay visible.
+        assert_eq!(
+            report.gen_output_tokens_total,
+            4 * 500,
+            "every generation that billed must remain in the spend totals"
+        );
     }
 
     #[tokio::test]
@@ -1597,6 +1717,12 @@ mod tests {
             "n_h",
             "meets_low_water",
             "meets_two_turn",
+            // Migration 0026. Re-verified for this contract: the writer maps
+            // the upstream value onto `summary::KNOWN_STOP_REASONS` or the
+            // fixed `other` sentinel, and `GeneratedSummary::stop_reason` is
+            // `Option<&'static str>` — there is no path for upstream bytes to
+            // reach this column.
+            "stop_reason",
             "outcome",
             "failure_stage",
             "error_type",
@@ -1693,6 +1819,7 @@ mod tests {
         SummaryReport {
             total_admitted: 40,
             measured: 30,
+            truncated: 0,
             disarmed: 0,
             below_ceiling: 5,
             tail_boundary_failures: 0,
