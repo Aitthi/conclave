@@ -92,6 +92,41 @@ fix minimally so a valid summary is extracted, pin with regression tests.
 - `cd src-tauri && cargo test engine::runtime::ctx_proxy`
 - `git diff --check`
 
+## Amendment — owner ruling on challenge 27913a07 (2026-08-16, credit: Dew)
+
+- **Hypothesis 1 CONFIRMED** by Dew's live probe: claude-opus-5 returns
+  `content = [thinking, text]` with NO `thinking` field in the request.
+  The probe-first requirement of this plan is satisfied; the fix proceeds
+  on that evidence.
+- **Scope widened to `quality.rs`** (challenge accepted, option a): H2's
+  `extract_text_response` (`quality.rs:654`, doc comment "mirroring the H1
+  generation parser") has the identical defect and all five H2 role calls
+  would die `non_text_content` against opus-5 the moment H2 is armed. Dew
+  ports the same skip-thinking-family parser there, with the same
+  mutation-verified test triplet.
+- **Mechanics (task boundary is immutable):** the recorded boundary cannot
+  change after create, so tooling that enforces it (`stage commit`, the
+  integrator's boundary check) treats `quality.rs` as out-of-scope. Land
+  the port as a SEPARATE commit in the lane worktree scoped to that one
+  path (`git commit -- src-tauri/src/engine/runtime/quality.rs`, normal
+  lane identity), so the integrator can attribute it to this ruling
+  rather than to the original boundary (protocol from the
+  boundary-immutable ruling).
+- **H2 request shapes stay UNTOUCHED.** The fix in quality.rs is the
+  response parser only. In particular do NOT disable thinking in the H2
+  replay call: replay fidelity requires sending what the original CLI
+  sent; thinking blocks in H2 responses are legitimate and the parser must
+  tolerate them. Any request-shape change to H2 builders is out of scope
+  (they were audited and merged at d6b81e6).
+- **Added gate:** `cd src-tauri && cargo test engine::runtime::quality`.
+- **Thinking stays OFF the gen_body — Dew's evaluation ACCEPTED.** His
+  live cache probe (one axis varied, 10956-token cacheable prefix) shows
+  `thinking:{"type":"disabled"}` misses the message-block prompt cache
+  (cache_read 10956 → 0, full re-write) while omitting the field is
+  cache-identical. At a ~200k prefix that trades ~$1.25 of cache-write for
+  ~$0.008 of saved thinking output. Parser-only fix is the ruling; the
+  probe table lives in this plan's lane-amended Outcome section.
+
 ## After merge (integrator + human)
 
 Rebuild + relaunch (arming is in-memory), re-arm with the exact commands in
