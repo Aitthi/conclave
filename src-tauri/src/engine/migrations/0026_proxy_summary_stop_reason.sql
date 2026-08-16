@@ -1,0 +1,16 @@
+-- H1 stop_reason guard (plan docs/superpowers/plans/2026-08-16-h1-stop-reason-guard.md).
+-- The 9f128b7 parser fix made truncation REACHABLE for the first time: before
+-- it, every claude-opus-5 generation died at `non_text`; after it, a response
+-- stopped at `max_tokens` parses as a valid summary and would persist as
+-- `measured`. A truncated summary is SHORTER, so B_h is smaller, s_h = A - B_h
+-- is larger and q_h is higher — it passes the two-turn bar MORE easily than a
+-- real summary and biases the GO bar optimistically.
+--
+-- Additive and nullable on purpose: historical rows keep NULL and keep their
+-- current aggregation behaviour. The guard lives in the AGGREGATION
+-- (repo/proxy_summary_metric.rs), not in the outcome, so a truncated row stays
+-- `measured` and the evidence is preserved rather than dropped.
+--
+-- Global constraint #7 (Privacy) still binds: this column holds only the
+-- bounded label vocabulary from runtime/summary.rs, never upstream bytes.
+ALTER TABLE proxy_summary_metric ADD COLUMN stop_reason TEXT;
