@@ -295,6 +295,17 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 26 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0026_proxy_summary_stop_reason.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::raw_sql("PRAGMA user_version = 26;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -451,7 +462,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 25, "migrate() from v13 must reach schema v25");
+        assert_eq!(version, 26, "migrate() from v13 must reach schema v26");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -702,7 +713,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 25, "user_version should be 25");
+        assert_eq!(version, 26, "user_version should be 26");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -905,7 +916,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 25);
+        assert_eq!(version, 26);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -996,7 +1007,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 25);
+        assert_eq!(version, 26);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1106,7 +1117,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 25);
+        assert_eq!(version, 26);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
