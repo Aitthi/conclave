@@ -3,7 +3,11 @@
 //! This module is deliberately narrow:
 //! - It discovers candidate Claude Code and Codex transcript files.
 //! - It matches them to a specific agent instance using workspace cwd plus the
-//!   bootstrap owner marker declaring the agent's own instance id.
+//!   bootstrap owner marker declaring the agent's own instance id. The marker
+//!   counts only where the harness itself writes it — the session-bootstrap
+//!   channel (`claude_value_declares_owner` / `codex_value_declares_owner`) —
+//!   never wherever the phrase merely appears, because agents quote each
+//!   other's briefings and all of a workspace's transcripts share one dir.
 //! - It returns only usage numbers, a limit, an observation timestamp, and the
 //!   source kind.
 //!
@@ -665,13 +669,53 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
     text.contains(&needle)
 }
 
+/// Ownership is bound to the ONE channel Conclave actually writes the marker
+/// on: the SessionStart hook (`runtime::sandbox_config::owner_marker_command`),
+/// which claude-code records as an `attachment` line on every session start —
+/// startup, resume, `/clear`, compact. The system-prompt append carries the
+/// same sentence but never reaches the transcript.
+///
+/// Anything else that CONTAINS the phrase is an echo, not a declaration. Every
+/// workspace agent shares one cwd, so one project dir holds every agent's
+/// transcript and `poll_claude` ranks them by recency — accepting the phrase
+/// from conversational text let a busy agent's transcript claim ownership of
+/// any peer whose briefing it happened to quote (a `ps eww` dump, a forwarded
+/// `conclave tell`, a pasted sidecar) and serve that peer's meter its own
+/// tokens. Structure, not content, decides: see
+/// `peer_briefing_echo_never_declares_ownership`.
+///
+/// Verified against 689 live transcripts (2026-08-16): all 518 marker
+/// declarations arrive as SessionStart hook attachments
+/// (`hook_additional_context` / `hook_success`), none from a user or system
+/// line — so this restriction loses no real declaration.
 fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
-    match value.get("type").and_then(Value::as_str) {
-        Some("attachment" | "user" | "system") => value_texts(value)
-            .iter()
-            .any(|text| text_declares_own_agent_id(text, instance_id)),
-        _ => false,
+    if value.get("type").and_then(Value::as_str) != Some("attachment") {
+        return false;
     }
+    let Some(attachment) = value.get("attachment") else {
+        return false;
+    };
+    if !is_session_start_hook(attachment) {
+        return false;
+    }
+    session_start_hook_texts(attachment)
+        .iter()
+        .any(|text| text_declares_own_agent_id(text, instance_id))
+}
+
+/// Is this attachment a SessionStart hook record? claude-code stamps
+/// `hookEvent: "SessionStart"` and a `hookName` of `SessionStart`,
+/// `SessionStart:startup` or `SessionStart:compact` (all three observed live);
+/// either field is accepted so a version that drops one still binds.
+fn is_session_start_hook(attachment: &Value) -> bool {
+    const SESSION_START: &str = "SessionStart";
+    if attachment.get("hookEvent").and_then(Value::as_str) == Some(SESSION_START) {
+        return true;
+    }
+    attachment
+        .get("hookName")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name.starts_with(SESSION_START))
 }
 
 fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
@@ -696,29 +740,21 @@ fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
         .any(|text| text_declares_own_agent_id(text, instance_id))
 }
 
-/// Every text fragment a claude transcript line can carry the owner marker in.
-///
-/// Real transcripts deliver it three ways (verified against live files):
+/// The text a SessionStart hook attachment carries the owner marker in. Real
+/// transcripts deliver it two ways (verified against live files):
 /// - `attachment.content` — a LIST of strings, how claude-code records a
-///   SessionStart hook's `additionalContext` (type `hook_additional_context`).
-/// - `attachment.stdout` — raw hook stdout (type `hook_success`).
-/// - `message.content` — a plain string OR an array of `{type:"text",text}`
-///   blocks on `user`/`system` lines.
-fn value_texts(value: &Value) -> Vec<&str> {
+///   hook's `additionalContext` (attachment type `hook_additional_context`).
+/// - `attachment.stdout` — raw hook stdout, which for our hook is the
+///   `hookSpecificOutput` JSON (attachment type `hook_success`).
+///
+/// Deliberately NOT the hook's `command` field: the marker command's own text
+/// is an argument we could read back before the hook ever ran, and the field
+/// exists on every hook record, ours or foreign.
+fn session_start_hook_texts(attachment: &Value) -> Vec<&str> {
     let mut out = Vec::new();
-    if let Some(t) = value.get("text").and_then(Value::as_str) {
-        out.push(t);
-    }
-    push_content_texts(value.get("content"), &mut out);
-    if let Some(att) = value.get("attachment") {
-        push_content_texts(att.get("content"), &mut out);
-        if let Some(s) = att.get("stdout").and_then(Value::as_str) {
-            out.push(s);
-        }
-    }
-    push_content_texts(value.pointer("/message/content"), &mut out);
-    if let Some(t) = value.pointer("/message/text").and_then(Value::as_str) {
-        out.push(t);
+    push_content_texts(attachment.get("content"), &mut out);
+    if let Some(stdout) = attachment.get("stdout").and_then(Value::as_str) {
+        out.push(stdout);
     }
     out
 }
@@ -836,13 +872,24 @@ mod tests {
         })
     }
 
+    /// The owner marker exactly as claude-code records it: the SessionStart
+    /// hook's `additionalContext` as a `hook_additional_context` attachment
+    /// whose `content` is a LIST of context strings (copied from a live
+    /// transcript, 2026-08-16). This is the ONLY channel that declares
+    /// ownership — every fixture that just needs "this file belongs to X"
+    /// must use it, or it pins a shape production never writes.
     fn claude_owner_line(instance_id: &str, workspace: &Path) -> Value {
         json!({
-            "type": "user",
+            "type": "attachment",
             "cwd": workspace.to_string_lossy(),
-            "message": {
-                "role": "user",
-                "content": format!("Startup context: your own agent id is {instance_id}.")
+            "attachment": {
+                "type": "hook_additional_context",
+                "hookName": "SessionStart",
+                "toolUseID": "SessionStart",
+                "hookEvent": "SessionStart",
+                "content": [
+                    format!("You are a Conclave agent, and your own agent id is {instance_id}.")
+                ]
             }
         })
     }
@@ -974,11 +1021,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
-    /// User messages in real transcripts frequently store `message.content` as
-    /// an ARRAY of typed blocks, not a plain string; a marker typed as a user
-    /// prompt (e.g. a post-/clear restore nudge) must still match.
+    /// The inverse of the hook tests, and the reason this lane exists: a user
+    /// turn is CONVERSATION, and conversation quotes things. Whether the marker
+    /// arrives as a plain string or as an array of typed blocks, a user line
+    /// must never declare ownership — otherwise quoting a peer's briefing
+    /// hands that peer's meter this transcript's tokens.
+    ///
+    /// This replaces `claude_owner_via_user_message_content_blocks`, which
+    /// pinned the opposite behaviour on a hypothetical "marker typed as a user
+    /// prompt" channel. No such channel exists: Conclave writes the marker only
+    /// through the SessionStart hook (`sandbox_config::owner_marker_command`),
+    /// and 689 live transcripts contain zero user-line declarations.
     #[test]
-    fn claude_owner_via_user_message_content_blocks() {
+    fn claude_user_message_marker_does_not_declare_owner() {
         let claude_root = tmp_root("claude-root");
         let workspace = tmp_root("workspace");
         let instance_id = "inst-blocks-1";
@@ -997,19 +1052,79 @@ mod tests {
                         ]
                     }
                 }),
+                json!({
+                    "type": "user",
+                    "cwd": workspace.to_string_lossy(),
+                    "message": {
+                        "role": "user",
+                        "content": format!("...and again: your own agent id is {instance_id}.")
+                    }
+                }),
                 claude_usage_line(44),
             ],
         );
 
-        let reading = scan_claude_file(
+        assert!(
+            scan_claude_file(
+                &file,
+                instance_id,
+                &workspace,
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+                200_000,
+            )
+            .is_none(),
+            "a user-turn marker is quotable content, never an ownership declaration"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// A hook attachment that is NOT the SessionStart hook must not declare
+    /// ownership either: hook records carry the wrapped tool's own text
+    /// (`stdout`, `command`), so a PreToolUse hook wrapping `ps eww` would
+    /// otherwise become a second echo channel. Only the session-bootstrap hook
+    /// speaks for the instance.
+    #[test]
+    fn claude_non_session_start_hook_does_not_declare_owner() {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-pretool-1";
+        let file = claude_root.join("session.jsonl");
+
+        write_jsonl(
             &file,
-            instance_id,
-            &workspace,
-            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
-            200_000,
-        )
-        .expect("array-form user message content must establish ownership");
-        assert_eq!(reading.tokens, 44);
+            &[
+                json!({
+                    "type": "attachment",
+                    "cwd": workspace.to_string_lossy(),
+                    "attachment": {
+                        "type": "hook_success",
+                        "hookName": "PreToolUse:Bash",
+                        "hookEvent": "PreToolUse",
+                        "content": "",
+                        "stdout": format!(
+                            "74400 claude --append-system-prompt You are a Conclave agent, and your own agent id is {instance_id}.\n"
+                        ),
+                        "stderr": "",
+                        "exitCode": 0
+                    }
+                }),
+                claude_usage_line(45),
+            ],
+        );
+
+        assert!(
+            scan_claude_file(
+                &file,
+                instance_id,
+                &workspace,
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+                200_000,
+            )
+            .is_none(),
+            "only the SessionStart hook declares ownership"
+        );
 
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&workspace);
@@ -1029,11 +1144,7 @@ mod tests {
         write_jsonl(
             &file,
             &[
-                json!({
-                    "type": "attachment",
-                    "cwd": workspace.to_string_lossy(),
-                    "text": format!("your own agent id is {instance_id}"),
-                }),
+                claude_owner_line(instance_id, &workspace),
                 claude_usage_line(140_000),
             ],
         );
@@ -1073,11 +1184,7 @@ mod tests {
         write_jsonl(
             &file,
             &[
-                json!({
-                    "type": "attachment",
-                    "cwd": workspace.to_string_lossy(),
-                    "text": format!("your own agent id is {instance_id}"),
-                }),
+                claude_owner_line(instance_id, &workspace),
                 json!({
                     "type": "assistant",
                     "requestId": "req-1",
@@ -1149,11 +1256,7 @@ mod tests {
         write_jsonl(
             &project_dir.join("active.jsonl"),
             &[
-                json!({
-                    "type": "attachment",
-                    "cwd": workspace.to_string_lossy(),
-                    "text": format!("your own agent id is {instance_id}"),
-                }),
+                claude_owner_line(instance_id, &workspace),
                 claude_usage_line(50),
             ],
         );
@@ -1167,11 +1270,7 @@ mod tests {
         write_jsonl(
             &decoy_dir.join("decoy.jsonl"),
             &[
-                json!({
-                    "type": "attachment",
-                    "cwd": workspace.to_string_lossy(),
-                    "text": format!("your own agent id is {instance_id}"),
-                }),
+                claude_owner_line(instance_id, &workspace),
                 claude_usage_line(999),
             ],
         );
@@ -1194,6 +1293,122 @@ mod tests {
             reading.tokens, 50,
             "scoped scan must read only the cwd project dir, never the decoy"
         );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// Force `path`'s mtime far into the future so `choose_newer` (which ranks
+    /// claude readings by FILE MTIME) has a deterministic winner instead of
+    /// depending on same-second timestamps and readdir order.
+    fn bump_mtime(path: &Path, secs_ahead: u64) {
+        let when = std::time::SystemTime::now() + std::time::Duration::from_secs(secs_ahead);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for set_times");
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("set mtime");
+    }
+
+    /// Incident regression (task ctxmeter-ownership-leak, human-reported):
+    /// every workspace agent shares one cwd, so ONE Claude project dir holds
+    /// every agent's transcript and `poll_claude` takes `choose_newer` across
+    /// all of them. Ownership therefore has to be un-forgeable by CONTENT: a
+    /// busy agent's transcript routinely quotes a peer's launch briefing —
+    /// `ps eww`/`pgrep -fl claude` dumps, a forwarded `conclave tell`, a
+    /// pasted sidecar — and the marker phrase rides along verbatim.
+    ///
+    /// If any of those echoes could declare ownership, the busiest file wins
+    /// `choose_newer` for the peer it echoed and an IDLE agent's meter shows
+    /// the WORKING agent's tokens (the sighting this test exists to make
+    /// impossible). Both echo shapes below are real: the plain-string user
+    /// prompt is the channel the reader actually read before this fix; the
+    /// `tool_result` block is the live 2026-08-16 `ps eww` dump.
+    #[test]
+    fn peer_briefing_echo_never_declares_ownership() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let busy = "inst-busy-lead";
+        let idle = "inst-idle-peer";
+
+        let project_dir = claude_project_dir(&claude_root, &workspace);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        // The busy agent's own transcript: legitimately owned by `busy`, and
+        // echoing the IDLE peer's briefing twice.
+        let busy_file = project_dir.join("busy.jsonl");
+        write_jsonl(
+            &busy_file,
+            &[
+                claude_owner_line(busy, &workspace),
+                // Echo #1 — a plain-string user prompt (peer message, paste).
+                json!({
+                    "type": "user",
+                    "cwd": workspace.to_string_lossy(),
+                    "message": {
+                        "role": "user",
+                        "content": format!(
+                            "roster: 74400 claude --append-system-prompt You are a Conclave agent, and your own agent id is {idle}."
+                        )
+                    }
+                }),
+                // Echo #2 — a `ps eww` dump landing as a tool_result block.
+                json!({
+                    "type": "user",
+                    "cwd": workspace.to_string_lossy(),
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "tool_use_id": "toolu_echo",
+                                "type": "tool_result",
+                                "content": format!(
+                                    "74400 claude --append-system-prompt You are a Conclave agent, and your own agent id is {idle}."
+                                ),
+                                "is_error": false
+                            }
+                        ]
+                    }
+                }),
+                claude_usage_line(900_000),
+            ],
+        );
+
+        // The idle peer's own transcript: quiet, and (mtime) older.
+        let idle_file = project_dir.join("idle.jsonl");
+        write_jsonl(
+            &idle_file,
+            &[
+                claude_owner_line(idle, &workspace),
+                claude_usage_line(1_234),
+            ],
+        );
+
+        // The busy file is the NEWEST, so any leaked ownership wins outright.
+        bump_mtime(&busy_file, 3_600);
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+        let epoch = DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH);
+
+        let idle_reading = reader
+            .poll(idle, &workspace, "claude-code", epoch)
+            .expect("the idle agent's own transcript must still be readable");
+        assert_eq!(
+            idle_reading.tokens, 1_234,
+            "an echoed briefing must not hand the busy agent's tokens to the idle peer's meter"
+        );
+
+        let busy_reading = reader
+            .poll(busy, &workspace, "claude-code", epoch)
+            .expect("the busy agent must still own its own transcript");
+        assert_eq!(busy_reading.tokens, 900_000);
 
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
