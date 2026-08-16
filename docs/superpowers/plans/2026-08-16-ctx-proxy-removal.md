@@ -163,8 +163,14 @@ From repo root (fresh lane worktree needs `pnpm install` first — known):
    toggle gone and no layout hole. Attach the shot path in the READY note.
    (UI Pixel Gate, CLAUDE.md standing protocol. Check :1420 for foreign vite
    servers first — `lsof -nP -iTCP:1420 -sTCP:LISTEN`.)
-5. `grep -rn "ctx_proxy\|ctxopt\|proxy_enabled\|proxyEnabled\|18787" src-tauri/src src design --include="*.rs" --include="*.ts" --include="*.tsx"`
-   — expect ZERO hits (migrations/ and docs/ are excluded by the paths given).
+5. Zero-reference sweep (amended per Dew's challenge 73b53c5a — the original
+   raw grep could never pass: `db.rs:243` `include_str!`s the migration
+   filename `0020_agent_proxy_enabled.sql`, which section C mandates keeping):
+   ```
+   bash -c 'hits=$(grep -rn "ctx_proxy\|ctxopt\|proxy_enabled\|proxyEnabled\|18787" src-tauri/src src design --include="*.rs" --include="*.ts" --include="*.tsx" | grep -v "migrations/0020_agent_proxy_enabled.sql"); [ -z "$hits" ] && echo PASS || { echo "$hits"; exit 1; }'
+   ```
+   — must print PASS and exit 0. The single excluded line is the
+   section-C-mandated migration include_str!, not a live proxy reference.
 
 ## After merge (integrator)
 
