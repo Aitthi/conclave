@@ -110,7 +110,49 @@ pub fn claude_sandbox_settings(
     // commands that stay sandboxed.
     sandbox.insert("autoAllowBashIfSandboxed".to_string(), Value::Bool(true));
 
+    strip_stale_proxy_loopback_domain(&mut root);
+
     root
+}
+
+/// The loopback host the deleted ctx-proxy block used to union into
+/// `sandbox.network.allowedDomains` (removed from this function in 5ed08ad).
+const STALE_PROXY_LOOPBACK_DOMAIN: &str = "127.0.0.1";
+
+/// Remove the stale ctx-proxy loopback entry from `sandbox.network.
+/// allowedDomains`, dropping the key entirely once it empties.
+///
+/// Already-written `agent-settings/<instance_id>.json` files still carry
+/// `allowedDomains: ["127.0.0.1"]` from the removed proxy union block, and the
+/// merge in [`write_claude_settings`] preserves foreign keys — so nothing ever
+/// strips it and those instances keep a loopback TCP hole for a listener that
+/// no longer exists. Stripping here makes every claude spawn self-heal the file
+/// (no one-shot migration to run, and files restored from an old backup heal
+/// too).
+///
+/// This prunes the entry unconditionally: nothing in the settings file
+/// distinguishes the proxy's `"127.0.0.1"` from one a user added by hand for
+/// their own local service. A user who genuinely needs a loopback hole should
+/// spell it differently (e.g. `"localhost"`) — any other entry survives
+/// untouched. A non-array `allowedDomains` is a shape we never wrote and is
+/// left exactly as found.
+fn strip_stale_proxy_loopback_domain(root: &mut serde_json::Value) {
+    let Some(network) = root
+        .pointer_mut("/sandbox/network")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+    let Some(domains) = network
+        .get_mut("allowedDomains")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return;
+    };
+    domains.retain(|v| v.as_str() != Some(STALE_PROXY_LOOPBACK_DOMAIN));
+    if domains.is_empty() {
+        network.remove("allowedDomains");
+    }
 }
 
 /// The marker phrase the transcript-backed context meter matches on
@@ -205,10 +247,17 @@ pub fn claude_agent_settings(
     use serde_json::Value;
     let mut root = match socket_path {
         Some(sock) => claude_sandbox_settings(sock, existing),
-        None => match existing {
-            Some(v @ Value::Object(_)) => v,
-            _ => Value::Object(serde_json::Map::new()),
-        },
+        None => {
+            // Full-bypass spawns skip the sandbox merge entirely, so the stale
+            // proxy loopback entry has to be pruned here too — otherwise a
+            // bypass-only instance never self-heals its settings file.
+            let mut root = match existing {
+                Some(v @ Value::Object(_)) => v,
+                _ => Value::Object(serde_json::Map::new()),
+            };
+            strip_stale_proxy_loopback_domain(&mut root);
+            root
+        }
     };
     let obj = root.as_object_mut().expect("root is an object");
 
@@ -597,5 +646,72 @@ mod tests {
         let sock = "/tmp/conclave.sock";
         let v: Value = claude_sandbox_settings(sock, Some(json!("not an object")));
         assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
+    }
+
+    #[test]
+    fn claude_settings_strip_stale_proxy_loopback_domain() {
+        let sock = "/tmp/conclave.sock";
+        // Exactly the shape the deleted ctx-proxy union block left behind.
+        let existing = json!({
+            "sandbox": {
+                "network": { "allowUnixSockets": [sock], "allowedDomains": ["127.0.0.1"] },
+                "autoAllowBashIfSandboxed": true
+            }
+        });
+        let v = claude_sandbox_settings(sock, Some(existing));
+        assert!(
+            v["sandbox"]["network"].get("allowedDomains").is_none(),
+            "emptied allowedDomains must be dropped, got {v}"
+        );
+        // the socket hole we DO own is untouched
+        assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
+    }
+
+    #[test]
+    fn claude_settings_strip_keeps_foreign_allowed_domains() {
+        let sock = "/tmp/conclave.sock";
+        let existing = json!({
+            "sandbox": {
+                "network": {
+                    "allowUnixSockets": [sock],
+                    "allowedDomains": ["localhost", "127.0.0.1", "*.github.com"]
+                }
+            }
+        });
+        let v = claude_sandbox_settings(sock, Some(existing));
+        assert_eq!(
+            v["sandbox"]["network"]["allowedDomains"],
+            json!(["localhost", "*.github.com"]),
+            "only the proxy loopback entry may be pruned"
+        );
+    }
+
+    #[test]
+    fn claude_settings_strip_leaves_wrong_typed_allowed_domains_alone() {
+        let sock = "/tmp/conclave.sock";
+        // Not a shape we ever wrote — prune only what we recognize, never panic.
+        let existing = json!({
+            "sandbox": { "network": { "allowedDomains": "127.0.0.1" } }
+        });
+        let v = claude_sandbox_settings(sock, Some(existing));
+        assert_eq!(
+            v["sandbox"]["network"]["allowedDomains"],
+            json!("127.0.0.1")
+        );
+        assert_eq!(v["sandbox"]["network"]["allowUnixSockets"], json!([sock]));
+    }
+
+    #[test]
+    fn agent_settings_strip_stale_proxy_loopback_domain_without_socket() {
+        // bypassPermissions spawns pass socket_path=None, so the sandbox merge
+        // never runs — the stale entry must still self-heal on that path.
+        let existing = json!({
+            "sandbox": { "network": { "allowedDomains": ["127.0.0.1", "localhost"] } }
+        });
+        let v = claude_agent_settings("inst-1", None, Some(existing), None);
+        assert_eq!(
+            v["sandbox"]["network"]["allowedDomains"],
+            json!(["localhost"])
+        );
     }
 }
