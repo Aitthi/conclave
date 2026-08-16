@@ -92,6 +92,45 @@ fix minimally so a valid summary is extracted, pin with regression tests.
 - `cd src-tauri && cargo test engine::runtime::ctx_proxy`
 - `git diff --check`
 
+## Outcome (2026-08-16, implementer findings — lane `lane/h1-gen-non-text` @ 191c755)
+
+- **Hypothesis 1 CONFIRMED live** against api.anthropic.com with the exact
+  Claude Code beta set: `claude-opus-5` returns `content:['thinking','text']`
+  for the gen_body shape when the request carries NO `thinking` field
+  (272 of 788 output tokens were thinking tokens). Claude Code itself sends
+  `thinking:{"type":"adaptive","display":"omitted"}` — adaptive is simply the
+  model default, so omitting the field does not turn thinking off.
+- **Hypothesis 2 REFUTED**: `tool_choice:{"type":"none"}` was honoured; no
+  `tool_use` block appeared.
+- **`thinking:{"type":"disabled"}` is ACCEPTED by the API** (returns
+  `['text']`, thinking_tokens 0) but is the WRONG fix. Live cache probe on
+  the same beta set, one axis varied, cacheable 10,956-token message prefix:
+
+  | request | cache_write | cache_read |
+  |---|---|---|
+  | `adaptive` (what Claude Code sends) | 0 | 10956 |
+  | `thinking:{"type":"disabled"}` | 10956 | **0** |
+  | no `thinking` field | 0 | 10956 |
+
+  Disabling thinking changes the **message-block** cache identity and forces a
+  full re-write of the generation prefix. At H1 sizes (~200k tokens) that is
+  ~$1.25 cache-write instead of ~$0.10 cache-read, to avoid ~$0.008 of
+  thinking output. **Decision: `gen_body` stays free of `thinking`**; the
+  parser absorbs the blocks. Pinned by ctx_proxy test
+  `pipeline_survives_a_leading_thinking_block_and_never_persists_it`, which
+  asserts `gen_body` has no `thinking` key.
+- **Fix**: `summary.rs` skips `thinking`/`redacted_thinking`, keeps
+  `non_text_content` for every other block type, and fails `empty_text` when
+  no non-empty text survives (the plan's suggested label — no new label, and
+  `empty_text` already maps to `G::EmptyText`). 4 mutations verified.
+- **Cross-boundary defect (escalated, NOT fixed here)**: H2's
+  `quality.rs::extract_text_response` (line 654) carries the identical
+  all-text requirement "mirroring the H1 generation parser", and both H2
+  builders (`evaluator_request`, the replay builder at ~line 796) set no
+  `thinking` while the replay one uses `original_request["model"]`. Armed
+  against claude-opus-5, all five H2 role calls fail `non_text_content`.
+  H2 is OFF, so this is latent, not live. Filed as a task challenge.
+
 ## After merge (integrator + human)
 
 Rebuild + relaunch (arming is in-memory), re-arm with the exact commands in
