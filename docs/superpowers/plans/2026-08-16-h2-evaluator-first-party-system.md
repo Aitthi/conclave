@@ -40,6 +40,22 @@ introduces. Same implementer (Tiësto) carries the context.
 - `evaluator_request` sets `"system"` to the shared first-party constant
   on the bodies it builds for calls 1+2. No captured bytes; no other
   request-shape change; no new failure kinds.
+- **One constant, no drift** (Mellow design note, e2d2ee0 review): both
+  `build_preflight_request` and `evaluator_request` must read the SAME
+  module const (`PREFLIGHT_SYSTEM`, introduced at e2d2ee0 — rename it if
+  a preflight-specific name no longer fits its two callers). A test
+  asserts the two builders emit an identical system block.
+- **Narrow the preflight doc comment** (same note): `preflight_evaluator`
+  still claims a green preflight predicts the role calls will work; after
+  e2d2ee0 it validates auth/model/usage only. Reword to the narrow claim.
+- **Breadcrumb at the disarm site** (same note): `ctx_proxy.rs` disarms
+  H2 BEFORE recording the preflight failure, so if the identity gate ever
+  changes, H2 disarms permanently under the misleading label
+  `rate_limit_error`. Add a comment at the disarm-first call site
+  (ctx_proxy.rs:3024 region) naming the trap: a preflight 429
+  rate_limit_error may be the first-party identity gate, not quota — see
+  2026-08-16-h2-preflight-text-free.md Probe outcome. Comment only, no
+  behavior change.
 - Pin with fixtures: bodies from `evaluator_request` must contain the
   system block; calls 3/4/5 bodies must carry the ORIGINAL request's
   system unchanged (regression: the port must not leak the constant into
@@ -49,10 +65,14 @@ introduces. Same implementer (Tiësto) carries the context.
 
 - Role-call response parsing untouched (fixed at 9f128b7).
 - Content-free metrics: nothing from message text enters metric rows.
+- Behavior changes live in `quality.rs` ONLY; the `ctx_proxy.rs` entry
+  in the boundary is for the breadcrumb comment, nothing else.
 - Boundary: `src-tauri/src/engine/runtime/quality.rs` (tests inline),
+  `src-tauri/src/engine/runtime/ctx_proxy.rs` (comment only),
   this plan file.
 
 ## Gates (record each via `conclave task gate`)
 
 - `cd src-tauri && cargo test engine::runtime::quality`
+- `cd src-tauri && cargo test engine::runtime::ctx_proxy`
 - `git diff --check`
