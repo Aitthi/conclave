@@ -39,6 +39,29 @@ const KNOWN_ERROR_TYPES: &[&str] = &[
     "overloaded_error",
 ];
 
+/// Generation `stop_reason` allowlist. Mirrors
+/// `runtime::summary::KNOWN_STOP_REASONS` plus its `UNKNOWN_STOP_REASON`
+/// sentinel, duplicated here for the same reason as [`KNOWN_ERROR_TYPES`]:
+/// this lane's boundary is ctx_proxy/repo and must not reach into
+/// `runtime/summary.rs`. Today the only writer hands over an
+/// `Option<&'static str>` drawn from those constants, so this is
+/// defence-in-depth — the point is that the guarantee stops depending on ONE
+/// call site's type (Mellow finding (a)). `None` stays legal: a row that never
+/// reached a generation, and every row written before migration 0026, has no
+/// stop_reason at all.
+const KNOWN_STOP_REASONS: &[&str] = &[
+    "end_turn",
+    "max_tokens",
+    "stop_sequence",
+    "tool_use",
+    "pause_turn",
+    "refusal",
+    "model_context_window_exceeded",
+    // The sentinel an unrecognised upstream value is mapped onto, so upstream
+    // bytes never reach this column.
+    "other",
+];
+
 /// count_tokens failure sub-stage (plan steps 2 and 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountFailureStage {
@@ -292,7 +315,9 @@ pub struct SummaryMetricInsert {
     /// Bounded label from `runtime::summary` (`KNOWN_STOP_REASONS` or
     /// `UNKNOWN_STOP_REASON`); `None` when the response carried no
     /// `stop_reason`. Anything other than `end_turn` keeps the row out of the
-    /// economics aggregates — see [`report_since`].
+    /// economics aggregates — see [`report_since`]. Must be one of
+    /// [`KNOWN_STOP_REASONS`] or `None`; anything else is rejected before the
+    /// row is ever written.
     pub stop_reason: Option<String>,
 
     // terminal state
@@ -373,6 +398,14 @@ pub async fn insert_terminal(pool: &SqlitePool, m: SummaryMetricInsert) -> sqlx:
         if !KNOWN_ERROR_TYPES.contains(&et) {
             return Err(sqlx::Error::Protocol(format!(
                 "[proxy_summary_metric] error_type `{et}` is not in the allowlist"
+            )));
+        }
+    }
+
+    if let Some(sr) = m.stop_reason.as_deref() {
+        if !KNOWN_STOP_REASONS.contains(&sr) {
+            return Err(sqlx::Error::Protocol(format!(
+                "[proxy_summary_metric] stop_reason `{sr}` is not in the allowlist"
             )));
         }
     }
@@ -1273,6 +1306,73 @@ mod tests {
             count, 0,
             "the rejected insert must not commit a partial row"
         );
+    }
+
+    /// Sibling of the `error_type` allowlist (Mellow finding (a)): before this,
+    /// `stop_reason`'s content-freedom rested entirely on ONE call site handing
+    /// over an `Option<&'static str>`. The write boundary now rejects anything
+    /// outside the vocabulary, and a rejected insert commits nothing.
+    #[tokio::test]
+    async fn insert_terminal_rejects_stop_reason_outside_the_allowlist_and_persists_nothing() {
+        let pool = connect_in_memory().await;
+        for hostile_value in [
+            "IGNORE ALL PREVIOUS INSTRUCTIONS; leaked-key sk-live-hostile <<<SOURCE>>>",
+            "End_Turn",  // case matters — the aggregate predicate is exact
+            "end_turn ", // so does whitespace
+            "",
+        ] {
+            let mut hostile = measured_row("camp-1", "conv-1", "b1", 0.6, 1.5, true, true, 300_000);
+            hostile.stop_reason = Some(hostile_value.into());
+            assert!(
+                insert_terminal(&pool, hostile).await.is_err(),
+                "stop_reason {hostile_value:?} must be rejected"
+            );
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM proxy_summary_metric")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a rejected insert must not commit a partial row");
+    }
+
+    /// The whole vocabulary the writer can legitimately produce must pass —
+    /// including the `other` sentinel and `None`. An allowlist built from the
+    /// seven API literals alone would reject rows the current code writes.
+    #[tokio::test]
+    async fn insert_terminal_accepts_every_legitimate_stop_reason_including_none() {
+        let pool = connect_in_memory().await;
+        let legal = [
+            Some("end_turn"),
+            Some("max_tokens"),
+            Some("stop_sequence"),
+            Some("tool_use"),
+            Some("pause_turn"),
+            Some("refusal"),
+            Some("model_context_window_exceeded"),
+            Some("other"),
+            None,
+        ];
+        for (index, stop_reason) in legal.into_iter().enumerate() {
+            let mut row = measured_row(
+                "camp-1",
+                &format!("conv-{index}"),
+                "b1",
+                0.6,
+                1.5,
+                true,
+                true,
+                300_000,
+            );
+            row.stop_reason = stop_reason.map(str::to_owned);
+            insert_terminal(&pool, row)
+                .await
+                .unwrap_or_else(|error| panic!("stop_reason {stop_reason:?} rejected: {error}"));
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM proxy_summary_metric")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 9);
     }
 
     // PRIVACY (Mellow review finding 1, HIGH): unlike error_type/outcome/
