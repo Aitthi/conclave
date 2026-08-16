@@ -549,7 +549,9 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
         )));
     }
 
-    let session = repo::session::get_by_instance(&state.db, &id)
+    // `mut`: the CLI branch zeroes this generation's context meter and must hand
+    // the CALLER the post-reset row, not the pre-reset one it read here.
+    let mut session = repo::session::get_by_instance(&state.db, &id)
         .await?
         .ok_or_else(|| {
             AppError::NotFound(format!("session for workspace_agent id={id} not found"))
@@ -944,7 +946,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             reset_context_meter_for_new_generation(
                 &state.db,
                 state.app(),
-                &session.id,
+                &mut session,
                 context_limit,
             )
             .await;
@@ -1404,34 +1406,42 @@ async fn poll_transcript_context(
     meter.last_poll = Some(std::time::Instant::now());
 }
 
-/// Zero the persisted context meter for a freshly spawned CLI generation, and
-/// tell any already-open UI about it.
+/// Zero the context meter for a freshly spawned CLI generation — in the DB row,
+/// in the caller's copy of that row, and on the bus.
 ///
 /// A CLI restart kills the child and spawns a new one; the resume is a handoff
 /// PROMPT (`run_respawn_resume`), not `--continue`, so the previous generation's
-/// `context_tokens` describe a window that no longer exists. Both the engine
-/// meter and the frontend (`ContextBars`) seed from this row, so leaving it in
-/// place shows the dead generation's reading until the new transcript produces
-/// its first usage row.
+/// `context_tokens` describe a window that no longer exists.
+///
+/// All THREE carriers are reset together, because each one alone still shows the
+/// dead generation's reading:
+/// - the row, which `forward_session_output` and every later roster read consult;
+/// - `session`, which is what `spawn` RETURNS —
+///   `WorkspacePane.spawnInstance` stores the response in `sessionObjs` and
+///   `ContextBars` seeds its meter from `session.contextTokens`, typically after
+///   the emit below has already fired at an unmounted component;
+/// - the `session:context` event, which repaints a UI that is already open.
 ///
 /// `limit` MUST be the resolved limit for this launch, never 0/NULL:
 /// [`repo::session::set_context_reading`] writes numerator and denominator
 /// together, and a bad denominator is what the roster divides by.
 ///
-/// Best-effort, exactly like the other meter writers: a failed write or emit
-/// must never abort a spawn that has already produced a live child.
+/// Best-effort on the I/O, exactly like the other meter writers: a failed write
+/// or emit must never abort a spawn that has already produced a live child.
 async fn reset_context_meter_for_new_generation(
     db: &sqlx::SqlitePool,
     app: Option<&tauri::AppHandle>,
-    session_id: &str,
+    session: &mut repo::session::SessionRow,
     limit: i64,
 ) {
-    let _ = repo::session::set_context_reading(db, session_id, 0, limit).await;
+    let _ = repo::session::set_context_reading(db, &session.id, 0, limit).await;
+    session.context_tokens = Some(0);
+    session.context_limit = Some(limit);
     if let Some(app) = app {
         let _ = bus::session_context(
             app,
             bus::SessionContext {
-                session_id: session_id.to_owned(),
+                session_id: session.id.clone(),
                 context_tokens: 0,
                 context_limit: limit,
                 estimated: true,
@@ -2561,21 +2571,35 @@ mod tests {
     /// Also pins the denominator: `set_context_reading` writes numerator AND
     /// denominator together, so the reset must carry the RESOLVED launch limit
     /// (never 0/NULL), which is what the roster divides by.
+    ///
+    /// And it pins the row `spawn` hands BACK: `WorkspacePane.spawnInstance`
+    /// seeds `ContextBars` from the spawn response, so a reset that only touched
+    /// the DB would still paint the dead generation's number on first mount.
     #[tokio::test]
     async fn reset_context_meter_zeroes_stale_generation_reading() {
         let state = AppState::for_tests().await;
         let id = fixture_instance(&state).await;
-        let session = repo::session::get_by_instance(&state.db, &id)
+        let mut session = repo::session::get_by_instance(&state.db, &id)
             .await
             .expect("get_by_instance failed")
             .expect("session exists");
 
-        // The previous generation's persisted reading.
+        // The previous generation's persisted reading, in the row AND in the
+        // stale in-memory copy `spawn` read before the reset.
         repo::session::set_context_reading(&state.db, &session.id, 125_000, 999)
             .await
             .expect("seed stale generation reading");
+        session.context_tokens = Some(125_000);
+        session.context_limit = Some(999);
 
-        reset_context_meter_for_new_generation(&state.db, None, &session.id, 1_000_000).await;
+        reset_context_meter_for_new_generation(&state.db, None, &mut session, 1_000_000).await;
+
+        assert_eq!(
+            (session.context_tokens, session.context_limit),
+            (Some(0), Some(1_000_000)),
+            "the row returned to the caller (and seeded into ContextBars) must \
+             carry the reset values, not the ones read before the reset"
+        );
 
         let after = repo::session::get(&state.db, &session.id)
             .await
