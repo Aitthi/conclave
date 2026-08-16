@@ -4171,7 +4171,7 @@ mod tests {
     use super::{
         expand_self_args, inject_code_path, parse_min_plan_header, plan_check_files_and_total,
         read_checkout_file, render_plan_check_result, sha256_hex, validate_slug, GUARD_HOOK,
-        GUARD_MARKER, USAGE,
+        GUARD_MARKER,
     };
     use std::path::{Path, PathBuf};
 
