@@ -907,6 +907,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 launch.clone(),
             ];
 
+            // Stamped BEFORE the child exists so nothing this generation writes
+            // can predate it: this is the transcript meter's generation anchor
+            // (see the `TranscriptPollContext` construction below).
+            let generation_started_at = Utc::now();
+
             let backend = runtime::pty::spawn_cli(
                 &session.id,
                 &shell,
@@ -924,18 +929,42 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                     .map_err(|e| AppError::Internal(e.to_string()));
             };
             repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
-            let started_at = DateTime::parse_from_rfc3339(&session.started_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
+
+            // A CLI (re)spawn is a genuinely fresh process: resume is a handoff
+            // PROMPT injection (`run_respawn_resume`), never `--continue`, so the
+            // persisted reading belongs to a generation that no longer exists.
+            // Zero it — and emit — before the meter can show it. CLI branch only:
+            // chat sessions keep their persisted value, because a chat agent's
+            // history really does survive a restart.
+            let context_limit = resolve_session_context_limit(
+                &cli_kind,
+                def.model.as_deref(),
+                session.context_limit,
+            );
+            reset_context_meter_for_new_generation(
+                &state.db,
+                state.app(),
+                &session.id,
+                context_limit,
+            )
+            .await;
+
+            // Anchor the transcript meter to THIS generation's start, not to
+            // `session.started_at`: that column is written once at instantiate
+            // (`repo::session::create_for_instance`) and never bumped, so a live
+            // row routinely carries a weeks-old stamp. Both of the reader's
+            // generation filters key off this instant — the `collect_jsonl_files`
+            // mtime filter and `finalize`'s `observed_at < started_at` — and the
+            // ownership marker is the instance id, which every generation of this
+            // instance shares. With a stale anchor the PREVIOUS generation's
+            // transcript stays admissible, keeps winning `choose_newer` until the
+            // new one logs its first usage row, and re-persists exactly the value
+            // zeroed above.
             let transcript_ctx = TranscriptPollContext::new(
                 &ws.folder_path,
                 &cli_kind,
-                started_at,
-                resolve_session_context_limit(
-                    &cli_kind,
-                    def.model.as_deref(),
-                    session.context_limit,
-                ),
+                generation_started_at,
+                context_limit,
             );
             Some((backend.output_rx, epoch, Some(transcript_ctx)))
         }
@@ -1203,11 +1232,15 @@ async fn forward_session_output(
             return;
         };
 
+        // Seeded at ZERO, never from the session row: this branch is only ever
+        // reached for a freshly spawned CLI child, whose context window starts
+        // empty (`spawn` has already zeroed the row via
+        // `reset_context_meter_for_new_generation`). Seeding from the row would
+        // make the first genuine transcript reading look "unchanged" whenever it
+        // happens to match the previous generation's count, suppressing both the
+        // persist and the `session:context` emit.
         let mut meter = TranscriptMeterState {
-            tokens: session_row
-                .as_ref()
-                .and_then(|s| s.context_tokens)
-                .unwrap_or(0),
+            tokens: 0,
             limit,
             last_poll: None,
         };
@@ -1369,6 +1402,42 @@ async fn poll_transcript_context(
     );
 
     meter.last_poll = Some(std::time::Instant::now());
+}
+
+/// Zero the persisted context meter for a freshly spawned CLI generation, and
+/// tell any already-open UI about it.
+///
+/// A CLI restart kills the child and spawns a new one; the resume is a handoff
+/// PROMPT (`run_respawn_resume`), not `--continue`, so the previous generation's
+/// `context_tokens` describe a window that no longer exists. Both the engine
+/// meter and the frontend (`ContextBars`) seed from this row, so leaving it in
+/// place shows the dead generation's reading until the new transcript produces
+/// its first usage row.
+///
+/// `limit` MUST be the resolved limit for this launch, never 0/NULL:
+/// [`repo::session::set_context_reading`] writes numerator and denominator
+/// together, and a bad denominator is what the roster divides by.
+///
+/// Best-effort, exactly like the other meter writers: a failed write or emit
+/// must never abort a spawn that has already produced a live child.
+async fn reset_context_meter_for_new_generation(
+    db: &sqlx::SqlitePool,
+    app: Option<&tauri::AppHandle>,
+    session_id: &str,
+    limit: i64,
+) {
+    let _ = repo::session::set_context_reading(db, session_id, 0, limit).await;
+    if let Some(app) = app {
+        let _ = bus::session_context(
+            app,
+            bus::SessionContext {
+                session_id: session_id.to_owned(),
+                context_tokens: 0,
+                context_limit: limit,
+                estimated: true,
+            },
+        );
+    }
 }
 
 /// Persist + emit the current context estimate, then run the auto-compact check.
@@ -2478,6 +2547,382 @@ mod tests {
             Some(1_050_000),
             "codex + known model (gpt-5.4) must seed the table's context limit, \
              not the stale stored value (999) or the generic default (200_000)"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+    }
+
+    /// A CLI (re)spawn must land the meter at ZERO, not at the previous
+    /// generation's reading. Reported 2026-08-16 (human + screenshot): a freshly
+    /// relaunched agent showed 15% (149,355 tok) before consuming anything —
+    /// the dead generation's count, kept alive by the reused session row.
+    ///
+    /// Also pins the denominator: `set_context_reading` writes numerator AND
+    /// denominator together, so the reset must carry the RESOLVED launch limit
+    /// (never 0/NULL), which is what the roster divides by.
+    #[tokio::test]
+    async fn reset_context_meter_zeroes_stale_generation_reading() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        // The previous generation's persisted reading.
+        repo::session::set_context_reading(&state.db, &session.id, 125_000, 999)
+            .await
+            .expect("seed stale generation reading");
+
+        reset_context_meter_for_new_generation(&state.db, None, &session.id, 1_000_000).await;
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_tokens,
+            Some(0),
+            "a fresh CLI generation must start the meter at 0, not at the \
+             previous generation's count"
+        );
+        assert_eq!(
+            after.context_limit,
+            Some(1_000_000),
+            "the reset must persist the RESOLVED launch limit as the denominator"
+        );
+    }
+
+    /// The transcript meter seeds at zero, never from the session row: a CLI
+    /// forwarder only ever runs for a freshly spawned child. Seeding from the
+    /// row makes `poll_transcript_context`'s `changed` check suppress the first
+    /// genuine reading whenever it happens to match the previous generation's
+    /// count — swallowing both the persist and the `session:context` emit.
+    ///
+    /// Exercised with a codex rollout reporting exactly the pre-seeded token
+    /// count (125_000) plus a `model_context_window` that differs from the
+    /// stored one (999): a row-seeded meter reports "unchanged" and leaves the
+    /// wrong denominator in place, a zero-seeded meter persists both.
+    #[tokio::test]
+    async fn forwarder_seeds_transcript_meter_at_zero_not_from_session_row() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let ws = workspace_agent::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("workspace agent exists");
+        let workspace_row = workspace::get(&state.db, &ws.workspace_id)
+            .await
+            .expect("workspace get failed")
+            .expect("workspace exists");
+
+        // The stale generation's reading, with a denominator that is NOT the one
+        // the transcript reports — so a suppressed write is observable.
+        repo::session::set_context_reading(&state.db, &session.id, 125_000, 999)
+            .await
+            .expect("seed stale generation reading");
+
+        // Resolved the same way the forwarder resolves its own pre-poll limit
+        // (codex ignores the stored value, R4), so `reading.limit` matches
+        // `meter.limit` and the ONLY thing that can flip `changed` is the seed.
+        let resolved_limit = resolve_session_context_limit("codex", None, Some(999));
+
+        // Stamped BEFORE the fixture transcript is written, exactly as `spawn`
+        // stamps it before the child can create one — the reader's mtime filter
+        // (`collect_jsonl_files`) admits only files touched at or after it.
+        let generation_started_at = Utc::now();
+
+        let claude_root = temp_root("forwarder-zero-seed-claude");
+        let codex_root = temp_root("forwarder-zero-seed-codex");
+        let codex_file = codex_root.join("2026/08/16/rollout.jsonl");
+        std::fs::create_dir_all(codex_file.parent().expect("codex parent dir"))
+            .expect("create codex dir");
+        write_jsonl(
+            &codex_file,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace_row.folder_path.clone(),
+                        "id": "codex-session-id-not-conclave-instance-id",
+                        "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": format!("You are a Conclave agent, and your own agent id is {id}.")
+                            }
+                        ]
+                    }
+                }),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": "2099-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": { "total_tokens": 125_000 },
+                            "total_token_usage": { "total_tokens": 125_000 },
+                            "model_context_window": resolved_limit
+                        }
+                    }
+                }),
+            ],
+        );
+
+        let transcript_ctx = TranscriptPollContext::with_reader(
+            runtime::transcript_context::TranscriptContextReader::new(
+                runtime::transcript_context::TranscriptContextConfig {
+                    claude_projects_root: claude_root.clone(),
+                    codex_sessions_root: codex_root.clone(),
+                    fallback_limit: resolved_limit,
+                },
+            ),
+            &workspace_row.folder_path,
+            "codex",
+            generation_started_at,
+        );
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            Some("codex".into()),
+            None,
+            rx,
+            false, // CLI/PTY backend — transcript-backed context enabled.
+            Some(transcript_ctx),
+            epoch,
+        ));
+
+        tx.send("prompt".to_string())
+            .await
+            .expect("send chunk failed");
+        drop(tx);
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_tokens,
+            Some(125_000),
+            "the first transcript reading must be persisted even when it equals \
+             the stale row"
+        );
+        assert_eq!(
+            after.context_limit,
+            Some(resolved_limit),
+            "a row-seeded meter would report 'unchanged' and leave the stale \
+             denominator (999) in place"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+    }
+
+    /// The generation anchor (ruling 7ef07d57, step 4): the transcript meter is
+    /// anchored to THIS process generation's start, so the PREVIOUS generation's
+    /// transcript can never win a poll — not even in the window where the new
+    /// child has booted but not yet logged a usage row, which is exactly when
+    /// the reported bug was visible.
+    ///
+    /// Shape mirrors production: an old rollout that still carries this
+    /// instance's ownership marker and a fat token count, then the anchor, then
+    /// the new generation's rollout with ownership but NO `token_count` yet.
+    /// The old file's ROWS are deliberately timestamped in the far future so the
+    /// per-row `observed_at < started_at` filter cannot be what rejects it —
+    /// this pins the `collect_jsonl_files` mtime filter, which is the one doing
+    /// the real work in production (for claude-code, `finalize` derives
+    /// `observed_at` from the file mtime too).
+    ///
+    /// Anchored to `session.started_at` instead — a stamp written once at
+    /// instantiate and weeks old on a live row — the old file is admissible and
+    /// its 900_000 lands back in the session row.
+    #[tokio::test]
+    async fn transcript_meter_ignores_previous_generation_after_reanchor() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+        let ws = workspace_agent::get(&state.db, &id)
+            .await
+            .expect("get failed")
+            .expect("workspace agent exists");
+        let workspace_row = workspace::get(&state.db, &ws.workspace_id)
+            .await
+            .expect("workspace get failed")
+            .expect("workspace exists");
+
+        let resolved_limit = resolve_session_context_limit("codex", None, None);
+
+        // Post-reset state: `spawn` has already zeroed the row for this
+        // generation via `reset_context_meter_for_new_generation`.
+        repo::session::set_context_reading(&state.db, &session.id, 0, resolved_limit)
+            .await
+            .expect("seed post-reset row");
+
+        let claude_root = temp_root("reanchor-claude");
+        let codex_root = temp_root("reanchor-codex");
+
+        // ── Previous generation: fat reading, ownership marker intact ──
+        let old_file = codex_root.join("2026/08/15/rollout-previous.jsonl");
+        std::fs::create_dir_all(old_file.parent().expect("old parent dir"))
+            .expect("create old codex dir");
+        write_jsonl(
+            &old_file,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace_row.folder_path.clone(),
+                        "id": "codex-session-previous-generation",
+                        "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": format!("You are a Conclave agent, and your own agent id is {id}.")
+                            }
+                        ]
+                    }
+                }),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": "2099-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": { "total_tokens": 900_000 },
+                            "total_token_usage": { "total_tokens": 900_000 },
+                            "model_context_window": resolved_limit
+                        }
+                    }
+                }),
+            ],
+        );
+
+        // The kill/respawn boundary. Sleep so the old file's mtime is strictly
+        // older than the anchor, the way a dead generation's file always is.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let generation_started_at = Utc::now();
+
+        // ── This generation: booted, owns the session, no usage row yet ──
+        let new_file = codex_root.join("2026/08/16/rollout-current.jsonl");
+        std::fs::create_dir_all(new_file.parent().expect("new parent dir"))
+            .expect("create new codex dir");
+        write_jsonl(
+            &new_file,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-02T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace_row.folder_path.clone(),
+                        "id": "codex-session-current-generation",
+                        "originator": "codex-tui"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": format!("You are a Conclave agent, and your own agent id is {id}.")
+                            }
+                        ]
+                    }
+                }),
+            ],
+        );
+
+        let transcript_ctx = TranscriptPollContext::with_reader(
+            runtime::transcript_context::TranscriptContextReader::new(
+                runtime::transcript_context::TranscriptContextConfig {
+                    claude_projects_root: claude_root.clone(),
+                    codex_sessions_root: codex_root.clone(),
+                    fallback_limit: resolved_limit,
+                },
+            ),
+            &workspace_row.folder_path,
+            "codex",
+            generation_started_at,
+        );
+
+        let epoch = state
+            .runtime
+            .register(&id, runtime::LiveHandle::placeholder(&session.id))
+            .expect("register");
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .expect("set running");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let task = tokio::spawn(forward_session_output(
+            state.db.clone(),
+            Arc::clone(&state.runtime),
+            None,
+            id.clone(),
+            session.id.clone(),
+            Some("codex".into()),
+            None,
+            rx,
+            false, // CLI/PTY backend — transcript-backed context enabled.
+            Some(transcript_ctx),
+            epoch,
+        ));
+
+        tx.send("prompt".to_string())
+            .await
+            .expect("send chunk failed");
+        drop(tx);
+        task.await.expect("forwarder task panicked");
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            after.context_tokens,
+            Some(0),
+            "the dead generation's transcript must not resurface — the meter \
+             stays at the reset value until THIS generation logs a reading"
         );
 
         let _ = std::fs::remove_dir_all(&claude_root);
