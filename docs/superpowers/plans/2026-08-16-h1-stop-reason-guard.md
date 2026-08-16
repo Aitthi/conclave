@@ -94,3 +94,34 @@ no failure-vocabulary migration):
 - `cd src-tauri && cargo test proxy_summary_metric`
 - `cd src-tauri && cargo test engine::db`
 - `git diff --check`
+
+## Outcome (2026-08-16, merged 22946e7 — recorded by owner; the lane's
+four self-ruled decisions lived only in the READY note until Mellow's
+review flagged the record gap)
+
+- Implemented as planned (lane ce437d8 + 1162c73, db.rs widening ruled
+  at challenge 85dd897d). Mellow verdict: RECOMMEND MERGE; every
+  measured-consumer in `report_since` carries `clean_stop!()`, followed
+  up to `h1_gate` (proxy_summary_metric.rs:823) whose inputs are all
+  truncation-filtered or unaffected; predicates verified empirically as
+  a true partition (clean+truncated == 1 on end_turn / max_tokens /
+  other / NULL / empty / 'END_TURN'), unknown shapes falling on the
+  truncated (fail-safe) side.
+- Dew's four self-ruled decisions, all accepted by owner (ledger note
+  83e274fe): (1) unrecognised stop_reason → fixed `other` sentinel,
+  never None — None is reserved for legacy/absent rows which keep
+  counting; `GeneratedSummary.stop_reason: Option<&'static str>` sourced
+  from a const slice makes upstream bytes unrepresentable. (2) gen_*
+  spend totals still COUNT truncated rows — they billed real money.
+  (3) `failure_rate` divides by truncation-filtered measured — the
+  conservative direction (rate can only move up). (4) `clean_stop!` /
+  `truncated_stop!` are macro_rules!/concat! expansions so every sqlx
+  query stays a compile-time literal with one definition per predicate.
+- Owner decisions on Mellow's non-blocking findings: (a) `plateau_turns`
+  keeps seeing truncated rows on both write-side lookup and MAX — it
+  measures sampling dynamics, not summary quality, and is not a GO-bar
+  input; revisit ONLY if plateau ever becomes one. (b) `insert_terminal`
+  allowlisting for stop_reason (write-boundary symmetry with error_type)
+  is folded into task h2-truncation-handoff-guard. (c) The truncated→H2
+  handoff leak (challenge 3a2afb6f) is that same follow-up task, on the
+  arm-H2 precondition list.
