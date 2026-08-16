@@ -125,15 +125,32 @@ pub async fn generate_summary(
         .ok_or_else(|| failure("missing_content"))?;
     let mut text = Vec::with_capacity(blocks.len());
     for block in blocks {
-        if block.get("type").and_then(Value::as_str) != Some("text") {
-            return Err(failure("non_text_content"));
+        match block.get("type").and_then(Value::as_str) {
+            // claude-opus-5 emits a leading `thinking` block even when the
+            // request carries NO `thinking` field — adaptive thinking is the
+            // model default (verified live 2026-08-16; proxy_summary_metric
+            // row 5 died here). Skip the thinking family and keep the text.
+            // Turning thinking off in the request is NOT the fix: sending
+            // `thinking:{"type":"disabled"}` misses the message-block prompt
+            // cache for the whole generation prefix (~200k tokens re-written
+            // at cache-write price), while omitting the field is
+            // cache-identical to the original request.
+            Some("thinking") | Some("redacted_thinking") => continue,
+            Some("text") => {
+                let block_text = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or_else(|| failure("empty_text"))?;
+                text.push(block_text);
+            }
+            // Any OTHER block type is still a hard failure.
+            _ => return Err(failure("non_text_content")),
         }
-        let block_text = block
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| failure("empty_text"))?;
-        text.push(block_text);
+    }
+    // A response made up entirely of thinking blocks carries no summary.
+    if text.is_empty() {
+        return Err(failure("empty_text"));
     }
     let usage = response
         .get("usage")
@@ -497,6 +514,102 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(error.kind(), "non_text_content");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// claude-opus-5 answers the generation request with `[thinking, text]`
+    /// even though `gen_body` sets no `thinking` field — adaptive thinking is
+    /// the model default (live-verified 2026-08-16, the defect behind
+    /// `proxy_summary_metric` row 5).
+    #[tokio::test]
+    async fn thinking_family_blocks_are_skipped_and_the_text_survives() {
+        let cases = [
+            (
+                json!([
+                    {"type":"thinking","thinking":"PRIVATE_REASONING","signature":"sig"},
+                    {"type":"text","text":"first"}
+                ]),
+                "first",
+            ),
+            (
+                json!([
+                    {"type":"redacted_thinking","data":"PRIVATE_REASONING"},
+                    {"type":"text","text":"first"},
+                    {"type":"thinking","thinking":"PRIVATE_REASONING","signature":"sig"},
+                    {"type":"text","text":"second"}
+                ]),
+                "first\nsecond",
+            ),
+        ];
+        for (content, expected) in cases {
+            let (upstream, hits, _server) = fixed_upstream(
+                StatusCode::OK,
+                success_body(content, Some(complete_usage())),
+                Duration::ZERO,
+            )
+            .await;
+            let generated = generate_summary(
+                &summary_client(),
+                &upstream,
+                &api_key_credential(),
+                &json!({}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(generated.text, expected);
+            assert!(
+                !generated.text.contains("PRIVATE_REASONING"),
+                "thinking payloads must never reach the summary text"
+            );
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// Tolerating the thinking family must not tolerate anything else, and a
+    /// response with no text block at all still has no summary in it.
+    #[tokio::test]
+    async fn thinking_tolerance_does_not_leak_to_other_types_or_textless_responses() {
+        let cases = [
+            (
+                json!([
+                    {"type":"thinking","thinking":"t","signature":"sig"},
+                    {"type":"tool_use","id":"tu","name":"Read","input":{}},
+                    {"type":"text","text":"first"}
+                ]),
+                "non_text_content",
+            ),
+            (
+                json!([
+                    {"type":"thinking","thinking":"t","signature":"sig"},
+                    {"type":"redacted_thinking","data":"d"}
+                ]),
+                "empty_text",
+            ),
+            (
+                json!([
+                    {"type":"thinking","thinking":"t","signature":"sig"},
+                    {"type":"text","text":"  \n "}
+                ]),
+                "empty_text",
+            ),
+        ];
+        for (content, expected) in cases {
+            let (upstream, hits, _server) = fixed_upstream(
+                StatusCode::OK,
+                success_body(content, Some(complete_usage())),
+                Duration::ZERO,
+            )
+            .await;
+            let error = generate_summary(
+                &summary_client(),
+                &upstream,
+                &api_key_credential(),
+                &json!({}),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), expected);
             assert_eq!(hits.load(Ordering::SeqCst), 1);
         }
     }

@@ -4510,6 +4510,10 @@ mod tests {
         Ok,
         HugeText,
         ToolUse,
+        /// What claude-opus-5 actually returns for a `gen_body` that sets no
+        /// `thinking` field: a leading `thinking` block, then the text
+        /// (verified live 2026-08-16; `proxy_summary_metric` row 5).
+        ThinkingThenText,
         Status(u16),
         /// Behaves like the real API: 400 `invalid_request_error` when a
         /// mid-conversation `{"role":"system"}` message neither ends `messages`
@@ -4582,6 +4586,15 @@ mod tests {
                     GenBehavior::ToolUse => axum::Json(json!({
                         "model": "claude-3-5-sonnet-20241022",
                         "content": [{"type":"tool_use","id":"x","name":"y","input":{}}],
+                        "usage": gen_usage_json(),
+                    }))
+                    .into_response(),
+                    GenBehavior::ThinkingThenText => axum::Json(json!({
+                        "model": "claude-3-5-sonnet-20241022",
+                        "content": [
+                            {"type":"thinking","thinking":"LEAK_MARKER reasoning","signature":"s"},
+                            {"type":"text","text":"aggregate summary of tool outputs"}
+                        ],
                         "usage": gen_usage_json(),
                     }))
                     .into_response(),
@@ -5075,6 +5088,31 @@ mod tests {
         let (outcome, stage, _err) = stage_of(&state.db).await;
         assert_eq!(outcome, "generation_failure");
         assert_eq!(stage.as_deref(), Some("non_text"));
+        up.abort();
+    }
+
+    /// End-to-end shape of the real defect: claude-opus-5 prepends a `thinking`
+    /// block to the generation answer, and the pipeline must still reach
+    /// `measured` — with the reasoning payload nowhere near the DB.
+    #[tokio::test]
+    async fn pipeline_survives_a_leading_thinking_block_and_never_persists_it() {
+        let (upstream, hits, last_gen, up) =
+            start_summary_mock(GenBehavior::ThinkingThenText).await;
+        let state = run_armed_pipeline(&upstream, summarizable_request()).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(only_outcome(&state.db).await, "measured");
+        assert!(!all_text(&state.db).await.contains("LEAK_MARKER"));
+
+        // The fix is the parser, NOT switching thinking off in the request:
+        // `thinking:{"type":"disabled"}` misses the message-block prompt cache
+        // for the whole generation prefix (live cache probe, 2026-08-16 —
+        // cache_read 10956 -> 0 with a full re-write), while omitting the field
+        // is cache-identical to the original request. Keep `gen_body` free of it.
+        let gen = last_gen.lock().unwrap().clone().expect("generation body");
+        assert!(
+            gen.get("thinking").is_none(),
+            "gen_body must not set `thinking`: it breaks generation-prefix cache identity"
+        );
         up.abort();
     }
 

@@ -632,9 +632,10 @@ fn required_usage_bucket(
         .ok_or_else(|| QualityClientError::new(stage, "missing_usage"))
 }
 
-/// Validate the text-only-with-complete-usage invariant every quality response
-/// must satisfy, mirroring the H1 generation parser: any `tool_use`/non-text
-/// block, empty text, or missing usage bucket fails closed.
+/// Validate the text-with-complete-usage invariant every quality response must
+/// satisfy, mirroring the H1 generation parser: `thinking`/`redacted_thinking`
+/// blocks are skipped, and any other non-text block, empty text, or missing
+/// usage bucket fails closed.
 pub fn extract_text_response(
     stage: QualityCallStage,
     response: &Value,
@@ -651,14 +652,28 @@ pub fn extract_text_response(
         .ok_or_else(|| QualityClientError::new(stage, "missing_content"))?;
     let mut parts = Vec::with_capacity(content.len());
     for block in content {
-        if block.get("type").and_then(Value::as_str) != Some("text") {
-            return Err(QualityClientError::new(stage, "non_text_content"));
+        match block.get("type").and_then(Value::as_str) {
+            // claude-opus-5 emits a leading `thinking` block even when the
+            // request carries NO `thinking` field — adaptive thinking is the
+            // model default (live-verified 2026-08-16 on the H1 generation
+            // path, which died here as `non_text`). Every H2 role call
+            // inherits that shape: the replay builders send the ORIGINAL
+            // request model, so an armed H2 would fail on block 0.
+            // The request shapes deliberately stay untouched — adding
+            // `thinking:{"type":"disabled"}` would break replay fidelity AND
+            // miss the message-block prompt cache for the whole replayed
+            // prefix. The parser absorbs the blocks instead.
+            Some("thinking") | Some("redacted_thinking") => continue,
+            Some("text") => {
+                let text = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| QualityClientError::new(stage, "non_text_content"))?;
+                parts.push(text);
+            }
+            // Any OTHER block type is still a hard failure.
+            _ => return Err(QualityClientError::new(stage, "non_text_content")),
         }
-        let text = block
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| QualityClientError::new(stage, "non_text_content"))?;
-        parts.push(text);
     }
     let text = parts.join("\n");
     if text.trim().is_empty() {
@@ -1860,6 +1875,79 @@ mod tests {
         ]);
         let extracted = extract_text_response(QualityCallStage::Judge, &response).unwrap();
         assert_eq!(extracted.text, "first\nsecond");
+    }
+
+    /// claude-opus-5 prepends a `thinking` block even when the request sets no
+    /// `thinking` field (live-verified 2026-08-16 on the H1 generation path).
+    /// The H2 replay builders send the ORIGINAL request model, so every role
+    /// call inherits that shape — the parser must look past it.
+    #[test]
+    fn extract_text_response_skips_the_thinking_family_and_keeps_the_text() {
+        let cases = [
+            (
+                json!([
+                    {"type": "thinking", "thinking": "PRIVATE_REASONING", "signature": "s"},
+                    {"type": "text", "text": "{\"answer\": 42}"},
+                ]),
+                "{\"answer\": 42}",
+            ),
+            (
+                json!([
+                    {"type": "redacted_thinking", "data": "PRIVATE_REASONING"},
+                    {"type": "text", "text": "first"},
+                    {"type": "thinking", "thinking": "PRIVATE_REASONING", "signature": "s"},
+                    {"type": "text", "text": "second"},
+                ]),
+                "first\nsecond",
+            ),
+        ];
+        for (content, expected) in cases {
+            let mut response = ok_provider_response();
+            response["content"] = content;
+            let extracted = extract_text_response(QualityCallStage::Judge, &response).unwrap();
+            assert_eq!(extracted.text, expected);
+            assert!(
+                !extracted.text.contains("PRIVATE_REASONING"),
+                "thinking payloads must never reach the parsed answer"
+            );
+        }
+    }
+
+    /// Tolerating the thinking family must not tolerate anything else, and a
+    /// response carrying no text block at all still has no answer in it.
+    #[test]
+    fn extract_text_response_thinking_tolerance_is_narrow() {
+        let cases = [
+            (
+                json!([
+                    {"type": "thinking", "thinking": "t", "signature": "s"},
+                    {"type": "tool_use", "id": "x", "name": "y", "input": {}},
+                    {"type": "text", "text": "{\"answer\": 42}"},
+                ]),
+                "non_text_content",
+            ),
+            (
+                json!([
+                    {"type": "thinking", "thinking": "t", "signature": "s"},
+                    {"type": "redacted_thinking", "data": "d"},
+                ]),
+                "empty_text",
+            ),
+            (
+                json!([
+                    {"type": "thinking", "thinking": "t", "signature": "s"},
+                    {"type": "text", "text": "   "},
+                ]),
+                "empty_text",
+            ),
+        ];
+        for (content, expected_kind) in cases {
+            let mut response = ok_provider_response();
+            response["content"] = content;
+            let error = extract_text_response(QualityCallStage::Judge, &response).unwrap_err();
+            assert_eq!(error.kind(), expected_kind);
+            assert_eq!(error.stage(), "judge");
+        }
     }
 
     #[test]
