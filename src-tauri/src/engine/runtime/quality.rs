@@ -632,6 +632,61 @@ fn required_usage_bucket(
         .ok_or_else(|| QualityClientError::new(stage, "missing_usage"))
 }
 
+/// The response model, or `missing_model`.
+fn required_response_model(
+    stage: QualityCallStage,
+    response: &Value,
+) -> Result<String, QualityClientError> {
+    Ok(response
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| QualityClientError::new(stage, "missing_model"))?
+        .to_owned())
+}
+
+/// All four usage buckets, or `missing_usage`.
+fn required_usage(
+    stage: QualityCallStage,
+    response: &Value,
+) -> Result<QualityUsage, QualityClientError> {
+    let usage = response
+        .get("usage")
+        .ok_or_else(|| QualityClientError::new(stage, "missing_usage"))?;
+    Ok(QualityUsage {
+        input_tokens: required_usage_bucket(stage, usage, "input_tokens")?,
+        cache_creation_input_tokens: required_usage_bucket(
+            stage,
+            usage,
+            "cache_creation_input_tokens",
+        )?,
+        cache_read_input_tokens: required_usage_bucket(stage, usage, "cache_read_input_tokens")?,
+        output_tokens: required_usage_bucket(stage, usage, "output_tokens")?,
+    })
+}
+
+/// Validate the accounting invariant alone — response model plus complete
+/// usage — with NO requirement on `content`.
+///
+/// This is the PREFLIGHT-ONLY parse path. The preflight asks one question ("can
+/// this credential call this model?") and consumes only these two fields, while
+/// its `max_tokens: 1` ceiling makes a text block unreachable on an
+/// adaptive-thinking model: live-verified 2026-08-16 against claude-opus-5, the
+/// one-token preflight body returns HTTP 200 with `content: []` (8/8 runs,
+/// `stop_reason: max_tokens`) and complete usage. Raising the ceiling does not
+/// help — at 64 tokens the whole budget goes to a text-empty `thinking` block
+/// (3/3). Probe table: `docs/superpowers/plans/2026-08-16-h2-preflight-text-free.md`.
+///
+/// The five ROLE calls keep [`extract_text_response`]: they parse the text as
+/// JSON, so a text-free response is a real failure there.
+fn extract_usage_response(
+    stage: QualityCallStage,
+    response: &Value,
+) -> Result<(String, QualityUsage), QualityClientError> {
+    let response_model = required_response_model(stage, response)?;
+    let usage = required_usage(stage, response)?;
+    Ok((response_model, usage))
+}
+
 /// Validate the text-with-complete-usage invariant every quality response must
 /// satisfy, mirroring the H1 generation parser: `thinking`/`redacted_thinking`
 /// blocks are skipped, and any other non-text block, empty text, or missing
@@ -640,11 +695,7 @@ pub fn extract_text_response(
     stage: QualityCallStage,
     response: &Value,
 ) -> Result<TextResponse, QualityClientError> {
-    let response_model = response
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| QualityClientError::new(stage, "missing_model"))?
-        .to_owned();
+    let response_model = required_response_model(stage, response)?;
     let content = response
         .get("content")
         .and_then(Value::as_array)
@@ -679,19 +730,7 @@ pub fn extract_text_response(
     if text.trim().is_empty() {
         return Err(QualityClientError::new(stage, "empty_text"));
     }
-    let usage = response
-        .get("usage")
-        .ok_or_else(|| QualityClientError::new(stage, "missing_usage"))?;
-    let usage = QualityUsage {
-        input_tokens: required_usage_bucket(stage, usage, "input_tokens")?,
-        cache_creation_input_tokens: required_usage_bucket(
-            stage,
-            usage,
-            "cache_creation_input_tokens",
-        )?,
-        cache_read_input_tokens: required_usage_bucket(stage, usage, "cache_read_input_tokens")?,
-        output_tokens: required_usage_bucket(stage, usage, "output_tokens")?,
-    };
+    let usage = required_usage(stage, response)?;
     Ok(TextResponse {
         text,
         response_model,
@@ -869,13 +908,30 @@ pub fn build_judge_call(
     QualityCall::new(QualityRole::Judge, request)
 }
 
+/// The fixed first-party system line the preflight body carries.
+///
+/// An OAuth carrier credential (the Claude Code case the proxy captures) is
+/// rejected `429 rate_limit_error` for ANY body with no top-level `system`, and
+/// accepts the byte-identical body once a first-party identity line is present
+/// — live-verified 2026-08-16 with an interleaved without/with/without control,
+/// at `max_tokens` 1 and 64 (`"You are a helpful assistant."` is also refused,
+/// so this is an identity gate, not a non-empty-system rule).
+///
+/// It is a CONSTANT on purpose: the carrier's own captured `system` carries
+/// conversation and project bytes, and none of them may enter a preflight.
+const PREFLIGHT_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 /// The one-per-campaign evaluator-auth preflight body: a fixed benign
-/// one-token prompt against the configured evaluator model.
+/// one-token prompt against the configured evaluator model, under the fixed
+/// [`PREFLIGHT_SYSTEM`] line. `max_tokens` stays 1 — the response is validated
+/// text-free (see [`extract_usage_response`]), so buying output tokens for a
+/// text block would be paying for something nothing reads.
 pub fn build_preflight_request(evaluator_model: &str) -> Value {
     serde_json::json!({
         "model": evaluator_model,
         "max_tokens": 1,
         "tool_choice": {"type": "none"},
+        "system": PREFLIGHT_SYSTEM,
         "messages": [{"role": "user", "content": "ok"}],
     })
 }
@@ -1275,6 +1331,11 @@ pub struct PreflightOutcome {
 /// model: one benign one-token request, 20-second client, no redirects, no
 /// retry. Any failure is a bounded `preflight`-stage error; the caller disarms
 /// H2 on it and runs zero probe/replay/judge calls.
+///
+/// Validation is TEXT-FREE ([`extract_usage_response`]): 2xx plus response
+/// model plus complete usage. A one-token ceiling leaves an adaptive-thinking
+/// evaluator no room to emit text, and this function discards text anyway —
+/// requiring it would disarm H2 on the first carrier for a field nobody reads.
 pub async fn preflight_evaluator(
     client: &reqwest::Client,
     upstream: &str,
@@ -1286,10 +1347,10 @@ pub async fn preflight_evaluator(
     let raw = transport
         .post_messages(stage, &build_preflight_request(evaluator_model))
         .await?;
-    let extracted = extract_text_response(stage, &raw)?;
+    let (response_model, usage) = extract_usage_response(stage, &raw)?;
     Ok(PreflightOutcome {
-        response_model: extracted.response_model,
-        usage: extracted.usage,
+        response_model,
+        usage,
     })
 }
 
@@ -2720,6 +2781,29 @@ mod tests {
         );
     }
 
+    /// An OAuth carrier refuses every system-less body with `429
+    /// rate_limit_error` (live-verified, interleaved without/with/without
+    /// control), so the preflight carries one FIXED first-party line — never
+    /// the carrier's captured system, which is full of conversation bytes.
+    #[test]
+    fn preflight_request_carries_a_fixed_first_party_system_line() {
+        let request = build_preflight_request("claude-eval-1");
+        let system = request["system"]
+            .as_str()
+            .expect("preflight body carries a top-level system string");
+        assert_eq!(system, PREFLIGHT_SYSTEM);
+        assert!(
+            !system.is_empty(),
+            "an empty system line does not satisfy the carrier's identity gate"
+        );
+        // Same constant for every evaluator model: it is not derived from the
+        // request, the candidate, or anything the carrier sent.
+        assert_eq!(
+            build_preflight_request("other-eval")["system"],
+            json!(system)
+        );
+    }
+
     // ---- Lane B: evaluator preflight + credential identity --------------------
 
     #[tokio::test]
@@ -2746,6 +2830,183 @@ mod tests {
         assert_eq!(body["model"], "claude-eval-1");
         assert_eq!(body["max_tokens"], 1);
         handle.abort();
+    }
+
+    /// The `max_tokens: 1` ceiling leaves an adaptive-thinking evaluator no room
+    /// for a text block: live-verified 2026-08-16, claude-opus-5 answers the
+    /// preflight body with HTTP 200 + `content: []` (8/8) or, at a higher
+    /// ceiling, a text-empty `thinking` block (3/3) — always with the response
+    /// model and all four usage buckets, the only two fields the preflight
+    /// consumes. Requiring text here disarmed H2 on the first carrier.
+    #[tokio::test]
+    async fn preflight_accepts_a_text_free_response_when_model_and_usage_are_present() {
+        let usage = json!({
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 1,
+        });
+        let cases = [
+            // Observed 8/8 at max_tokens:1.
+            ("empty content array", json!([])),
+            // Observed 3/3 at max_tokens:64 (`display: omitted` → no text).
+            (
+                "thinking-only content",
+                json!([{"type": "thinking", "thinking": "", "signature": "s"}]),
+            ),
+            ("no content key at all", Value::Null),
+        ];
+
+        for (label, content) in cases {
+            let mut response = json!({"model": "claude-eval-1", "usage": usage.clone()});
+            if !content.is_null() {
+                response["content"] = content;
+            }
+            let (upstream, seen, handle) = start_provider_mock(StatusCode::OK, response).await;
+
+            let outcome = preflight_evaluator(
+                &preflight_client(),
+                &upstream,
+                &api_key_cred("k"),
+                "claude-eval-1",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} must pass the preflight, got {error}"));
+
+            assert_eq!(outcome.response_model, "claude-eval-1", "{label}");
+            assert_eq!(
+                outcome.usage,
+                QualityUsage {
+                    input_tokens: 6,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    output_tokens: 1,
+                },
+                "{label}"
+            );
+            assert_eq!(seen.lock().unwrap().len(), 1, "{label}: no retry");
+            handle.abort();
+        }
+    }
+
+    /// Text-free is not shape-free: the accounting fields the preflight DOES
+    /// consume stay mandatory, with the same bounded kinds as before.
+    #[tokio::test]
+    async fn preflight_still_fails_without_a_model_or_complete_usage() {
+        let full_usage = json!({
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 1,
+        });
+        let mut cases: Vec<(&str, Value, &str)> = vec![
+            (
+                "no model",
+                json!({"content": [], "usage": full_usage.clone()}),
+                "missing_model",
+            ),
+            (
+                "no usage",
+                json!({"model": "claude-eval-1", "content": []}),
+                "missing_usage",
+            ),
+            (
+                "usage is not an object",
+                json!({"model": "claude-eval-1", "content": [], "usage": 7}),
+                "missing_usage",
+            ),
+        ];
+        // Each bucket individually: a partial usage row is still a failure.
+        for bucket in [
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "output_tokens",
+        ] {
+            let mut usage = full_usage.clone();
+            usage.as_object_mut().unwrap().remove(bucket);
+            cases.push((
+                bucket,
+                json!({"model": "claude-eval-1", "content": [], "usage": usage}),
+                "missing_usage",
+            ));
+        }
+
+        for (label, response, expected_kind) in cases {
+            let (upstream, seen, handle) = start_provider_mock(StatusCode::OK, response).await;
+            let error = preflight_evaluator(
+                &preflight_client(),
+                &upstream,
+                &api_key_cred("k"),
+                "claude-eval-1",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), expected_kind, "{label}");
+            assert_eq!(error.stage(), "preflight", "{label}");
+            assert_eq!(seen.lock().unwrap().len(), 1, "{label}: no retry");
+            handle.abort();
+        }
+    }
+
+    /// The text requirement moved off the preflight ONLY. Every role call parses
+    /// its answer out of the text, so a text-free response is a real failure
+    /// there and must keep failing after this split.
+    #[test]
+    fn text_free_responses_pass_the_preflight_parse_but_still_fail_every_role_call() {
+        let usage = json!({
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 1,
+        });
+        for (label, content, role_kind) in [
+            ("empty content array", json!([]), "missing_content"),
+            (
+                "thinking-only content",
+                json!([{"type": "thinking", "thinking": "", "signature": "s"}]),
+                "empty_text",
+            ),
+        ] {
+            let response = json!({
+                "model": "claude-eval-1",
+                "content": content,
+                "usage": usage.clone(),
+            });
+
+            let (model, parsed_usage) =
+                extract_usage_response(QualityCallStage::Preflight, &response)
+                    .unwrap_or_else(|error| panic!("{label} must parse text-free, got {error}"));
+            assert_eq!(model, "claude-eval-1", "{label}");
+            assert_eq!(parsed_usage.output_tokens, 1, "{label}");
+
+            assert_eq!(
+                parse_probe_response(&response, &[], &[])
+                    .unwrap_err()
+                    .kind(),
+                role_kind,
+                "{label}: probe still requires text"
+            );
+            assert_eq!(
+                parse_faithfulness_response(&response, &[], &sample_probes())
+                    .unwrap_err()
+                    .kind(),
+                role_kind,
+                "{label}: faithfulness still requires text"
+            );
+            assert_eq!(
+                parse_replay_response(QualityCallStage::OriginalReplay, &response)
+                    .unwrap_err()
+                    .kind(),
+                role_kind,
+                "{label}: replay still requires text"
+            );
+            assert_eq!(
+                parse_judge_response(&response).unwrap_err().kind(),
+                role_kind,
+                "{label}: judge still requires text"
+            );
+        }
     }
 
     #[tokio::test]
