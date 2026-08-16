@@ -100,3 +100,34 @@ the lead is working — meter must show the idle agent's own small value;
 (2) during a long working turn, the app meter should track the CLI statusline
 within one poll interval. Contamination from historical echo lines self-clears
 once binding is fixed (old echoes stop qualifying).
+
+## Corrections (2026-08-16, owner ruling on Tiësto's challenge 003abdb6)
+
+The plan's two mechanisms were WRONG AS WRITTEN; both corrections verified
+by the owner against the code and Tiësto's evidence note:
+
+- **Bug 1 mechanism corrected.** The cited ps-dump echo CANNOT reach the
+  ownership gate: `value_texts`/`push_content_texts` extract only `.text`
+  fields (and attachment stdout), never `tool_result` block content —
+  mirrored over all 689 live transcripts: 518 ownership declarations, every
+  one a SessionStart hook attachment, zero from user/system lines. The
+  defect CLASS is nonetheless real: a plain-string or text-block user line
+  echoing a briefing DOES leak (Tiësto's regression test shows a 900k
+  contamination), and the human's long-standing sightings are explained by
+  the PRE-38e6ead gate (`line.contains(instance_id)`, fixed 2026-07-09),
+  under which every `conclave tell <id>` in a busy transcript conferred
+  ownership. Fix shipped at dd03eac: ownership binds to the SessionStart
+  hook attachment STRUCTURE (not content matching), which also closes the
+  tool_result shape if `value_texts` is ever widened.
+- **Bug 2 closed as not-reproduced.** `instance.rs` has had an unconditional
+  2s `tokio::time::interval` poll since df8b78c — no PTY-coupled cadence
+  defect exists. Six live samples during active turns: every agent's DB row
+  equals its OWN transcript's latest usage within ≤3s. The screenshot's
+  38%-vs-46% gap is the transcript-meter design boundary: the transcript
+  records usage only when an API response LANDS, while the CLI statusline
+  already counts the in-flight request. An in-flight estimator would be a
+  design change, out of this lane's scope; `instance.rs` stays untouched.
+- **Plan-writing lesson (owner's own miss):** both mechanisms were inferred
+  from code reading but written as confirmed. Future plans mark reach paths
+  as INFERRED until an implementer or a probe verifies them — hypotheses
+  ranked, never asserted.
