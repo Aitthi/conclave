@@ -166,6 +166,64 @@ struct InstanceReq {
     self_triggered: bool,
 }
 
+/// Test seams for `spawn`'s CLI success branch — the ONLY two things that make
+/// that branch undrivable from a test.
+///
+/// Mellow's post-merge audit (challenge 9005decc) mutation-proved the branch was
+/// therefore unpinned: deleting the meter reset, or re-anchoring the poll context
+/// back to `session.started_at`, left the entire suite green. It resisted testing
+/// for two reasons — it execs `$SHELL -l -i` (the developer's real login shell,
+/// which sources their rc files, and which a bare CI image may not have at all),
+/// and the generation anchor is handed to a detached task without ever being
+/// persisted, so nothing observable comes back.
+///
+/// Both fields are `#[cfg(test)]`: production reads `$SHELL` and records nothing.
+/// One lock rather than two statics so a test sets up and reads back in a fixed
+/// order.
+#[cfg(test)]
+struct SpawnTestHooks {
+    /// Stands in for `$SHELL`. Point it at a script that ignores its args and
+    /// exits and the branch runs end to end — no real shell, no rc files, no CLI
+    /// binary anywhere on PATH.
+    shell: Option<String>,
+    /// `(workspace_folder, anchor)` for every `TranscriptPollContext` built, so a
+    /// test can assert the CALL SITE passed THIS generation's stamp rather than
+    /// the session row's `started_at`.
+    anchors: Vec<(String, DateTime<Utc>)>,
+}
+
+#[cfg(test)]
+impl SpawnTestHooks {
+    const fn new() -> Self {
+        Self {
+            shell: None,
+            anchors: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+static SPAWN_TEST_HOOKS: std::sync::Mutex<SpawnTestHooks> =
+    std::sync::Mutex::new(SpawnTestHooks::new());
+
+/// The shell the CLI is launched inside. Production always answers `$SHELL`
+/// (falling back to zsh); under `cfg(test)` a wiring test can substitute a stub
+/// so the branch never execs a real login shell. See [`SpawnTestHooks`].
+fn launch_shell() -> String {
+    #[cfg(test)]
+    {
+        if let Some(shell) = SPAWN_TEST_HOOKS
+            .lock()
+            .expect("spawn test hooks poisoned")
+            .shell
+            .clone()
+        {
+            return shell;
+        }
+    }
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
 #[derive(Debug)]
 struct TranscriptPollContext {
     reader: runtime::transcript_context::TranscriptContextReader,
@@ -181,6 +239,16 @@ impl TranscriptPollContext {
         started_at: DateTime<Utc>,
         fallback_limit: i64,
     ) -> Self {
+        // Anchor recorder — see [`SpawnTestHooks`]. Production compiles this
+        // away; `with_reader` (the helper-level tests' constructor) deliberately
+        // does NOT record, so what a test reads back came from `spawn` itself.
+        #[cfg(test)]
+        SPAWN_TEST_HOOKS
+            .lock()
+            .expect("spawn test hooks poisoned")
+            .anchors
+            .push((workspace_folder.to_owned(), started_at));
+
         Self {
             reader: runtime::transcript_context::TranscriptContextReader::new(
                 runtime::transcript_context::TranscriptContextConfig::default_with_limit(
@@ -901,7 +969,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // environment a normal terminal would, then `-c <cli>` runs it; the
             // shell exits when the CLI does, so the forwarder still sees EOF for
             // idle cleanup. `$SHELL` honors the user's chosen shell (zsh default).
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let shell = launch_shell();
             let shell_args = [
                 "-l".to_string(),
                 "-i".to_string(),
@@ -927,10 +995,9 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // dropped (its shutdown closure tears down the just-spawned child)
             // and we return the existing session without double-persisting.
             let Some(epoch) = state.runtime.register(&id, backend.handle) else {
-                return serde_json::to_value(&session)
-                    .map_err(|e| AppError::Internal(e.to_string()));
+                let fresh = lost_race_session_response(&state.db, &id, session).await;
+                return serde_json::to_value(&fresh).map_err(|e| AppError::Internal(e.to_string()));
             };
-            repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
 
             // A CLI (re)spawn is a genuinely fresh process: resume is a handoff
             // PROMPT injection (`run_respawn_resume`), never `--continue`, so the
@@ -938,6 +1005,12 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // Zero it — and emit — before the meter can show it. CLI branch only:
             // chat sessions keep their persisted value, because a chat agent's
             // history really does survive a restart.
+            //
+            // Ordered BEFORE the fallible `set_launched_skill_ids` below, whose
+            // `?` aborts the whole spawn on a DB error: aborting with a live
+            // child AND an un-reset meter is the original bug wearing a
+            // different hat. The reset depends only on the session row and the
+            // resolved limit, so it can lead.
             let context_limit = resolve_session_context_limit(
                 &cli_kind,
                 def.model.as_deref(),
@@ -950,6 +1023,8 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 context_limit,
             )
             .await;
+
+            repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
 
             // Anchor the transcript meter to THIS generation's start, not to
             // `session.started_at`: that column is written once at instantiate
@@ -1404,6 +1479,36 @@ async fn poll_transcript_context(
     );
 
     meter.last_poll = Some(std::time::Instant::now());
+}
+
+/// The session row to hand back when `register` loses the race — a concurrent
+/// spawn won, or an already-live older generation slipped past the `is_live`
+/// check at the top of [`spawn`].
+///
+/// RE-READS rather than returning `local`: that copy was taken before this
+/// call's meter reset and is exactly what the UI seeds `ContextBars` from
+/// (`WorkspacePane.spawnInstance`), so returning it hands the caller the dead
+/// generation's tokens (challenge fd886a93).
+///
+/// Deliberately NOT zeroing `local` instead. The winner may be an already-live
+/// generation whose persisted reading is real and current — zeroing would be
+/// right in one of the two cases, re-reading is right in both. No emit either:
+/// the bus belongs to the winner. Accepted window (risk ledger): if this re-read
+/// beats the winner's own reset, the winner's `session:context` corrects any
+/// open UI a moment later — this is not worth a lock.
+///
+/// Falls back to `local` if the re-read fails; a slightly stale row still beats
+/// failing a spawn that otherwise succeeded.
+async fn lost_race_session_response(
+    db: &sqlx::SqlitePool,
+    instance_id: &str,
+    local: repo::session::SessionRow,
+) -> repo::session::SessionRow {
+    repo::session::get_by_instance(db, instance_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(local)
 }
 
 /// Zero the context meter for a freshly spawned CLI generation — in the DB row,
@@ -2951,6 +3056,203 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
+    }
+
+    /// Losing the `register` race must hand back the row as it stands NOW, not
+    /// the copy `spawn` read before its own reset — that copy is what the UI
+    /// seeds `ContextBars` from, so returning it shows the dead generation
+    /// (challenge fd886a93). Re-reading also covers the other way the race is
+    /// lost: to an ALREADY-LIVE older generation, whose persisted reading is
+    /// real and must survive untouched — which is why this re-reads instead of
+    /// zeroing the local copy.
+    #[tokio::test]
+    async fn lost_race_response_rereads_the_current_row() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let mut stale = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        // The copy `spawn` is holding: the dead generation's numbers.
+        stale.context_tokens = Some(125_000);
+        stale.context_limit = Some(999);
+
+        // What the race winner has since persisted — non-zero on purpose, so a
+        // "just zero the local copy" implementation fails here too.
+        repo::session::set_context_reading(&state.db, &stale.id, 7_000, 555)
+            .await
+            .expect("winner's reading");
+
+        let out = lost_race_session_response(&state.db, &id, stale).await;
+        assert_eq!(
+            (out.context_tokens, out.context_limit),
+            (Some(7_000), Some(555)),
+            "the loser must report the winner's current reading"
+        );
+    }
+
+    /// A failed re-read must not sink an otherwise successful spawn: fall back
+    /// to the caller's copy.
+    #[tokio::test]
+    async fn lost_race_response_falls_back_to_the_local_row() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let local = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        let out = lost_race_session_response(&state.db, "no-such-instance", local.clone()).await;
+        assert_eq!(out, local, "an unresolvable re-read falls back to the copy");
+    }
+
+    /// The spawn-level pin Mellow's audit asked for (challenge 9005decc): all
+    /// three helper-level meter tests stay green if the CALL SITE stops calling
+    /// the reset, or goes back to anchoring the poll context on
+    /// `session.started_at` — mutation-proven at merge 841e0df. This drives
+    /// `spawn` itself through the CLI success branch and fails under BOTH.
+    ///
+    /// Determinism comes from [`SpawnTestHooks`], not from the environment:
+    /// - `shell` is a stub script, so no login shell is exec'd and no rc file is
+    ///   sourced. The plan suggested a PATH shim named `codex` instead, but the
+    ///   launch shell runs `-l -i` and rc sourcing routinely RESETS PATH — the
+    ///   comment at the `spawn_cli` call site says exactly that — so a PATH shim
+    ///   is not reliably reachable. Substituting the shell pins the same wiring
+    ///   with none of that dependency, and needs no real CLI binary either.
+    /// - `cli_kind` is codex deliberately: the claude branch writes a
+    ///   per-instance settings JSON into the real app-support dir on every
+    ///   spawn, while the codex branch writes no files at all.
+    ///
+    /// Environment note: `agentctx::ensure_conclave_shim` no-ops under `cargo
+    /// test` because `current_exe().parent()` is `target/debug/deps`, which holds
+    /// no unhashed `conclave-cli`. Were a future cargo layout to put one there,
+    /// this test would repoint the LIVE `Conclave/bin` shim links at a debug
+    /// build — check that first if agents lose their `conclave` CLI after a test
+    /// run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_cli_branch_wires_meter_reset_and_generation_anchor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = AppState::for_tests().await;
+
+        // The workspace folder is both the child's cwd (must exist) and the key
+        // the anchor recorder files this spawn under, so it has to be unique.
+        let ws_folder = temp_root("spawn-wiring-cwd");
+        let bin_dir = temp_root("spawn-wiring-bin");
+        let stub_shell = bin_dir.join("stub-login-shell");
+        std::fs::write(&stub_shell, "#!/bin/sh\nexit 0\n").expect("write stub shell");
+        std::fs::set_permissions(&stub_shell, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub shell");
+
+        let ws = workspace::create(&state.db, "WS", &ws_folder.to_string_lossy(), None)
+            .await
+            .expect("create workspace failed");
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "SpawnWiringAgent".into(),
+                role: None,
+                agent_type: "cli".into(),
+                cli_kind: Some("codex".into()),
+                color: None,
+                provider_id: None,
+                model: None,
+                harness_mode: "own".into(),
+                share_blackboard: None,
+                auto_submit_injected: None,
+                allowed_senders: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create agent_def failed");
+        let id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .expect("instantiate failed")
+            .id;
+
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists");
+
+        // The dead generation's reading, as a restarted agent's row carries it.
+        repo::session::set_context_reading(&state.db, &session.id, 125_000, 999)
+            .await
+            .expect("seed stale generation reading");
+
+        let resolved_limit = resolve_session_context_limit("codex", None, Some(999));
+        // Strictly after `session.started_at` (the row was written above), so an
+        // anchor taken from the row cannot clear this bar.
+        let before_spawn = Utc::now();
+
+        SPAWN_TEST_HOOKS
+            .lock()
+            .expect("spawn test hooks poisoned")
+            .shell = Some(stub_shell.to_string_lossy().into_owned());
+
+        let out = spawn(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("spawn failed");
+
+        // Released before the assertions so a failure here can't leave the stub
+        // shell wired in for anything else.
+        SPAWN_TEST_HOOKS
+            .lock()
+            .expect("spawn test hooks poisoned")
+            .shell = None;
+
+        // Carrier 1 — the payload `WorkspacePane.spawnInstance` seeds
+        // `ContextBars` from.
+        assert_eq!(
+            out.get("contextTokens").and_then(Value::as_i64),
+            Some(0),
+            "spawn's response must carry the reset reading, got {out}"
+        );
+        assert_eq!(
+            out.get("contextLimit").and_then(Value::as_i64),
+            Some(resolved_limit),
+            "spawn's response must carry the resolved limit, got {out}"
+        );
+
+        // Carrier 2 — the persisted row every later read consults.
+        let row = repo::session::get(&state.db, &session.id)
+            .await
+            .expect("get failed")
+            .expect("session exists");
+        assert_eq!(
+            (row.context_tokens, row.context_limit),
+            (Some(0), Some(resolved_limit)),
+            "the CLI spawn branch must call reset_context_meter_for_new_generation"
+        );
+
+        // Carrier 3 — the generation anchor handed to the detached forwarder,
+        // recorded by the real `TranscriptPollContext::new` (never by the
+        // tests' `with_reader`), so this can only have come from `spawn`.
+        let folder_key = ws_folder.to_string_lossy().into_owned();
+        let anchor = SPAWN_TEST_HOOKS
+            .lock()
+            .expect("spawn test hooks poisoned")
+            .anchors
+            .iter()
+            .find(|(folder, _)| *folder == folder_key)
+            .map(|(_, anchor)| *anchor)
+            .expect("spawn must build a TranscriptPollContext for this workspace");
+        assert!(
+            anchor >= before_spawn,
+            "the poll context must be anchored to THIS generation's start; \
+             anchor {anchor} predates the spawn ({before_spawn}), which is what \
+             re-anchoring on session.started_at ({}) looks like",
+            session.started_at
+        );
+
+        // Teardown: kill the stub child if it somehow outlived its `exit 0`, and
+        // drop the sidecar this spawn wrote into the real app-support dir.
+        let _ = state.runtime.unregister(&id);
+        crate::engine::agentctx::remove_skill_sidecar(&id);
+        let _ = std::fs::remove_dir_all(&ws_folder);
+        let _ = std::fs::remove_dir_all(&bin_dir);
     }
 
     #[tokio::test]
