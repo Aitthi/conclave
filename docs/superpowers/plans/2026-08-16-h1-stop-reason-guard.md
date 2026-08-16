@@ -70,9 +70,27 @@ no failure-vocabulary migration):
   aggregates; a max_tokens row is excluded and counted as truncated; a
   NULL row keeps legacy behavior.
 
+## Amendment — owner ruling on challenge 85dd897d (2026-08-16, credit: Dew)
+
+- **Plan defect confirmed, boundary was wrong at creation**: every
+  migration is REGISTERED in `src-tauri/src/engine/db.rs`
+  (`if version < N { include_str!(...); PRAGMA user_version = N }`,
+  0024 at db.rs:280-287, 0025 at db.rs:289-294), and two existing tests
+  (db.rs:705 asserts user_version == 25; db.rs:722-765 asserts a fresh
+  migrate() lands at the highest migration file number) turn an
+  unregistered 0026 into a hard red. The plan pinned the .sql file but
+  not the registry — the same defining-file-vs-importer mistake this
+  workspace has hit before, now in its registration-hook form.
+- **Resolution**: db.rs wiring (the 0026 block + the two version
+  assertions 25 → 26) lands as a SEPARATE commit scoped to that one
+  path (`git commit -- src-tauri/src/engine/db.rs`), same pattern as
+  ruling 5068e380, so the integrator attributes it to this ruling.
+- **Added gate**: `cd src-tauri && cargo test engine::db`.
+
 ## Gates (record each via `conclave task gate`)
 
 - `cd src-tauri && cargo test engine::runtime::summary`
 - `cd src-tauri && cargo test engine::runtime::ctx_proxy`
 - `cd src-tauri && cargo test proxy_summary_metric`
+- `cd src-tauri && cargo test engine::db`
 - `git diff --check`
