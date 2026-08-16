@@ -13,10 +13,18 @@ type PopoverContentProps = React.ComponentProps<typeof PopoverPrimitive.Popup> &
 const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
   ({ align = "center", side = "bottom", sideOffset = 4, className = "", ...props }, ref) => (
     <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Positioner align={align} side={side} sideOffset={sideOffset}>
+      {/* z-index lives on the Positioner: it is the positioned element, so a
+          z-index on the (static) Popup is ignored and the popover hit-tests
+          UNDER xterm's z-2 canvas layers wherever it overlaps the terminal. */}
+      <PopoverPrimitive.Positioner
+        align={align}
+        side={side}
+        sideOffset={sideOffset}
+        className="z-50"
+      >
         <PopoverPrimitive.Popup
           ref={ref}
-          className={`z-50 w-72 rounded-lg bg-surface p-3 text-[11.5px] text-text-secondary shadow-lg ring-hair outline-none ${className}`}
+          className={`w-72 rounded-lg bg-surface p-3 text-[11.5px] text-text-secondary shadow-lg ring-hair outline-none ${className}`}
           {...props}
         />
       </PopoverPrimitive.Positioner>
