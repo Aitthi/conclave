@@ -793,12 +793,36 @@ fn probes_json(probes: &[QualityProbe]) -> Value {
     )
 }
 
-/// A fresh evaluator request: no tools, no stream/metadata, pinned max output.
+/// The fixed first-party system line every FRESH quality body carries: the
+/// preflight, and role calls 1 (probe) and 2 (faithfulness).
+///
+/// An OAuth carrier credential (the Claude Code case the proxy captures) is
+/// rejected `429 rate_limit_error` for ANY body with no top-level `system`, and
+/// accepts the byte-identical body once a first-party identity line is present
+/// — live-verified 2026-08-16 with an interleaved without/with/without control,
+/// at `max_tokens` 1 and 64 and with role-call-shaped content (`"You are a
+/// helpful assistant."` is also refused, so this is an identity gate, not a
+/// non-empty-system rule). Probe table:
+/// `docs/superpowers/plans/2026-08-16-h2-preflight-text-free.md`.
+///
+/// It is a CONSTANT on purpose: the carrier's own captured `system` carries
+/// conversation and project bytes, and none of them may enter a body the
+/// evaluator sees for grading. Calls 3/4/5 are the deliberate exception — they
+/// REPLAY the original request, so they forward its `system` unchanged and must
+/// never see this constant.
+///
+/// One definition, two callers: [`build_preflight_request`] and
+/// [`evaluator_request`] must not drift apart.
+const FIRST_PARTY_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// A fresh evaluator request: no tools, no stream/metadata, pinned max output,
+/// under the fixed [`FIRST_PARTY_SYSTEM`] line.
 fn evaluator_request(evaluator_model: &str, content: String) -> Value {
     serde_json::json!({
         "model": evaluator_model,
         "max_tokens": QUALITY_MAX_OUTPUT_TOKENS,
         "tool_choice": {"type": "none"},
+        "system": FIRST_PARTY_SYSTEM,
         "messages": [{"role": "user", "content": content}],
     })
 }
@@ -908,22 +932,9 @@ pub fn build_judge_call(
     QualityCall::new(QualityRole::Judge, request)
 }
 
-/// The fixed first-party system line the preflight body carries.
-///
-/// An OAuth carrier credential (the Claude Code case the proxy captures) is
-/// rejected `429 rate_limit_error` for ANY body with no top-level `system`, and
-/// accepts the byte-identical body once a first-party identity line is present
-/// — live-verified 2026-08-16 with an interleaved without/with/without control,
-/// at `max_tokens` 1 and 64 (`"You are a helpful assistant."` is also refused,
-/// so this is an identity gate, not a non-empty-system rule).
-///
-/// It is a CONSTANT on purpose: the carrier's own captured `system` carries
-/// conversation and project bytes, and none of them may enter a preflight.
-const PREFLIGHT_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
 /// The one-per-campaign evaluator-auth preflight body: a fixed benign
 /// one-token prompt against the configured evaluator model, under the fixed
-/// [`PREFLIGHT_SYSTEM`] line. `max_tokens` stays 1 — the response is validated
+/// [`FIRST_PARTY_SYSTEM`] line. `max_tokens` stays 1 — the response is validated
 /// text-free (see [`extract_usage_response`]), so buying output tokens for a
 /// text block would be paying for something nothing reads.
 pub fn build_preflight_request(evaluator_model: &str) -> Value {
@@ -931,7 +942,7 @@ pub fn build_preflight_request(evaluator_model: &str) -> Value {
         "model": evaluator_model,
         "max_tokens": 1,
         "tool_choice": {"type": "none"},
-        "system": PREFLIGHT_SYSTEM,
+        "system": FIRST_PARTY_SYSTEM,
         "messages": [{"role": "user", "content": "ok"}],
     })
 }
@@ -1327,15 +1338,21 @@ pub struct PreflightOutcome {
     pub usage: QualityUsage,
 }
 
-/// Prove the captured carrier credential can call the configured evaluator
-/// model: one benign one-token request, 20-second client, no redirects, no
-/// retry. Any failure is a bounded `preflight`-stage error; the caller disarms
-/// H2 on it and runs zero probe/replay/judge calls.
+/// Prove ONE narrow thing: the captured carrier credential is accepted by the
+/// upstream for the configured evaluator model — one benign one-token request,
+/// 20-second client, no redirects, no retry. Any failure is a bounded
+/// `preflight`-stage error; the caller disarms H2 on it and runs zero
+/// probe/replay/judge calls.
 ///
 /// Validation is TEXT-FREE ([`extract_usage_response`]): 2xx plus response
 /// model plus complete usage. A one-token ceiling leaves an adaptive-thinking
 /// evaluator no room to emit text, and this function discards text anyway —
 /// requiring it would disarm H2 on the first carrier for a field nobody reads.
+///
+/// What a GREEN preflight does NOT predict: that role calls 1–5 will succeed.
+/// It exercises neither the text/JSON parse path they all depend on, nor their
+/// size, nor — for calls 3/4/5 — their model and their replayed `system`. Read
+/// it as an auth/model/accounting check, never as a dry run of the campaign.
 pub async fn preflight_evaluator(
     client: &reqwest::Client,
     upstream: &str,
@@ -2791,7 +2808,7 @@ mod tests {
         let system = request["system"]
             .as_str()
             .expect("preflight body carries a top-level system string");
-        assert_eq!(system, PREFLIGHT_SYSTEM);
+        assert_eq!(system, FIRST_PARTY_SYSTEM);
         assert!(
             !system.is_empty(),
             "an empty system line does not satisfy the carrier's identity gate"
@@ -2802,6 +2819,101 @@ mod tests {
             build_preflight_request("other-eval")["system"],
             json!(system)
         );
+    }
+
+    /// Calls 1 and 2 are FRESH bodies (no original request to replay), so they
+    /// hit the same identity gate the preflight does: without a first-party
+    /// `system` an OAuth carrier answers `429 rate_limit_error` — verified live
+    /// with role-call-shaped content, not just the one-token preflight body.
+    #[test]
+    fn probe_and_faithfulness_calls_carry_the_first_party_system_line() {
+        let calls = [
+            build_probe_call("claude-eval-1", &sample_envelope()),
+            build_faithfulness_call(
+                "claude-eval-1",
+                &sample_envelope(),
+                "candidate summary",
+                &sample_probes(),
+            ),
+        ];
+        for call in calls {
+            let system = call.request["system"].as_str().unwrap_or_else(|| {
+                panic!("{:?} body carries a top-level system string", call.role)
+            });
+            assert_eq!(system, FIRST_PARTY_SYSTEM, "{:?}", call.role);
+            // The line is the ONLY thing added: no captured bytes ride along.
+            assert!(call.request.get("tools").is_none(), "{:?}", call.role);
+            assert_eq!(call.request["max_tokens"], QUALITY_MAX_OUTPUT_TOKENS);
+        }
+    }
+
+    /// One definition, two callers. Two copies of this string drift, and the
+    /// drifted one dies `429 rate_limit_error` — a label that reads as quota and
+    /// sends the next debugger to the wrong place entirely.
+    #[test]
+    fn every_fresh_body_reads_the_same_system_constant() {
+        let bodies = [
+            build_preflight_request("claude-eval-1"),
+            build_probe_call("claude-eval-1", &sample_envelope()).request,
+            build_faithfulness_call(
+                "claude-eval-1",
+                &sample_envelope(),
+                "candidate summary",
+                &sample_probes(),
+            )
+            .request,
+        ];
+        let first = bodies[0]["system"].clone();
+        assert_eq!(first, json!(FIRST_PARTY_SYSTEM));
+        for body in &bodies {
+            assert_eq!(
+                body["system"], first,
+                "every fresh body must emit an identical system block"
+            );
+        }
+    }
+
+    /// The replay/judge calls are the deliberate exception: they reproduce the
+    /// ORIGINAL request, so they forward its `system` and must never pick up the
+    /// constant — that would change what the task model was actually asked and
+    /// break the A/B the whole measurement rests on.
+    #[test]
+    fn replay_and_judge_calls_keep_the_original_system_and_never_the_constant() {
+        let original = original_task_request();
+        assert_ne!(
+            original["system"],
+            json!(FIRST_PARTY_SYSTEM),
+            "fixture must not accidentally equal the constant"
+        );
+        let projected = json!([{"role": "user", "content": "projected context"}]);
+        let calls = [
+            build_replay_call(
+                QualityRole::OriginalReplay,
+                &original,
+                &original["messages"],
+            ),
+            build_replay_call(QualityRole::ProjectedReplay, &original, &projected),
+            build_judge_call(
+                "claude-eval-1",
+                &original,
+                &sample_probes(),
+                "plan text alpha",
+                "plan text beta",
+            ),
+        ];
+        for call in calls {
+            assert_eq!(
+                call.request["system"], original["system"],
+                "{:?} forwards the original system unchanged",
+                call.role
+            );
+            assert_ne!(
+                call.request["system"],
+                json!(FIRST_PARTY_SYSTEM),
+                "{:?} must not carry the fresh-body constant",
+                call.role
+            );
+        }
     }
 
     // ---- Lane B: evaluator preflight + credential identity --------------------
