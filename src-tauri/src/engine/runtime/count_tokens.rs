@@ -120,6 +120,41 @@ pub fn prefix_messages(messages: &Value, earliest_changed_msg_index: usize) -> V
     }
 }
 
+fn is_system_message(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("system")
+}
+
+/// Same closed prefix as [`prefix_messages`], additionally cut so that appending
+/// one `{"role":"user"}` turn after it still yields a request the API accepts.
+///
+/// Claude Code emits mid-conversation `{"role":"system"}` messages (beta
+/// `mid-conversation-system-2026-04-07`), and the API requires each of them to
+/// either end `messages` or be followed by an `assistant` turn. Tool closure
+/// alone does not imply that: a prefix may legally stop on a system message,
+/// and the H1 summary request then appends its `user` instruction right after
+/// it, producing `messages.N: role 'system' must precede an 'assistant' message
+/// or end the array` (HTTP 400 `invalid_request_error`).
+///
+/// [`prefix_messages`] stays the cache-identity authority for the C count; this
+/// is the boundary the generation REQUEST must use.
+pub fn prefix_messages_before_appended_user(
+    messages: &Value,
+    earliest_changed_msg_index: usize,
+) -> Value {
+    match messages.as_array() {
+        Some(arr) => {
+            let mut end = earliest_changed_msg_index.min(arr.len());
+            while end > 0
+                && (!tool_exchanges_are_closed(&arr[..end]) || is_system_message(&arr[end - 1]))
+            {
+                end -= 1;
+            }
+            Value::Array(arr[..end].to_vec())
+        }
+        None => Value::Array(Vec::new()),
+    }
+}
+
 fn sensitive_header(value: &str) -> Option<reqwest::header::HeaderValue> {
     let mut hv = reqwest::header::HeaderValue::from_str(value).ok()?;
     hv.set_sensitive(true);
@@ -379,6 +414,144 @@ mod tests {
             }
         }
         unmatched_uses.is_empty()
+    }
+
+    /// The API rule for mid-conversation `{"role":"system"}` messages: one may
+    /// not open `messages`, and must either end the array or be followed by an
+    /// `assistant` turn. Verified against the live API on 2026-08-16 — the
+    /// violation reads `messages.N: role 'system' must precede an 'assistant'
+    /// message or end the array`.
+    fn schema_accepts_mid_conversation_system(messages: &Value) -> bool {
+        let Some(messages) = messages.as_array() else {
+            return false;
+        };
+        for (index, message) in messages.iter().enumerate() {
+            if !is_system_message(message) {
+                continue;
+            }
+            if index == 0 {
+                return false;
+            }
+            match messages.get(index + 1) {
+                None => {}
+                Some(next) => {
+                    if next.get("role").and_then(Value::as_str) != Some("assistant") {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// The generation request H1 builds: closed prefix + ONE appended user turn.
+    fn with_appended_user(prefix: &Value) -> Value {
+        let mut messages = prefix.as_array().cloned().unwrap_or_default();
+        messages.push(json!({"role":"user","content":"summarize the records"}));
+        Value::Array(messages)
+    }
+
+    /// Row 4 of `proxy_summary_metric` (2026-08-16): the closed prefix stopped
+    /// on a Claude Code mid-conversation system message, and appending the
+    /// instruction turn made the request invalid.
+    #[test]
+    fn generation_prefix_walks_back_off_a_trailing_system_message() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"system","content":[{"type":"text","text":"operator note"}]},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]}
+        ]);
+
+        // Tool closure alone stops ON the system message.
+        let cache_prefix = prefix_messages(&msgs, 3);
+        assert_eq!(cache_prefix.as_array().unwrap().len(), 2);
+        assert!(!schema_accepts_mid_conversation_system(
+            &with_appended_user(&cache_prefix)
+        ));
+
+        let gen_prefix = prefix_messages_before_appended_user(&msgs, 3);
+
+        assert_eq!(
+            gen_prefix,
+            json!([{"role":"user","content":"initial request"}])
+        );
+        assert!(schema_accepts_closed_tool_exchanges(&gen_prefix));
+        assert!(schema_accepts_mid_conversation_system(&with_appended_user(
+            &gen_prefix
+        )));
+    }
+
+    #[test]
+    fn generation_prefix_keeps_a_system_message_followed_by_an_assistant_turn() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"system","content":[{"type":"text","text":"operator note"}]},
+            {"role":"assistant","content":"acknowledged"},
+            {"role":"user","content":"next"}
+        ]);
+
+        let gen_prefix = prefix_messages_before_appended_user(&msgs, 3);
+
+        assert_eq!(gen_prefix.as_array().unwrap().len(), 3);
+        assert!(schema_accepts_mid_conversation_system(&with_appended_user(
+            &gen_prefix
+        )));
+    }
+
+    /// Both cuts compose: walk back over an open tool_use AND over the system
+    /// message the walk-back lands on.
+    #[test]
+    fn generation_prefix_walks_back_over_an_open_tool_use_then_a_system_message() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"system","content":[{"type":"text","text":"operator note"}]},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_b","name":"Read","input":{}}
+            ]}
+        ]);
+
+        // end=3 is open (tu_a unmatched), end=2 lands on the system message.
+        let gen_prefix = prefix_messages_before_appended_user(&msgs, 3);
+
+        assert_eq!(gen_prefix.as_array().unwrap().len(), 1);
+        assert!(schema_accepts_mid_conversation_system(&with_appended_user(
+            &gen_prefix
+        )));
+    }
+
+    #[test]
+    fn generation_prefix_matches_the_cache_prefix_without_a_trailing_system_message() {
+        let msgs = json!([
+            {"role":"user","content":"initial request"},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_a","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"tu_a","content":"A"}
+            ]},
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"tu_b","name":"Read","input":{}}
+            ]}
+        ]);
+
+        for earliest in 0..=msgs.as_array().unwrap().len() {
+            assert_eq!(
+                prefix_messages_before_appended_user(&msgs, earliest),
+                prefix_messages(&msgs, earliest),
+                "no system message present: the two boundaries must agree at {earliest}"
+            );
+        }
     }
 
     #[test]

@@ -2062,7 +2062,13 @@ async fn sample_summary(state: Arc<AppState>, job: SummaryJob, permit: OwnedSema
         "role": "user",
         "content": format!("{SUMMARY_INSTRUCTION}\n\n{sources_envelope}"),
     });
-    let mut gen_messages = prefix.as_array().cloned().unwrap_or_default();
+    // The REQUEST boundary is not the cache boundary: appending this user turn
+    // after a prefix that ends on a mid-conversation `{"role":"system"}` message
+    // is a 400 `invalid_request_error` (proxy_summary_metric row 4, 2026-08-16).
+    // `prefix` above stays the C/cache-identity authority; only the generation
+    // body walks further back.
+    let gen_prefix = ct::prefix_messages_before_appended_user(&messages, earliest);
+    let mut gen_messages = gen_prefix.as_array().cloned().unwrap_or_default();
     gen_messages.push(instruction);
     let mut gen_body = serde_json::json!({
         "model": job.model,
@@ -4505,6 +4511,32 @@ mod tests {
         HugeText,
         ToolUse,
         Status(u16),
+        /// Behaves like the real API: 400 `invalid_request_error` when a
+        /// mid-conversation `{"role":"system"}` message neither ends `messages`
+        /// nor precedes an `assistant` turn (verified live 2026-08-16).
+        EnforceSystemBoundary,
+    }
+
+    /// The API's placement rule for mid-conversation `{"role":"system"}`
+    /// messages, as reproduced against api.anthropic.com on 2026-08-16.
+    fn messages_accept_mid_conversation_system(messages: &Value) -> bool {
+        let Some(messages) = messages.as_array() else {
+            return false;
+        };
+        for (index, message) in messages.iter().enumerate() {
+            if message.get("role").and_then(Value::as_str) != Some("system") {
+                continue;
+            }
+            if index == 0 {
+                return false;
+            }
+            if let Some(next) = messages.get(index + 1) {
+                if next.get("role").and_then(Value::as_str) != Some("assistant") {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Mock upstream: count_tokens answers `{input_tokens: body_bytes}` (so
@@ -4550,6 +4582,29 @@ mod tests {
                         "usage": gen_usage_json(),
                     }))
                     .into_response(),
+                    GenBehavior::EnforceSystemBoundary => {
+                        let body = l2.lock().unwrap().clone().unwrap_or(Value::Null);
+                        if messages_accept_mid_conversation_system(&body["messages"]) {
+                            axum::Json(json!({
+                                "model": "claude-3-5-sonnet-20241022",
+                                "content": [{"type":"text","text":"aggregate summary of tool outputs"}],
+                                "usage": gen_usage_json(),
+                            }))
+                            .into_response()
+                        } else {
+                            Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .header("content-type", "application/json")
+                                .body(Body::from(
+                                    json!({"type":"error","error":{
+                                        "type":"invalid_request_error",
+                                        "message":"role 'system' must precede an 'assistant' message or end the array"
+                                    }})
+                                    .to_string(),
+                                ))
+                                .unwrap()
+                        }
+                    }
                     GenBehavior::Status(code) => Response::builder()
                         .status(StatusCode::from_u16(code).unwrap())
                         .header("content-type", "application/json")
@@ -4614,6 +4669,23 @@ mod tests {
         json!({"model":"claude-3-5-sonnet-20241022","messages":messages})
     }
 
+    /// `summarizable_request` plus the mid-conversation `{"role":"system"}`
+    /// message Claude Code emits (beta `mid-conversation-system-2026-04-07`),
+    /// positioned so the tool-closed prefix lands exactly ON it.
+    fn summarizable_request_with_mid_conversation_system() -> Value {
+        let source = "S".repeat(60_000);
+        let tail = "T".repeat(70_000);
+        let mut messages = vec![
+            json!({"role":"user","content":"initial request"}),
+            json!({"role":"system","content":[{"type":"text","text":"operator note"}]}),
+        ];
+        messages.extend(tool_pair("s1", &source));
+        messages.extend(tool_pair("s2", &source));
+        messages.push(json!({"role":"user","content":tail.clone()}));
+        messages.push(json!({"role":"user","content":tail}));
+        json!({"model":"claude-3-5-sonnet-20241022","messages":messages})
+    }
+
     async fn summary_outcome_counts(db: &sqlx::SqlitePool) -> Vec<(String, i64)> {
         sqlx::query_as::<_, (String, i64)>(
             "SELECT outcome, COUNT(*) FROM proxy_summary_metric GROUP BY outcome",
@@ -4628,6 +4700,61 @@ mod tests {
         assert_eq!(rows.len(), 1, "exactly one terminal row: {rows:?}");
         assert_eq!(rows[0].1, 1, "exactly one row: {rows:?}");
         rows[0].0.clone()
+    }
+
+    /// Regression for `proxy_summary_metric` row 4 (2026-08-16): the closed
+    /// prefix stopped on a mid-conversation system message and the appended
+    /// instruction turn made the generation request invalid — the FIRST real
+    /// generation attempt died `generation_failure/non_2xx/invalid_request_error`.
+    #[tokio::test]
+    async fn pipeline_generation_walks_the_prefix_off_a_mid_conversation_system_message() {
+        let (upstream, hits, last_gen, up) =
+            start_summary_mock(GenBehavior::EnforceSystemBoundary).await;
+        let rt = ProxyRuntime::with_port(0);
+        rt.arm_summary(arm_req()).unwrap();
+        let (state, rt) = armed_state(rt).await;
+        let job = armed_summary_job(
+            &rt,
+            &upstream,
+            summarizable_request_with_mid_conversation_system(),
+        );
+
+        sample_summary(state.clone(), job, test_permit()).await;
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "exactly one generation call"
+        );
+        let gen = last_gen.lock().unwrap().clone().expect("generation body");
+        let sent = gen["messages"].as_array().expect("messages array");
+        assert!(
+            messages_accept_mid_conversation_system(&gen["messages"]),
+            "generation body must stay a legal request: {:?}",
+            sent.iter().map(|m| m["role"].clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            sent.last().and_then(|m| m["role"].as_str()),
+            Some("user"),
+            "the instruction turn is still appended last"
+        );
+        assert_eq!(only_outcome(&state.db).await, "measured");
+
+        // The C/cache boundary is unchanged: it MAY still stop on the system
+        // message, and count_tokens accepts that (only generation does not).
+        let runtime_prefix = sqlx::query_scalar::<_, i64>(
+            "SELECT runtime_prefix_messages FROM proxy_summary_metric WHERE outcome='measured'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            runtime_prefix >= sent.len() as i64 - 1,
+            "generation prefix never exceeds the cache prefix: \
+             cache={runtime_prefix} gen={}",
+            sent.len() - 1
+        );
+        up.abort();
     }
 
     #[tokio::test]
