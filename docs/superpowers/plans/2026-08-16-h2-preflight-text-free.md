@@ -131,6 +131,18 @@ Rejected (429): no `system`, and `"You are a helpful assistant."` — so
 this is a first-party-identity gate, not a "system must be non-empty"
 rule.
 
+Two runs the paragraph above under-recorded, added post-merge by the
+owner from Tiësto's exact parameters (they are the evidence
+h2-evaluator-first-party-system-v2 reused instead of re-probing):
+
+| run | body | HTTP | notes |
+|---|---|---|---|
+| role-call-shaped | opus-5, max_tokens 32, `tool_choice:none`, ONE user turn, 242-char probe-instruction-shaped content with JSON payload, n=1/arm | (a) no system → **429** rate_limit_error; (b) byte-identical + captured `system[1]` SDK-identity string → **200**, content `['thinking']` | arm (b) used the CAPTURED SDK-identity line, NOT the constant now in code; stop_reason/usage not captured |
+| constant itself | `"You are Claude Code, Anthropic's official CLI for Claude."` (57 chars) at max_tokens 1, n=1 each on claude-opus-5 AND claude-sonnet-5 | both **200**, content `[]`, stop_reason max_tokens, usage complete (input 32 / cc 0 / cr 0 / output 1) | the only DIRECT evidence for the exact `FIRST_PARTY_SYSTEM` string |
+
+Headers for all rows: captured OAuth bearer + captured `anthropic-beta`
+byte-for-byte + `anthropic-version 2023-06-01`; no `?beta=true`.
+
 Consequence: `build_preflight_request` (no `system`) and
 `evaluator_request` (`quality.rs:758`, calls 1 probe + 2 faithfulness,
 also no `system`) cannot reach a 200 against an OAuth carrier at all.
