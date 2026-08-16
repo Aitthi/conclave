@@ -128,15 +128,6 @@ Subcommands:
   code stats|files|tree|symbols|find <args>   survey a codebase (tree-sitter)
   code callers|callees|refs|impact <name>     semantic cross-references
   code rename|rewrite [--apply]               AST-validated edits (dry-run default)
-  proxy status | mode <off|log|rewrite> | threshold <ratio> | checkpoint <on|off> | ceiling <tokens> | report [--since-hours N] | checkpoint-report [--since-hours N]
-  proxy summary-shadow off
-  proxy summary-shadow on --model <exact-request-model> --price-version <immutable-version-label> --standard-input-usd-per-mtok <rate> --standard-cache-write-usd-per-mtok <rate> --standard-cache-read-usd-per-mtok <rate> --standard-output-usd-per-mtok <rate> --long-context-threshold <tokens> --long-input-usd-per-mtok <rate> --long-cache-write-usd-per-mtok <rate> --long-cache-read-usd-per-mtok <rate> --long-output-usd-per-mtok <rate>
-  proxy summary-report [--since-hours N] [--campaign-id ID]
-  proxy quality-shadow off
-  proxy quality-shadow on --h1-campaign-id <passing-h1-id> --evaluator-model <different-model> --rubric-version hybrid-quality-rubric-v1 --max-cases <1..1000>
-  proxy quality-fixtures enqueue --manifest h2-adversarial-v1
-  proxy quality-report [--since-hours N] [--campaign-id ID]
-  proxy quality-audit start --campaign-id ID | stop
   rtk-hook --rtk <absRtkPath>          (local Claude Code PreToolUse hook body: stdin JSON -> rtk rewrite -> hook response; always exits 0)
   run <orchestratorId> <prompt...>
   help
@@ -5734,21 +5725,6 @@ mod tests {
             expand_self_args(all_lim.clone(), Some("self1")).unwrap(),
             all_lim
         );
-    }
-
-    #[test]
-    fn proxy_commands_pass_through_for_plain_cli_exec() {
-        let input = v(&["proxy", "report", "--since-hours", "48"]);
-        assert_eq!(expand_self_args(input.clone(), None).unwrap(), input);
-        let summary = v(&["proxy", "summary-report", "--campaign-id", "campaign-1"]);
-        assert_eq!(expand_self_args(summary.clone(), None).unwrap(), summary);
-        assert!(USAGE.contains(
-            "proxy summary-shadow on --model <exact-request-model> --price-version <immutable-version-label>"
-        ));
-        assert!(USAGE.contains("proxy summary-report [--since-hours N] [--campaign-id ID]"));
-        assert!(USAGE.contains("proxy quality-shadow on --h1-campaign-id"));
-        assert!(USAGE.contains("proxy quality-fixtures enqueue --manifest h2-adversarial-v1"));
-        assert!(USAGE.contains("proxy quality-audit start --campaign-id ID | stop"));
     }
 
     // ── browser: caller-id injection + screenshot path resolution ──────────

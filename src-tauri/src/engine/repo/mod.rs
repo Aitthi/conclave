@@ -26,16 +26,6 @@ pub mod inter_agent_message;
 pub mod memory;
 pub mod memory_proposal;
 pub mod provider;
-pub mod proxy_checkpoint_metric;
-pub mod proxy_metric;
-// H2 Lane C lands this repository seam before Lane D/E consume
-// insert_terminal/insert_audit/report/evaluate_go.
-#[allow(dead_code)]
-pub mod proxy_quality_metric;
-// Lane B (H1 shadow economics) lands this repository seam before Lane D's
-// runtime orchestration consumes insert_terminal/report.
-#[allow(dead_code)]
-pub mod proxy_summary_metric;
 pub mod role;
 pub mod session;
 pub mod skill;

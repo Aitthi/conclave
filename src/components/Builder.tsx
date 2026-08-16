@@ -204,8 +204,6 @@ export function Builder({
   const [contextWindow, setContextWindow] = useState<string>(() => initialContextWindow(initialDef));
   // Token filter (rtk): absent/null on the definition means enabled (default ON).
   const [rtkEnabled, setRtkEnabled] = useState<boolean>(initialDef?.rtkEnabled ?? true);
-  // Context proxy: absent/null on the definition means enabled (default ON, Claude only).
-  const [proxyEnabled, setProxyEnabled] = useState<boolean>(initialDef?.proxyEnabled ?? true);
   const [customArgs, setCustomArgs] = useState(initialDef?.customArgs ?? "");
   // Custom env is opt-in so the starter template isn't saved by accident.
   const [useCustomEnv, setUseCustomEnv] = useState(
@@ -477,8 +475,6 @@ export function Builder({
         contextWindow: contextWindowForSave,
         // Token filter (rtk) — claude-code + codex; the engine treats absent as ON.
         rtkEnabled: showCliConfig ? rtkEnabled : undefined,
-        // Context proxy — Claude Code only; the engine treats absent as ON.
-        proxyEnabled: isClaudeCode ? proxyEnabled : undefined,
         customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
@@ -1285,20 +1281,6 @@ export function Builder({
                   </div>
                   <p className="text-[10.5px] text-text-tertiary mt-1.5">
                     Rewrites shell commands through rtk to compress output and save tokens.
-                  </p>
-                </div>
-                )}
-
-                {/* Context proxy — Claude Code only; absent/null = ON. */}
-                {isClaudeCode && (
-                <div className="px-3 py-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[12.5px] text-text-secondary">Context proxy</span>
-                    <Toggle on={proxyEnabled} onChange={setProxyEnabled} label="Context proxy" />
-                  </div>
-                  <p className="text-[10.5px] text-text-tertiary mt-1.5">
-                    Routes this agent's Anthropic requests through the local context proxy to
-                    measure and compress oversized context.
                   </p>
                 </div>
                 )}
