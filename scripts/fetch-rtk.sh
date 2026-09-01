@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetches the pinned rtk binary for bundling. Idempotent.
 set -euo pipefail
-RTK_VERSION="${RTK_VERSION:-0.42.4}"
+RTK_VERSION="${RTK_VERSION:-0.46.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 DEST="$ROOT/src-tauri/binaries/rtk-$TRIPLE"
