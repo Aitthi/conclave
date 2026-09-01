@@ -348,6 +348,8 @@ fn scan_file_incremental(
 struct ScannedReading {
     tokens: i64,
     limit: i64,
+    /// When the usage was RECORDED — the timestamp on the transcript row the
+    /// numbers came from, not when the file was last written to.
     observed_at: DateTime<Utc>,
     source_kind: TranscriptSourceKind,
 }
@@ -363,6 +365,11 @@ impl ScannedReading {
     }
 }
 
+/// Pick the more recent of two per-file readings. Every workspace agent shares
+/// one cwd, so one Claude project dir holds many transcripts and the poll folds
+/// this across all of them. Recency is the reading's `observed_at`, i.e. the
+/// timestamp of the usage row it came from — NOT the file's mtime, which a
+/// metadata-only append to a closed session can bump arbitrarily far ahead.
 fn choose_newer(
     current: Option<ScannedReading>,
     next: Option<ScannedReading>,
@@ -395,10 +402,17 @@ fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
 }
 
 /// Collect `.jsonl` files under `root` that were modified at or after
-/// `min_mtime`. A closed session's transcript can never gain the current
-/// agent's usage rows, so filtering by mtime here — a cheap `stat`, before any
-/// file is opened or parsed — keeps the meter off the (potentially many GB of)
-/// historical transcripts that a full parse would otherwise churn every poll.
+/// `min_mtime`. This is a cheap `stat`-only PRE-FILTER — before any file is
+/// opened or parsed — that keeps the meter off the (potentially many GB of)
+/// historical transcripts a full parse would otherwise churn every poll. A
+/// file whose newest usage row is at or after the anchor necessarily has an
+/// mtime at or after it too, so nothing admissible is ever dropped here.
+///
+/// It deliberately OVER-admits: Claude Code appends non-usage metadata to
+/// closed session files hours after their last usage row, so a bumped mtime
+/// proves nothing about the usage inside. Admissibility is decided by the
+/// usage row's own timestamp in [`ClaudeAcc::finalize`] (and
+/// [`CodexAcc::ingest_line`] for rollouts).
 fn collect_jsonl_files(root: &Path, min_mtime: DateTime<Utc>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_jsonl_files_inner(root, min_mtime, &mut out);
@@ -448,15 +462,20 @@ fn claude_model_context_window(model: &str) -> Option<i64> {
 /// usage insert carries a strictly increasing line number, so the map's
 /// max-by-line_no was ALWAYS its most recent insert — the retried-requestId
 /// de-dup could never change the winner, only overwrite a key that had already
-/// lost. A single `(line_no, tokens)` scalar is the same reduction, O(1) per
-/// poll instead of an unbounded map held per file all session.
+/// lost. A single `(line_no, tokens, observed_at)` scalar is the same
+/// reduction, O(1) per poll instead of an unbounded map held per file all
+/// session.
+///
+/// The third element is the winning usage row's OWN top-level `timestamp`.
+/// It is what dates the reading — see [`ClaudeAcc::finalize`] for why the
+/// file's mtime cannot.
 #[derive(Debug, Default, Clone)]
 struct ClaudeAcc {
     line_no: usize,
     saw_workspace: bool,
     saw_instance: bool,
     last_model_window: Option<i64>,
-    latest_usage: Option<(usize, i64)>,
+    latest_usage: Option<(usize, i64, Option<DateTime<Utc>>)>,
 }
 
 impl ClaudeAcc {
@@ -487,9 +506,32 @@ impl ClaudeAcc {
         let Some(usage) = message.get("usage") else {
             return;
         };
-        self.latest_usage = Some((self.line_no, sum_claude_usage(usage)));
+        // The row's own `timestamp` (RFC3339 with `Z`, millisecond precision —
+        // e.g. `2026-08-31T15:23:04.140Z`) dates the usage itself, mirroring
+        // what the codex path already reads off its token_count events.
+        let row_observed_at = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_ts);
+        self.latest_usage = Some((self.line_no, sum_claude_usage(usage), row_observed_at));
     }
 
+    /// A reading is dated by the winning usage ROW, never by the file's mtime.
+    ///
+    /// Claude Code keeps appending non-usage metadata (`agent-name`,
+    /// `last-prompt`, `cost-state`, `system`/`bridge_status`, summary lines) to
+    /// CLOSED session files, sometimes hours after the last assistant response
+    /// — a live 2026-08-31 file had its final usage row at 15:23:04.140Z and an
+    /// mtime of 19:51:32Z. An mtime-dated reading therefore drifted past the
+    /// current generation's `started_at`, the guard below stopped rejecting the
+    /// dead generation, and its full accumulated usage won `choose_newer`
+    /// whenever the live transcript was momentarily idle — the repeating
+    /// fixed-percentage context nudge reported from the lokal-llm workspace.
+    /// Anchored to the row, that rejection is permanent.
+    ///
+    /// The file's mtime remains the fallback for a usage row that carries no
+    /// parseable `timestamp` (legacy or unknown shapes); every row observed in
+    /// live transcripts has one.
     fn finalize(
         &self,
         path: &Path,
@@ -499,8 +541,11 @@ impl ClaudeAcc {
         if !self.saw_workspace || !self.saw_instance {
             return None;
         }
-        let (_, tokens) = self.latest_usage?;
-        let observed_at = file_modified_at(path)?;
+        let (_, tokens, row_observed_at) = self.latest_usage?;
+        let observed_at = match row_observed_at {
+            Some(at) => at,
+            None => file_modified_at(path)?,
+        };
         if observed_at < started_at {
             return None;
         }
@@ -1299,9 +1344,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
-    /// Force `path`'s mtime far into the future so `choose_newer` (which ranks
-    /// claude readings by FILE MTIME) has a deterministic winner instead of
-    /// depending on same-second timestamps and readdir order.
+    /// Force `path`'s mtime far into the future.
+    ///
+    /// Readings are dated by the winning usage ROW, so for a fixture whose
+    /// usage rows carry a `timestamp` this steers only the `collect_jsonl_files`
+    /// pre-filter — and is how the metadata-append incident is reproduced. For
+    /// a legacy fixture built from timestamp-less `claude_usage_line`s the
+    /// reading falls back to the mtime, so this still gives `choose_newer` a
+    /// deterministic winner instead of leaving it to same-second timestamps and
+    /// readdir order.
     fn bump_mtime(path: &Path, secs_ahead: u64) {
         let when = std::time::SystemTime::now() + std::time::Duration::from_secs(secs_ahead);
         let file = std::fs::OpenOptions::new()
@@ -2210,25 +2261,30 @@ mod tests {
 
     /// Pinned test 6: choose_newer across files is preserved — the file whose
     /// reading is newest wins, even as per-file results come from caches.
+    ///
+    /// Recency is the USAGE ROW's timestamp, so the fixtures carry the
+    /// production row shape and order the two files explicitly (the previous
+    /// sleep-and-write-order steering dated readings by file mtime, which
+    /// production no longer does).
     #[test]
     fn newer_reading_in_second_file_still_wins() {
         let setup = IncrementalSetup::new();
         let instance_id = "inst-multi-1";
+        let now = Utc::now();
         let first = setup.project_dir.join("first.jsonl");
         let second = setup.project_dir.join("second.jsonl");
         write_jsonl_terminated(
             &first,
             &[
                 claude_owner_line(instance_id, &setup.workspace),
-                claude_usage_line(10),
+                claude_usage_line_at("req-first-1", 10, now - chrono::Duration::seconds(20)),
             ],
         );
-        std::thread::sleep(std::time::Duration::from_millis(20));
         write_jsonl_terminated(
             &second,
             &[
                 claude_owner_line(instance_id, &setup.workspace),
-                claude_usage_line(99),
+                claude_usage_line_at("req-second-1", 99, now - chrono::Duration::seconds(10)),
             ],
         );
         assert_eq!(
@@ -2239,10 +2295,7 @@ mod tests {
 
         // Appending to the FIRST file makes it the newest observation; the
         // cached second-file reading must lose to the refreshed first.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let mut line = claude_usage_line(111);
-        line["requestId"] = json!("req-2");
-        append_jsonl_terminated(&first, &[line]);
+        append_jsonl_terminated(&first, &[claude_usage_line_at("req-first-2", 111, now)]);
         assert_eq!(
             setup.poll_claude(instance_id).unwrap().tokens,
             111,
@@ -2399,5 +2452,216 @@ mod tests {
         let _ = setup.poll_codex(instance_id);
         assert_eq!(setup.reader.file_opens(instance_id, &file), opens);
         setup.cleanup();
+    }
+
+    /// An assistant usage line carrying the row's OWN top-level `timestamp`,
+    /// exactly as claude-code stamps every assistant record (RFC3339 with `Z`,
+    /// millisecond precision — live sample `2026-08-31T15:23:04.140Z`).
+    /// Fixtures that need to express *when the usage happened*, as opposed to
+    /// when the file was last touched, must use this shape;
+    /// `claude_usage_line` deliberately keeps the timestamp-less legacy shape
+    /// that exercises the mtime fallback.
+    fn claude_usage_line_at(req: &str, tokens: i64, timestamp: DateTime<Utc>) -> Value {
+        let mut line = claude_usage_line(tokens);
+        line["requestId"] = json!(req);
+        line["message"]["id"] = json!(req);
+        line["timestamp"] = json!(timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        line
+    }
+
+    /// A non-usage metadata record of the shape claude-code appends to a
+    /// CLOSED session file long after its last usage row (live tail,
+    /// 2026-08-31: a `system` / `bridge_status` line, alongside `agent-name`,
+    /// `last-prompt` and `cost-state` records). It contributes no usage, but
+    /// writing it bumps the file's mtime.
+    fn claude_bridge_status_line(timestamp: DateTime<Utc>) -> Value {
+        json!({
+            "type": "system",
+            "subtype": "bridge_status",
+            "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "content": "bridge status changed"
+        })
+    }
+
+    /// Incident regression (cross-workspace report, 2026-08-31): after an
+    /// agent's first `conclave restart` the `[conclave context]` nudge fired
+    /// four times with a FIXED stale 70–71% while the live meter read 25–31%.
+    ///
+    /// Root cause: claude-code appends non-usage metadata (`agent-name`,
+    /// `last-prompt`, `cost-state`, `system`/`bridge_status`) to a CLOSED
+    /// session file hours after its last usage row — the observed file's last
+    /// usage row was 15:23:04.140Z but its mtime was 19:51:32Z. While a
+    /// reading's `observed_at` came from the FILE MTIME, that append made the
+    /// dead generation admissible again (`observed_at < started_at` stopped
+    /// rejecting it) and its full accumulated usage won `choose_newer` over
+    /// the quiet live transcript, re-persisting a closed generation's tokens.
+    ///
+    /// Anchoring `observed_at` to the usage ROW makes the rejection permanent:
+    /// no number of metadata appends can move a closed generation's last usage
+    /// row past the new generation's anchor.
+    #[test]
+    fn closed_generation_metadata_append_never_resurrects_its_usage() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-restart-1";
+        let project_dir = claude_project_dir(&claude_root, &workspace);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let now = Utc::now();
+        // The generation that ended BEFORE the restart...
+        let closed_usage_at = now - chrono::Duration::hours(4);
+        // ...and the anchor stamped just before the respawn.
+        let started_at = now - chrono::Duration::hours(1);
+
+        let closed = project_dir.join("closed-generation.jsonl");
+        write_jsonl(
+            &closed,
+            &[
+                claude_owner_line(instance_id, &workspace),
+                claude_usage_line_at(
+                    "req-old-1",
+                    700_000,
+                    closed_usage_at - chrono::Duration::minutes(5),
+                ),
+                claude_usage_line_at("req-old-2", 710_000, closed_usage_at),
+                // Metadata-only tail, written hours after the session closed.
+                claude_bridge_status_line(now),
+            ],
+        );
+        // That append lands well after the new generation's anchor, so the
+        // cheap `collect_jsonl_files` mtime pre-filter still admits the file —
+        // the rejection has to happen in `finalize`.
+        bump_mtime(&closed, 3_600);
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+
+        assert_eq!(
+            reader.poll(instance_id, &workspace, "claude-code", started_at),
+            None,
+            "a closed generation's usage must stay rejected however often a \
+             metadata append bumps the file's mtime"
+        );
+
+        // The live generation, mid-turn and far below the stale reading.
+        let live = project_dir.join("live-generation.jsonl");
+        write_jsonl(
+            &live,
+            &[
+                claude_owner_line(instance_id, &workspace),
+                claude_usage_line_at("req-live-1", 62_000, now),
+            ],
+        );
+        let reading = reader
+            .poll(instance_id, &workspace, "claude-code", started_at)
+            .expect("the live generation is owned and admissible");
+        assert_eq!(
+            reading.tokens, 62_000,
+            "the meter must report the LIVE generation, not the closed one the \
+             metadata append kept on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// `choose_newer` ranks claude readings by USAGE recency, not by file
+    /// mtime: the file whose last usage row is older loses even when something
+    /// touched it afterwards. Before the entry-derived `observed_at`, a
+    /// metadata-only append was enough to hand the stale file the win.
+    #[test]
+    fn choose_newer_ranks_by_usage_row_timestamp_not_file_mtime() {
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-recency-1";
+        let project_dir = claude_project_dir(&claude_root, &workspace);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let now = Utc::now();
+        let fresher = project_dir.join("fresher-usage.jsonl");
+        write_jsonl(
+            &fresher,
+            &[
+                claude_owner_line(instance_id, &workspace),
+                claude_usage_line_at("req-fresh", 111, now - chrono::Duration::minutes(1)),
+            ],
+        );
+        let touched = project_dir.join("older-usage-newer-mtime.jsonl");
+        write_jsonl(
+            &touched,
+            &[
+                claude_owner_line(instance_id, &workspace),
+                claude_usage_line_at("req-stale", 222, now - chrono::Duration::hours(3)),
+                claude_bridge_status_line(now),
+            ],
+        );
+        // The stale file is by far the newest on disk.
+        bump_mtime(&touched, 3_600);
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 200_000,
+        });
+        let epoch = DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH);
+
+        let reading = reader
+            .poll(instance_id, &workspace, "claude-code", epoch)
+            .expect("both files are owned and admissible");
+        assert_eq!(
+            reading.tokens, 111,
+            "the file with the LATER usage row must win, even though the other \
+             file carries the newer mtime"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// Legacy fallback: a usage row with no top-level `timestamp` keeps the
+    /// pre-fix semantics — `observed_at` comes from the file's mtime — so an
+    /// unknown or older row shape still produces a reading instead of dropping
+    /// silently out of the meter.
+    #[test]
+    fn usage_row_without_timestamp_falls_back_to_file_mtime() {
+        let claude_root = tmp_root("claude-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "inst-legacy-1";
+        let project_dir = claude_project_dir(&claude_root, &workspace);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let file = project_dir.join("legacy.jsonl");
+        write_jsonl(
+            &file,
+            &[
+                claude_owner_line(instance_id, &workspace),
+                claude_usage_line(4_242),
+            ],
+        );
+
+        let reading = scan_claude_file(
+            &file,
+            instance_id,
+            &workspace,
+            DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            200_000,
+        )
+        .expect("a timestamp-less usage row still reads");
+        assert_eq!(reading.tokens, 4_242);
+        assert_eq!(
+            reading.observed_at,
+            file_modified_at(&file).expect("file mtime"),
+            "with no row timestamp the reading falls back to the file's mtime"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }
