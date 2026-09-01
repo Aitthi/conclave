@@ -2760,8 +2760,9 @@ mod tests {
     /// The old file's ROWS are deliberately timestamped in the far future so the
     /// per-row `observed_at < started_at` filter cannot be what rejects it —
     /// this pins the `collect_jsonl_files` mtime filter, which is the one doing
-    /// the real work in production (for claude-code, `finalize` derives
-    /// `observed_at` from the file mtime too).
+    /// the real work in production (for claude-code the mtime filter is only a
+    /// cheap pre-filter — `finalize` dates the reading by the usage row's own
+    /// timestamp since c8d013d).
     ///
     /// Anchored to `session.started_at` instead — a stamp written once at
     /// instantiate and weeks old on a live row — the old file is admissible and
