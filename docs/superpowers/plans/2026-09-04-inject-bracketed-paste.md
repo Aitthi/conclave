@@ -111,6 +111,32 @@ test asserts no envelope; `send` with `paste: true` on a PTY handle wraps.
 - After rebuild+relaunch (human action): one real `conclave tell` > 1022 bytes
   to an idle peer, then read that peer's transcript user entry — full body.
 
+## Review rulings (Mellow, note 1bf50ab4 / challenge 9f5cc168 — 2026-09-04)
+
+- **D1 defect — UPHELD (credit: Mellow, reproduced on claude 2.1.260).** A body
+  carrying a literal `ESC[201~` closed the envelope early; the tail acted as
+  keystrokes and the `[from …]` origin tag was dropped from what the receiver
+  submitted. Ruling goes further than the proposal: `send_stdin_paste`
+  substitutes EVERY `ESC` byte in the body with `␛` (U+241B) before wrapping,
+  not just the two markers — a single-pass marker strip can re-form a marker
+  from `ESC ESC [201~`, and any other input-side CSI inside a paste is equally
+  unwanted. The envelope is the only escape sequence on the wire. Unit test
+  `send_stdin_paste_neutralizes_escape_bytes_in_body`.
+- **G1 (SkillAssistPanel text sent raw) — UPHELD, fixed in-lane.** Boundary
+  widened by `src/components/SkillAssistPanel.tsx` (separate scoped commit);
+  that composer always targets a PTY CLI, same bug class.
+- **G2 (`conclave send` CLI stays raw) — EXCLUDED by design.** `send` is the
+  raw-keystroke primitive (it never submits; it exists to type control bytes
+  and single keys). Text that must arrive whole goes through `conclave tell` /
+  `message.inject`. Recorded here so it is not re-proposed.
+- **G3 (harness at handoff size) — ACCEPTED as a gate:** one run
+  `--size 40000 --mode bracketed` on claude 2.1.260, recorded on the task.
+- **G4 (Terminal.tsx file-drop insert raw) — DEFERRED, follow-up.** Different
+  surface (the xterm pane); a multi-file drop over 1022 bytes would truncate
+  the same way. One-word fix (`paste: true` on the insert write), needs its own
+  lane because `Terminal.tsx` is a keystroke path and must stay byte-exact
+  elsewhere.
+
 ## Risk ledger
 
 - The RUNNING engine keeps the old behaviour until the human rebuilds and

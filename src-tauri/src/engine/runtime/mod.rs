@@ -120,6 +120,10 @@ pub struct LiveHandle {
 /// (docs/superpowers/plans/2026-09-04-inject-bracketed-paste.md).
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
 pub const BRACKETED_PASTE_END: &str = "\x1b[201~";
+/// What an `ESC` byte inside a pasted body becomes on the wire: U+241B
+/// "SYMBOL FOR ESCAPE" — the sender's text stays readable, but no escape
+/// sequence (least of all the envelope's own terminator) can be smuggled.
+pub const ESC_SUBSTITUTE: &str = "\u{241b}";
 
 impl LiveHandle {
     /// Build a placeholder handle that holds the session "live" without a real
@@ -412,12 +416,22 @@ impl Runtime {
     /// Same errors as [`Self::send_stdin`]. The submit Enter (`\r`) must still
     /// go through `send_stdin` as a separate write — inside the envelope it is
     /// literal paste content.
+    ///
+    /// The envelope must be the ONLY escape sequence on the wire: every `ESC`
+    /// byte in the body becomes the visible `␛` (U+241B) first. A body carrying
+    /// a literal `ESC[201~` would otherwise close the paste early, the rest
+    /// would act as keystrokes, and the `[from …]` origin tag would vanish from
+    /// what the receiver submits (Mellow's challenge 9f5cc168, reproduced on
+    /// claude 2.1.260). Substituting the byte — rather than stripping the two
+    /// markers — cannot re-form a marker from `ESC ESC [201~` and also keeps
+    /// any other input-side CSI out of the paste.
     pub fn send_stdin_paste(&self, instance_id: &str, text: &str) -> Result<(), StdinError> {
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let handle = guard.get(instance_id).ok_or(StdinError::NotLive)?;
         self.arm_echo_suppress(instance_id);
         let payload = if handle.bracketed_paste {
-            format!("{BRACKETED_PASTE_START}{text}{BRACKETED_PASTE_END}")
+            let safe = text.replace('\x1b', ESC_SUBSTITUTE);
+            format!("{BRACKETED_PASTE_START}{safe}{BRACKETED_PASTE_END}")
         } else {
             text.to_owned()
         };
@@ -600,6 +614,49 @@ mod tests {
             rt.send_stdin_paste("never-registered", "x").unwrap_err(),
             StdinError::NotLive
         ));
+    }
+
+    /// Mellow's challenge 9f5cc168 (task inject-bracketed-paste): a body that
+    /// carries the literal terminator `ESC[201~` closed the paste early — the
+    /// rest acted as keystrokes and the `[from …]` origin tag was dropped from
+    /// what the receiver submitted (reproduced on claude 2.1.260). The envelope
+    /// must be the ONLY escape sequence on the wire: every ESC byte in the body
+    /// is neutralised, so neither marker — nor any other CSI — can be smuggled,
+    /// and a marker cannot be re-formed by deleting a nested one
+    /// (`ESC ESC [201~` → single-pass strip would yield `ESC[201~` again).
+    #[tokio::test]
+    async fn send_stdin_paste_neutralizes_escape_bytes_in_body() {
+        let rt = Runtime::new();
+        let (pty, mut pty_rx) = LiveHandle::for_test_pty("sess-pty");
+        assert!(rt.register("inst-pty", pty).is_some());
+
+        let body = format!(
+            "head {BRACKETED_PASTE_END}\rSECOND {BRACKETED_PASTE_START} \x1b\x1b[201~ tail \x1b[31mred"
+        );
+        rt.send_stdin_paste("inst-pty", &body).expect("pty paste");
+        let wire = pty_rx.try_recv().unwrap();
+
+        assert!(
+            wire.starts_with(BRACKETED_PASTE_START),
+            "opens with ESC[200~"
+        );
+        assert!(wire.ends_with(BRACKETED_PASTE_END), "closes with ESC[201~");
+        let inner = &wire[BRACKETED_PASTE_START.len()..wire.len() - BRACKETED_PASTE_END.len()];
+        assert!(
+            !inner.contains('\x1b'),
+            "no ESC byte may survive inside the envelope, got {inner:?}"
+        );
+        assert_eq!(wire.matches(BRACKETED_PASTE_END).count(), 1);
+        assert_eq!(wire.matches(BRACKETED_PASTE_START).count(), 1);
+        // The text itself is preserved (only ESC is substituted), so the
+        // receiver still sees what the sender wrote — visibly, not as a key.
+        assert!(inner.contains("head ␛[201~\rSECOND ␛[200~ ␛␛[201~ tail ␛[31mred"));
+
+        // Non-PTY backends are not terminals: text passes through untouched.
+        let (chat, mut chat_rx) = LiveHandle::for_test("sess-chat");
+        assert!(rt.register("inst-chat", chat).is_some());
+        rt.send_stdin_paste("inst-chat", &body).expect("chat paste");
+        assert_eq!(chat_rx.try_recv().unwrap(), body);
     }
 
     #[tokio::test]
