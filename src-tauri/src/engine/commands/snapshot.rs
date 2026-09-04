@@ -296,13 +296,16 @@ struct InstanceReq {
     instance_id: String,
 }
 
-/// Type a line into a live agent's stdin and submit it. A TUI's Enter is CR
-/// (`\r`) sent as a SEPARATE write after a short beat, so Codex's paste-burst
-/// detection treats it as a real Enter (mirrors [`super::message::inject`]).
+/// Type a line into a live agent's stdin and submit it. The text goes out as
+/// ONE bracketed paste on PTY backends (a handoff is far longer than the
+/// 1022-byte PTY read the receiver would otherwise see as its only surviving
+/// chunk — see `Runtime::send_stdin_paste`); a TUI's Enter is CR (`\r`) sent
+/// as a SEPARATE write after a short beat, so it lands as a real keystroke
+/// rather than paste content (mirrors [`super::message::inject`]).
 /// Best-effort: a dead/closed backend is ignored — the caller owns liveness.
 /// `pub(crate)`: also used by the restart loop in `commands::instance`.
 pub(crate) async fn submit_line(runtime: &Runtime, instance_id: &str, text: &str) {
-    if runtime.send_stdin(instance_id, text).is_ok() {
+    if runtime.send_stdin_paste(instance_id, text).is_ok() {
         tokio::time::sleep(Duration::from_millis(40)).await;
         let _ = runtime.send_stdin(instance_id, "\r");
     }

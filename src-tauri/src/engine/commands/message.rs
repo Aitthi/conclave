@@ -14,6 +14,13 @@ const SUBMIT_CR_DELAYS_MS: [u64; 3] = [40, 120, 300];
 struct SendReq {
     session_id: String,
     text: String,
+    /// `true` when `text` is a composed message (StdinBar) rather than raw
+    /// keystrokes (Terminal pane, the submit `\r`): it is then delivered as ONE
+    /// bracketed paste on PTY backends so a body longer than one kernel read
+    /// (macOS: 1022 bytes) is not head-truncated by the receiving TUI. Absent
+    /// = raw, the byte-exact path xterm's `onData` relies on.
+    #[serde(default)]
+    paste: bool,
 }
 
 /// Ack returned by `message.send`. Shape mirrors the TS `Message` interface in
@@ -38,28 +45,35 @@ struct MessageAck {
 /// - session not running (no live backend) → [`AppError::NotFound`]
 /// - backend stdin channel closed (server-side fault) → [`AppError::Internal`]
 pub async fn send(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let SendReq { session_id, text } =
-        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let SendReq {
+        session_id,
+        text,
+        paste,
+    } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
     let session = repo::session::get(&state.db, &session_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("session id={session_id} not found")))?;
 
     // Route the text to the live PTY keyed by the owning workspace_agent. The
-    // ack below still owns `text` — `send_stdin` borrows it.
-    state
-        .runtime
-        .send_stdin(&session.workspace_agent_id, &text)
-        .map_err(|e| match e {
-            // No live backend = the session simply isn't running yet.
-            StdinError::NotLive => AppError::NotFound(format!(
-                "session {session_id} is not running — spawn it first"
-            )),
-            // Registered-but-closed channel is a backend fault, not a bad request.
-            StdinError::Closed => {
-                AppError::Internal(format!("session {session_id} backend stdin channel closed"))
-            }
-        })?;
+    // ack below still owns `text` — the runtime borrows it.
+    let routed = if paste {
+        state
+            .runtime
+            .send_stdin_paste(&session.workspace_agent_id, &text)
+    } else {
+        state.runtime.send_stdin(&session.workspace_agent_id, &text)
+    };
+    routed.map_err(|e| match e {
+        // No live backend = the session simply isn't running yet.
+        StdinError::NotLive => AppError::NotFound(format!(
+            "session {session_id} is not running — spawn it first"
+        )),
+        // Registered-but-closed channel is a backend fault, not a bad request.
+        StdinError::Closed => {
+            AppError::Internal(format!("session {session_id} backend stdin channel closed"))
+        }
+    })?;
 
     // TODO(M3): persist to message table
     let ack = MessageAck {
@@ -87,9 +101,9 @@ struct InjectReq {
 ///
 /// This is the inter-agent messaging backbone (M3.1).
 ///
-/// **Auto-submit:** a trailing newline is appended to `text` before routing to
-/// stdin — this mirrors how the frontend StdinBar submits (the chat backend
-/// trims it, the CLI PTY submits on it).
+/// **Auto-submit:** the tagged body is written as one bracketed paste, then
+/// submitted with separate spaced `\r` keystrokes (see [`SUBMIT_CR_DELAYS_MS`]);
+/// a chat backend receives the body raw and needs no Enter.
 ///
 /// **Origin tag:** the origin is carried as `from_instance_id` on the persisted
 /// row AND on the `message:injected` event. We deliberately inject the RAW
@@ -137,11 +151,18 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
     // agent knows who it's from and can reply directly with `conclave tell <id>`
     // (no roster lookup needed). The persisted row + UI carry origin separately,
     // so `text` stays RAW for those — only the stdin line is tagged.
+    // The body goes out as ONE bracketed paste (PTY backends): a body longer
+    // than the kernel's PTY input queue (macOS: 1022 bytes) reaches the TUI as
+    // several reads, and Claude Code's un-bracketed burst handling keeps only
+    // the LAST read — the receiver then submits just the tail (a 1023-byte
+    // tell arrived as "."; docs/superpowers/plans/2026-09-04-inject-bracketed-paste.md).
+    // Inside the envelope the TUI reassembles the whole body regardless of
+    // read boundaries, exactly as it does for a human's terminal paste.
     let body = format!("[from {sender} · {from_instance_id}] {text}");
-    let status = match state.runtime.send_stdin(&to_instance_id, &body) {
+    let status = match state.runtime.send_stdin_paste(&to_instance_id, &body) {
         // Delivered to a live backend — now SUBMIT it. A TUI's Enter is CR (\r),
-        // not LF; and sending the CR in the SAME write as the text makes the
-        // receiver's paste-burst detection treat it as literal paste content
+        // not LF; and a CR inside the paste envelope (or, on a non-bracketed
+        // burst, in the SAME write as the text) is literal paste content
         // (cursor drops to a new line, nothing submits). Worse, a SINGLE spaced
         // CR still races the receiver's PTY drain: under load the 40ms beat
         // elapses before the text is read, the CR coalesces into the same read
@@ -727,7 +748,7 @@ mod tests {
             .expect("get_by_instance failed")
             .expect("session exists")
             .id;
-        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
         assert!(state.runtime.register(&to, handle).is_some());
 
         inject(
@@ -746,12 +767,88 @@ mod tests {
             1 + SUBMIT_CR_DELAYS_MS.len(),
             "expected tagged body + one CR per retry slot, got {writes:?}"
         );
+        // The body is ONE bracketed paste: the receiver accumulates it across
+        // PTY reads (macOS hands a TUI at most 1022 bytes per read) instead of
+        // keeping only the last burst chunk — the head-truncation bug of
+        // 2026-09-04 (docs/superpowers/plans/2026-09-04-inject-bracketed-paste.md).
         assert!(
-            writes[0].ends_with("] hi"),
-            "first write is the tagged body"
+            writes[0].starts_with("\x1b[200~[from ") && writes[0].ends_with("] hi\x1b[201~"),
+            "first write is the tagged body inside a bracketed-paste envelope, got {:?}",
+            writes[0]
         );
         for cr in &writes[1..] {
             assert_eq!(cr, "\r", "every follow-up write is a bare Enter");
         }
+    }
+
+    /// A chat backend has no terminal: the paste envelope is a PTY-only
+    /// concern, so a non-PTY handle must receive the tagged body raw.
+    #[tokio::test]
+    async fn inject_non_pty_target_gets_raw_body() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists")
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "hi" }),
+        )
+        .await
+        .expect("inject should deliver to a live target");
+
+        let first = rx.try_recv().expect("tagged body write");
+        assert!(
+            first.starts_with("[from ") && first.ends_with("] hi"),
+            "non-PTY body is raw (no ESC[200~ envelope), got {first:?}"
+        );
+    }
+
+    /// `message.send` is the raw keystroke path (Terminal pane, submit CR).
+    /// Only an explicit `paste: true` opts a text write into the envelope, and
+    /// only on a PTY handle.
+    #[tokio::test]
+    async fn send_paste_flag_wraps_text_on_pty_only() {
+        let state = AppState::for_tests().await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .expect("get_by_instance failed")
+            .expect("session exists")
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        send(&state, json!({ "sessionId": session_id, "text": "hello" }))
+            .await
+            .expect("raw send");
+        assert_eq!(rx.try_recv().expect("raw write"), "hello");
+
+        send(
+            &state,
+            json!({ "sessionId": session_id, "text": "hello", "paste": true }),
+        )
+        .await
+        .expect("paste send");
+        assert_eq!(
+            rx.try_recv().expect("paste write"),
+            "\x1b[200~hello\x1b[201~"
+        );
+
+        send(&state, json!({ "sessionId": session_id, "text": "\r" }))
+            .await
+            .expect("cr send");
+        assert_eq!(
+            rx.try_recv().expect("cr write"),
+            "\r",
+            "Enter stays a keystroke"
+        );
     }
 }

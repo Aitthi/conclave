@@ -181,7 +181,9 @@ export interface Commands {
     res: void;
   };
   "message.send": {
-    req: { sessionId: string; text: string };
+    /** `paste: true` = composed text delivered as ONE bracketed paste on a PTY
+     *  (survives the kernel's ~1 KB read chunking); omit for raw keystrokes. */
+    req: { sessionId: string; text: string; paste?: boolean };
     res: Message;
   };
   "message.inject": {
