@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Waypoints,
-  Terminal,
   Search,
   Folder,
   Plus,
@@ -25,6 +24,7 @@ import { computeSkillsStale } from "../lib/skills";
 import { type PositionPerson, PositionLine, ReportsTo } from "./Position";
 import { SupervisorPicker, type SupervisorCandidate } from "./SupervisorPicker";
 import { descendantsOf } from "../lib/positions";
+import { providerChip } from "../lib/providerLabel";
 
 // A live instance reads as "working" while its backend emitted output within
 // this window (R-act-1) — mirrors commands::instance::WORKING_WINDOW (Rust).
@@ -70,6 +70,12 @@ interface RosterEntry {
    *  to seed SupervisorPicker's `current` and to walk the chain client-side
    *  (descendantsOf) when the chip opens the edit-variant picker. */
   supervisorAgentId?: string;
+  /** Which provider/model the agent runs on — the name-line chip (human
+   *  request 2026-09-04). `cliKind`/`model` prefer the live instance's values
+   *  (`instance.list` annotates them) and fall back to the definition. */
+  cliKind?: string;
+  model?: string;
+  providerId?: string;
 }
 
 // Status dot colors — the theme's --color-status-* tokens (D6: design tokens
@@ -162,8 +168,10 @@ function AgentRow({
   removing,
   onEditSupervisor,
 }: AgentRowProps) {
-  const isCli = entry.type === "cli";
   const statusColor = STATUS_COLOR[entry.status];
+  // Name-line provider chip — replaces the generic `>_` icon, which said the
+  // same thing for every CLI agent (human request 2026-09-04).
+  const chip = providerChip(entry);
   // Two-step removal so a stray click can't delete an agent: the first click
   // arms the confirm, the second (red) click commits.
   const [confirming, setConfirming] = useState(false);
@@ -188,9 +196,16 @@ function AgentRow({
       <AgentAvatar entry={entry} />
 
       <div className="flex-1 text-left leading-tight min-w-0">
-        <div className="text-[12.5px] font-semibold flex items-center gap-1.5 truncate">
-          {entry.name}
-          {isCli && <Terminal className="w-3 h-3 text-text-muted shrink-0" />}
+        <div className="text-[12.5px] font-semibold flex items-center gap-1.5 min-w-0">
+          <span className="truncate">{entry.name}</span>
+          {chip && (
+            <span
+              className="text-[10px] text-text-tertiary font-medium tracking-tight shrink-0"
+              title={entry.model ?? undefined}
+            >
+              {chip}
+            </span>
+          )}
         </div>
         <div className="flex items-center min-w-0 mt-0.5">
           <PositionLine
@@ -435,6 +450,9 @@ export function Roster({
                   })
                 : null,
             supervisorAgentId: inst.supervisorAgentId,
+            cliKind: inst.cliKind ?? def.cliKind,
+            model: inst.model ?? def.model,
+            providerId: def.providerId,
           });
         }
         setEntries(rosterEntries);
@@ -802,6 +820,7 @@ export function Roster({
             color: e.color,
             level: e.level,
             roleName: e.roleName,
+            providerChip: providerChip(e) ?? undefined,
           }));
           const excludeIds = [
             editingSupervisorFor,
@@ -937,6 +956,9 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
     color: undefined,
     level: m.level,
     roleName: m.roleName,
+    // `instance.list` annotates `cliKind` only for CLI agents, so its presence
+    // IS the type here — a WorkspaceAgent carries no `type` column.
+    providerChip: providerChip({ type: m.cliKind ? "cli" : undefined, cliKind: m.cliKind, model: m.model }) ?? undefined,
   }));
 
   if (pendingDef) {
