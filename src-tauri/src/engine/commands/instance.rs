@@ -1837,7 +1837,10 @@ pub(crate) async fn run_respawn_resume(
 ) {
     use tauri::Manager;
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    run_respawn_resume_state(state, instance_id, kill_first).await;
+}
 
+async fn run_respawn_resume_state(state: Arc<AppState>, instance_id: String, kill_first: bool) {
     if kill_first {
         // Let the agent render its "saved" confirmation, then kill its process.
         tokio::time::sleep(std::time::Duration::from_millis(RESTART_SETTLE_MS)).await;
@@ -4312,6 +4315,80 @@ mod tests {
             resume(&state, json!({ "workspaceAgentId": id })).await,
             Err(AppError::Invalid(_))
         ));
+        assert!(!state.runtime.is_live(&id));
+    }
+
+    #[tokio::test]
+    async fn workspace_stop_serializes_spawn_and_resume() {
+        for resume_mode in [false, true] {
+            let state = Arc::new(AppState::for_tests().await);
+            let id = fixture_instance(&state).await;
+            let eligibility = workspace_agent::runtime_eligibility(&state.db, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            if resume_mode {
+                workspace_agent::set_availability(&state.db, &id, "stopped")
+                    .await
+                    .unwrap();
+            }
+
+            let lifecycle = async {
+                if resume_mode {
+                    resume(&state, json!({ "workspaceAgentId": id })).await
+                } else {
+                    spawn(&state, json!({ "workspaceAgentId": id })).await
+                }
+            };
+            let (operation, stopped) = tokio::join!(
+                lifecycle,
+                super::super::workspace::stop(
+                    &state,
+                    json!({ "workspaceId": eligibility.workspace_id }),
+                ),
+            );
+            stopped.unwrap();
+            assert!(
+                operation.is_ok() || matches!(operation, Err(AppError::Invalid(_))),
+                "operation either precedes Stop or observes stopped state: {operation:?}"
+            );
+            assert_eq!(
+                workspace::get(&state.db, &eligibility.workspace_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .run_state,
+                "stopped"
+            );
+            assert!(!state.runtime.is_live(&id));
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_stop_prevents_detached_restart_tail_from_reviving_runtime() {
+        let state = Arc::new(AppState::for_tests().await);
+        let id = fixture_instance(&state).await;
+        let eligibility = workspace_agent::runtime_eligibility(&state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (_, stopped) = tokio::join!(
+            run_respawn_resume_state(Arc::clone(&state), id.clone(), false),
+            super::super::workspace::stop(
+                &state,
+                json!({ "workspaceId": eligibility.workspace_id }),
+            ),
+        );
+        stopped.unwrap();
+        assert_eq!(
+            workspace::get(&state.db, &eligibility.workspace_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_state,
+            "stopped"
+        );
         assert!(!state.runtime.is_live(&id));
     }
 }

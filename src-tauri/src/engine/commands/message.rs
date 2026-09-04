@@ -1022,4 +1022,50 @@ mod tests {
             "stopped"
         );
     }
+
+    #[tokio::test]
+    async fn workspace_stop_race_either_commits_delivery_before_stop_or_rejects_without_row() {
+        let state = std::sync::Arc::new(AppState::for_tests().await);
+        let (workspace_id, from, to) = fixture_workspace_pair(&state).await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, _rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        let (delivery, stopped) = tokio::join!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "workspace-race" }),
+            ),
+            super::super::workspace::stop(&state, json!({ "workspaceId": workspace_id }),),
+        );
+        stopped.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message \
+             WHERE to_instance_id=? AND text='workspace-race'",
+        )
+        .bind(&to)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        match delivery {
+            Ok(_) => assert_eq!(count, 1, "delivery that won must be durable"),
+            Err(AppError::Invalid(_)) => {
+                assert_eq!(count, 0, "delivery that lost must not queue")
+            }
+            other => panic!("unexpected race outcome: {other:?}"),
+        }
+        assert_eq!(
+            workspace::get(&state.db, &workspace_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_state,
+            "stopped"
+        );
+        assert!(!state.runtime.is_live(&to));
+    }
 }
