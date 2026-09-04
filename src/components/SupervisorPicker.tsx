@@ -23,6 +23,10 @@ export interface SupervisorCandidate {
   color?: string;
   level?: string;
   roleName?: string;
+  /** "Claude · opus-5" — appended to the subtitle so the picker says which
+   *  provider a candidate runs on (human request 2026-09-04). Built by the
+   *  caller via `lib/providerLabel.providerChip`; absent when unknown. */
+  providerChip?: string;
 }
 
 export interface SupervisorPickerSubject {
@@ -151,6 +155,12 @@ function CandidateRow({
           <span className="truncate">
             {candidate.roleName ?? "Agent"} · {candidate.level ? levelOf(candidate.level).name : "Unranked"}
           </span>
+          {/* Own shrink-0 span, outside the truncate: the provider reads at the
+              same priority as it does on a roster row, so a long role name
+              clips instead of eating the chip. */}
+          {candidate.providerChip && (
+            <span className="shrink-0">· {candidate.providerChip}</span>
+          )}
         </span>
       </span>
       {disabled ? (

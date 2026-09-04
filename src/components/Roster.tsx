@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Waypoints,
-  Terminal,
   Search,
   Folder,
   Plus,
@@ -25,6 +24,7 @@ import { computeSkillsStale } from "../lib/skills";
 import { type PositionPerson, PositionLine, ReportsTo } from "./Position";
 import { SupervisorPicker, type SupervisorCandidate } from "./SupervisorPicker";
 import { descendantsOf } from "../lib/positions";
+import { providerChip } from "../lib/providerLabel";
 
 // A live instance reads as "working" while its backend emitted output within
 // this window (R-act-1) — mirrors commands::instance::WORKING_WINDOW (Rust).
@@ -70,6 +70,12 @@ interface RosterEntry {
    *  to seed SupervisorPicker's `current` and to walk the chain client-side
    *  (descendantsOf) when the chip opens the edit-variant picker. */
   supervisorAgentId?: string;
+  /** Which provider/model the agent runs on — the name-line chip (human
+   *  request 2026-09-04). `cliKind`/`model` prefer the live instance's values
+   *  (`instance.list` annotates them) and fall back to the definition. */
+  cliKind?: string;
+  model?: string;
+  providerId?: string;
 }
 
 // Status dot colors — the theme's --color-status-* tokens (D6: design tokens
@@ -162,8 +168,10 @@ function AgentRow({
   removing,
   onEditSupervisor,
 }: AgentRowProps) {
-  const isCli = entry.type === "cli";
   const statusColor = STATUS_COLOR[entry.status];
+  // Name-line provider chip — replaces the generic `>_` icon, which said the
+  // same thing for every CLI agent (human request 2026-09-04).
+  const chip = providerChip(entry);
   // Two-step removal so a stray click can't delete an agent: the first click
   // arms the confirm, the second (red) click commits.
   const [confirming, setConfirming] = useState(false);
@@ -188,9 +196,16 @@ function AgentRow({
       <AgentAvatar entry={entry} />
 
       <div className="flex-1 text-left leading-tight min-w-0">
-        <div className="text-[12.5px] font-semibold flex items-center gap-1.5 truncate">
-          {entry.name}
-          {isCli && <Terminal className="w-3 h-3 text-text-muted shrink-0" />}
+        <div className="text-[12.5px] font-semibold flex items-center gap-1.5 min-w-0">
+          <span className="truncate">{entry.name}</span>
+          {chip && (
+            <span
+              className="text-[10px] text-text-tertiary font-medium tracking-tight shrink-0"
+              title={entry.model ?? undefined}
+            >
+              {chip}
+            </span>
+          )}
         </div>
         <div className="flex items-center min-w-0 mt-0.5">
           <PositionLine
@@ -435,6 +450,9 @@ export function Roster({
                   })
                 : null,
             supervisorAgentId: inst.supervisorAgentId,
+            cliKind: inst.cliKind ?? def.cliKind,
+            model: inst.model ?? def.model,
+            providerId: def.providerId,
           });
         }
         setEntries(rosterEntries);
@@ -802,6 +820,7 @@ export function Roster({
             color: e.color,
             level: e.level,
             roleName: e.roleName,
+            providerChip: providerChip(e) ?? undefined,
           }));
           const excludeIds = [
             editingSupervisorFor,
@@ -852,6 +871,10 @@ interface AddAgentPickerProps {
 function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAgentPickerProps) {
   const [available, setAvailable] = useState<AgentDefinition[] | null>(null);
   const [members, setMembers] = useState<WorkspaceAgent[]>([]);
+  // The FULL def list, kept beside `available` (which is filtered to defs not
+  // yet in the workspace): step 2's candidate rows need each member's `type`
+  // and `providerId`, which a WorkspaceAgent does not carry.
+  const [defsById, setDefsById] = useState<Map<string, AgentDefinition>>(new Map());
   const [error, setError] = useState(false);
   // Step 2 (plan supervisor-picker-ui, Lane C step 4): picking an agent
   // doesn't call the API immediately — it swaps to the supervisor step in
@@ -874,6 +897,7 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
         if (!active) return;
         const present = new Set(instances.map((i) => i.agentDefId));
         setAvailable(defs.filter((d) => !present.has(d.id)));
+        setDefsById(new Map(defs.map((d) => [d.id, d])));
         setMembers(instances);
       })
       .catch(() => {
@@ -931,13 +955,26 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
     }
   }
 
-  const step2Members: SupervisorCandidate[] = members.map((m) => ({
-    id: m.id,
-    name: m.name,
-    color: undefined,
-    level: m.level,
-    roleName: m.roleName,
-  }));
+  const step2Members: SupervisorCandidate[] = members.map((m) => {
+    // Join the def in for `type`/`providerId` so a chat agent reads
+    // "Chat · Anthropic" here exactly as it does in the roster row — the two
+    // candidate builders must agree (Mellow M1).
+    const def = defsById.get(m.agentDefId);
+    return {
+      id: m.id,
+      name: m.name,
+      color: def?.color,
+      level: m.level,
+      roleName: m.roleName,
+      providerChip:
+        providerChip({
+          type: def?.type,
+          cliKind: m.cliKind ?? def?.cliKind,
+          providerId: def?.providerId,
+          model: m.model ?? def?.model,
+        }) ?? undefined,
+    };
+  });
 
   if (pendingDef) {
     if (partialFailure) {
