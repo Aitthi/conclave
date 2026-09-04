@@ -115,12 +115,12 @@ function AgentRow({
               Stopped
             </span>
           )}
-          {state !== "stopped" && availabilityLabel && (
-            <span className="truncate rounded-md bg-fill px-1.5 py-0.5 font-semibold text-text-secondary">
-              {availabilityLabel}
-            </span>
-          )}
         </div>
+        {state !== "stopped" && availabilityLabel && (
+          <div className="mt-0.5 inline-flex rounded-md bg-fill px-1.5 py-0.5 text-[9.5px] font-semibold text-text-secondary">
+            {availabilityLabel}
+          </div>
+        )}
         {working && (
           <div className="mt-0.5 flex items-center gap-1 text-[10px] font-semibold text-waiting">
             <LoaderCircle className="h-2.5 w-2.5 animate-spin motion-reduce:animate-none" />
@@ -155,9 +155,9 @@ function AgentRow({
   );
 }
 
-function ChatRail() {
+function ChatRail({ routeOpen, onToggleRoute }: { routeOpen: boolean; onToggleRoute: () => void }) {
   return (
-    <aside className="hidden w-[286px] shrink-0 border-l border-border bg-sidebar xl:flex xl:flex-col">
+    <aside className="flex w-[238px] shrink-0 flex-col border-l border-border bg-sidebar">
       <div className="flex h-12 items-center border-b border-border px-3 text-[13px] font-semibold">Chats</div>
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="rounded-full bg-accent/[0.14] px-2.5 py-1 text-[11.5px] font-semibold text-accent ring-1 ring-accent/30">
@@ -187,8 +187,21 @@ function ChatRail() {
           </p>
         </div>
       </div>
-      <div className="border-t border-border px-3 py-2.5 text-[10.5px] text-text-tertiary">
-        Read-only live view · stopped agents do not receive messages
+      <div className="relative border-t border-border p-2.5">
+        {routeOpen && <RoutingSpecimen />}
+        <button
+          type="button"
+          onClick={onToggleRoute}
+          aria-expanded={routeOpen}
+          className="flex h-8 w-full items-center gap-2 rounded-lg bg-fill px-2.5 text-left text-[11px] text-text-secondary ring-1 ring-border transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <MessageSquare className="h-3.5 w-3.5 text-accent" />
+          <span className="min-w-0 flex-1 truncate"><span className="font-semibold text-text-primary">Send to Aoki</span> · self</span>
+          <ChevronDown className={`h-3 w-3 transition-transform ${routeOpen ? "rotate-180" : ""}`} />
+        </button>
+        <p className="mt-1.5 px-1 text-[9.5px] leading-snug text-text-tertiary">
+          Stopped agents cannot receive new messages
+        </p>
       </div>
     </aside>
   );
@@ -320,7 +333,7 @@ function WorkspaceStatusPane({ state, setState }: { state: WorkspacePreview; set
   );
 }
 
-function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePreview, openStop, openRemove, openWorkspaceStop }: {
+function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePreview, openStop, openRemove, openWorkspaceStop, routeOpen, onToggleRoute }: {
   preview: PreviewState;
   setPreview: (state: PreviewState) => void;
   workspacePreview: WorkspacePreview;
@@ -328,12 +341,14 @@ function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePre
   openStop: () => void;
   openRemove: () => void;
   openWorkspaceStop: () => void;
+  routeOpen: boolean;
+  onToggleRoute: () => void;
 }) {
   const workspaceStarted = workspacePreview === "started";
   const workspaceRunning = workspacePreview === "started" || workspacePreview === "partial";
   const stopped = preview !== "active";
   return (
-    <div className="flex h-[650px] min-w-[1040px] overflow-hidden rounded-[14px] bg-surface ring-1 ring-border">
+    <div className="flex h-full min-h-0 w-full overflow-hidden rounded-[14px] bg-surface ring-1 ring-border">
       <nav className="flex w-[54px] shrink-0 flex-col items-center gap-2 border-r border-border bg-canvas px-1.5 py-3">
         <RailIcon label="Workspaces"><Waypoints className="h-4 w-4" /></RailIcon>
         <RailIcon active label="codeup workspace"><span className="text-[12px] font-bold">C</span></RailIcon>
@@ -343,7 +358,7 @@ function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePre
         <RailIcon label="Settings"><Settings2 className="h-4 w-4" /></RailIcon>
       </nav>
 
-      <aside className="flex w-[266px] shrink-0 flex-col border-r border-border bg-sidebar">
+      <aside className="flex w-[248px] shrink-0 flex-col border-r border-border bg-sidebar">
         <div className="flex h-12 items-center gap-2 border-b border-border px-3.5">
           <span className="grid h-6 w-6 place-items-center rounded-[7px] bg-accent text-[11px] font-bold text-white">C</span>
           <div className="min-w-0 flex-1 leading-tight">
@@ -461,8 +476,22 @@ function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePre
           </div>
         ) : (
           <div className="flex h-10 items-center gap-2 border-b border-border px-4 text-[11.5px] text-text-muted">
-            <CirclePause className="h-3.5 w-3.5" />
-            <span>Inspect only · retained workspace records are available</span>
+            {workspacePreview === "partial" ? (
+              <>
+                <AlertCircle className="h-3.5 w-3.5 text-waiting" />
+                <span>1 agent active · 1 failed · 1 individually stopped</span>
+              </>
+            ) : workspacePreview === "starting" ? (
+              <>
+                <LoaderCircle className="h-3.5 w-3.5 animate-spin text-accent motion-reduce:animate-none" />
+                <span>Starting individually active agents · stopped agents are skipped</span>
+              </>
+            ) : (
+              <>
+                <CirclePause className="h-3.5 w-3.5" />
+                <span>Inspect only · retained workspace records are available</span>
+              </>
+            )}
           </div>
         )}
         {workspaceStarted ? (
@@ -472,17 +501,16 @@ function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePre
         )}
       </main>
 
-      <ChatRail />
+      <ChatRail routeOpen={routeOpen} onToggleRoute={onToggleRoute} />
     </div>
   );
 }
 
 function RoutingSpecimen() {
   return (
-    <div className="relative min-h-64 bg-surface px-5 py-4">
-      <div className="text-[12px] font-semibold text-text-primary">Send to</div>
-      <p className="mt-1 text-[11.5px] leading-relaxed text-text-secondary">Stopped agents remain visible for context but cannot be selected.</p>
-      <div className="mt-3 w-full max-w-[300px] rounded-[12px] bg-surface-raised p-1 ring-1 ring-border">
+    <div className="absolute bottom-[62px] left-2.5 right-2.5 z-20 rounded-[12px] bg-surface-raised p-1.5 shadow-xl">
+      <div className="px-2 pb-1.5 pt-1 text-[10px] font-semibold text-text-tertiary">Send to</div>
+      <div className="w-full">
         <button type="button" className="flex w-full items-center gap-2 rounded-lg bg-accent/[0.10] px-2 py-2 text-left text-[12px]">
           <Avatar name="Aoki" color={identity.aoki} />
           <span className="min-w-0 flex-1 font-medium">Aoki <span className="font-normal text-text-tertiary">· self</span></span>
@@ -505,42 +533,6 @@ function RoutingSpecimen() {
           <span className="text-[10.5px] text-text-tertiary">stdin</span>
         </button>
       </div>
-    </div>
-  );
-}
-
-function StateSpecimen({
-  title,
-  body,
-  state,
-  action,
-  busy,
-  danger,
-}: {
-  title: string;
-  body: string;
-  state: "running" | "stopped";
-  action: string;
-  busy?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <div className="min-w-[220px] flex-1 px-4 py-4">
-      <div className="flex items-center gap-2">
-        <StatusDot state={state} />
-        <h3 className="text-[12.5px] font-semibold text-text-primary">{title}</h3>
-      </div>
-      <p className="mt-2 min-h-12 text-[11.5px] leading-relaxed text-text-secondary">{body}</p>
-      <button
-        type="button"
-        disabled={busy}
-        className={`mt-3 inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11.5px] font-semibold ${
-          danger ? "bg-danger text-white" : state === "stopped" ? "bg-accent text-white" : "bg-overlay/[0.06] text-text-secondary"
-        } disabled:opacity-60`}
-      >
-        {busy ? <LoaderCircle className="h-3 w-3 animate-spin motion-reduce:animate-none" /> : state === "stopped" ? <Play className="h-3 w-3" /> : <Square className="h-2.5 w-2.5" />}
-        {action}
-      </button>
     </div>
   );
 }
@@ -583,25 +575,30 @@ export default function AgentStopResume() {
   const [preview, setPreview] = useState<PreviewState>("stopped");
   const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreview>("started");
   const [dialog, setDialog] = useState<"stop" | "remove" | "workspace-stop" | null>(null);
+  const [routeOpen, setRouteOpen] = useState(false);
   const workspaceStarted = workspacePreview === "started";
 
   return (
-    <div className="h-screen overflow-y-auto bg-canvas font-sans text-text-primary antialiased">
-      <div className="mx-auto min-w-[1080px] max-w-[1540px] px-8 py-7">
-        <header className="flex items-end justify-between gap-6 pb-5">
-          <div>
-            <div className="flex items-center gap-2 text-[11px] font-semibold text-text-muted">
-              <span>Home</span><span>·</span><span>Lifecycle canon</span>
+    <div className="dark h-screen overflow-hidden bg-canvas font-sans text-text-primary antialiased">
+      <div className="flex h-full min-h-0 flex-col gap-3 p-3">
+        <header className="flex min-h-[64px] shrink-0 items-center gap-5 rounded-[12px] bg-sidebar px-4 ring-1 ring-border">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-accent/[0.14] text-accent ring-1 ring-accent/25">
+              <Waypoints className="h-[18px] w-[18px]" />
             </div>
-            <h1 className="mt-1 text-[24px] font-semibold tracking-[-0.025em] text-text-primary">Stop workspaces and agents without removing them</h1>
-            <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-text-secondary">
-              A focused engineering lead pauses every runtime or one agent during an active work session. Identity and records stay visible; routing and runtime state remain unambiguous.
-            </p>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="truncate text-[15px] font-semibold tracking-[-0.015em]">Lifecycle controls</h1>
+                <span className="rounded-full bg-fill px-2 py-0.5 text-[9.5px] font-semibold text-text-muted">Home canon</span>
+              </div>
+              <p className="mt-0.5 truncate text-[10.5px] text-text-muted">Stop runtimes, keep identity and records</p>
+            </div>
           </div>
-          <div className="shrink-0 space-y-1.5 text-right">
-            <div className="flex items-center justify-end gap-1" aria-label="Workspace preview state">
-              <span className="mr-1 text-[10.5px] font-semibold text-text-tertiary">Workspace</span>
-              <div className="flex items-center gap-1 rounded-lg bg-fill p-1">
+
+          <div className="ml-auto flex min-w-0 items-center gap-3 overflow-x-auto" aria-label="Canon state controls">
+            <div className="flex shrink-0 items-center gap-1.5" aria-label="Workspace preview state">
+              <span className="text-[9.5px] font-semibold text-text-tertiary">Workspace</span>
+              <div className="flex items-center rounded-lg bg-canvas p-1">
                 {([
                   ["started", "Started"],
                   ["stopped", "Stopped"],
@@ -613,8 +610,8 @@ export default function AgentStopResume() {
                     type="button"
                     onClick={() => setWorkspacePreview(value)}
                     aria-pressed={workspacePreview === value}
-                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-colors ${
-                      workspacePreview === value ? "bg-surface-raised text-text-primary ring-1 ring-border" : "text-text-muted hover:text-text-primary"
+                    className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                      workspacePreview === value ? "bg-surface-raised text-text-primary" : "text-text-muted hover:text-text-primary"
                     }`}
                   >
                     {label}
@@ -622,9 +619,12 @@ export default function AgentStopResume() {
                 ))}
               </div>
             </div>
-            <div className="flex items-center justify-end gap-1" aria-label="Agent preview state">
-              <span className="mr-1 text-[10.5px] font-semibold text-text-tertiary">Agent</span>
-              <div className="flex items-center gap-1 rounded-lg bg-fill p-1">
+
+            <span className="h-6 w-px shrink-0 bg-border" />
+
+            <div className="flex shrink-0 items-center gap-1.5" aria-label="Agent preview state">
+              <span className="text-[9.5px] font-semibold text-text-tertiary">Agent</span>
+              <div className="flex items-center rounded-lg bg-canvas p-1">
                 {([
                   ["stopped", "Stopped"],
                   ["resuming", "Resuming"],
@@ -637,8 +637,8 @@ export default function AgentStopResume() {
                     disabled={!workspaceStarted}
                     onClick={() => setPreview(value)}
                     aria-pressed={preview === value}
-                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-                      preview === value ? "bg-surface-raised text-text-primary ring-1 ring-border" : "text-text-muted hover:text-text-primary"
+                    className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                      preview === value ? "bg-surface-raised text-text-primary" : "text-text-muted hover:text-text-primary"
                     }`}
                   >
                     {label}
@@ -649,63 +649,24 @@ export default function AgentStopResume() {
           </div>
         </header>
 
-        <WorkspaceFrame
-          preview={preview}
-          setPreview={setPreview}
-          workspacePreview={workspacePreview}
-          setWorkspacePreview={setWorkspacePreview}
-          openStop={() => setDialog("stop")}
-          openRemove={() => setDialog("remove")}
-          openWorkspaceStop={() => setDialog("workspace-stop")}
-        />
+        <div className="min-h-0 flex-1">
+          <WorkspaceFrame
+            preview={preview}
+            setPreview={setPreview}
+            workspacePreview={workspacePreview}
+            setWorkspacePreview={setWorkspacePreview}
+            openStop={() => setDialog("stop")}
+            openRemove={() => setDialog("remove")}
+            openWorkspaceStop={() => setDialog("workspace-stop")}
+            routeOpen={routeOpen}
+            onToggleRoute={() => setRouteOpen((open) => !open)}
+          />
+        </div>
 
-        <section className="mt-6 overflow-hidden rounded-[12px] bg-surface ring-1 ring-border">
-          <div className="border-b border-border px-5 py-3">
-            <h2 className="text-[14px] font-semibold text-text-primary">Workspace lifecycle states</h2>
-            <p className="mt-0.5 text-[11.5px] text-text-secondary">Workspace availability controls every runtime without changing individual agent availability.</p>
-          </div>
-          <div className="flex divide-x divide-border">
-            <StateSpecimen title="Stopped workspace" body="Retained content stays inspectable; no runtime starts on entry." state="stopped" action="Start workspace" />
-            <StateSpecimen title="Starting" body="Launch only individually active agents and keep stopped agents stopped." state="stopped" action="Starting workspace…" busy />
-            <StateSpecimen title="Partial launch" body="Keep successful agents active; name each failure and offer a scoped retry." state="running" action="Retry 1 agent" />
-            <StateSpecimen title="Started workspace" body="Stop workspace is neutral lifecycle control, never a destructive Remove." state="running" action="Stop workspace" />
-          </div>
-        </section>
-
-        <section className="mt-6 overflow-hidden rounded-[12px] bg-surface ring-1 ring-border">
-          <div className="border-b border-border px-5 py-3">
-            <h2 className="text-[14px] font-semibold text-text-primary">Lifecycle action states</h2>
-            <p className="mt-0.5 text-[11.5px] text-text-secondary">Same compact component vocabulary; labels carry meaning without relying on colour.</p>
-          </div>
-          <div className="flex divide-x divide-border">
-            <StateSpecimen title="Active · idle" body="Stop is neutral and distinct from Remove in More actions." state="running" action="Stop" />
-            <StateSpecimen title="Active · working" body="Confirm before terminating current runtime and work; the confirm action becomes Stopping agent… while in flight." state="running" action="Stop agent" />
-            <StateSpecimen title="Stopped" body="Stopped is persistent. Resume agent is the primary lifecycle action." state="stopped" action="Resume agent" />
-            <StateSpecimen title="In flight" body="Keep Stopped visible until resume succeeds; disable duplicate actions." state="stopped" action="Resuming agent…" busy />
-          </div>
-        </section>
-
-        <section className="mt-6 grid grid-cols-[360px_1fr] overflow-hidden rounded-[12px] bg-surface ring-1 ring-border">
-          <RoutingSpecimen />
-          <div className="border-l border-border px-6 py-4">
-            <h2 className="text-[14px] font-semibold text-text-primary">Interaction contract</h2>
-            <div className="mt-3 grid grid-cols-2 gap-x-8 gap-y-4 text-[11.5px] leading-relaxed">
-              <div><strong className="block text-text-primary">Stop</strong><span className="text-text-secondary">Confirm every live runtime. The confirm action becomes “Stopping agent…” and disables duplicate input. On success, preserve selection and focus Resume agent. On failure, keep the runtime active, keep the dialog open, and show an inline alert.</span></div>
-              <div><strong className="block text-text-primary">Resume</strong><span className="text-text-secondary">Use “Resume agent” for lifecycle copy. “Restore snapshot” names context recovery. While loading, keep the agent stopped and disable retries.</span></div>
-              <div><strong className="block text-text-primary">Errors and announcements</strong><span className="text-text-secondary">Inline role=alert; no toast-only failures. Stop failure leaves the runtime active. Resume failure leaves it stopped. Success uses a polite aria-live announcement.</span></div>
-              <div><strong className="block text-text-primary">Keyboard and focus</strong><span className="text-text-secondary">Row, Stop, Resume, and More actions are independently reachable. Escape returns to the trigger. Disabled routing options are skipped by selection and identify “Stopped” in their accessible name.</span></div>
-              <div><strong className="block text-text-primary">Concurrent routing</strong><span className="text-text-secondary">If the selected recipient stops, reset Send to self (or the first active target) before the next send and announce the change. Never queue work to a stopped target.</span></div>
-              <div><strong className="block text-text-primary">Removal</strong><span className="text-text-secondary">Remove remains under More actions, uses red destructive styling, and confirms separately. Never relabel Remove as Stop or place it in the blue primary action slot.</span></div>
-              <div><strong className="block text-text-primary">Stopped workspace entry</strong><span className="text-text-secondary">Load retained navigation, roster, task, message, and history surfaces without auto-launch. Center the explicit Start workspace action; keep agent lifecycle actions unavailable until started.</span></div>
-              <div><strong className="block text-text-primary">Workspace start</strong><span className="text-text-secondary">Start only individually active agents. Keep per-agent progress visible. Partial success keeps successful runtimes active, names failures inline, and offers Retry failed agents.</span></div>
-              <div><strong className="block text-text-primary">Workspace stop</strong><span className="text-text-secondary">If any agent is working, confirm that all live runtimes and current work terminate immediately. “Stopping workspace…” disables duplicate input. Success preserves every record; failure names agents still running.</span></div>
-            </div>
-          </div>
-        </section>
-
-        <footer className="flex items-center justify-between py-5 text-[10.5px] text-text-tertiary">
-          <span>Affected real-app view: home</span>
-          <span>Implementation pixel gate: home/default and home/empty · open and inspect both PNGs</span>
+        <footer className="flex h-8 shrink-0 items-center gap-4 px-1 text-[9.5px] text-text-tertiary">
+          <span className="inline-flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-live" /> Workspace: {workspacePreview}</span>
+          <span className="inline-flex items-center gap-1.5"><CirclePause className="h-3 w-3" /> Agent: {preview === "resume-error" ? "resume error" : preview}</span>
+          <span className="ml-auto">Implementation checks: home/default · home/empty</span>
         </footer>
       </div>
 
