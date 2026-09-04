@@ -18,6 +18,7 @@ import type { AgentDefinition, Skill, Role, WorkspaceAgent } from "../ipc";
 import { EVENT_NAMES, useEvent } from "../ipc";
 import type { RosterChangedEvent } from "../ipc/events";
 import { LEVELS, chainUp, levelOf, wouldCycle } from "../lib/positions";
+import { CLAUDE_MODELS, CODEX_MODELS, COLOR_SWATCHES } from "../lib/modelCatalogue";
 import { HumanChip, PositionLine } from "./Position";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -25,28 +26,22 @@ import { HumanChip, PositionLine } from "./Position";
 export interface BuilderProps {
   onClose: () => void;
   onSaved?: (def: AgentDefinition) => void;
-  /** Pre-fill the form for editing an existing definition. */
+  /**
+   * Pre-fill the form. A definition WITH an id is an edit; an id-less one is an
+   * AI draft (spec R6) — the form reads "New agent" and saves as a creation.
+   */
   initialDef?: AgentDefinition;
   workspaceId?: string;
   workspaceAgentId?: string;
+  /** Name of the drafter that produced an id-less `initialDef`; shows a chip
+   *  under Identity until the user touches the form. */
+  draftedBy?: string;
 }
 
 type AgentType = "cli" | "chat" | "orchestrator";
 type CliKind = "claude-code" | "codex" | "custom";
 type PermissionMode = "auto" | "bypassPermissions";
 type ClaudeContextWindow = "1m" | "200k";
-
-// ── Preset color swatches ────────────────────────────────────────────────────
-
-const COLOR_SWATCHES = [
-  "#5e5ce6",
-  "#0a84ff",
-  "#d6409f",
-  "#30d158",
-  "#ff9f0a",
-  "#0fa3a3",
-  "#ff3b30",
-];
 
 // ── Builtin role card looks (ADR 0005) ───────────────────────────────────────
 
@@ -70,26 +65,6 @@ function roleLook(role: Role): { Icon: typeof Compass; tagline: string } {
 }
 
 // ── Claude Code config presets ───────────────────────────────────────────────
-
-/** Quick-fill model presets (the user can still type any value). */
-const CLAUDE_MODELS = [
-  "claude-opus-4-8",
-  "claude-sonnet-5",
-  "claude-haiku-4-5",
-];
-
-/** Quick-fill Codex model presets. Context window is no longer configured
- *  here — the backend derives it per model (R2/R6, `codex_model_context_window`
- *  in `src-tauri/src/engine/codex_models.rs`) and the Builder shows "Auto". */
-const CODEX_MODELS = [
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex-spark",
-];
 
 function initialContextWindow(def?: AgentDefinition): string {
   return def?.contextWindow === "1m" ? "1m" : "200k";
@@ -180,8 +155,14 @@ export function Builder({
   initialDef,
   workspaceId,
   workspaceAgentId,
+  draftedBy,
 }: BuilderProps) {
-  const isEditing = Boolean(initialDef);
+  // An id-less `initialDef` is a DRAFT, not an edit (spec R6): the save path
+  // already posts `id: undefined`, so only the copy must follow.
+  const isEditing = Boolean(initialDef?.id);
+  // Cleared once the user edits anything — the "Drafted by" chip stops
+  // claiming authorship the moment the draft becomes their own.
+  const [touched, setTouched] = useState(false);
 
   // ── Form state (lazy-initialised from initialDef when editing) ─────────────
   const [name, setName] = useState(initialDef?.name ?? "");
@@ -326,6 +307,7 @@ export function Builder({
     applyRoleTransition(roleId, id);
     setRoleId(id);
     setCustomRoleOpen(false);
+    setTouched(true);
   }
 
   async function handleCreateCustomRole() {
@@ -536,8 +518,16 @@ export function Builder({
 
           {/* Identity */}
           <section>
-            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
-              Identity
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+                Identity
+              </div>
+              {draftedBy && !touched && (
+                <span className="text-[11px] text-text-tertiary inline-flex items-center gap-1">
+                  <Sparkles className="w-3 h-3" />
+                  Drafted by {draftedBy}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2.5">
               {/* Avatar doubles as the color picker — click to choose. */}
@@ -601,7 +591,10 @@ export function Builder({
               <div className="flex-1 space-y-1">
                 <input
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    setTouched(true);
+                  }}
                   placeholder="Agent name"
                   className="w-full text-[14px] font-semibold tracking-tight bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
                 />

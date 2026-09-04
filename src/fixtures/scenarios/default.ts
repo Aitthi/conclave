@@ -13,6 +13,7 @@ import {
   roles,
   skills,
   providers,
+  draftTeam,
 } from "./data";
 
 // One human tab (active) + two agent tabs, one `ended` — exercises every
@@ -122,6 +123,12 @@ export const handlers: FixtureHandlers = {
     },
   ],
   "role.list": () => roles,
+  // AI drafter: agent mode returns the single new-role agent (no positions),
+  // team mode the whole fixed team. Same literal either way — no Date.now().
+  "draft.agents": ({ mode }) =>
+    mode === "agent"
+      ? { ...draftTeam, agents: [draftTeam.agents[1]], positions: [] }
+      : draftTeam,
   "skill.list": () => skills,
   "provider.list": () => providers,
   "session.resize": () => undefined,

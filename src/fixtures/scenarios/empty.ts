@@ -41,6 +41,13 @@ export const handlers: FixtureHandlers = {
   "message.listForWorkspace": () => [],
   "snapshot.list": () => [],
   "role.list": () => [],
+  // Fresh install: nothing to draft with — the drafter renders its empty state.
+  "draft.agents": () => ({
+    agents: [],
+    positions: [],
+    notes: "",
+    drafter: { defId: "", cliKind: "", model: "" },
+  }),
   "skill.list": () => [],
   "provider.list": () => [],
   "session.resize": () => undefined,
