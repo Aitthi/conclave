@@ -27,6 +27,8 @@ export interface SupervisorCandidate {
    *  provider a candidate runs on (human request 2026-09-04). Built by the
    *  caller via `lib/providerLabel.providerChip`; absent when unknown. */
   providerChip?: string;
+  /** Full unshortened model text for the chip tooltip. */
+  providerTitle?: string;
 }
 
 export interface SupervisorPickerSubject {
@@ -150,16 +152,25 @@ function CandidateRow({
       <Avatar name={name} color={candidate.color} />
       <span className="min-w-0 flex-1">
         <span className="block text-[12.5px] font-semibold leading-tight truncate">{name}</span>
-        <span className="flex items-center gap-1 text-[10.5px] text-text-tertiary leading-tight">
+        <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-text-tertiary leading-tight">
           <TrackIcon track={candidate.roleName} size={9} className="shrink-0" />
-          <span className="truncate">
+          <span className="min-w-0 flex-1 truncate">
             {candidate.roleName ?? "Agent"} · {candidate.level ? levelOf(candidate.level).name : "Unranked"}
           </span>
           {/* Own shrink-0 span, outside the truncate: the provider reads at the
               same priority as it does on a roster row, so a long role name
               clips instead of eating the chip. */}
           {candidate.providerChip && (
-            <span className="shrink-0">· {candidate.providerChip}</span>
+            <>
+              <span aria-hidden="true">·</span>
+              <span
+                className="max-w-[145px] min-w-0 shrink-0 truncate"
+                title={candidate.providerTitle ?? candidate.providerChip}
+                aria-label={candidate.providerChip}
+              >
+                {candidate.providerChip}
+              </span>
+            </>
           )}
         </span>
       </span>

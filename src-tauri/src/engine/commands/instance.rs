@@ -49,6 +49,8 @@ const RESTART_SETTLE_MS: u64 = 2_000;
 /// on purpose; a restart is a rare, human-triggered operation.
 const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
 
+const ANTIGRAVITY_INSTALL_URL: &str = "https://antigravity.google/docs/cli/install/";
+
 /// Emit codex's numeric context-window `-c` overrides for `model`, resolved
 /// through [`crate::engine::codex_models::codex_model_context_window`] (plan
 /// ruling R2 — "Auto" derives the value from the model, the Builder no
@@ -96,6 +98,14 @@ fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Op
 #[serde(rename_all = "camelCase")]
 struct ListInstancesReq {
     workspace_id: String,
+}
+
+/// Payload for the read-only CLI availability probe. The allowlist is mapped
+/// server-side so the renderer can never supply an executable name or path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CliStatusReq {
+    cli_kind: String,
 }
 
 /// Payload for `instance.spawn` / `instance.stop` / `instance.restart` —
@@ -175,7 +185,7 @@ fn launch_shell() -> String {
 /// the real PTY launch. Finder-launched apps do not inherit the user's terminal
 /// PATH, so checking Conclave's own process environment would reject valid
 /// installs and still miss shell-profile problems.
-async fn require_login_shell_binary(shell: &str, binary: &str) -> Result<(), AppError> {
+async fn login_shell_binary_available(shell: &str, binary: &str) -> Result<bool, AppError> {
     let command = format!("command -v {} >/dev/null 2>&1", shell_quote(binary));
     let status = tokio::process::Command::new(shell)
         .args(["-l", "-i", "-c", &command])
@@ -184,14 +194,42 @@ async fn require_login_shell_binary(shell: &str, binary: &str) -> Result<(), App
         .map_err(|error| {
             AppError::Internal(format!("check {binary} in login shell {shell}: {error}"))
         })?;
-    if status.success() {
-        return Ok(());
+    Ok(status.success())
+}
+
+async fn require_login_shell_binary(shell: &str, binary: &str) -> Result<(), AppError> {
+    if login_shell_binary_available(shell, binary).await? {
+        Ok(())
+    } else {
+        Err(AppError::Invalid(format!(
+            "Antigravity CLI executable 'agy' was not found in your login-shell PATH. \
+             Install it from {ANTIGRAVITY_INSTALL_URL} and restart Conclave."
+        )))
     }
-    Err(AppError::Invalid(
-        "Antigravity CLI executable 'agy' was not found in your login-shell PATH. \
-         Install it from https://antigravity.google/docs/cli/install/ and restart Conclave."
-            .to_string(),
-    ))
+}
+
+async fn cli_status_for_shell(shell: &str, cli_kind: &str) -> Result<Value, AppError> {
+    let binary = match cli_kind {
+        "antigravity" => "agy",
+        other => {
+            return Err(AppError::Invalid(format!(
+                "CLI availability is not supported for cliKind={other}"
+            )))
+        }
+    };
+    let available = login_shell_binary_available(shell, binary).await?;
+    Ok(serde_json::json!({
+        "available": available,
+        "installUrl": ANTIGRAVITY_INSTALL_URL,
+    }))
+}
+
+/// Report whether a supported CLI is visible through the same login shell
+/// lookup used immediately before spawn. Maps to `instance.cliStatus`.
+pub async fn cli_status(_state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: CliStatusReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    cli_status_for_shell(&launch_shell(), &req.cli_kind).await
 }
 
 #[derive(Debug)]
@@ -2175,6 +2213,65 @@ mod tests {
             vec!["-l", "-i", "-c", "command -v 'agy' >/dev/null 2>&1"]
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_status_reports_available() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("agy-status-available");
+        let shell = root.join("login-shell");
+        std::fs::write(&shell, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let status = cli_status_for_shell(&shell.to_string_lossy(), "antigravity")
+            .await
+            .expect("available agy status");
+        assert_eq!(status.get("available").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            status.get("installUrl").and_then(Value::as_str),
+            Some(ANTIGRAVITY_INSTALL_URL)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_status_reports_missing_without_transport_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("agy-status-missing");
+        let shell = root.join("login-shell");
+        std::fs::write(&shell, "#!/bin/sh\nexit 127\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let status = cli_status_for_shell(&shell.to_string_lossy(), "antigravity")
+            .await
+            .expect("missing agy is a normal status");
+        assert_eq!(
+            status.get("available").and_then(Value::as_bool),
+            Some(false)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_status_keeps_shell_failures_as_errors() {
+        let root = temp_root("agy-status-shell-error");
+        let missing_shell = root.join("missing-login-shell");
+
+        let error = cli_status_for_shell(&missing_shell.to_string_lossy(), "antigravity")
+            .await
+            .expect_err("shell launch failure must not look like a missing CLI");
+        assert!(matches!(error, AppError::Internal(_)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cli_status_rejects_unsupported_cli_kind() {
+        let error = cli_status_for_shell("/bin/sh", "custom")
+            .await
+            .expect_err("renderer must not choose an arbitrary CLI executable");
+        assert!(matches!(error, AppError::Invalid(_)));
     }
 
     #[tokio::test]

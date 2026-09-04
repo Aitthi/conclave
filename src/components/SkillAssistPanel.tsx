@@ -69,7 +69,11 @@ export function SkillAssistPanel({
       .list()
       .then((defs) => {
         const cliDefs = defs.filter(
-          (d) => d.type === "cli" && (d.cliKind === "claude-code" || d.cliKind === "codex"),
+          (d) =>
+            d.type === "cli" &&
+            (d.cliKind === "claude-code" ||
+              d.cliKind === "codex" ||
+              d.cliKind === "antigravity"),
         );
         setAgents(cliDefs);
         setAgentDefId((prev) => prev || (cliDefs[0]?.id ?? ""));
@@ -173,7 +177,7 @@ export function SkillAssistPanel({
     try {
       // `paste: true`: a draft longer than the PTY's ~1 KB read chunk must
       // travel as ONE bracketed paste (see StdinBar) — this session is always
-      // a PTY CLI (skill_draft.rs accepts only claude-code/codex).
+      // a PTY CLI (skill_draft.rs accepts Claude Code, Codex, and Antigravity).
       await ipc.message.send({
         sessionId: draft.sessionId,
         text: draftText,

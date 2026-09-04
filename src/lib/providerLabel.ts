@@ -23,6 +23,8 @@ export function providerLabel(a: ProviderSource): string | null {
         return "Claude";
       case "codex":
         return "Codex";
+      case "antigravity":
+        return "Antigravity";
       case "custom":
         return "CLI";
       default:

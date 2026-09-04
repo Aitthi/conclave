@@ -52,6 +52,10 @@ export const handlers: FixtureHandlers = {
     return { workspace, stoppedRuntimeIds: [] };
   },
   "instance.list": () => [],
+  "instance.cliStatus": () => ({
+    available: false,
+    installUrl: "https://antigravity.google/docs/cli/install/",
+  }),
   "agentDef.list": () => [],
   "task.list": () => [],
   "memory.graph": () => ({ nodes: [], edges: [] }),
