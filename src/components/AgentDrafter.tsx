@@ -35,7 +35,7 @@ import type {
   Role,
 } from "../ipc";
 import { CLAUDE_MODELS, CODEX_MODELS } from "../lib/modelCatalogue";
-import { LEVELS } from "../lib/positions";
+import { LEVELS, descendantsOf } from "../lib/positions";
 import { applyTeamDraft, type ApplyStatus } from "../lib/applyTeamDraft";
 import { fixtureScenario } from "../fixtures/mode";
 
@@ -48,8 +48,12 @@ export interface AgentDrafterProps {
   onClose: () => void;
   /** Agent mode: hand the drafted, id-less definition to the Builder. */
   onDraftAgent: (def: AgentDefinition, draftedBy: string) => void;
-  /** Team mode: the apply run finished and the roster/Library must re-fetch. */
-  onTeamApplied: () => void;
+  /** Team mode: an apply run finished. Called on the way out whether it fully
+   *  succeeded or failed part-way — a partial apply is exactly the case where
+   *  definitions WERE created, so the parent must still close the overlay and
+   *  refresh the Library/roster (Mellow M1). `created` is how many definitions
+   *  the run made. */
+  onApplyFinished: (created: number) => void;
   /** No CLI definition exists yet — send the user to the Builder to make one. */
   onOpenBuilder: () => void;
 }
@@ -277,14 +281,20 @@ export function draftToInitialDef(a: DraftAgent, roleSkillIds: string[]): AgentD
 // ── Component ────────────────────────────────────────────────────────────────
 
 export function AgentDrafter({
-  mode,
+  mode: requestedMode,
   workspaceId,
   workspaceName,
   onClose,
   onDraftAgent,
-  onTeamApplied,
+  onApplyFinished,
   onOpenBuilder,
 }: AgentDrafterProps) {
+  // A team is applied to a specific roster (spec D2), so without a workspace
+  // the panel can only draft a single agent — whatever mode the caller asked
+  // for. Enforced here rather than at each entry point so it holds however the
+  // overlay was opened, including the `#view=drafter` fixture route that runs
+  // before the workspace has loaded (Mellow M2).
+  const mode: DraftMode = workspaceId ? requestedMode : "agent";
   const [phase, setPhase] = useState<Phase>("idle");
   const [brief, setBrief] = useState("");
   const [drafters, setDrafters] = useState<AgentDefinition[]>([]);
@@ -298,7 +308,14 @@ export function AgentDrafter({
   const [error, setError] = useState<{ message: string; detail?: string } | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [progress, setProgress] = useState<Record<string, { status: ApplyStatus; message?: string }>>({});
-  const [applyError, setApplyError] = useState<{ name: string; created: number } | null>(null);
+  /** Set whenever an apply run did NOT complete. `name` is the row that failed;
+   *  a prologue failure (cycle, or a list call that threw) has no row, so only
+   *  `message` is set. */
+  const [applyError, setApplyError] = useState<{
+    name?: string;
+    message?: string;
+    created: number;
+  } | null>(null);
   /** The role each key was DRAFTED with, kept so switching a row to a
    *  catalogue role and back restores the proposed custom role instead of
    *  losing it (ruling 4af30f4a, Arta). Keyed by draft key, set when the
@@ -386,10 +403,18 @@ export function AgentDrafter({
           if (a.existingAgentDefId) {
             const defs = await ipc.agentDef.list();
             const existing = defs.find((d) => d.id === a.existingAgentDefId);
-            if (existing) {
-              onDraftAgent(existing, res.drafter.defId === defId ? drafterName : drafterName);
+            if (!existing) {
+              // A reuse agent carries nothing but key and rationale, so falling
+              // through would open the Builder blank with no explanation.
+              setError({
+                message: "The definition the drafter reused no longer exists",
+                detail: `existingAgentDefId: ${a.existingAgentDefId}`,
+              });
+              setPhase("error");
               return;
             }
+            onDraftAgent(existing, drafterName);
+            return;
           }
           onDraftAgent(draftToInitialDef({ ...a, roleId }, bundle), drafterName);
           return;
@@ -444,15 +469,30 @@ export function AgentDrafter({
       setProgress((prev) => ({ ...prev, [p.key]: { status: p.status, message: p.message } })),
     );
     setCreatedCount(result.created);
-    if (result.failedKey) {
-      const failed = draft.agents.find((a) => a.key === result.failedKey);
+    // `error` WITHOUT `failedKey` is a prologue failure (applyTeamDraft.ts
+    // catches topoOrder/instance.list/role.list there and returns
+    // { created: 0, error }). Gating on failedKey alone showed a "Done" screen
+    // for a team that was never applied (Mellow H1).
+    if (result.failedKey || result.error) {
+      const failed = result.failedKey
+        ? draft.agents.find((a) => a.key === result.failedKey)
+        : undefined;
       setApplyError({
         name: failed ? displayName(failed) : result.failedKey,
+        message: result.error,
         created: result.created,
       });
     }
     setPhase("done");
   }
+
+  /** Draft keys reporting (directly or transitively) to `key` — the options a
+   *  row must not be able to choose as its own supervisor. */
+  const reportsTo = (key: string) =>
+    descendantsOf(
+      key,
+      (draft?.positions ?? []).map((p) => ({ id: p.key, supervisorAgentId: p.supervisorKey })),
+    );
 
   const levelName = (id: string) => LEVELS.find((l) => l.id === id)?.name ?? id;
   /** A reuse row carries only `existingAgentDefId`, so its display identity
@@ -524,6 +564,9 @@ export function AgentDrafter({
               readOnly={waiting}
               onChange={(e) => setBrief(e.target.value)}
               rows={4}
+              // The engine rejects past BRIEF_MAX_CHARS (draft.rs) after a full
+              // round trip; capping here makes it an inert keystroke instead.
+              maxLength={4000}
               placeholder="Describe the job. Example: a team to port our billing service from Node to Rust with tests and a reviewer."
               className={`w-full resize-none rounded-lg bg-fill-soft px-3 py-2.5 text-[12.5px] leading-relaxed text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 waiting ? "text-text-secondary" : ""
@@ -777,13 +820,19 @@ export function AgentDrafter({
                       onChange={(level) => patchPosition(a.key, { level: level as DraftLevel })}
                     />
 
+                    {/* A cycle must be unbuildable here, not merely rejected
+                        later: the engine validator and topoOrder are backstops,
+                        but before this filter Nova→Ferro + Ferro→Nova was two
+                        clicks away and Apply then failed in the prologue
+                        (Mellow H1). Same descendantsOf the Roster's own
+                        supervisor picker uses. */}
                     <Field
                       label={`Supervisor for ${a.key}`}
                       value={position?.supervisorKey ?? ""}
                       options={[
                         { value: "", text: "—" },
                         ...draft.agents
-                          .filter((o) => o.key !== a.key)
+                          .filter((o) => o.key !== a.key && !reportsTo(a.key).includes(o.key))
                           .map((o) => ({ value: o.key, text: displayName(o) })),
                       ]}
                       onChange={(key) => patchPosition(a.key, { supervisorKey: key || null })}
@@ -860,7 +909,10 @@ export function AgentDrafter({
                 )
               }
               busy={running}
-              onClick={applyError ? onClose : onTeamApplied}
+              // Both branches go through the parent: a partial apply created
+              // definitions that the Library will not show until something
+              // forces a refetch, so only the LABEL differs (Mellow M1).
+              onClick={() => onApplyFinished(createdCount)}
             >
               {running ? "Applying…" : applyError ? "Close" : "Done"}
             </PrimaryButton>
@@ -956,12 +1008,19 @@ export function AgentDrafter({
                 role="alert"
               >
                 <AlertCircle className="w-4 h-4 shrink-0" />
-                Couldn&rsquo;t add {applyError.name} to {target}.
+                {applyError.name
+                  ? `Couldn't add ${applyError.name} to ${target}.`
+                  : `Couldn't apply the team to ${target}.`}
               </p>
+              {applyError.message && (
+                <p className="mt-1 px-0.5 font-mono text-[10.5px] text-text-muted">
+                  {applyError.message}
+                </p>
+              )}
               <p className="mt-1.5 px-0.5 text-[11px] leading-relaxed text-text-tertiary">
-                {applyError.created} {applyError.created === 1 ? "agent was" : "agents were"} created
-                before the failure. Created agents stay in the Library, so you can fix the cause and
-                apply the rest.
+                {applyError.created === 0
+                  ? "Nothing was created."
+                  : `${applyError.created} ${applyError.created === 1 ? "agent was" : "agents were"} created before the failure. Created agents stay in the Library, so you can fix the cause and apply the rest.`}
               </p>
             </div>
           )}

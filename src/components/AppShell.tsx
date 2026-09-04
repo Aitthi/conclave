@@ -662,14 +662,18 @@ export function AppShell() {
             setShowDrafter(null);
             setShowBuilder(true);
           }}
-          onTeamApplied={() => {
+          onApplyFinished={(created) => {
             setShowDrafter(null);
-            setLibraryRefreshKey((k) => k + 1);
-            setAgentsVersion((v) => v + 1);
+            // A partial apply still created definitions, so refresh either way.
+            if (created > 0) {
+              setLibraryRefreshKey((k) => k + 1);
+              setAgentsVersion((v) => v + 1);
+            }
           }}
           onOpenBuilder={() => {
             setShowDrafter(null);
             setBuilderInitialDef(undefined);
+            setBuilderDraftedBy(undefined);
             setShowBuilder(true);
           }}
         />
