@@ -1,3 +1,6 @@
+use crate::engine::runtime::launch_common::{
+    agent_env_overrides, effective_claude_model, prefix_conclave_path_with, shell_quote,
+};
 use crate::engine::{bus, repo, runtime, AppError, AppState};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -44,20 +47,6 @@ const RESTART_SETTLE_MS: u64 = 2_000;
 /// typing before the TUI reads stdin risks the prompt landing garbled. Generous
 /// on purpose; a restart is a rare, human-triggered operation.
 const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
-
-// Single-quote a value so the shell doesn't glob it; POSIX-escape embedded
-// quotes so the value can't break out of the launch command.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn effective_claude_model(model: &str, context_window: Option<&str>) -> String {
-    if context_window == Some("1m") {
-        format!("{model}[1m]")
-    } else {
-        model.to_string()
-    }
-}
 
 /// Emit codex's numeric context-window `-c` overrides for `model`, resolved
 /// through [`crate::engine::codex_models::codex_model_context_window`] (plan
@@ -855,13 +844,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // found beside the app, skip it and launch without `conclave` (the
             // preamble then carries no PATH-fallback sentence either, since
             // there is no path to point at).
-            if let Some(bin) = &conclave_bin {
-                launch = format!(
-                    "export PATH={}:\"$PATH\"; {}",
-                    shell_quote(&bin.to_string_lossy()),
-                    launch
-                );
-            }
+            launch = prefix_conclave_path_with(launch, conclave_bin.as_deref());
 
             // Env overrides: non-secret vars from the DB JSON object + secret
             // values fetched back from the Keychain by their recorded names.
@@ -871,29 +854,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             // CONCLAVE_WORKSPACE_ID saves the agent repeating its id on every call.
             extra_env.push(("CONCLAVE_WORKSPACE_ID".to_string(), ws.id.clone()));
             extra_env.push(("CONCLAVE_INSTANCE_ID".to_string(), id.clone()));
-            if let Some(text) = def.custom_env.as_deref() {
-                if let Ok(serde_json::Value::Object(map)) =
-                    serde_json::from_str::<serde_json::Value>(text)
-                {
-                    for (k, v) in map {
-                        if let Some(s) = v.as_str() {
-                            extra_env.push((k, s.to_owned()));
-                        }
-                    }
-                }
-            }
-            if let Some(text) = def.secret_env_keys.as_deref() {
-                if let Ok(serde_json::Value::Array(names)) =
-                    serde_json::from_str::<serde_json::Value>(text)
-                {
-                    for name in names.iter().filter_map(|n| n.as_str()) {
-                        let account = format!("agent_env:{}:{}", def.id, name);
-                        if let Ok(Some(val)) = crate::engine::secrets::get_key(&account) {
-                            extra_env.push((name.to_owned(), val));
-                        }
-                    }
-                }
-            }
+            extra_env.extend(agent_env_overrides(&def));
             // Launch the CLI INSIDE the user's login + interactive shell, the way
             // VS Code's integrated terminal does (it spawns the shell, not the
             // program). A Tauri app started from Finder has only a bare

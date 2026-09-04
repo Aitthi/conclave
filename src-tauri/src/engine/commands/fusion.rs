@@ -165,7 +165,7 @@ fn build_synthesis_prompt(
 
 /// Strip a leading ```/```json fence and its closing fence, returning the inner
 /// slice. Returns the trimmed input unchanged when there is no opening fence.
-fn strip_code_fences(text: &str) -> &str {
+pub(crate) fn strip_code_fences(text: &str) -> &str {
     let mut s = text.trim();
     if let Some(rest) = s.strip_prefix("```") {
         s = rest;

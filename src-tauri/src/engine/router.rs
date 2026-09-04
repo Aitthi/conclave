@@ -1,6 +1,6 @@
 use crate::engine::commands::{
-    agent, artifact, blackboard, browser, cli, code, design, fusion, instance, memory, message,
-    orient, provider, role, skill, skill_draft, snapshot, task, tool, workspace,
+    agent, artifact, blackboard, browser, cli, code, design, draft, fusion, instance, memory,
+    message, orient, provider, role, skill, skill_draft, snapshot, task, tool, workspace,
 };
 use crate::engine::{AppError, AppState};
 use serde_json::Value;
@@ -122,6 +122,9 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "design.ensure" => design::ensure(state, payload).await,
         "design.status" => design::status(state, payload).await,
         "design.review" => design::review(state, payload).await,
+
+        // ── draft ─────────────────────────────────────────────────────────
+        "draft.agents" => draft::run(state, payload).await,
 
         // ── browser (in-app browser agent tools) ──────────────────────────
         "browser.open" => browser::open(state, payload).await,

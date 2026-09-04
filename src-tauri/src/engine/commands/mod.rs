@@ -5,6 +5,8 @@ pub mod browser;
 pub mod cli;
 pub mod code;
 pub mod design;
+pub mod draft;
+pub mod draft_prompt;
 pub mod fusion;
 pub mod instance;
 pub mod memory;
