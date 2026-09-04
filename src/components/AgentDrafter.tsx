@@ -59,6 +59,27 @@ type Phase = "idle" | "running" | "error" | "preview" | "applying" | "done";
 /** Sample brief used ONLY in fixture mode, so `pnpm uishot drafter` has
  *  something to render. Fixed literal (fixture rule: no Date.now(), no
  *  randomness). */
+/**
+ * The one-line headline for an error banner.
+ *
+ * `draft.agents` failures reach the UI as the AppError Display string with the
+ * engine's field prefix still on the front — e.g.
+ * `invalid: draft.run: The drafter did not answer in 120 s`. Strip the transport
+ * kind, then a simple `draft.<word>: ` prefix, which leaves the sentence the
+ * canon's copy deck specifies. A FIELD-INDEXED validator message
+ * (`draft.agents[1].model: gpt-4o`) deliberately does not match the second
+ * pattern: stripping it would leave a bare value as the headline, so the field
+ * stays visible instead. The untouched original always goes on the mono detail
+ * line below.
+ */
+export function errorHeadline(raw: string): string {
+  const stripped = raw
+    .replace(/^(invalid|internal|not found): /, "")
+    .replace(/^draft\.[A-Za-z]+: /, "")
+    .trim();
+  return stripped || raw;
+}
+
 /** Select value standing for "create the role the drafter proposed". Not a
  *  role id — it never leaves the preview. */
 const NEW_ROLE_OPTION = "__new";
@@ -384,14 +405,7 @@ export function AgentDrafter({
         setPhase("preview");
       } catch (e) {
         const raw = e instanceof Error ? e.message : String(e);
-        // The engine returns "draft.<field>: <reason>" for a validation
-        // failure; show the human sentence first and the identifier below.
-        const validation = /^draft\.[^\s:]+:\s*(.*)$/.exec(raw);
-        setError(
-          validation
-            ? { message: "The draft did not match the catalogue", detail: raw }
-            : { message: raw },
-        );
+        setError({ message: errorHeadline(raw), detail: raw });
         setPhase("error");
       }
     },
@@ -610,7 +624,9 @@ export function AgentDrafter({
                 <AlertCircle className="mt-0.5 w-3.5 h-3.5 shrink-0" />
                 <div className="min-w-0">
                   <p className="font-semibold">{error.message}</p>
-                  {error.detail && <p className="mt-1 font-mono text-[10.5px]">{error.detail}</p>}
+                  {error.detail && error.detail !== error.message && (
+                    <p className="mt-1 font-mono text-[10.5px]">{error.detail}</p>
+                  )}
                 </div>
               </div>
               <p className="mt-1.5 px-0.5 text-[10.5px] text-text-tertiary">
