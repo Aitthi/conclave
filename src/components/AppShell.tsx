@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { ipc } from "../ipc";
 import { useEvent } from "../ipc/events";
 import { setThemePref } from "../lib/theme";
-import type { Workspace, AgentDefinition } from "../ipc";
+import type { Workspace, AgentDefinition, DraftMode } from "../ipc";
 import { Rail } from "./Rail";
 import { Roster } from "./Roster";
 import { Builder } from "./Builder";
 import { Library } from "./Library";
+import { AgentDrafter } from "./AgentDrafter";
 import { SkillLibrary } from "./SkillLibrary";
 import { LinkFolder } from "./LinkFolder";
 import { EditWorkspace } from "./EditWorkspace";
@@ -83,6 +84,15 @@ export function AppShell() {
   // ── Skill Library state ────────────────────────────────────────────────
   const [showSkillLibrary, setShowSkillLibrary] = useState(false);
 
+  // ── AI drafter state ───────────────────────────────────────────────────
+  /** Open overlay + which mode it runs in; null = closed. */
+  const [showDrafter, setShowDrafter] = useState<{ mode: DraftMode } | null>(null);
+  /** Bumped per accepted draft so the Builder remounts for each one — an
+   *  id-less draft has no id to key on. */
+  const [draftSeq, setDraftSeq] = useState(0);
+  /** Drafter name for the Builder's "Drafted by" chip. */
+  const [builderDraftedBy, setBuilderDraftedBy] = useState<string | undefined>(undefined);
+
   // ── Builder state ──────────────────────────────────────────────────────
   const [showBuilder, setShowBuilder] = useState(false);
   /** Set when opening Builder in edit mode from Library. */
@@ -146,6 +156,7 @@ export function AppShell() {
       chat: () => setShowChat(true),
       library: () => setShowLibrary(true),
       builder: () => setShowBuilder(true),
+      drafter: () => setShowDrafter({ mode: "team" }),
       settings: () => setShowSettings(true),
       browser: () => setShowBrowser(true),
     };
@@ -459,6 +470,7 @@ export function AppShell() {
                 setBuilderInitialDef(undefined);
                 setShowBuilder(true);
               }}
+              onBuildTeam={() => setShowDrafter({ mode: "team" })}
               agentsVersion={agentsVersion}
               onAgentsChanged={() => {
                 setAgentsVersion((v) => v + 1);
@@ -599,6 +611,7 @@ export function AppShell() {
             setBuilderInitialDef(def);
             setShowBuilder(true);
           }}
+          onOpenDrafter={() => setShowDrafter({ mode: "agent" })}
           refreshKey={libraryRefreshKey}
           onAgentsChanged={() => {
             setAgentsVersion((v) => v + 1);
@@ -615,19 +628,49 @@ export function AppShell() {
         <Builder
           // Remount per def identity so the once-only useState prefill can't go
           // stale if a different agent is edited while the Builder is open.
-          key={builderInitialDef?.id ?? "new"}
+          key={builderInitialDef?.id || `draft-${draftSeq}`}
           initialDef={builderInitialDef}
+          draftedBy={builderDraftedBy}
           workspaceId={activeWorkspaceId ?? undefined}
           workspaceAgentId={selectedId ?? undefined}
           onClose={() => {
             setShowBuilder(false);
             setBuilderInitialDef(undefined);
+            setBuilderDraftedBy(undefined);
           }}
           onSaved={() => {
             setShowBuilder(false);
             setBuilderInitialDef(undefined);
+            setBuilderDraftedBy(undefined);
             // Bump key so Library re-fetches agentDef.list after a save/edit.
             setLibraryRefreshKey((k) => k + 1);
+          }}
+        />
+      )}
+
+      {/* ── AI drafter overlay ───────────────────────────────────────── */}
+      {showDrafter && (
+        <AgentDrafter
+          mode={showDrafter.mode}
+          workspaceId={activeWorkspaceId ?? undefined}
+          workspaceName={activeWorkspace?.name}
+          onClose={() => setShowDrafter(null)}
+          onDraftAgent={(def, by) => {
+            setBuilderInitialDef(def);
+            setBuilderDraftedBy(by);
+            setDraftSeq((n) => n + 1);
+            setShowDrafter(null);
+            setShowBuilder(true);
+          }}
+          onTeamApplied={() => {
+            setShowDrafter(null);
+            setLibraryRefreshKey((k) => k + 1);
+            setAgentsVersion((v) => v + 1);
+          }}
+          onOpenBuilder={() => {
+            setShowDrafter(null);
+            setBuilderInitialDef(undefined);
+            setShowBuilder(true);
           }}
         />
       )}
