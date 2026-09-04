@@ -11,6 +11,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
+#[cfg(test)]
+use super::launch_common::prefix_conclave_path_with;
 use super::launch_common::{prefix_conclave_path, shell_quote};
 use crate::engine::commands::fusion::strip_code_fences;
 
@@ -109,6 +111,17 @@ pub fn codex_launch(model: Option<&str>, out_path: &Path) -> String {
     s
 }
 
+/// `exec` the CLI so it REPLACES the login shell instead of running as its
+/// child. The one-shot shell exists only to source rc files and resolve PATH —
+/// with `exec` there is no shell left parked around the CLI, so the process the
+/// timeout's `kill_on_drop` reaches IS the CLI, not a wrapper that would leave
+/// an orphaned `claude`/`codex` behind on expiry. (The PTY spawn path in
+/// `commands::instance` deliberately does NOT do this — its shell stays alive
+/// as the terminal.)
+fn exec_launch(launch: String) -> String {
+    format!("exec {launch}")
+}
+
 /// The LAST line of stdout that parses as a JSON object. An interactive login
 /// shell may print banners before the CLI's envelope (spec R1).
 pub fn extract_last_json_object(stdout: &str) -> Option<Value> {
@@ -186,7 +199,9 @@ async fn run_live(spec: &OneshotSpec) -> Result<Value, OneshotError> {
         CliKind::ClaudeCode => claude_launch(spec.model.as_deref(), &spec.json_schema),
         CliKind::Codex => codex_launch(spec.model.as_deref(), &out_path),
     };
-    let launch = prefix_conclave_path(launch);
+    // `exec` first, then the PATH export in front of it: the export must run in
+    // the shell, so it has to sit BEFORE the exec, never inside it.
+    let launch = prefix_conclave_path(exec_launch(launch));
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let mut cmd = tokio::process::Command::new(&shell);
@@ -277,6 +292,35 @@ mod tests {
             "codex exec --json --ephemeral --skip-git-repo-check -o '/t/o.json' -m 'gpt-5.5' -"
         );
         assert!(!s.contains("--output-schema"));
+    }
+
+    #[test]
+    fn exec_launch_prefixes_the_one_shot_command() {
+        let claude = exec_launch(claude_launch(Some("claude-sonnet-5"), &json!({})));
+        assert!(claude.starts_with("exec "), "got {claude}");
+        assert!(claude.starts_with("exec claude -p "), "got {claude}");
+
+        let codex = exec_launch(codex_launch(None, std::path::Path::new("/t/o.json")));
+        assert!(codex.starts_with("exec "), "got {codex}");
+        assert!(codex.starts_with("exec codex exec "), "got {codex}");
+    }
+
+    #[test]
+    fn the_path_export_stays_in_front_of_the_exec() {
+        // Ordering guard for the composition `run_live` performs: `exec` must
+        // replace the shell only AFTER the shell has applied the PATH export,
+        // so the export can never end up inside the exec'd command.
+        let composed = prefix_conclave_path_with(
+            exec_launch(claude_launch(None, &json!({}))),
+            Some(std::path::Path::new("/a/b")),
+        );
+        assert!(
+            composed.starts_with("export PATH='/a/b':\"$PATH\"; exec claude -p "),
+            "got {composed}"
+        );
+        // With no shim there is nothing in front of it at all.
+        let bare = prefix_conclave_path_with(exec_launch(claude_launch(None, &json!({}))), None);
+        assert!(bare.starts_with("exec "), "got {bare}");
     }
 
     #[test]

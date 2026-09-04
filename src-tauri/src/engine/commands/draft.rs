@@ -61,6 +61,16 @@ pub const LEVELS: &[&str] = &["junior", "mid", "senior", "principal"];
 /// Team-mode cap (spec: "Team mode: 1..12 agents").
 pub const MAX_TEAM_SIZE: usize = 12;
 
+/// Free-text caps. The JSON schema DECLARES these (`maxLength`) and
+/// `validate_draft` RE-CHECKS them: a schema is a request, not a guarantee —
+/// codex gets no `--output-schema` at all (spec R2 ruling), and even claude's
+/// structured output is the model's word for it. Both read these constants so
+/// the two can never disagree.
+pub const MAX_NAME_CHARS: usize = 40;
+pub const MAX_RATIONALE_CHARS: usize = 200;
+pub const MAX_ROLE_DESCRIPTION_CHARS: usize = 600;
+pub const MAX_NOTES_CHARS: usize = 600;
+
 /// Brief length cap (spec R3: keeps the whole prompt comfortably small).
 pub const BRIEF_MAX_CHARS: usize = 4000;
 
@@ -253,7 +263,7 @@ pub fn draft_schema(mode: DraftMode) -> Value {
         "properties": {
             "key": {"type": "string", "description": "Draft-local handle, unique, e.g. \"lead\", \"impl-1\"."},
             "existingAgentDefId": {"type": "string", "description": "Reuse this existing agent definition id. When set, give NO other field besides key and rationale."},
-            "name": {"type": "string", "maxLength": 40},
+            "name": {"type": "string", "maxLength": MAX_NAME_CHARS},
             "color": {"type": "string", "enum": COLOR_SWATCHES},
             "cliKind": {"type": "string", "enum": ["claude-code", "codex"]},
             "model": {"type": "string", "description": "A model id from the catalogue for the chosen cliKind."},
@@ -263,14 +273,14 @@ pub fn draft_schema(mode: DraftMode) -> Value {
                 "additionalProperties": false,
                 "required": ["name", "description", "skillIds"],
                 "properties": {
-                    "name": {"type": "string", "maxLength": 40},
-                    "description": {"type": "string", "maxLength": 600},
+                    "name": {"type": "string", "maxLength": MAX_NAME_CHARS},
+                    "description": {"type": "string", "maxLength": MAX_ROLE_DESCRIPTION_CHARS},
                     "skillIds": {"type": "array", "items": {"type": "string"}}
                 }
             },
             "skillIds": {"type": "array", "items": {"type": "string"}, "description": "Optional skill ids from the catalogue (mandatory skills are attached automatically)."},
             "defaultLevel": {"type": "string", "enum": LEVELS},
-            "rationale": {"type": "string", "maxLength": 200}
+            "rationale": {"type": "string", "maxLength": MAX_RATIONALE_CHARS}
         }
     });
     let max_agents = match mode {
@@ -296,7 +306,7 @@ pub fn draft_schema(mode: DraftMode) -> Value {
                     }
                 }
             },
-            "notes": {"type": "string", "maxLength": 600, "description": "One short paragraph for the user: assumptions and anything the brief left open."}
+            "notes": {"type": "string", "maxLength": MAX_NOTES_CHARS, "description": "One short paragraph for the user: assumptions and anything the brief left open."}
         }
     })
 }
@@ -351,6 +361,12 @@ pub fn validate_draft(
         validate_agent(i, a, &draft.agents[..i], cat)?;
     }
 
+    if draft.notes.chars().count() > MAX_NOTES_CHARS {
+        return Err(format!(
+            "draft.notes: longer than {MAX_NOTES_CHARS} characters"
+        ));
+    }
+
     if mode == DraftMode::Team {
         validate_positions(draft, cat)?;
     }
@@ -363,6 +379,11 @@ fn validate_agent(
     earlier: &[DraftAgent],
     cat: &Catalogue,
 ) -> Result<(), String> {
+    // Every leg carries a rationale, including reuse — so this is checked
+    // before the reuse branch returns.
+    check_len(&a.rationale, MAX_RATIONALE_CHARS)
+        .map_err(|n| format!("draft.agents[{i}].rationale: longer than {n} characters"))?;
+
     if let Some(def_id) = a.existing_agent_def_id.as_deref() {
         if !cat.existing.iter().any(|d| d.id == def_id) {
             return Err(format!(
@@ -404,6 +425,8 @@ fn validate_agent(
     if name.is_empty() {
         return Err(format!("draft.agents[{i}].name: missing"));
     }
+    check_len(name, MAX_NAME_CHARS)
+        .map_err(|n| format!("draft.agents[{i}].name: longer than {n} characters"))?;
     let cli_kind = a.cli_kind.as_deref().unwrap_or("");
     let models = models_for(cli_kind).ok_or_else(|| {
         format!("draft.agents[{i}].cliKind: must be 'claude-code' or 'codex', got '{cli_kind}'")
@@ -439,6 +462,12 @@ fn validate_agent(
             if fresh.is_empty() {
                 return Err(format!("draft.agents[{i}].newRole.name: empty"));
             }
+            check_len(fresh, MAX_NAME_CHARS).map_err(|n| {
+                format!("draft.agents[{i}].newRole.name: longer than {n} characters")
+            })?;
+            check_len(&nr.description, MAX_ROLE_DESCRIPTION_CHARS).map_err(|n| {
+                format!("draft.agents[{i}].newRole.description: longer than {n} characters")
+            })?;
             if cat
                 .roles
                 .iter()
@@ -469,6 +498,15 @@ fn validate_agent(
                 "draft.agents[{i}].defaultLevel: unknown level '{level}'"
             ));
         }
+    }
+    Ok(())
+}
+
+/// `Err(max)` when `s` is longer than `max` CHARS — a byte length would reject
+/// a legal name early on any non-ASCII text.
+fn check_len(s: &str, max: usize) -> Result<(), usize> {
+    if s.chars().count() > max {
+        return Err(max);
     }
     Ok(())
 }
@@ -923,6 +961,101 @@ pub(crate) mod tests {
             vec![pos("a", None), pos("b", Some("a"))],
         );
         assert!(validate_draft(&once, DraftMode::Team, &c).is_ok());
+    }
+
+    #[test]
+    fn rejects_free_text_longer_than_the_schema_declares() {
+        let c = cat();
+        // The caps the schema declares are re-checked here, because codex gets
+        // no --output-schema at all and a model can overrun either way.
+        let mut a = agent("a");
+        a.name = Some("N".repeat(MAX_NAME_CHARS + 1));
+        assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c)
+            .unwrap_err()
+            .contains("name: longer than 40"));
+
+        let mut a = agent("a");
+        a.rationale = "r".repeat(MAX_RATIONALE_CHARS + 1);
+        assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c)
+            .unwrap_err()
+            .contains("rationale: longer than 200"));
+
+        // rationale is checked on the REUSE leg too, which returns early.
+        let reuse = DraftAgent {
+            key: "x".into(),
+            existing_agent_def_id: Some("def-existing".into()),
+            name: None,
+            color: None,
+            cli_kind: None,
+            model: None,
+            role_id: None,
+            new_role: None,
+            skill_ids: vec![],
+            default_level: None,
+            rationale: "r".repeat(MAX_RATIONALE_CHARS + 1),
+        };
+        assert!(
+            validate_draft(&resp(vec![reuse], vec![]), DraftMode::Agent, &c)
+                .unwrap_err()
+                .contains("rationale: longer than 200")
+        );
+
+        let mut a = agent("a");
+        a.role_id = None;
+        a.new_role = Some(DraftNewRole {
+            name: "Q".repeat(MAX_NAME_CHARS + 1),
+            description: "d".into(),
+            skill_ids: vec![],
+        });
+        assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c)
+            .unwrap_err()
+            .contains("newRole.name: longer than 40"));
+
+        let mut a = agent("a");
+        a.role_id = None;
+        a.new_role = Some(DraftNewRole {
+            name: "QA".into(),
+            description: "d".repeat(MAX_ROLE_DESCRIPTION_CHARS + 1),
+            skill_ids: vec![],
+        });
+        assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c)
+            .unwrap_err()
+            .contains("newRole.description: longer than 600"));
+
+        let mut r = resp(vec![agent("a")], vec![]);
+        r.notes = "n".repeat(MAX_NOTES_CHARS + 1);
+        assert!(validate_draft(&r, DraftMode::Agent, &c)
+            .unwrap_err()
+            .contains("draft.notes: longer than 600"));
+
+        // Exactly at the cap is legal — the check is `>`, not `>=`.
+        let mut a = agent("a");
+        a.name = Some("N".repeat(MAX_NAME_CHARS));
+        a.rationale = "r".repeat(MAX_RATIONALE_CHARS);
+        assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c).is_ok());
+
+        // Multi-byte text is measured in CHARS, not bytes: 40 e-acutes is 80
+        // bytes and must still pass.
+        let mut a = agent("a");
+        a.name = Some("é".repeat(MAX_NAME_CHARS));
+        assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c).is_ok());
+    }
+
+    #[test]
+    fn schema_max_lengths_come_from_the_same_constants_the_validator_uses() {
+        let s = draft_schema(DraftMode::Team);
+        let items = &s["properties"]["agents"]["items"]["properties"];
+        assert_eq!(items["name"]["maxLength"], MAX_NAME_CHARS);
+        assert_eq!(items["rationale"]["maxLength"], MAX_RATIONALE_CHARS);
+        assert_eq!(
+            items["newRole"]["properties"]["name"]["maxLength"],
+            MAX_NAME_CHARS
+        );
+        assert_eq!(
+            items["newRole"]["properties"]["description"]["maxLength"],
+            MAX_ROLE_DESCRIPTION_CHARS
+        );
+        assert_eq!(s["properties"]["notes"]["maxLength"], MAX_NOTES_CHARS);
     }
 
     #[test]
