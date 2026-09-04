@@ -15,6 +15,7 @@ owner: 30fa04f4-e047-4241-a9ed-f452529952be (Detoro, lead) · authority: in-loop
 ## Global Constraints
 
 - No DB migration. No new bus event. No new write command — team apply is frontend orchestration over existing commands (spec D6).
+- `tempfile` is a normal `[dependencies]` entry as of main 6192ed8 (it was dev-only; found by Dew, challenge df8ae20b). Lane A merges main into its worktree before Task A2 — no lane edits `src-tauri/Cargo.toml`.
 - Rust tests never spawn a real `claude`/`codex` (spec D7); the only real run is the recorded manual gate in Task A5.
 - Rust gates per task, run in `src-tauri`: `cargo test -p conclave` (or the crate name in `src-tauri/Cargo.toml` `[package] name`), `cargo clippy --all-targets -- -D warnings`, and `rustfmt --check <your files>` ONLY (never bare `cargo fmt` — main has 17 files of fmt drift, bb `warning:fmt-drift-main`).
 - Frontend gates: `pnpm exec tsc --noEmit`, `pnpm build`, `pnpm uishot <view>` with the PNG opened and inspected (CLAUDE.md UI Pixel Gate). A fresh lane worktree needs `pnpm install` once.
