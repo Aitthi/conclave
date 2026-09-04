@@ -26,9 +26,24 @@ struct StartDraftReq {
 /// Rejects a non-`cli` or unconfigured/unsupported-`cli_kind` agent
 /// definition BEFORE creating any resources — `instance::spawn`'s `chat` and
 /// `orchestrator` branches don't give the agent real file tool access, and
-/// only `claude-code`/`codex` are launchable `cli_kind`s today (see
+/// only `claude-code`/`codex`/`antigravity` are launchable `cli_kind`s today (see
 /// `instance::spawn`'s own dispatch) — failing fast here avoids leaving an
 /// orphaned hidden workspace + scratch dir behind.
+fn validate_skill_assist_agent(agent_type: &str, cli_kind: Option<&str>) -> Result<(), AppError> {
+    if agent_type == "cli"
+        && matches!(
+            cli_kind,
+            Some("claude-code") | Some("codex") | Some("antigravity")
+        )
+    {
+        return Ok(());
+    }
+    Err(AppError::Invalid(
+        "skill-assist agent must be a configured CLI agent (Claude Code, Codex, or Antigravity)"
+            .into(),
+    ))
+}
+
 pub async fn start(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: StartDraftReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -41,13 +56,7 @@ pub async fn start(state: &AppState, payload: Value) -> Result<Value, AppError> 
                 req.agent_def_id
             ))
         })?;
-    if def.r#type != "cli"
-        || !matches!(def.cli_kind.as_deref(), Some("claude-code") | Some("codex"))
-    {
-        return Err(AppError::Invalid(
-            "skill-assist agent must be a configured CLI agent (Claude Code or Codex)".into(),
-        ));
-    }
+    validate_skill_assist_agent(&def.r#type, def.cli_kind.as_deref())?;
 
     let dir = repo::skill::new_draft_dir()
         .map_err(|e| AppError::Internal(format!("create skill draft scratch dir: {e}")))?;
@@ -263,6 +272,24 @@ mod tests {
         .await
         .expect_err("must reject an unknown agent_def id");
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn skill_assist_guard_accepts_antigravity_and_rejects_unlaunchable_kinds() {
+        validate_skill_assist_agent("cli", Some("antigravity"))
+            .expect("Antigravity must pass before resources are created");
+
+        for (agent_type, cli_kind) in [
+            ("chat", Some("antigravity")),
+            ("orchestrator", Some("antigravity")),
+            ("cli", None),
+            ("cli", Some("custom")),
+            ("cli", Some("unknown")),
+        ] {
+            let error = validate_skill_assist_agent(agent_type, cli_kind)
+                .expect_err("unlaunchable skill-assist agent must be rejected");
+            assert!(matches!(error, AppError::Invalid(_)));
+        }
     }
 
     #[tokio::test]

@@ -1,5 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  CircleHelp,
   X,
   Sparkles,
   Waypoints,
@@ -11,8 +15,10 @@ import {
   PenTool,
   Microscope,
   Plus,
+  RefreshCw,
   UserPen,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../ipc";
 import type { AgentDefinition, Skill, Role, WorkspaceAgent } from "../ipc";
 import { EVENT_NAMES, useEvent } from "../ipc";
@@ -39,9 +45,22 @@ export interface BuilderProps {
 }
 
 type AgentType = "cli" | "chat" | "orchestrator";
-type CliKind = "claude-code" | "codex" | "custom";
-type PermissionMode = "auto" | "bypassPermissions";
+type CliKind = "claude-code" | "codex" | "antigravity" | "custom";
+type PermissionMode = "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
+type AntigravityEffort = "low" | "medium" | "high" | undefined;
 type ClaudeContextWindow = "1m" | "200k";
+
+type CliAvailability =
+  | { state: "idle" | "checking" }
+  | { state: "available" | "missing"; installUrl: string }
+  | { state: "error"; message: string };
+
+const ANTIGRAVITY_MODE_HELP: Record<Exclude<PermissionMode, "auto">, string> = {
+  default: "Pauses for diff review before applying changes.",
+  acceptEdits: "Applies file edits automatically. Shell and web actions still ask.",
+  plan: "Starts in planning mode before making changes.",
+  bypassPermissions: "Skips every permission prompt, including shell and web actions.",
+};
 
 // ── Builtin role card looks (ADR 0005) ───────────────────────────────────────
 
@@ -180,8 +199,16 @@ export function Builder({
   const [model, setModel] = useState(initialDef?.model ?? "");
   // ── Claude Code launch config ──────────────────────────────────────────────
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
-    initialDef?.permissionMode ?? "auto",
+    initialDef?.cliKind === "antigravity"
+      ? initialDef.permissionMode ?? "default"
+      : initialDef?.permissionMode === "bypassPermissions"
+        ? "bypassPermissions"
+        : "auto",
   );
+  const [effort, setEffort] = useState<AntigravityEffort>(initialDef?.effort);
+  const [cliAvailability, setCliAvailability] = useState<CliAvailability>({
+    state: initialDef?.cliKind === "antigravity" ? "checking" : "idle",
+  });
   const [contextWindow, setContextWindow] = useState<string>(() => initialContextWindow(initialDef));
   // Token filter (rtk): absent/null on the definition means enabled (default ON).
   const [rtkEnabled, setRtkEnabled] = useState<boolean>(initialDef?.rtkEnabled ?? true);
@@ -360,10 +387,15 @@ export function Builder({
         .map((id) => allSkills.find((s) => s.id === id)?.name)
         .filter((n): n is string => Boolean(n))
     : [];
-  // CLI launch config applies to claude-code + codex (custom isn't wired yet).
+  // CLI launch config applies to every first-class CLI (custom isn't wired yet).
   const isClaudeCode = agentType === "cli" && cliKind === "claude-code";
   const isCodex = agentType === "cli" && cliKind === "codex";
-  const showCliConfig = isClaudeCode || isCodex;
+  const isAntigravity = agentType === "cli" && cliKind === "antigravity";
+  const showCliConfig = isClaudeCode || isCodex || isAntigravity;
+  const antigravitySaveBlocked =
+    isAntigravity &&
+    cliAvailability.state !== "available" &&
+    cliAvailability.state !== "error";
   const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
   const positionEnabled = Boolean(
     scopedAgent && workspaceId && workspaceAgentId && initialDef?.id,
@@ -390,7 +422,50 @@ export function Builder({
   const supervisorChanged =
     positionEnabled && (scopedAgent?.supervisorAgentId ?? null) !== supervisorDraft;
 
+  const checkAntigravityAvailability = useCallback(async () => {
+    setCliAvailability({ state: "checking" });
+    try {
+      const status = await ipc.instance.cliStatus({ cliKind: "antigravity" });
+      setCliAvailability({
+        state: status.available ? "available" : "missing",
+        installUrl: status.installUrl,
+      });
+    } catch (e) {
+      setCliAvailability({
+        state: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isAntigravity) {
+      setCliAvailability({ state: "idle" });
+      return;
+    }
+    void checkAntigravityAvailability();
+  }, [checkAntigravityAvailability, isAntigravity]);
+
+  async function openAntigravityInstallGuide() {
+    if (cliAvailability.state !== "missing") return;
+    try {
+      await openUrl(cliAvailability.installUrl);
+    } catch {
+      window.open(cliAvailability.installUrl, "_blank", "noopener,noreferrer");
+    }
+  }
+
   function selectCliKind(next: CliKind) {
+    if (next === "antigravity" && permissionMode === "auto") {
+      setPermissionMode("default");
+    } else if (
+      cliKind === "antigravity" &&
+      next !== "antigravity" &&
+      permissionMode !== "bypassPermissions"
+    ) {
+      setPermissionMode("auto");
+    }
+    if (next === "antigravity") setCliAvailability({ state: "checking" });
     setCliKind(next);
     if (next === "claude-code" && contextWindow !== "1m" && contextWindow !== "200k") {
       setContextWindow("200k");
@@ -403,6 +478,7 @@ export function Builder({
 
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave() {
+    if (antigravitySaveBlocked) return;
     if (!name.trim()) {
       setError("Name is required");
       return;
@@ -413,6 +489,15 @@ export function Builder({
     const contextWindowForSave: string | undefined = isClaudeCode
       ? contextWindow === "1m" ? "1m" : "200k"
       : undefined;
+    const permissionModeForSave: AgentDefinition["permissionMode"] = isAntigravity
+      ? permissionMode === "default" || permissionMode === "auto"
+        ? undefined
+        : permissionMode
+      : isClaudeCode || isCodex
+        ? permissionMode === "bypassPermissions"
+          ? "bypassPermissions"
+          : "auto"
+        : undefined;
     // Parse the custom env up front so a JSON error is reported before saving.
     // Claude Code only — Codex doesn't use ANTHROPIC_* env config.
     let customEnv: Record<string, string> | undefined;
@@ -452,11 +537,13 @@ export function Builder({
         // backend already behaves this way). Sent as fixed constants.
         autoSubmitInjected: true,
         allowedSenders: "all",
-        // CLI launch config (claude-code + codex; omitted for other kinds).
-        permissionMode: showCliConfig ? permissionMode : undefined,
+        // Harness-specific launch config. Antigravity Default/Auto and effort
+        // Auto are omitted so the authenticated CLI defaults win.
+        permissionMode: permissionModeForSave,
+        effort: isAntigravity ? effort : undefined,
         contextWindow: contextWindowForSave,
         // Token filter (rtk) — claude-code + codex; the engine treats absent as ON.
-        rtkEnabled: showCliConfig ? rtkEnabled : undefined,
+        rtkEnabled: isClaudeCode || isCodex ? rtkEnabled : undefined,
         customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
@@ -1069,12 +1156,13 @@ export function Builder({
               <div
                 role="radiogroup"
                 aria-label="CLI kind"
-                className="mt-2 flex gap-1 rounded-xl bg-overlay/[0.04] p-1"
+                className="mt-2 grid grid-cols-4 gap-1 rounded-xl bg-overlay/[0.04] p-1"
               >
                 {(
                   [
                     { value: "claude-code", label: "Claude Code", soon: false },
                     { value: "codex", label: "Codex", soon: false },
+                    { value: "antigravity", label: "Antigravity", soon: false },
                     { value: "custom", label: "Custom", soon: true },
                   ] as { value: CliKind; label: string; soon: boolean }[]
                 ).map(({ value, label, soon }) => (
@@ -1084,7 +1172,7 @@ export function Builder({
                     aria-checked={cliKind === value}
                     disabled={soon}
                     onClick={() => !soon && selectCliKind(value)}
-                    className={`flex-1 flex items-center justify-center gap-1 text-[12.5px] py-1.5 rounded-lg transition-colors ${
+                    className={`min-w-0 rounded-lg px-1 py-1.5 text-[11.5px] transition-colors ${
                       soon
                         ? "text-text-tertiary cursor-not-allowed"
                         : cliKind === value
@@ -1092,9 +1180,9 @@ export function Builder({
                           : "text-text-secondary hover:bg-overlay/[0.03]"
                     }`}
                   >
-                    {label}
+                    <span className="block truncate">{label}</span>
                     {soon && (
-                      <span className="text-[8.5px] font-bold tracking-wide text-text-muted bg-overlay/[0.06] px-1 py-px rounded uppercase">
+                      <span className="block text-[8px] font-bold tracking-wide text-text-muted uppercase">
                         Soon
                       </span>
                     )}
@@ -1104,7 +1192,7 @@ export function Builder({
             )}
           </section>
 
-          {/* Model / API — for claude-code / codex the model lives in the CLI
+          {/* Model / API — for first-class CLI harnesses the model lives in the CLI
               config section below (with its presets), so it's hidden here to
               avoid two disconnected model fields. */}
           {!showCliConfig && (
@@ -1131,86 +1219,280 @@ export function Builder({
             </section>
           )}
 
-          {/* CLI launch config — for claude-code + codex */}
+          {/* CLI launch config — for first-class CLI harnesses. */}
           {showCliConfig && (
             <section>
-              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
-                {isCodex ? "Codex" : "Claude Code"}
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
+                  {isAntigravity ? "Antigravity" : isCodex ? "Codex" : "Claude Code"}
+                </div>
+                {isAntigravity && (
+                  <span
+                    className={`inline-flex items-center gap-1 text-[10px] font-medium ${
+                      cliAvailability.state === "missing" || cliAvailability.state === "error"
+                        ? "text-danger"
+                        : "text-text-muted"
+                    }`}
+                  >
+                    {cliAvailability.state === "checking" ? (
+                      <RefreshCw className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+                    ) : cliAvailability.state === "available" ? (
+                      <Check className="h-3 w-3 text-success" />
+                    ) : cliAvailability.state === "missing" || cliAvailability.state === "error" ? (
+                      <AlertTriangle className="h-3 w-3" />
+                    ) : null}
+                    {cliAvailability.state === "checking"
+                      ? "Checking agy…"
+                      : cliAvailability.state === "available"
+                        ? "agy available"
+                        : cliAvailability.state === "missing"
+                          ? "agy not found"
+                          : cliAvailability.state === "error"
+                            ? "Check failed"
+                            : ""}
+                  </span>
+                )}
               </div>
+
+              {isAntigravity && cliAvailability.state === "missing" && (
+                <div role="alert" className="mb-2 rounded-xl bg-danger/[0.09] px-3 py-2.5 text-danger">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[11.5px] font-semibold">
+                        Antigravity CLI is not available
+                      </div>
+                      <p className="mt-0.5 text-[10.5px] leading-relaxed">
+                        Install the CLI from the Antigravity documentation, then make sure{" "}
+                        <span className="font-mono">agy</span> is on your login-shell PATH.
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void openAntigravityInstallGuide()}
+                          title={cliAvailability.installUrl}
+                          aria-label="Open Antigravity installation guide"
+                          className="inline-flex h-7 items-center gap-1.5 rounded-md bg-danger px-2.5 text-[10.5px] font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+                        >
+                          <CircleHelp className="h-3 w-3" /> Installation guide
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void checkAntigravityAvailability()}
+                          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[10.5px] font-semibold text-danger hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+                        >
+                          <RefreshCw className="h-3 w-3" /> Check again
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {isAntigravity && cliAvailability.state === "error" && (
+                <div role="alert" className="mb-2 rounded-xl bg-warning/[0.09] px-3 py-2.5 text-warning">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[11.5px] font-semibold">Couldn’t check Antigravity CLI</div>
+                      <p className="mt-0.5 text-[10.5px] leading-relaxed">
+                        Conclave couldn’t query your login shell. Check its configuration, then try again.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void checkAntigravityAvailability()}
+                        title={cliAvailability.message}
+                        className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[10.5px] font-semibold hover:bg-warning/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning"
+                      >
+                        <RefreshCw className="h-3 w-3" /> Check again
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
                 {/* Model — field + quick-presets together so picking a preset
                     visibly fills the same field. */}
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-[12.5px] text-text-secondary shrink-0">Model</span>
+                    <label htmlFor="cli-model" className="text-[12.5px] text-text-secondary shrink-0">
+                      Model
+                    </label>
                     <input
+                      id="cli-model"
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      placeholder={isCodex ? "gpt-5.5" : "claude-opus-4-8"}
-                      className="text-[12.5px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-text-quaternary"
+                      placeholder={
+                        isAntigravity
+                          ? "Auto (authenticated default)"
+                          : isCodex
+                            ? "gpt-5.5"
+                            : "claude-opus-4-8"
+                      }
+                      className="min-w-0 flex-1 bg-transparent text-right font-mono text-[12.5px] outline-none placeholder:text-text-tertiary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-accent"
                     />
                   </div>
-                  <div className="flex flex-wrap gap-1.5 mt-2">
-                    {modelPresets.map((m) => (
-                      <button
-                        key={m}
-                        onClick={() => selectModelPreset(m)}
-                        className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
-                          model === m
-                            ? "ring-accent/40 bg-accent/[0.08] text-accent"
-                            : "ring-overlay/[0.08] text-text-secondary hover:bg-overlay/[0.03]"
-                        }`}
-                      >
-                        {m.replace("claude-", "")}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Permission mode */}
-                <div className="px-3 py-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[12.5px] text-text-secondary">Permission mode</span>
-                    <div
-                      role="radiogroup"
-                      aria-label="Permission mode"
-                      className="flex rounded-lg bg-overlay/[0.04] p-0.5"
-                    >
-                      {(
-                        [
-                          { value: "auto", label: "Auto" },
-                          { value: "bypassPermissions", label: "Bypass" },
-                        ] as { value: PermissionMode; label: string }[]
-                      ).map(({ value, label }) => (
+                  {isAntigravity ? (
+                    <p className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
+                      Leave blank for Antigravity to choose from your authenticated models.
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {modelPresets.map((m) => (
                         <button
-                          key={value}
-                          role="radio"
-                          aria-checked={permissionMode === value}
-                          onClick={() => setPermissionMode(value)}
-                          className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
-                            permissionMode === value
-                              ? "bg-surface shadow-sm font-semibold"
-                              : "text-text-secondary"
+                          key={m}
+                          onClick={() => selectModelPreset(m)}
+                          className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
+                            model === m
+                              ? "ring-accent/40 bg-accent/[0.08] text-accent"
+                              : "ring-overlay/[0.08] text-text-secondary hover:bg-overlay/[0.03]"
                           }`}
-                          title={
-                            isCodex
-                              ? value === "auto"
-                                ? "codex --ask-for-approval never"
-                                : "codex --yolo"
-                              : `claude --permission-mode ${value}`
-                          }
                         >
-                          {label}
+                          {m.replace("claude-", "")}
                         </button>
                       ))}
                     </div>
-                  </div>
-                  {permissionMode === "bypassPermissions" && (
-                    <p className="text-[10.5px] text-warning mt-1.5">
-                      Skips every permission prompt — use only in workspaces you trust.
-                    </p>
                   )}
                 </div>
+
+                {isAntigravity && (
+                  <div className="px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-[12.5px] text-text-secondary">Effort</span>
+                      <div
+                        role="radiogroup"
+                        aria-label="Effort"
+                        className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+                      >
+                        {(
+                          [
+                            { value: undefined, label: "Auto" },
+                            { value: "low", label: "low" },
+                            { value: "medium", label: "medium" },
+                            { value: "high", label: "high" },
+                          ] as { value: AntigravityEffort; label: string }[]
+                        ).map(({ value, label }) => (
+                          <button
+                            key={label}
+                            type="button"
+                            role="radio"
+                            aria-checked={effort === value}
+                            onClick={() => setEffort(value)}
+                            className={`rounded-[7px] px-2.5 py-1 text-[11.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                              effort === value
+                                ? "bg-surface font-semibold text-text-primary shadow-sm"
+                                : "text-text-secondary hover:text-text-primary"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
+                      Auto omits the effort flag.
+                    </p>
+                  </div>
+                )}
+
+                {/* Permission mode */}
+                {isAntigravity ? (
+                  <div className="px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <label
+                        htmlFor="antigravity-execution-mode"
+                        className="shrink-0 text-[12.5px] text-text-secondary"
+                      >
+                        Execution mode
+                      </label>
+                      <div className="relative min-w-[190px]">
+                        <select
+                          id="antigravity-execution-mode"
+                          value={permissionMode === "auto" ? "default" : permissionMode}
+                          onChange={(event) => setPermissionMode(event.target.value as PermissionMode)}
+                          className={`h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                            permissionMode === "bypassPermissions"
+                              ? "text-danger"
+                              : "text-text-primary"
+                          }`}
+                        >
+                          <option value="default">Default</option>
+                          <option value="acceptEdits">Accept edits</option>
+                          <option value="plan">Plan</option>
+                          <option value="bypassPermissions">Bypass permissions</option>
+                        </select>
+                        <ChevronDown className="pointer-events-none absolute right-2 top-2 h-3 w-3 text-text-muted" />
+                      </div>
+                    </div>
+                    <p
+                      className={`mt-1.5 text-[10px] leading-relaxed ${
+                        permissionMode === "bypassPermissions"
+                          ? "text-danger"
+                          : "text-text-tertiary"
+                      }`}
+                    >
+                      {
+                        ANTIGRAVITY_MODE_HELP[
+                          permissionMode === "auto" ? "default" : permissionMode
+                        ]
+                      }
+                    </p>
+                    {permissionMode === "bypassPermissions" && (
+                      <div className="mt-2 flex items-start gap-2 rounded-lg bg-danger/[0.09] px-2.5 py-2 text-[10.5px] leading-relaxed text-danger">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          <strong>Use only in workspaces you trust.</strong> This disables
+                          Antigravity permission checks.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="px-3 py-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12.5px] text-text-secondary">Permission mode</span>
+                      <div
+                        role="radiogroup"
+                        aria-label="Permission mode"
+                        className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+                      >
+                        {(
+                          [
+                            { value: "auto", label: "Auto" },
+                            { value: "bypassPermissions", label: "Bypass" },
+                          ] as { value: PermissionMode; label: string }[]
+                        ).map(({ value, label }) => (
+                          <button
+                            key={value}
+                            role="radio"
+                            aria-checked={permissionMode === value}
+                            onClick={() => setPermissionMode(value)}
+                            className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                              permissionMode === value
+                                ? "bg-surface shadow-sm font-semibold"
+                                : "text-text-secondary"
+                            }`}
+                            title={
+                              isCodex
+                                ? value === "auto"
+                                  ? "codex --ask-for-approval never"
+                                  : "codex --yolo"
+                                : `claude --permission-mode ${value}`
+                            }
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {permissionMode === "bypassPermissions" && (
+                      <p className="text-[10.5px] text-warning mt-1.5">
+                        Skips every permission prompt — use only in workspaces you trust.
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* Context window — Claude's [1m] suffix remains a segmented
                     choice; Codex uses a numeric model_context_window override. */}
@@ -1266,7 +1548,7 @@ export function Builder({
                 )}
 
                 {/* Token filter (rtk) — Claude Code + Codex; absent/null = ON. */}
-                {showCliConfig && (
+                {(isClaudeCode || isCodex) && (
                 <div className="px-3 py-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[12.5px] text-text-secondary">Token filter (rtk)</span>
@@ -1321,10 +1603,16 @@ export function Builder({
                 </div>
                 )}
               </div>
+              {isAntigravity && (
+                <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
+                  Token filtering and sandbox controls are not available for Antigravity in this
+                  version.
+                </p>
+              )}
             </section>
           )}
 
-          {/* Skills — for claude-code + codex */}
+          {/* Skills — for every first-class CLI harness. */}
           {showCliConfig && (
             <section>
               <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
@@ -1436,11 +1724,19 @@ export function Builder({
           </button>
           <button
             onClick={handleSave}
-            disabled={saving}
-            className="text-[12.5px] font-semibold text-white bg-accent px-4 py-1.5 rounded-lg hover:brightness-105 disabled:opacity-60 flex items-center gap-1.5"
+            disabled={saving || antigravitySaveBlocked}
+            className="text-[12.5px] font-semibold text-white bg-accent px-4 py-1.5 rounded-lg hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-45 flex items-center gap-1.5"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            {saving ? "Saving…" : isEditing ? "Save changes" : "Create agent"}
+            {saving
+              ? "Saving…"
+              : cliAvailability.state === "checking" && isAntigravity
+                ? "Checking agy…"
+                : cliAvailability.state === "missing" && isAntigravity
+                  ? "Install agy to continue"
+                  : isEditing
+                    ? "Save changes"
+                    : "Create agent"}
           </button>
         </div>
       </div>

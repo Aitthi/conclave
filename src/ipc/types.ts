@@ -46,7 +46,7 @@ export interface AgentDefinition {
    *  `Role.id`. Persisted server-side in Phase B; the Builder sends it on save. */
   roleId?: string;
   type: "cli" | "chat" | "orchestrator";
-  cliKind?: "claude-code" | "codex" | "custom";
+  cliKind?: "claude-code" | "codex" | "antigravity" | "custom";
   color?: string;
   providerId?: string;
   model?: string;
@@ -56,7 +56,9 @@ export interface AgentDefinition {
   allowedSenders?: "all" | "selected" | "none";
   // ── Claude Code / CLI launch config ────────────────────────────────────────
   /** `--permission-mode` value passed to the CLI. */
-  permissionMode?: "auto" | "bypassPermissions";
+  permissionMode?: "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
+  /** Antigravity reasoning effort. Absent means Auto / omit the CLI flag. */
+  effort?: "low" | "medium" | "high";
   /** Extra CLI args appended verbatim to the launch command. */
   customArgs?: string;
   /** NON-secret env overrides; secret values live in the Keychain, not here. */
@@ -142,7 +144,7 @@ export interface WorkspaceAgent {
   model?: string;
   /** Annotated by `instance.list`: the agent definition's CLI harness kind,
    *  absent for a chat/orchestrator agent or an unset `cli` agent. */
-  cliKind?: "claude-code" | "codex" | "custom";
+  cliKind?: "claude-code" | "codex" | "antigravity" | "custom";
   /** Annotated by `instance.list`, live instances only (R-act-1): whether the
    *  backend emitted output within the last `WORKING_WINDOW` (5s). */
   working?: boolean;

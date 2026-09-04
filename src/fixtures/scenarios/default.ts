@@ -61,11 +61,13 @@ let workspaceState: Workspace = workspaces[0];
 let agentsState: WorkspaceAgent[] = agents.map((agent) => ({ ...agent }));
 
 function fixtureSession(workspaceAgentId: string): Session {
+  const agent = agentsState.find((candidate) => candidate.id === workspaceAgentId);
   return {
     id: `fx-sess-${workspaceAgentId}`,
     workspaceAgentId,
-    contextTokens: 42000,
-    contextLimit: 200000,
+    ...(agent?.cliKind === "antigravity"
+      ? {}
+      : { contextTokens: 42000, contextLimit: 200000 }),
     startedAt: "2026-07-05T11:00:00.000Z",
     lastActiveAt: "2026-07-05T11:58:00.000Z",
   };
@@ -111,6 +113,10 @@ export const handlers: FixtureHandlers = {
   },
   "instance.list": ({ workspaceId }) =>
     agentsState.filter((a) => a.workspaceId === workspaceId),
+  "instance.cliStatus": () => ({
+    available: true,
+    installUrl: "https://antigravity.google/docs/cli/install/",
+  }),
   // The WorkspacePane auto-opens a session for the focused agent on mount.
   // Synthesize a deterministic one; the Terminal then renders an empty frame
   // (no session:output on the fixture bus) — the accepted PTY-in-fixture v1

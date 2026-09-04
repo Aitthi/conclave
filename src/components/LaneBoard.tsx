@@ -606,6 +606,7 @@ function trackLabelOf(agent: WorkspaceAgent): string {
   if (agent.roleName) return agent.roleName;
   if (agent.cliKind === "claude-code") return "CLI";
   if (agent.cliKind === "codex") return "Codex";
+  if (agent.cliKind === "antigravity") return "Antigravity";
   if (agent.cliKind === "custom") return "Custom";
   return "Agent";
 }

@@ -41,6 +41,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
 
         // ── instance ──────────────────────────────────────────────────────
         "instance.list" => instance::list(state, payload).await,
+        "instance.cliStatus" => instance::cli_status(state, payload).await,
         "instance.spawn" => instance::spawn(state, payload).await,
         "instance.restart" => instance::restart(state, payload).await,
         "instance.stop" => instance::stop(state, payload).await,

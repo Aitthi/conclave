@@ -224,11 +224,12 @@ function AgentRow({
           <AgentAvatar entry={entry} />
           <span className="min-w-0 flex-1 leading-tight">
             <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] font-semibold">
-              <span className="truncate">{entry.name}</span>
+              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
               {chip && (
                 <span
-                  className="shrink-0 text-[10px] font-medium tracking-tight text-text-tertiary"
-                  title={entry.model ?? undefined}
+                  className="max-w-[104px] min-w-0 shrink-0 truncate text-[10px] font-medium tracking-tight text-text-tertiary"
+                  title={entry.model?.trim() || chip}
+                  aria-label={chip}
                 >
                   {chip}
                 </span>
@@ -1101,6 +1102,7 @@ export function Roster({
             level: e.level,
             roleName: e.roleName,
             providerChip: providerChip(e) ?? undefined,
+            providerTitle: e.model?.trim() || providerChip(e) || undefined,
           }));
           const excludeIds = [
             editingSupervisorFor,
@@ -1260,19 +1262,21 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
     // "Chat · Anthropic" here exactly as it does in the roster row — the two
     // candidate builders must agree (Mellow M1).
     const def = defsById.get(m.agentDefId);
+    const model = m.model ?? def?.model;
+    const chip = providerChip({
+      type: def?.type,
+      cliKind: m.cliKind ?? def?.cliKind,
+      providerId: def?.providerId,
+      model,
+    });
     return {
       id: m.id,
       name: m.name,
       color: def?.color,
       level: m.level,
       roleName: m.roleName,
-      providerChip:
-        providerChip({
-          type: def?.type,
-          cliKind: m.cliKind ?? def?.cliKind,
-          providerId: def?.providerId,
-          model: m.model ?? def?.model,
-        }) ?? undefined,
+      providerChip: chip ?? undefined,
+      providerTitle: model?.trim() || chip || undefined,
     };
   });
 

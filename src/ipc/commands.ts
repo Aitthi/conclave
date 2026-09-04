@@ -84,7 +84,7 @@ export interface Commands {
       /** The chosen first-class role id (builtin slug or custom `Role.id`).
        *  Persisted server-side in Phase B; harmlessly ignored until then. */
       roleId?: string;
-      cliKind?: "claude-code" | "codex" | "custom";
+      cliKind?: "claude-code" | "codex" | "antigravity" | "custom";
       color?: string;
       providerId?: string;
       model?: string;
@@ -96,7 +96,8 @@ export interface Commands {
       // include secret values); the backend splits secret-looking keys out to
       // the Keychain and persists only the rest. `secretEnvKeys` is derived
       // server-side, so it is not sent here.
-      permissionMode?: "auto" | "bypassPermissions";
+      permissionMode?: "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
+      effort?: "low" | "medium" | "high";
       customArgs?: string;
       customEnv?: Record<string, string>;
       contextWindow?: string;
@@ -163,6 +164,10 @@ export interface Commands {
   "instance.list": {
     req: { workspaceId: string };
     res: WorkspaceAgent[];
+  };
+  "instance.cliStatus": {
+    req: { cliKind: "antigravity" };
+    res: { available: boolean; installUrl: string };
   };
   "instance.spawn": {
     req: { workspaceAgentId: string };
@@ -459,6 +464,7 @@ export const ipc = {
   },
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
+    cliStatus: (req: Commands["instance.cliStatus"]["req"]) => call("instance.cliStatus", req),
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
     stop: (req: Commands["instance.stop"]["req"]) => call("instance.stop", req),
     resume: (req: Commands["instance.resume"]["req"]) => call("instance.resume", req),

@@ -30,6 +30,8 @@ const AG_MELLOW = "fx-ag-mellow";
 const AG_TIESTO = "fx-ag-tiesto";
 const AG_DEW = "fx-ag-dew";
 const AG_ARTA = "fx-ag-arta";
+const AG_NOVA = "fx-ag-nova";
+const AG_ORBIT = "fx-ag-orbit";
 
 // ── Workspaces ──────────────────────────────────────────────────────────────
 export const workspaces: Workspace[] = [
@@ -116,6 +118,32 @@ export const agentDefs: AgentDefinition[] = [
     contextWindow: "200k",
     defaultLevel: "senior",
     createdAt: "2026-07-01T09:09:00.000Z",
+  },
+  {
+    id: "fx-def-nova",
+    name: "Nova",
+    role: "Implementer",
+    roleId: "implementer",
+    type: "cli",
+    cliKind: "antigravity",
+    color: "#9f5bd8",
+    effort: "medium",
+    harnessMode: "own",
+    defaultLevel: "senior",
+    createdAt: "2026-07-01T09:09:15.000Z",
+  },
+  {
+    id: "fx-def-orbit",
+    name: "Orbit",
+    type: "cli",
+    cliKind: "antigravity",
+    color: "#b05b8e",
+    model: "gemini-3.8-pro-experimental-context-extended",
+    effort: "high",
+    permissionMode: "plan",
+    harnessMode: "own",
+    defaultLevel: "mid",
+    createdAt: "2026-07-01T09:09:30.000Z",
   },
 ];
 
@@ -210,6 +238,39 @@ export const agents: WorkspaceAgent[] = [
     level: "senior",
     supervisorAgentId: AG_DETORO,
     supervisorName: "Detoro",
+  },
+  {
+    id: AG_NOVA,
+    workspaceId: WS_ID,
+    agentDefId: "fx-def-nova",
+    status: "idle",
+    availability: "active",
+    addedAt: "2026-07-01T09:14:15.000Z",
+    name: "Nova",
+    roleName: "Implementer",
+    roleDescription: "Builds scoped product integrations from approved plans.",
+    cliKind: "antigravity",
+    working: false,
+    lastActivityAt: "2026-07-05T10:10:00.000Z",
+    level: "senior",
+    supervisorAgentId: AG_DETORO,
+    supervisorName: "Detoro",
+  },
+  {
+    id: AG_ORBIT,
+    workspaceId: WS_ID,
+    agentDefId: "fx-def-orbit",
+    status: "idle",
+    availability: "active",
+    addedAt: "2026-07-01T09:14:30.000Z",
+    name: "Orbit",
+    model: "gemini-3.8-pro-experimental-context-extended",
+    cliKind: "antigravity",
+    working: false,
+    lastActivityAt: "2026-07-05T10:00:00.000Z",
+    level: "mid",
+    supervisorAgentId: AG_NOVA,
+    supervisorName: "Nova",
   },
 ];
 
@@ -360,7 +421,7 @@ export const tasks: TaskListRow[] = [
     slug: "welcome-screen",
     title: "Welcome screen + design tokens",
     state: "planned",
-    ownerAgentId: AG_DETORO,
+    ownerAgentId: AG_ORBIT,
     fileBoundary: ["src/components/Welcome.tsx", ".arta/runtime.json"],
     plan: "Implement the welcome screen and define the design-system tokens.",
     createdAt: "2026-07-03T10:00:00.000Z",
