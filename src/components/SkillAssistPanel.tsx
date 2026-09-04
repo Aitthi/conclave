@@ -171,7 +171,14 @@ export function SkillAssistPanel({
     if (!draft || draftText.trim().length === 0) return;
     setSending(true);
     try {
-      await ipc.message.send({ sessionId: draft.sessionId, text: draftText });
+      // `paste: true`: a draft longer than the PTY's ~1 KB read chunk must
+      // travel as ONE bracketed paste (see StdinBar) — this session is always
+      // a PTY CLI (skill_draft.rs accepts only claude-code/codex).
+      await ipc.message.send({
+        sessionId: draft.sessionId,
+        text: draftText,
+        paste: true,
+      });
       setDraftText("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
