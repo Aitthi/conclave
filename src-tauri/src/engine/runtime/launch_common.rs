@@ -23,6 +23,44 @@ pub fn effective_claude_model(model: &str, context_window: Option<&str>) -> Stri
     }
 }
 
+/// Build Antigravity's complete inner-shell command in Conclave-owned order.
+///
+/// Typed fields are quoted and precede expert `custom_args`. `None`, blank
+/// model/effort and the Default/Auto permission modes deliberately omit flags
+/// so AGY retains its own defaults. This helper contains no rtk or sandbox
+/// concepts: v1 has neither integration.
+pub fn build_antigravity_launch(
+    model: Option<&str>,
+    effort: Option<&str>,
+    permission_mode: Option<&str>,
+    bootstrap: &str,
+    custom_args: Option<&str>,
+) -> String {
+    let mut launch = String::from("agy");
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        launch.push_str(&format!(" --model {}", shell_quote(model.trim())));
+    }
+    if let Some(effort) = effort.filter(|value| !value.trim().is_empty()) {
+        launch.push_str(&format!(" --effort {}", shell_quote(effort.trim())));
+    }
+    match permission_mode {
+        Some("acceptEdits") => launch.push_str(" --mode 'accept-edits'"),
+        Some("plan") => launch.push_str(" --mode 'plan'"),
+        Some("bypassPermissions") => launch.push_str(" --dangerously-skip-permissions"),
+        _ => {}
+    }
+    let bootstrap = format!("{bootstrap} Acknowledge these instructions, then wait for the user.");
+    launch.push_str(&format!(
+        " --prompt-interactive {}",
+        shell_quote(&bootstrap)
+    ));
+    if let Some(extra) = custom_args.filter(|value| !value.trim().is_empty()) {
+        launch.push(' ');
+        launch.push_str(extra.trim());
+    }
+    launch
+}
+
 /// Non-secret env from the definition's `custom_env` JSON object, then secret
 /// values fetched back from the Keychain by the names in `secret_env_keys`.
 pub fn agent_env_overrides(def: &AgentDefRow) -> Vec<(String, String)> {
@@ -105,6 +143,7 @@ mod tests {
             default_level: None,
             provider_id: None,
             model: None,
+            effort: None,
             harness_mode: "own".into(),
             share_blackboard: None,
             auto_submit_injected: None,
@@ -140,6 +179,60 @@ mod tests {
             effective_claude_model("claude-opus-4-8", None),
             "claude-opus-4-8"
         );
+    }
+
+    #[test]
+    fn antigravity_launch_orders_typed_flags_bootstrap_then_custom_args() {
+        let launch = build_antigravity_launch(
+            Some("gemini 'pro'"),
+            Some("high"),
+            Some("acceptEdits"),
+            "identity 'quoted'",
+            Some("--expert value"),
+        );
+        assert_eq!(
+            launch,
+            "agy --model 'gemini '\\''pro'\\''' --effort 'high' --mode 'accept-edits' \
+             --prompt-interactive 'identity '\\''quoted'\\'' Acknowledge these instructions, \
+             then wait for the user.' --expert value"
+        );
+        assert!(launch.find("--model").unwrap() < launch.find("--prompt-interactive").unwrap());
+        assert!(launch.find("--prompt-interactive").unwrap() < launch.find("--expert").unwrap());
+    }
+
+    #[test]
+    fn antigravity_launch_covers_effort_and_permission_matrix() {
+        for effort in [None, Some(""), Some("low"), Some("medium"), Some("high")] {
+            let launch = build_antigravity_launch(None, effort, None, "boot", None);
+            match effort.filter(|value| !value.is_empty()) {
+                Some(value) => assert!(launch.contains(&format!("--effort '{value}'"))),
+                None => assert!(!launch.contains("--effort")),
+            }
+        }
+
+        for (mode, expected) in [
+            (None, None),
+            (Some("default"), None),
+            (Some("auto"), None),
+            (Some("acceptEdits"), Some("--mode 'accept-edits'")),
+            (Some("plan"), Some("--mode 'plan'")),
+            (
+                Some("bypassPermissions"),
+                Some("--dangerously-skip-permissions"),
+            ),
+        ] {
+            let launch = build_antigravity_launch(Some(""), None, mode, "boot", None);
+            assert!(!launch.contains("--model"));
+            match expected {
+                Some(flag) => assert!(launch.contains(flag), "{mode:?}: {launch}"),
+                None => {
+                    assert!(!launch.contains("--mode"), "{mode:?}: {launch}");
+                    assert!(!launch.contains("--dangerously-skip-permissions"));
+                }
+            }
+            assert!(!launch.contains("--sandbox"));
+            assert!(!launch.contains("rtk"));
+        }
     }
 
     #[test]

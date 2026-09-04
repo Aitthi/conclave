@@ -868,6 +868,27 @@ mod tests {
         root
     }
 
+    #[test]
+    fn antigravity_is_unsupported_and_never_scans_opaque_conversations() {
+        let root = tmp_root("antigravity-unsupported");
+        let opaque = root.join("conversation.pb");
+        std::fs::write(&opaque, [0_u8, 1, 2, 3]).unwrap();
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: root.join("claude"),
+            codex_sessions_root: root.clone(),
+            fallback_limit: 200_000,
+        });
+
+        let reading = reader.poll("agent-1", &root, "antigravity", Utc::now());
+
+        assert!(reading.is_none());
+        assert!(
+            reader.scan_state.lock().unwrap().is_empty(),
+            "unsupported harnesses must not open or cache conversation files"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn write_jsonl(path: &Path, lines: &[Value]) {
         let mut body = String::new();
         for (idx, line) in lines.iter().enumerate() {

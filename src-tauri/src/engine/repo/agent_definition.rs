@@ -79,6 +79,10 @@ pub struct AgentDefRow {
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Antigravity reasoning effort. `None` means Auto/omit; non-Antigravity
+    /// definitions are normalized to `None` on every write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub harness_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_blackboard: Option<bool>,
@@ -145,6 +149,8 @@ pub struct AgentDefListItem {
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub harness_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_blackboard: Option<bool>,
@@ -185,7 +191,7 @@ pub struct AgentDefListItem {
 
 // ── Column list (shared between list and get) ────────────────────────────────
 
-const COLS: [&str; 22] = [
+const COLS: [&str; 23] = [
     "id",
     "name",
     "role",
@@ -196,6 +202,7 @@ const COLS: [&str; 22] = [
     "default_level",
     "provider_id",
     "model",
+    "effort",
     "harness_mode",
     "share_blackboard",
     "auto_submit_injected",
@@ -230,6 +237,9 @@ pub struct AgentDefinitionInput {
     pub default_level: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
+    /// Antigravity reasoning effort (`low` / `medium` / `high`). `None` means
+    /// Auto and is also the normalized value for every other CLI harness.
+    pub effort: Option<String>,
     pub harness_mode: String,
     pub share_blackboard: Option<bool>,
     pub auto_submit_injected: Option<bool>,
@@ -279,7 +289,7 @@ pub async fn list_with_counts(pool: &SqlitePool) -> sqlx::Result<Vec<AgentDefLis
     // appended `in_workspaces` count) if the table's columns ever change.
     sqlx::query_as::<_, AgentDefListItem>(
         "SELECT d.id, d.name, d.role, d.role_id, d.type, d.cli_kind, d.color, d.default_level, \
-         d.provider_id, d.model, \
+         d.provider_id, d.model, d.effort, \
          d.harness_mode, d.share_blackboard, d.auto_submit_injected, d.allowed_senders, \
          d.permission_mode, d.custom_args, d.custom_env, d.secret_env_keys, d.context_window, \
          d.selected_builtin_skill_ids, d.rtk_enabled, \
@@ -319,7 +329,10 @@ pub async fn exists(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
 pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Result<AgentDefRow> {
     let id = Uuid::new_v4().to_string();
     let created_at = Utc::now().to_rfc3339();
-    let input = input.clone();
+    let mut input = input.clone();
+    if input.cli_kind.as_deref() != Some("antigravity") {
+        input.effort = None;
+    }
 
     QueryBuilder::<Sqlite>::table("agent_definition")
         .insert([
@@ -361,6 +374,10 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
             (
                 "model",
                 input.model.clone().map(Bind::Text).unwrap_or(Bind::Null),
+            ),
+            (
+                "effort",
+                input.effort.clone().map(Bind::Text).unwrap_or(Bind::Null),
             ),
             ("harness_mode", Bind::Text(input.harness_mode.clone())),
             (
@@ -451,6 +468,7 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
         default_level: input.default_level,
         provider_id: input.provider_id,
         model: input.model,
+        effort: input.effort,
         harness_mode: input.harness_mode,
         share_blackboard: input.share_blackboard,
         auto_submit_injected: input.auto_submit_injected,
@@ -475,7 +493,10 @@ pub async fn update(
     id: &str,
     input: &AgentDefinitionInput,
 ) -> sqlx::Result<Option<AgentDefRow>> {
-    let input = input.clone();
+    let mut input = input.clone();
+    if input.cli_kind.as_deref() != Some("antigravity") {
+        input.effort = None;
+    }
 
     QueryBuilder::<Sqlite>::table("agent_definition")
         .update([
@@ -500,6 +521,7 @@ pub async fn update(
                 input.provider_id.map(Bind::Text).unwrap_or(Bind::Null),
             ),
             ("model", input.model.map(Bind::Text).unwrap_or(Bind::Null)),
+            ("effort", input.effort.map(Bind::Text).unwrap_or(Bind::Null)),
             ("harness_mode", Bind::Text(input.harness_mode)),
             (
                 "share_blackboard",
@@ -590,6 +612,7 @@ mod tests {
             default_level: None,
             provider_id: None,
             model: None,
+            effort: None,
             harness_mode: harness_mode.to_owned(),
             share_blackboard: None,
             auto_submit_injected: None,
@@ -623,6 +646,7 @@ mod tests {
                 default_level: Some("senior".into()),
                 provider_id: None,
                 model: Some("claude-opus-4-8".into()),
+                effort: None,
                 harness_mode: "own".into(),
                 share_blackboard: Some(true),
                 auto_submit_injected: Some(false),
@@ -722,6 +746,7 @@ mod tests {
                 default_level: Some("principal".into()),
                 provider_id: None,
                 model: Some("claude-opus-4-8".into()),
+                effort: None,
                 harness_mode: "central".into(),
                 share_blackboard: Some(true),
                 auto_submit_injected: Some(true),
@@ -826,6 +851,7 @@ mod tests {
                 default_level: Some("mid".into()),
                 provider_id: None,
                 model: None,
+                effort: None,
                 harness_mode: "own".into(),
                 share_blackboard: Some(true),
                 auto_submit_injected: Some(true),
@@ -1052,5 +1078,80 @@ mod tests {
             .expect("update failed")
             .expect("row should exist after update");
         assert_eq!(re_enabled.rtk_enabled, Some(true));
+    }
+
+    #[tokio::test]
+    async fn antigravity_effort_roundtrips_and_other_harnesses_normalize_to_null() {
+        let pool = connect_in_memory().await;
+        let input = AgentDefinitionInput {
+            name: "AGY".into(),
+            agent_type: "cli".into(),
+            cli_kind: Some("antigravity".into()),
+            model: Some("gemini-pro".into()),
+            effort: Some("medium".into()),
+            harness_mode: "own".into(),
+            ..Default::default()
+        };
+
+        let row = create(&pool, &input).await.unwrap();
+        assert_eq!(row.effort.as_deref(), Some("medium"));
+        assert_eq!(
+            get(&pool, &row.id).await.unwrap().unwrap().effort,
+            row.effort
+        );
+        assert_eq!(
+            list(&pool).await.unwrap()[0].effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            list_with_counts(&pool).await.unwrap()[0].effort.as_deref(),
+            Some("medium")
+        );
+
+        let updated = update(
+            &pool,
+            &row.id,
+            &AgentDefinitionInput {
+                effort: Some("high".into()),
+                ..input.clone()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(updated.effort.as_deref(), Some("high"));
+
+        let normalized = update(
+            &pool,
+            &row.id,
+            &AgentDefinitionInput {
+                cli_kind: Some("codex".into()),
+                effort: Some("low".into()),
+                ..input
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(normalized.effort.is_none());
+    }
+
+    #[tokio::test]
+    async fn antigravity_effort_check_rejects_unknown_value() {
+        let pool = connect_in_memory().await;
+        let error = create(
+            &pool,
+            &AgentDefinitionInput {
+                name: "AGY".into(),
+                agent_type: "cli".into(),
+                cli_kind: Some("antigravity".into()),
+                effort: Some("extreme".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("schema CHECK must reject invalid effort");
+        assert!(error.to_string().contains("CHECK constraint failed"));
     }
 }

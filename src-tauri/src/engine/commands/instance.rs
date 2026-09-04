@@ -1,5 +1,6 @@
 use crate::engine::runtime::launch_common::{
-    agent_env_overrides, effective_claude_model, prefix_conclave_path_with, shell_quote,
+    agent_env_overrides, build_antigravity_launch, effective_claude_model,
+    prefix_conclave_path_with, shell_quote,
 };
 use crate::engine::{bus, repo, runtime, AppError, AppState};
 use chrono::{DateTime, Utc};
@@ -55,8 +56,7 @@ const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
 /// ignored at launch). Emits NOTHING for an unknown model so codex's own
 /// default wins, matching the old sentinel/invalid-value behavior.
 fn append_codex_context_window_config(launch: &mut String, model: Option<&str>) {
-    let Some(tokens) =
-        crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
+    let Some(tokens) = crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
     else {
         return;
     };
@@ -150,6 +150,8 @@ impl SpawnTestHooks {
 #[cfg(test)]
 static SPAWN_TEST_HOOKS: std::sync::Mutex<SpawnTestHooks> =
     std::sync::Mutex::new(SpawnTestHooks::new());
+#[cfg(test)]
+static SPAWN_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The shell the CLI is launched inside. Production always answers `$SHELL`
 /// (falling back to zsh); under `cfg(test)` a wiring test can substitute a stub
@@ -167,6 +169,29 @@ fn launch_shell() -> String {
         }
     }
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+/// Verify a harness binary through the same login+interactive shell used for
+/// the real PTY launch. Finder-launched apps do not inherit the user's terminal
+/// PATH, so checking Conclave's own process environment would reject valid
+/// installs and still miss shell-profile problems.
+async fn require_login_shell_binary(shell: &str, binary: &str) -> Result<(), AppError> {
+    let command = format!("command -v {} >/dev/null 2>&1", shell_quote(binary));
+    let status = tokio::process::Command::new(shell)
+        .args(["-l", "-i", "-c", &command])
+        .status()
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("check {binary} in login shell {shell}: {error}"))
+        })?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(AppError::Invalid(
+        "Antigravity CLI executable 'agy' was not found in your login-shell PATH. \
+         Install it from https://antigravity.google/docs/cli/install/ and restart Conclave."
+            .to_string(),
+    ))
 }
 
 #[derive(Debug)]
@@ -663,6 +688,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             let base = match def.cli_kind.as_deref() {
                 Some("claude-code") => "claude",
                 Some("codex") => "codex",
+                Some("antigravity") => "agy",
                 _ => {
                     return Err(AppError::NotImplemented(
                         "custom CLI command is not configurable yet (M5 settings)".into(),
@@ -750,18 +776,29 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             // socket without a permission modal. Resolved at runtime from the
             // same `Conclave` data dir the server binds (never hardcoded), and
             // skipped in full-bypass mode (no sandbox to poke).
-            let socket_path =
-                if runtime::sandbox_config::needs_socket_hole(def.permission_mode.as_deref()) {
-                    Some(
-                        crate::engine::uds::socket_path()
-                            .to_string_lossy()
-                            .into_owned(),
-                    )
-                } else {
-                    None
-                };
+            let socket_path = if cli_kind != "antigravity"
+                && runtime::sandbox_config::needs_socket_hole(def.permission_mode.as_deref())
+            {
+                Some(
+                    crate::engine::uds::socket_path()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                None
+            };
 
-            let mut launch = String::from(base);
+            let mut launch = if base == "agy" {
+                build_antigravity_launch(
+                    def.model.as_deref(),
+                    def.effort.as_deref(),
+                    def.permission_mode.as_deref(),
+                    &preamble,
+                    def.custom_args.as_deref(),
+                )
+            } else {
+                String::from(base)
+            };
 
             // Resolve the rtk PreToolUse hook (A5), SHARED by both CLI launch
             // branches — the human mandate is "make codex use rtk the way
@@ -779,7 +816,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             // cli_kinds early-returned above), and each branch installs the hook
             // its own way — claude via the per-instance settings JSON, codex via
             // a per-spawn `-c` override.
-            let rtk_on = def.rtk_enabled.unwrap_or(true);
+            let rtk_on = cli_kind != "antigravity" && def.rtk_enabled.unwrap_or(true);
             let rtk_hook = conclave_bin.as_ref().filter(|_| rtk_on).and_then(|bin| {
                 let cli_bin = bin.join("conclave");
                 let rtk_bin = bin.join("rtk");
@@ -890,9 +927,11 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                     launch.push_str(" --dangerously-bypass-hook-trust");
                 }
             }
-            if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {
-                launch.push(' ');
-                launch.push_str(extra.trim());
+            if base != "agy" {
+                if let Some(extra) = def.custom_args.as_deref().filter(|s| !s.trim().is_empty()) {
+                    launch.push(' ');
+                    launch.push_str(extra.trim());
+                }
             }
 
             // Put `conclave` on the agent's PATH so the briefing's commands
@@ -930,6 +969,17 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 "-c".to_string(),
                 launch.clone(),
             ];
+
+            if base == "agy" {
+                require_login_shell_binary(&shell, "agy").await?;
+                // Clear unsupported telemetry before the child exists. A DB
+                // failure therefore prevents the generation instead of
+                // returning success with a stale, fabricated meter or leaking
+                // a registered child through a post-spawn `?`.
+                repo::session::clear_context_reading(&state.db, &session.id).await?;
+                session.context_tokens = None;
+                session.context_limit = None;
+            }
 
             // Stamped BEFORE the child exists so nothing this generation writes
             // can predate it: this is the transcript meter's generation anchor
@@ -975,13 +1025,26 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 def.model.as_deref(),
                 session.context_limit,
             );
-            reset_context_meter_for_new_generation(
-                &state.db,
-                state.app(),
-                &mut session,
-                context_limit,
-            )
-            .await;
+            let transcript_ctx = if cli_kind == "antigravity" {
+                // AGY stores opaque protobuf conversations and exposes no
+                // trustworthy live usage telemetry. The pre-spawn clear above
+                // covered both carriers; emit nothing and start no scanner.
+                None
+            } else {
+                reset_context_meter_for_new_generation(
+                    &state.db,
+                    state.app(),
+                    &mut session,
+                    context_limit,
+                )
+                .await;
+                Some(TranscriptPollContext::new(
+                    &ws.folder_path,
+                    &cli_kind,
+                    generation_started_at,
+                    context_limit,
+                ))
+            };
 
             repo::session::set_launched_skill_ids(&state.db, &session.id, &skill_ids).await?;
 
@@ -996,13 +1059,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             // transcript stays admissible, keeps winning `choose_newer` until the
             // new one logs its first usage row, and re-persists exactly the value
             // zeroed above.
-            let transcript_ctx = TranscriptPollContext::new(
-                &ws.folder_path,
-                &cli_kind,
-                generation_started_at,
-                context_limit,
-            );
-            Some((backend.output_rx, epoch, Some(transcript_ctx)))
+            Some((backend.output_rx, epoch, transcript_ctx))
         }
         "chat" => {
             // Resolve the provider from the agent's `provider_id`. The API key
@@ -2087,6 +2144,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn antigravity_preflight_uses_login_shell_and_reports_official_install_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("agy-preflight");
+        let args_path = root.join("args.txt");
+        let shell = root.join("login-shell");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 127\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = require_login_shell_binary(&shell.to_string_lossy(), "agy")
+            .await
+            .expect_err("missing agy must fail before PTY spawn");
+        let message = error.to_string();
+        assert!(message.contains("agy"), "{message}");
+        assert!(
+            message.contains("https://antigravity.google/docs/cli/install/"),
+            "{message}"
+        );
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec!["-l", "-i", "-c", "command -v 'agy' >/dev/null 2>&1"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn spawn_marks_running_and_live() {
         let state = AppState::for_tests().await;
         let id = fixture_instance(&state).await;
@@ -3136,6 +3227,8 @@ mod tests {
     async fn spawn_cli_branch_wires_meter_reset_and_generation_anchor() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _serial = SPAWN_TEST_SERIAL.lock().await;
+
         let state = AppState::for_tests().await;
 
         // The workspace folder is both the child's cwd (must exist) and the key
@@ -3258,6 +3351,107 @@ mod tests {
         crate::engine::agentctx::remove_skill_sidecar(&id);
         let _ = std::fs::remove_dir_all(&ws_folder);
         let _ = std::fs::remove_dir_all(&bin_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn antigravity_spawn_clears_context_and_skips_transcript_anchor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serial = SPAWN_TEST_SERIAL.lock().await;
+        let state = AppState::for_tests().await;
+        let ws_folder = temp_root("agy-spawn-cwd");
+        let bin_dir = temp_root("agy-spawn-bin");
+        let stub_shell = bin_dir.join("stub-login-shell");
+        std::fs::write(&stub_shell, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&stub_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ws = workspace::create(&state.db, "WS", &ws_folder.to_string_lossy(), None)
+            .await
+            .unwrap();
+        workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .unwrap();
+        let def = agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "AGY".into(),
+                agent_type: "cli".into(),
+                cli_kind: Some("antigravity".into()),
+                model: Some("gemini-pro".into()),
+                effort: Some("high".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = workspace_agent::instantiate(&state.db, &ws.id, &def.id)
+            .await
+            .unwrap()
+            .id;
+        let original = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        repo::session::set_context_reading(&state.db, &original.id, 125_000, 999)
+            .await
+            .unwrap();
+
+        SPAWN_TEST_HOOKS.lock().unwrap().shell = Some(stub_shell.to_string_lossy().into_owned());
+        let result = spawn(&state, json!({ "workspaceAgentId": id })).await;
+        SPAWN_TEST_HOOKS.lock().unwrap().shell = None;
+        let out = result.expect("stub login shell should pass preflight and spawn");
+
+        assert!(out.get("contextTokens").is_none(), "{out}");
+        assert!(out.get("contextLimit").is_none(), "{out}");
+        let persisted = repo::session::get(&state.db, &original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (persisted.context_tokens, persisted.context_limit),
+            (None, None)
+        );
+        let folder_key = ws_folder.to_string_lossy();
+        assert!(
+            SPAWN_TEST_HOOKS
+                .lock()
+                .unwrap()
+                .anchors
+                .iter()
+                .all(|(folder, _)| folder != folder_key.as_ref()),
+            "Antigravity must not start a transcript scanner"
+        );
+
+        stop(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .expect("shared stop path");
+        assert_eq!(
+            workspace_agent::get(&state.db, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .availability,
+            "stopped"
+        );
+        SPAWN_TEST_HOOKS.lock().unwrap().shell = Some(stub_shell.to_string_lossy().into_owned());
+        let resumed_result = resume(&state, json!({ "workspaceAgentId": id })).await;
+        SPAWN_TEST_HOOKS.lock().unwrap().shell = None;
+        let resumed = resumed_result.expect("shared resume path");
+        assert!(resumed.get("contextTokens").is_none(), "{resumed}");
+        assert_eq!(
+            workspace_agent::get(&state.db, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .availability,
+            "active"
+        );
+
+        let _ = state.runtime.unregister(&id);
+        crate::engine::agentctx::remove_skill_sidecar(&id);
+        let _ = std::fs::remove_dir_all(ws_folder);
+        let _ = std::fs::remove_dir_all(bin_dir);
     }
 
     #[tokio::test]
