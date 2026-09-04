@@ -30,6 +30,7 @@ import type {
   DraftAgent,
   DraftLevel,
   DraftMode,
+  DraftNewRole,
   DraftResponse,
   Role,
 } from "../ipc";
@@ -58,6 +59,10 @@ type Phase = "idle" | "running" | "error" | "preview" | "applying" | "done";
 /** Sample brief used ONLY in fixture mode, so `pnpm uishot drafter` has
  *  something to render. Fixed literal (fixture rule: no Date.now(), no
  *  randomness). */
+/** Select value standing for "create the role the drafter proposed". Not a
+ *  role id — it never leaves the preview. */
+const NEW_ROLE_OPTION = "__new";
+
 const SAMPLE_BRIEF =
   "Port the billing service from Node to Rust, module by module, with tests for each module and a reviewer who checks the ported behaviour against the old service.";
 
@@ -273,6 +278,11 @@ export function AgentDrafter({
   const [elapsed, setElapsed] = useState(0);
   const [progress, setProgress] = useState<Record<string, { status: ApplyStatus; message?: string }>>({});
   const [applyError, setApplyError] = useState<{ name: string; created: number } | null>(null);
+  /** The role each key was DRAFTED with, kept so switching a row to a
+   *  catalogue role and back restores the proposed custom role instead of
+   *  losing it (ruling 4af30f4a, Arta). Keyed by draft key, set when the
+   *  draft lands and never mutated by editing. */
+  const [draftedNewRoles, setDraftedNewRoles] = useState<Map<string, DraftNewRole>>(new Map());
   const [createdCount, setCreatedCount] = useState(0);
 
   const target = workspaceName ?? "this workspace";
@@ -364,6 +374,13 @@ export function AgentDrafter({
           return;
         }
         setDraft(res);
+        setDraftedNewRoles(
+          new Map(
+            res.agents
+              .filter((a): a is DraftAgent & { newRole: DraftNewRole } => Boolean(a.newRole))
+              .map((a) => [a.key, a.newRole]),
+          ),
+        );
         setPhase("preview");
       } catch (e) {
         const raw = e instanceof Error ? e.message : String(e);
@@ -690,16 +707,37 @@ export function AgentDrafter({
                       )}
                     </div>
 
-                    {reuse || a.newRole ? (
+                    {/* Only a REUSE row is static: it carries no roleId to edit
+                        (spec D4). A newRole row stays a select, with the
+                        proposed role as a synthetic option, so the user can
+                        redirect it to a catalogue role — and back. */}
+                    {reuse ? (
                       <span className="truncate text-[11.5px] text-text-secondary">
                         {roleName(a)}
                       </span>
                     ) : (
                       <Field
                         label={`Role for ${a.key}`}
-                        value={a.roleId ?? ""}
-                        options={roles.map((r) => ({ value: r.id, text: r.name }))}
-                        onChange={(roleId) => patchAgent(a.key, { roleId })}
+                        value={a.newRole ? NEW_ROLE_OPTION : (a.roleId ?? "")}
+                        options={[
+                          ...(draftedNewRoles.has(a.key)
+                            ? [
+                                {
+                                  value: NEW_ROLE_OPTION,
+                                  text: `New: ${draftedNewRoles.get(a.key)!.name}`,
+                                },
+                              ]
+                            : []),
+                          ...roles.map((r) => ({ value: r.id, text: r.name })),
+                        ]}
+                        onChange={(value) =>
+                          value === NEW_ROLE_OPTION
+                            ? patchAgent(a.key, {
+                                newRole: draftedNewRoles.get(a.key),
+                                roleId: undefined,
+                              })
+                            : patchAgent(a.key, { roleId: value, newRole: undefined })
+                        }
                       />
                     )}
 
