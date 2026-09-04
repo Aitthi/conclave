@@ -187,10 +187,11 @@ async fn require_login_shell_binary(shell: &str, binary: &str) -> Result<(), App
     if status.success() {
         return Ok(());
     }
-    Err(AppError::Invalid(format!(
+    Err(AppError::Invalid(
         "Antigravity CLI executable 'agy' was not found in your login-shell PATH. \
          Install it from https://antigravity.google/docs/cli/install/ and restart Conclave."
-    )))
+            .to_string(),
+    ))
 }
 
 #[derive(Debug)]
