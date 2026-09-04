@@ -373,8 +373,8 @@ function ConfirmLifecycleDialog({
   const title = remove
     ? `Remove ${entry?.name ?? "agent"} from ${workspaceName ?? "this workspace"}?`
     : workspaceStop
-      ? `Stop ${workspaceName ?? "workspace"} while an agent is working?`
-      : `Stop ${entry?.name ?? "agent"} while working?`;
+      ? `Stop ${workspaceName ?? "workspace"}?`
+      : `Stop ${entry?.name ?? "agent"}?`;
   const detail = remove
     ? "This removes workspace membership and its attached workspace records. This is separate from stopping the runtime."
     : workspaceStop
@@ -812,9 +812,6 @@ export function Roster({
   // Workspace header: use real name/folderPath; static blue avatar (no fake state).
   const wsLetter = workspaceName ? workspaceName[0].toUpperCase() : "—";
   const workspaceBusy = workspaceLifecyclePhase !== "idle";
-  const anyAgentWorking = entries.some(
-    (entry) => entry.availability === "active" && entry.working,
-  );
 
   const renderAgentRow = (entry: RosterEntry) => (
     <AgentRow
@@ -823,10 +820,7 @@ export function Roster({
       isSelected={selectedId === entry.instanceId}
       onSelect={() => onSelect(entry.instanceId)}
       onRequestRemove={(trigger) => openDialog({ kind: "remove", entry }, trigger)}
-      onRequestStop={(trigger) => {
-        if (entry.working) openDialog({ kind: "agent-stop", entry }, trigger);
-        else void stopAgent(entry);
-      }}
+      onRequestStop={(trigger) => openDialog({ kind: "agent-stop", entry }, trigger)}
       onResume={() => void resumeAgent(entry)}
       lifecycleAvailable={workspaceRunState === "started" && !workspaceBusy}
       lifecycleBusy={lifecycleBusyId === entry.instanceId}
@@ -875,11 +869,7 @@ export function Roster({
             aria-label={`${workspaceRunState === "stopped" ? "Start" : "Stop"} workspace ${workspaceName ?? "workspace"}`}
             onClick={(event) => {
               if (workspaceRunState === "stopped") onStartWorkspace?.();
-              else if (anyAgentWorking) {
-                openDialog({ kind: "workspace-stop" }, event.currentTarget);
-              } else {
-                onStopWorkspace?.();
-              }
+              else openDialog({ kind: "workspace-stop" }, event.currentTarget);
             }}
             className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-overlay/[0.06] px-1.5 text-[10px] font-semibold text-text-secondary transition-colors hover:bg-overlay/[0.1] hover:text-text-primary disabled:cursor-wait disabled:opacity-55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
