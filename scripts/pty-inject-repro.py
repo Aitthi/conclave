@@ -220,11 +220,20 @@ if args.dump:
 files, msgs = (claude_transcript_user_msgs() if args.cli == "claude" else codex_transcript_user_msgs())
 print(f"=== {args.cli} {os.path.basename(args.bin)} mode={args.mode} sizeB={len(body_b)} ===")
 print(f"transcript files: {[os.path.basename(f) for f in files]}")
+# Judge ONLY this run's submission: the sender id is unique per run, and a
+# head-truncated body loses it — so "no message carries our id" is itself the
+# failure signature. Older transcripts in the same cwd are ignored.
+intact = False
 if not msgs:
     print("RESULT: NO user message recorded (nothing submitted)")
 for m in msgs:
     mb = len(m.encode())
     has_head = "HEAD-MARKER" in m
     has_tail = "TAIL-MARKER" in m
-    verdict = "INTACT" if (has_head and has_tail and mb >= len(body_b) - 2) else "TRUNCATED/ALTERED"
-    print(f"RESULT: {verdict} recvB={mb} head={has_head} tail={has_tail} first60={m[:60]!r} last40={m[-40:]!r}")
+    ours = sender_id in m
+    verdict = "INTACT" if (ours and has_head and has_tail and mb >= len(body_b) - 2) else "TRUNCATED/ALTERED"
+    intact = intact or verdict == "INTACT"
+    print(f"RESULT: {verdict} recvB={mb} head={has_head} tail={has_tail} this_run={ours} first60={m[:60]!r} last40={m[-40:]!r}")
+# Exit non-zero unless this run's body arrived whole — so a `conclave task gate`
+# wrapping this script actually goes red on regression (review note, Mellow).
+sys.exit(0 if intact else 1)
