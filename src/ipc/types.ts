@@ -479,3 +479,62 @@ export interface BrowserShot {
   width: number;
   height: number;
 }
+
+// ---------------------------------------------------------------------------
+// AI agent & team drafter (`draft.agents`)
+// Mirrors the Rust wire contract in `src-tauri/src/engine/commands/draft.rs`
+// field-for-field (spec `2026-09-04-ai-agent-team-drafter-design.md`). The
+// engine validates every id against the live catalogue, so an unknown role,
+// skill, model or colour comes back as `AppError::Invalid`, never coerced.
+// ---------------------------------------------------------------------------
+
+export type DraftMode = "agent" | "team";
+export type DraftLevel = "junior" | "mid" | "senior" | "principal";
+
+/** A role the drafter proposes creating (resolved through `role.save`). */
+export interface DraftNewRole {
+  name: string;
+  description: string;
+  skillIds: string[];
+}
+
+export interface DraftAgent {
+  /** Draft-local handle, unique within the draft (e.g. "lead", "impl-1"). */
+  key: string;
+  /** Reuse this definition instead of creating one; then no other field but
+   *  `key` and `rationale` is set. */
+  existingAgentDefId?: string;
+  name?: string;
+  color?: string;
+  cliKind?: "claude-code" | "codex";
+  model?: string;
+  /** An existing role id; mutually exclusive with `newRole`. */
+  roleId?: string;
+  newRole?: DraftNewRole;
+  /** Optional skills on top of the role's defaults; mandatory ones are never
+   *  listed (the engine attaches them). */
+  skillIds: string[];
+  defaultLevel?: DraftLevel;
+  /** One sentence shown in the preview. */
+  rationale: string;
+}
+
+export interface DraftPosition {
+  key: string;
+  level: DraftLevel;
+  supervisorKey?: string | null;
+}
+
+/** Which definition produced the draft — shown while waiting and in the chip. */
+export interface DrafterInfo {
+  defId: string;
+  cliKind: string;
+  model: string;
+}
+
+export interface DraftResponse {
+  agents: DraftAgent[];
+  positions: DraftPosition[];
+  notes: string;
+  drafter: DrafterInfo;
+}

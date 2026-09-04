@@ -39,6 +39,13 @@ export type {
   BrowserSnapshotButton,
   BrowserBounds,
   BrowserShot,
+  DraftMode,
+  DraftLevel,
+  DraftNewRole,
+  DraftAgent,
+  DraftPosition,
+  DrafterInfo,
+  DraftResponse,
 } from "./types";
 
 export type { Commands } from "./commands";

@@ -19,6 +19,7 @@ import type {
   Role,
   Skill,
   Provider,
+  DraftResponse,
 } from "../../ipc/types";
 
 export const WS_ID = "fx-ws-codeup";
@@ -700,3 +701,55 @@ export const providers: Provider[] = [
     status: "connected",
   },
 ];
+
+// ── AI draft (draft.agents) ─────────────────────────────────────────────────
+// A fixed literal team so `pnpm uishot drafter` renders the preview: one new
+// agent on a catalogue role, one on a proposed `newRole`, one reusing an
+// existing definition. Every id below resolves against `agentDefs`, `roles`
+// and `skills` above — the same rule the Rust validator enforces on a real
+// draft.
+export const draftTeam: DraftResponse = {
+  drafter: { defId: agentDefs[0].id, cliKind: "claude-code", model: "claude-sonnet-5" },
+  notes:
+    "Assumed the port keeps the public HTTP contract; added a reviewer because the brief asks for tests.",
+  agents: [
+    {
+      key: "lead",
+      name: "Nova",
+      color: "#5e5ce6",
+      cliKind: "claude-code",
+      model: "claude-opus-4-8",
+      roleId: "lead",
+      skillIds: ["leadership"],
+      defaultLevel: "principal",
+      rationale: "One lead settles decisions and integrates.",
+    },
+    {
+      key: "impl-rust",
+      name: "Ferro",
+      color: "#ff9f0a",
+      cliKind: "claude-code",
+      model: "claude-sonnet-5",
+      newRole: {
+        name: "Rust Porter",
+        description:
+          "You port Node services to idiomatic Rust, module by module, keeping behaviour identical and covering each module with tests before moving on.",
+        skillIds: ["implementer"],
+      },
+      skillIds: ["implementer"],
+      defaultLevel: "senior",
+      rationale: "The brief needs a Rust specialist; no catalogue role fits.",
+    },
+    {
+      key: "reviewer",
+      existingAgentDefId: agentDefs[1].id,
+      skillIds: [],
+      rationale: "Reuse the existing reviewer definition.",
+    },
+  ],
+  positions: [
+    { key: "lead", level: "principal", supervisorKey: null },
+    { key: "impl-rust", level: "senior", supervisorKey: "lead" },
+    { key: "reviewer", level: "senior", supervisorKey: "lead" },
+  ],
+};
