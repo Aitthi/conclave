@@ -89,6 +89,13 @@ function saveRequest(agent: DraftAgent, roleId: string, roleName: string | undef
     shareBlackboard: true,
     autoSubmitInjected: true,
     allowedSenders: "all" as const,
+    // Every hand-built claude-code/codex definition stores "auto"
+    // (Builder.tsx:201-203 seeds it, :456 always sends it for a CLI kind), and
+    // commands/agent.rs:203 has NO default — an absent value writes NULL and
+    // instance.rs:760/:808 then omit --permission-mode / --ask-for-approval
+    // entirely, so a drafted agent would stall on approval prompts an
+    // identical hand-built one never sees. Spec D10: keep Builder defaults.
+    permissionMode: "auto" as const,
     // contextWindow is omitted on purpose: absent behaves exactly like the
     // Builder's "200k" default (only "1m" changes the launch, see
     // `effective_claude_model` in commands/instance.rs:54), and Codex derives
@@ -103,23 +110,43 @@ function saveRequest(agent: DraftAgent, roleId: string, roleName: string | undef
  * workspace, then set its level and supervisor. Progress is reported per key
  * as each step lands. Returns the number of definitions created, plus the
  * failing key and its error when a step throws.
+ *
+ * SINGLE-SHOT (Detoro ruling on Mellow's M1): `role.save` and `agentDef.save`
+ * are called without an id, so a second run over the same draft creates a
+ * SECOND custom role and a SECOND definition for every key already processed —
+ * the roster-reuse check keys on the new defId and never matches. Spec D6
+ * promises only that a partial apply keeps what it made; it never promises a
+ * safe retry. The caller therefore offers Done/Close after a run, never
+ * "Apply again". Never rejects: a prologue failure comes back as
+ * `{ created: 0, error }` like any other.
  */
 export async function applyTeamDraft(
   draft: DraftResponse,
   workspaceId: string,
   onProgress: (p: ApplyProgress) => void,
 ): Promise<ApplyResult> {
-  const order = topoOrder(draft.positions);
   const agentByKey = new Map(draft.agents.map((a) => [a.key, a]));
   const positionByKey = new Map(draft.positions.map((p) => [p.key, p]));
   // Draft key -> the workspace_agent id it ended up as; supervisors resolve
   // through this map, which is why the order is supervisor-first.
   const keyToWsAgent = new Map<string, string>();
 
-  let roster: WorkspaceAgent[] = await ipc.instance.list({ workspaceId });
-  const roles = await ipc.role.list();
-  const roleNameById = new Map(roles.map((r) => [r.id, r.name]));
-  const roleSkillIdsById = new Map(roles.map((r) => [r.id, r.skillIds ?? []]));
+  // The prologue is inside the contract: topoOrder throws on a cycle and both
+  // list calls can fail, and this function promises an ApplyResult, never a
+  // rejection the caller has to catch separately.
+  let order: string[];
+  let roster: WorkspaceAgent[];
+  let roleNameById: Map<string, string>;
+  let roleSkillIdsById: Map<string, string[]>;
+  try {
+    order = topoOrder(draft.positions);
+    roster = await ipc.instance.list({ workspaceId });
+    const roles = await ipc.role.list();
+    roleNameById = new Map(roles.map((r) => [r.id, r.name]));
+    roleSkillIdsById = new Map(roles.map((r) => [r.id, r.skillIds ?? []]));
+  } catch (err) {
+    return { created: 0, error: err instanceof Error ? err.message : String(err) };
+  }
 
   let created = 0;
   for (const key of order) {
@@ -163,12 +190,19 @@ export async function applyTeamDraft(
         workspaceAgentId = existingRow.id;
         onProgress({ key, status: "skipped", message: "already in this workspace" });
       } else {
-        await ipc.agentDef.addToWorkspace({ agentDefId: defId, workspaceIds: [workspaceId] });
-        const before = new Set(roster.map((r) => r.id));
-        roster = await ipc.instance.list({ workspaceId });
-        const added = roster.find((r) => r.agentDefId === defId && !before.has(r.id));
-        if (!added) throw new Error(`could not find the new roster row for ${agent.name ?? key}`);
+        // `add_to_workspace` returns the created-or-found row per workspaceId
+        // (commands/agent.rs:437-454; repo::workspace_agent::instantiate is
+        // find-or-create), so rows[0] IS the workspace agent — no re-list, and
+        // no spurious failure when an idempotent re-add returns an existing
+        // row that a stale snapshot already contained.
+        const rows = await ipc.agentDef.addToWorkspace({
+          agentDefId: defId,
+          workspaceIds: [workspaceId],
+        });
+        const added = rows[0];
+        if (!added) throw new Error(`could not add ${agent.name ?? key} to the workspace`);
         workspaceAgentId = added.id;
+        roster = [...roster, added];
         onProgress({ key, status: "added" });
       }
 
@@ -189,6 +223,25 @@ export async function applyTeamDraft(
       onProgress({ key, status: "failed", message });
       return { created, failedKey: key, error: message };
     }
+  }
+
+  // An agent whose key never reached the topological order has no position —
+  // impossible for an engine-validated draft, but the preview lets the user
+  // edit levels and supervisors, so a UI bug must surface instead of silently
+  // dropping an agent.
+  const ordered = new Set(order);
+  for (const agent of draft.agents) {
+    if (ordered.has(agent.key)) continue;
+    onProgress({
+      key: agent.key,
+      status: "failed",
+      message: "no reporting line was set for this agent, so it was not created",
+    });
+    return {
+      created,
+      failedKey: agent.key,
+      error: `draft.positions: no position for ${agent.name ?? agent.key}`,
+    };
   }
 
   return { created };
