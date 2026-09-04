@@ -348,7 +348,7 @@ pub fn validate_draft(
     }
 
     for (i, a) in draft.agents.iter().enumerate() {
-        validate_agent(i, a, cat)?;
+        validate_agent(i, a, &draft.agents[..i], cat)?;
     }
 
     if mode == DraftMode::Team {
@@ -357,11 +357,29 @@ pub fn validate_draft(
     Ok(())
 }
 
-fn validate_agent(i: usize, a: &DraftAgent, cat: &Catalogue) -> Result<(), String> {
+fn validate_agent(
+    i: usize,
+    a: &DraftAgent,
+    earlier: &[DraftAgent],
+    cat: &Catalogue,
+) -> Result<(), String> {
     if let Some(def_id) = a.existing_agent_def_id.as_deref() {
         if !cat.existing.iter().any(|d| d.id == def_id) {
             return Err(format!(
                 "draft.agents[{i}].existingAgentDefId: no agent definition '{def_id}'"
+            ));
+        }
+        // One definition, one roster row: two keys reusing the same definition
+        // collapse onto a single `workspace_agent`, and the second
+        // `instance.setPosition` of the apply orchestration silently overwrites
+        // the first (plan amendment c5f6ec3, from Mellow's frontend review).
+        if let Some(dup) = earlier
+            .iter()
+            .find(|b| b.existing_agent_def_id.as_deref() == Some(def_id))
+        {
+            return Err(format!(
+                "draft.agents[{i}].existingAgentDefId: already used by {}",
+                dup.key
             ));
         }
         // Reuse means reuse: any other field would silently be dropped by the
@@ -876,6 +894,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn existing_def_reuse_must_be_unique_across_the_draft() {
+        let c = cat();
+        let reuse = |key: &str| DraftAgent {
+            key: key.into(),
+            existing_agent_def_id: Some("def-existing".into()),
+            name: None,
+            color: None,
+            cli_kind: None,
+            model: None,
+            role_id: None,
+            new_role: None,
+            skill_ids: vec![],
+            default_level: None,
+            rationale: "r".into(),
+        };
+        let twice = resp(
+            vec![reuse("a"), reuse("b")],
+            vec![pos("a", None), pos("b", Some("a"))],
+        );
+        let err = validate_draft(&twice, DraftMode::Team, &c).unwrap_err();
+        assert!(err.contains("existingAgentDefId"), "got {err}");
+        assert!(err.contains("already used by a"), "got {err}");
+
+        // One reuse plus a fresh agent is still fine.
+        let once = resp(
+            vec![reuse("a"), agent("b")],
+            vec![pos("a", None), pos("b", Some("a"))],
+        );
+        assert!(validate_draft(&once, DraftMode::Team, &c).is_ok());
+    }
+
+    #[test]
     fn new_agent_needs_name_cli_kind_model_and_a_role() {
         let c = cat();
         let mut a = agent("a");
@@ -1066,5 +1116,66 @@ pub(crate) mod tests {
             "mandatory skills must not be offered"
         );
         assert!(cat.roster.is_empty(), "no workspace -> no roster");
+    }
+    /// The REAL answer Claude Code 2.1.260 gave the shipped prompt in the Task
+    /// A5 probe (`claude -p --output-format json --json-schema … --model
+    /// claude-sonnet-5`, envelope at /tmp/draft-probe/claude.out, recorded as a
+    /// task gate). Prose fields are shortened; every id-bearing field is
+    /// verbatim. This is the regression guard that the prompt and the validator
+    /// agree — if a future prompt edit makes a real model answer fail
+    /// validation, the fix belongs in the prompt, not the validator.
+    #[test]
+    fn recorded_claude_envelope_parses_and_validates() {
+        let envelope = json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": {
+                "agents": [
+                    {"key": "lead", "name": "Elena", "cliKind": "claude-code",
+                     "model": "claude-opus-5", "color": "#5e5ce6", "roleId": "lead",
+                     "defaultLevel": "principal", "rationale": "r"},
+                    {"key": "dew", "existingAgentDefId": "def-existing", "rationale": "r"},
+                    {"key": "reviewer", "name": "Priya", "cliKind": "claude-code",
+                     "model": "claude-sonnet-5", "color": "#0a84ff", "defaultLevel": "senior",
+                     "newRole": {"name": "Reviewer", "description": "d", "skillIds": []},
+                     "rationale": "r"}
+                ],
+                "positions": [
+                    {"key": "lead", "level": "principal"},
+                    {"key": "dew", "level": "senior", "supervisorKey": "lead"},
+                    {"key": "reviewer", "level": "senior", "supervisorKey": "lead"}
+                ],
+                "notes": "n"
+            },
+            "result": "…"
+        });
+
+        let structured =
+            crate::engine::runtime::cli_oneshot::claude_structured_result(&envelope).unwrap();
+        let mut draft: DraftResponse = serde_json::from_value(json!({
+            "agents": structured["agents"],
+            "positions": structured["positions"],
+            "notes": structured["notes"],
+            "drafter": {"defId": "d", "cliKind": "claude-code", "model": "claude-sonnet-5"}
+        }))
+        .expect("the recorded structured_output deserializes into the wire types");
+
+        validate_draft(&draft, DraftMode::Team, &cat()).expect("the real draft validates");
+
+        // The shape the house rules ask for: exactly one top-level lead.
+        assert_eq!(
+            draft
+                .positions
+                .iter()
+                .filter(|p| p.supervisor_key.is_none())
+                .count(),
+            1
+        );
+        // …and the validator is not vacuous on it.
+        draft.agents[0].model = Some("gpt-5.5".into());
+        assert!(validate_draft(&draft, DraftMode::Team, &cat())
+            .unwrap_err()
+            .contains("model"));
     }
 }
