@@ -15,6 +15,7 @@ owner: 30fa04f4-e047-4241-a9ed-f452529952be (Detoro, lead) · authority: in-loop
 ## Global Constraints
 
 - No DB migration. No new bus event. No new write command — team apply is frontend orchestration over existing commands (spec D6).
+- `tempfile` is a normal `[dependencies]` entry as of main 6192ed8 (it was dev-only; found by Dew, challenge df8ae20b). Lane A merges main into its worktree before Task A2 — no lane edits `src-tauri/Cargo.toml`.
 - Rust tests never spawn a real `claude`/`codex` (spec D7); the only real run is the recorded manual gate in Task A5.
 - Rust gates per task, run in `src-tauri`: `cargo test -p conclave` (or the crate name in `src-tauri/Cargo.toml` `[package] name`), `cargo clippy --all-targets -- -D warnings`, and `rustfmt --check <your files>` ONLY (never bare `cargo fmt` — main has 17 files of fmt drift, bb `warning:fmt-drift-main`).
 - Frontend gates: `pnpm exec tsc --noEmit`, `pnpm build`, `pnpm uishot <view>` with the PNG opened and inspected (CLAUDE.md UI Pixel Gate). A fresh lane worktree needs `pnpm install` once.
@@ -1041,7 +1042,7 @@ Use ids that exist in `agentDefs` / `roles` / `skills` of `data.ts` (check `role
 - Create: `src/lib/applyTeamDraft.ts`
 
 **Interfaces:**
-- Consumes: `ipc.role.save`, `ipc.agentDef.save` (request shape: copy the object literal from `Builder.tsx` `handleSave` ~:453 and fill: `id: undefined, name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "own"`, everything else omitted), `ipc.agentDef.addToWorkspace({ agentDefId, workspaceIds: [workspaceId] })`, `ipc.instance.list({ workspaceId })`, `ipc.instance.setPosition`.
+- Consumes: `ipc.role.save`, `ipc.agentDef.save` (request shape: copy the object literal from `Builder.tsx` `handleSave` ~:453 and fill: `id: undefined, name, role: <role display name>, roleId, type: "cli", cliKind, model, color, skillIds, defaultLevel` PLUS Builder's fixed constants verbatim: `harnessMode: "central", shareBlackboard: true, autoSubmitInjected: true, allowedSenders: "all"` (Builder.tsx:466-472 — found by Tiësto, challenge 27c3493c; spec D10 = Builder defaults, and Builder's default is central), everything else omitted), `ipc.agentDef.addToWorkspace({ agentDefId, workspaceIds: [workspaceId] })`, `ipc.instance.list({ workspaceId })`, `ipc.instance.setPosition`.
 - Produces:
 
 ```ts
@@ -1074,7 +1075,7 @@ export async function applyTeamDraft(
 
 **Interfaces:**
 - `AgentDrafterProps { mode: DraftMode; workspaceId?: string; workspaceName?: string; onClose: () => void; onDraftAgent: (def: AgentDefinition, draftedBy: string) => void; onTeamApplied: () => void; onOpenBuilder: () => void }`
-- `export function draftToInitialDef(a: DraftAgent, roleName?: string): AgentDefinition` — id-less object: `{ id: "", name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "own", createdAt: "" }` (when `newRole` is present the Builder cannot show it, so agent mode first calls `ipc.role.save` for the new role and passes its id; when `existingAgentDefId` is present, pass that def fetched via `agentDef.list`).
+- `export function draftToInitialDef(a: DraftAgent, roleName?: string): AgentDefinition` — id-less object: `{ id: "", name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "central", createdAt: "" }` (Builder re-sends its own constants on save, so only `harnessMode` needs a value here) (when `newRole` is present the Builder cannot show it, so agent mode first calls `ipc.role.save` for the new role and passes its id; when `existingAgentDefId` is present, pass that def fetched via `agentDef.list`).
 - AppShell: `const [showDrafter, setShowDrafter] = useState<{ mode: DraftMode } | null>(null); const [draftSeq, setDraftSeq] = useState(0); const [builderDraftedBy, setBuilderDraftedBy] = useState<string | undefined>()`; view map adds `drafter: () => setShowDrafter({ mode: "team" })`; Builder `key={builderInitialDef?.id || \`draft-${draftSeq}\`}` and `draftedBy={builderDraftedBy}`; `onDraftAgent={(def, by) => { setBuilderInitialDef(def); setBuilderDraftedBy(by); setDraftSeq(s => s + 1); setShowDrafter(null); setShowBuilder(true); }}`; `onTeamApplied={() => { setShowDrafter(null); setLibraryRefreshKey(k => k + 1); setAgentsVersion(v => v + 1); }}`.
 - Library: new prop `onOpenDrafter: () => void`, button beside "New agent". Roster: new prop `onBuildTeam?: () => void`, button beside "Add agent" (disabled when `workspaceId === null`).
 
