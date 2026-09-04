@@ -173,6 +173,18 @@ impl TabRegistry {
         }
     }
 
+    /// Clear the ended marker when the same agent identity starts a fresh
+    /// runtime generation. A no-op for human tabs and unknown ids.
+    pub fn mark_resumed(&mut self, agent_id: &str) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.tab_id == agent_id && t.owner.kind == OwnerKind::Agent)
+        {
+            tab.ended = false;
+        }
+    }
+
     /// Record that a tab finished loading: clears `loading` and stores the page
     /// title. A no-op for an unknown id.
     pub fn set_loaded(&mut self, tab_id: &str, title: Option<String>) {
@@ -245,6 +257,22 @@ mod tests {
                 .unwrap()
                 .ended
         );
+    }
+
+    #[test]
+    fn mark_resumed_clears_ended_for_agent_only() {
+        let mut r = TabRegistry::new();
+        let owner = BrowserOwner {
+            kind: OwnerKind::Agent,
+            id: "agentA".into(),
+            label: "G".into(),
+        };
+        r.upsert("agentA".into(), owner, None);
+        r.mark_ended("agentA");
+        r.mark_resumed("agentA");
+        assert!(!r.state().tabs[0].ended);
+        r.mark_resumed("unknown");
+        assert_eq!(r.state().tabs.len(), 1);
     }
 
     #[test]

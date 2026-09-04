@@ -306,6 +306,15 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
     }
 
+    if version < 27 {
+        sqlx::raw_sql(include_str!("migrations/0027_workspace_lifecycle.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 27;")
+            .execute(&mut *tx)
+            .await?;
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -337,6 +346,181 @@ pub(crate) async fn connect_in_memory() -> SqlitePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn connect_at_v26() -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("invalid in-memory connection string")
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("open v26 pool");
+        let mut tx = pool.begin().await.expect("begin v26 setup");
+        for sql in [
+            include_str!("migrations/0001_init.sql"),
+            include_str!("migrations/0002_seed_core_tools.sql"),
+            include_str!("migrations/0003_agent_cli_config.sql"),
+            include_str!("migrations/0004_skill_system.sql"),
+            include_str!("migrations/0005_drop_skill_kind.sql"),
+            include_str!("migrations/0006_selected_builtin_skills.sql"),
+            include_str!("migrations/0007_workspace_hidden.sql"),
+            include_str!("migrations/0008_role_system.sql"),
+            include_str!("migrations/0009_memory_system.sql"),
+            include_str!("migrations/0010_memory_search_index.sql"),
+            include_str!("migrations/0011_seed_memory_tool.sql"),
+            include_str!("migrations/0012_task_system.sql"),
+            include_str!("migrations/0013_memory_proposal.sql"),
+            include_str!("migrations/0014_artifact_workspace.sql"),
+            include_str!("migrations/0015_position_system.sql"),
+            include_str!("migrations/0016_agent_default_level.sql"),
+            include_str!("migrations/0017_agent_rtk_enabled.sql"),
+            include_str!("migrations/0018_task_event_plan_check.sql"),
+            include_str!("migrations/0019_proxy_metric.sql"),
+            include_str!("migrations/0020_agent_proxy_enabled.sql"),
+            include_str!("migrations/0021_proxy_checkpoint_metric.sql"),
+            include_str!("migrations/0022_proxy_checkpoint_outcome.sql"),
+            include_str!("migrations/0023_proxy_checkpoint_error_snippet.sql"),
+            include_str!("migrations/0024_proxy_summary_metric.sql"),
+            include_str!("migrations/0025_proxy_quality_metric.sql"),
+            include_str!("migrations/0026_proxy_summary_stop_reason.sql"),
+        ] {
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .expect("apply pre-0027 migration");
+        }
+        sqlx::raw_sql("PRAGMA user_version = 26;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 26");
+        tx.commit().await.expect("commit v26 setup");
+        pool
+    }
+
+    #[tokio::test]
+    async fn migrate_0027_preserves_populated_lifecycle_relations() {
+        let pool = connect_at_v26().await;
+        sqlx::query(
+            "INSERT INTO workspace (id,name,folder_path,hidden,created_at) \
+             VALUES ('ws','WS','/tmp/ws',0,'2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for id in ["root", "child"] {
+            sqlx::query(
+                "INSERT INTO agent_definition (id,name,type,harness_mode,created_at) \
+                 VALUES (?1,?1,'orchestrator','own','2020-01-01')",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO workspace_agent \
+             (id,workspace_id,agent_def_id,status,added_at,supervisor_agent_id) VALUES \
+             ('wa-root','ws','root','running','2020-01-01',NULL), \
+             ('wa-child','ws','child','waiting','2020-01-02','wa-root')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session (id,workspace_agent_id,started_at) \
+             VALUES ('s-root','wa-root','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO message (id,session_id,role,text,created_at) \
+             VALUES ('m1','s-root','agent','history','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshot (id,session_id,type,summary,created_at) \
+             VALUES ('snap','s-root','handoff','durable','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,created_at) \
+             VALUES ('im','wa-root','wa-child','hello','queued','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task \
+             (id,workspace_id,slug,title,owner_agent_id,created_at,updated_at) \
+             VALUES ('t','ws','task','Task','wa-root','2020-01-01','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.expect("0027 migration");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 27);
+        let workspace: (String, String) =
+            sqlx::query_as("SELECT id,run_state FROM workspace WHERE id='ws'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(workspace, ("ws".into(), "stopped".into()));
+        let agents: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id,status,availability,supervisor_agent_id \
+             FROM workspace_agent ORDER BY added_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].1, "idle");
+        assert_eq!(agents[1].1, "idle");
+        assert_eq!(agents[0].2, "active");
+        assert_eq!(agents[1].3.as_deref(), Some("wa-root"));
+        let preserved: i64 = sqlx::query_scalar(
+            "SELECT \
+             (SELECT COUNT(*) FROM session WHERE id='s-root') + \
+             (SELECT COUNT(*) FROM message WHERE id='m1') + \
+             (SELECT COUNT(*) FROM snapshot WHERE id='snap') + \
+             (SELECT COUNT(*) FROM inter_agent_message WHERE id='im') + \
+             (SELECT COUNT(*) FROM task WHERE id='t')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(preserved, 5, "all durable relations survived");
+        assert!(
+            sqlx::query("UPDATE workspace SET run_state='broken' WHERE id='ws'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("UPDATE workspace_agent SET availability='broken' WHERE id='wa-root'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        let violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(violations.is_empty(), "dangling FKs: {violations:?}");
+    }
 
     /// Build an in-memory DB at schema **v13** — the state just before 0014 —
     /// by applying the migration chain 0001..0013 exactly as [`migrate`] would
@@ -390,17 +574,21 @@ mod tests {
     /// shape and could not catch a lossy rebuild (Armin, challenge 2a190c1a).
     #[tokio::test]
     async fn migrate_0014_preserves_legacy_artifact_rows() {
-        use crate::engine::repo::workspace;
-
         let pool = connect_at_v13().await;
 
         // Build a real message to own the legacy artifact (message_id was NOT
         // NULL pre-0014). Seed the pre-0014 schema directly: modern repo
         // helpers now assume later additive columns like
         // `agent_definition.default_level`, which do not exist at v13.
-        let ws = workspace::create(&pool, "WS", "/tmp/ws", None)
-            .await
-            .expect("create workspace");
+        let ws_id = "ws-v13";
+        sqlx::query(
+            "INSERT INTO workspace (id,name,folder_path,color,hidden,created_at) \
+             VALUES (?1,'WS','/tmp/ws',NULL,0,'2020-01-01T00:00:00+00:00')",
+        )
+        .bind(ws_id)
+        .execute(&pool)
+        .await
+        .expect("seed v13 workspace");
         let def_id = "def-v13";
         sqlx::query(
             "INSERT INTO agent_definition (id, name, type, model, harness_mode, created_at) \
@@ -416,7 +604,7 @@ mod tests {
              VALUES (?1, ?2, ?3, 'idle', '2020-01-01T00:00:00+00:00')",
         )
         .bind(wa_id)
-        .bind(&ws.id)
+        .bind(ws_id)
         .bind(def_id)
         .execute(&pool)
         .await
@@ -462,7 +650,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 26, "migrate() from v13 must reach schema v26");
+        assert_eq!(version, 27, "migrate() from v13 must reach schema v27");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -713,7 +901,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 26, "user_version should be 26");
+        assert_eq!(version, 27, "user_version should be 27");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -916,7 +1104,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -1007,7 +1195,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1117,7 +1305,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped

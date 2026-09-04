@@ -66,7 +66,11 @@ Usage: conclave <subcommand> [args...]
 Subcommands:
   ws list
   ws use <workspaceId>
+  ws start <workspaceId>
+  ws stop <workspaceId>
   agent list <workspaceId>
+  agent stop <workspaceAgentId>
+  agent resume <workspaceAgentId>
   send <sessionId> <text...>
   tell <agentId> <text...>          (agent→agent; inside a spawned agent)
   msg list [--limit N]              (read YOUR own inter-agent inbox+outbox, newest-first; inside a spawned agent)

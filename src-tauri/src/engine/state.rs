@@ -8,7 +8,7 @@
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -64,6 +64,13 @@ pub struct AppState {
     /// Keyed by instance id → arm time, with consume-once + TTL discipline so
     /// a stale arm cannot hijack a later unrelated save.
     restart_pending: Mutex<HashMap<String, Instant>>,
+
+    /// Keyed async lifecycle locks. Workspace operations take WRITE; an
+    /// operation targeting one agent takes the workspace READ guard and then
+    /// that agent's mutex. The map mutexes are held only long enough to clone
+    /// an `Arc`, never across `.await`.
+    workspace_lifecycle_locks: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    agent_lifecycle_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AppState {
@@ -87,6 +94,8 @@ impl AppState {
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
             restart_pending: Mutex::new(HashMap::new()),
+            workspace_lifecycle_locks: Mutex::new(HashMap::new()),
+            agent_lifecycle_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -152,6 +161,37 @@ impl AppState {
         false
     }
 
+    /// Disarm a pending restart without consuming it as a trigger.
+    pub fn clear_restart_pending(&self, instance_id: &str) {
+        if let Ok(mut pending) = self.restart_pending.lock() {
+            pending.remove(instance_id);
+        }
+    }
+
+    pub fn workspace_lifecycle_lock(&self, workspace_id: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut locks = self
+            .workspace_lifecycle_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            locks
+                .entry(workspace_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(()))),
+        )
+    }
+
+    pub fn agent_lifecycle_lock(&self, instance_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .agent_lifecycle_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            locks
+                .entry(instance_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
     /// The TTL a restart arm stays valid for. Exposed so a self-triggered
     /// restart's returned instruction (ADR 0006) can surface the SAME
     /// deadline `take_restart_pending` actually holds it to, rather than a
@@ -181,6 +221,8 @@ impl AppState {
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
             restart_pending: Mutex::new(HashMap::new()),
+            workspace_lifecycle_locks: Mutex::new(HashMap::new()),
+            agent_lifecycle_locks: Mutex::new(HashMap::new()),
         }
     }
 }

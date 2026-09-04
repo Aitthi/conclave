@@ -51,6 +51,7 @@ pub struct WorkspaceRow {
     /// field and nothing outside this module needs to know a row is hidden.
     #[serde(skip)]
     pub hidden: bool,
+    pub run_state: String,
     pub created_at: String, // serializes to "createdAt"
 }
 
@@ -62,7 +63,15 @@ pub struct WorkspaceRow {
 /// [`WorkspaceRow::hidden`]) are excluded.
 pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
     let rows = QueryBuilder::<Sqlite>::table("workspace")
-        .select(["id", "name", "folder_path", "color", "hidden", "created_at"])
+        .select([
+            "id",
+            "name",
+            "folder_path",
+            "color",
+            "hidden",
+            "run_state",
+            "created_at",
+        ])
         .order_by("created_at", Order::Asc)
         .order_by("id", Order::Asc)
         .fetch_all::<WorkspaceRow, _>(pool)
@@ -78,7 +87,15 @@ pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
 /// Fetch a single workspace by `id`, or `None` if it does not exist.
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<WorkspaceRow>> {
     QueryBuilder::<Sqlite>::table("workspace")
-        .select(["id", "name", "folder_path", "color", "hidden", "created_at"])
+        .select([
+            "id",
+            "name",
+            "folder_path",
+            "color",
+            "hidden",
+            "run_state",
+            "created_at",
+        ])
         .where_eq("id", id)
         .fetch_optional::<WorkspaceRow, _>(pool)
         .await
@@ -101,7 +118,7 @@ pub async fn create(
     folder_path: &str,
     color: Option<&str>,
 ) -> sqlx::Result<WorkspaceRow> {
-    insert_row(pool, name, folder_path, color, false).await
+    insert_row(pool, name, folder_path, color, false, "stopped").await
 }
 
 /// Create a HIDDEN, single-purpose workspace — used only to back an
@@ -117,7 +134,7 @@ pub async fn create_hidden(
     name: &str,
     folder_path: &str,
 ) -> sqlx::Result<WorkspaceRow> {
-    insert_row(pool, name, folder_path, None, true).await
+    insert_row(pool, name, folder_path, None, true, "started").await
 }
 
 async fn insert_row(
@@ -126,6 +143,7 @@ async fn insert_row(
     folder_path: &str,
     color: Option<&str>,
     hidden: bool,
+    run_state: &str,
 ) -> sqlx::Result<WorkspaceRow> {
     // Allocate each owned value once, then clone into the bind array — avoids a
     // second allocation per field when constructing the returned row.
@@ -134,6 +152,7 @@ async fn insert_row(
     let name = name.to_owned();
     let folder_path = folder_path.to_owned();
     let color = color.map(str::to_owned);
+    let run_state = run_state.to_owned();
 
     QueryBuilder::<Sqlite>::table("workspace")
         .insert([
@@ -143,6 +162,7 @@ async fn insert_row(
             // Option<String> → Value::Text(s) | Value::Null (no raw sqlx needed)
             ("color", color.clone().map(Bind::Text).unwrap_or(Bind::Null)),
             ("hidden", Bind::Bool(hidden)),
+            ("run_state", Bind::Text(run_state.clone())),
             ("created_at", Bind::Text(created_at.clone())),
         ])
         .execute(pool)
@@ -155,8 +175,25 @@ async fn insert_row(
         folder_path,
         color,
         hidden,
+        run_state,
         created_at,
     })
+}
+
+/// Persist the workspace runtime gate. The database CHECK is the final guard
+/// against values outside `started | stopped`.
+pub async fn set_run_state(
+    pool: &SqlitePool,
+    id: &str,
+    run_state: &str,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    QueryBuilder::<Sqlite>::table("workspace")
+        .update([("run_state", Bind::Text(run_state.to_owned()))])
+        .where_eq("id", id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    get(pool, id).await
 }
 
 /// Update a workspace's mutable fields (`name`, `color`) and return the updated
@@ -225,6 +262,7 @@ mod tests {
         assert_eq!(row.name, "My Workspace");
         assert_eq!(row.folder_path, "/tmp/my-ws");
         assert_eq!(row.color.as_deref(), Some("#ff0000"));
+        assert_eq!(row.run_state, "stopped");
         assert!(!row.id.is_empty());
         assert!(!row.created_at.is_empty());
 
@@ -375,6 +413,7 @@ mod tests {
             .expect("create_hidden failed");
         assert!(hidden.hidden);
         assert!(hidden.color.is_none());
+        assert_eq!(hidden.run_state, "started");
 
         let listed = list(&pool).await.expect("list failed");
         assert_eq!(listed.len(), 1, "only the visible workspace must be listed");

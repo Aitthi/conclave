@@ -567,6 +567,64 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let id = req.workspace_agent_id;
 
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&id);
+    let _agent_guard = agent_lock.lock().await;
+
+    let result = spawn_locked(state, &id, LaunchMode::Normal).await?;
+    runtime::browser::mark_resumed(&id);
+    Ok(result)
+}
+
+#[derive(Clone, Copy)]
+enum LaunchMode {
+    Normal,
+    Resume,
+}
+
+async fn require_launch_eligible(
+    state: &AppState,
+    id: &str,
+    mode: LaunchMode,
+) -> Result<repo::workspace_agent::RuntimeEligibility, AppError> {
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    if eligibility.run_state != "started" {
+        return Err(AppError::Invalid(format!(
+            "workspace {} is stopped — start it first",
+            eligibility.workspace_id
+        )));
+    }
+    if matches!(mode, LaunchMode::Normal) && eligibility.availability != "active" {
+        return Err(AppError::Invalid(format!(
+            "workspace_agent id={id} is stopped — resume it first"
+        )));
+    }
+    Ok(eligibility)
+}
+
+/// Launch while the caller already holds the workspace lifecycle guard and
+/// per-agent lock. Workspace batch operations use this to avoid recursively
+/// acquiring the workspace WRITE lock they already own.
+pub(crate) async fn spawn_under_workspace_write(
+    state: &AppState,
+    id: &str,
+) -> Result<Value, AppError> {
+    let result = spawn_locked(state, id, LaunchMode::Normal).await?;
+    runtime::browser::mark_resumed(id);
+    Ok(result)
+}
+
+async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Value, AppError> {
+    let id = id.to_owned();
+
+    require_launch_eligible(state, &id, mode).await?;
+
     if !repo::workspace_agent::exists(&state.db, &id).await? {
         return Err(AppError::NotFound(format!(
             "workspace_agent id={id} not found"
@@ -926,6 +984,11 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
             )
             .map_err(|e| AppError::Internal(format!("spawn {shell} -c {launch}: {e}")))?;
 
+            // Registration is the publication point for this generation.
+            // Re-read persistent eligibility immediately beforehand so a
+            // detached tail can never revive a stopped workspace/agent.
+            require_launch_eligible(state, &id, mode).await?;
+
             // Register; if we lost a race with a concurrent spawn, the handle is
             // dropped (its shutdown closure tears down the just-spawned child)
             // and we return the existing session without double-persisting.
@@ -1003,6 +1066,8 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
 
             let backend = runtime::chat::spawn_chat(&session.id, provider, model);
 
+            require_launch_eligible(state, &id, mode).await?;
+
             // Same lost-race handling as the CLI branch: the dropped handle's
             // shutdown closure aborts the just-spawned chat loop.
             let Some(epoch) = state.runtime.register(&id, backend.handle) else {
@@ -1013,6 +1078,7 @@ pub async fn spawn(state: &AppState, payload: Value) -> Result<Value, AppError> 
         }
         _ => {
             // orchestrator / unknown: placeholder backend (fusion arrives in M4).
+            require_launch_eligible(state, &id, mode).await?;
             if state
                 .runtime
                 .register(&id, runtime::LiveHandle::placeholder(&session.id))
@@ -1076,25 +1142,29 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let id = req.workspace_agent_id;
 
-    if !repo::workspace_agent::exists(&state.db, &id).await? {
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&id);
+    let _agent_guard = agent_lock.lock().await;
+    remove_under_workspace_write(state, &id).await
+}
+
+/// Remove one retained identity while the caller already holds the workspace
+/// lifecycle guard and per-agent lock.
+pub(crate) async fn remove_under_workspace_write(
+    state: &AppState,
+    id: &str,
+) -> Result<Value, AppError> {
+    if !repo::workspace_agent::exists(&state.db, id).await? {
         return Err(AppError::NotFound(format!(
             "workspace_agent id={id} not found"
         )));
     }
-
-    // Stop the live backend first so no PTY child / chat loop outlives the row.
-    // The `#[must_use]` bool (did THIS call perform teardown, for idle-status
-    // emission) is intentionally discarded: we're deleting the instance, so
-    // there is no idle status to emit.
-    let _ = state.runtime.unregister(&id);
-
-    // D4b: the agent is being removed — flip its browser tab to `ended` BEFORE
-    // its row is deleted. The tab stays as a read-only view of the final page
-    // until the human closes it (browser.rs:463 contract). No-op for a tab-less
-    // agent; the frontend's 2s `browser.status` poll repaints the badge.
-    runtime::browser::mark_ended(&id);
-
-    let removed = repo::workspace_agent::remove(&state.db, &id).await?;
+    let _ = teardown_under_lifecycle_lock(state, id).await?;
+    let removed = repo::workspace_agent::remove(&state.db, id).await?;
     if !removed {
         return Err(AppError::NotFound(format!(
             "workspace_agent id={id} not found"
@@ -1103,7 +1173,7 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
 
     // D2: the row is gone — delete its skill sidecar so the skills dir doesn't
     // accrue an orphan until the next startup sweep.
-    crate::engine::agentctx::remove_skill_sidecar(&id);
+    crate::engine::agentctx::remove_skill_sidecar(id);
 
     Ok(Value::Null)
 }
@@ -1566,33 +1636,89 @@ pub async fn stop(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: InstanceReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let id = req.workspace_agent_id;
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&id);
+    let _agent_guard = agent_lock.lock().await;
 
-    // Capture the live session id BEFORE unregister; no-op if not live.
-    let Some(session_id) = state.runtime.session_id(&id) else {
-        return Ok(Value::Null);
-    };
+    let current = repo::workspace_agent::runtime_eligibility(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
 
-    // Tear down; if a concurrent stop already unregistered (returns false),
-    // skip the redundant persist + emit.
-    if !state.runtime.unregister(&id) {
-        return Ok(Value::Null);
+    // Individual availability is the linearization point: after this write,
+    // generic spawn/message/task paths reject even while teardown completes.
+    repo::workspace_agent::set_availability(&state.db, &id, "stopped").await?;
+    teardown_under_lifecycle_lock(state, &id).await?;
+    if current.availability != "stopped" {
+        state.emit(
+            bus::ROSTER_CHANGED,
+            bus::RosterChanged {
+                workspace_id: current.workspace_id,
+            },
+        );
     }
-    repo::workspace_agent::set_status(&state.db, &id, "idle").await?;
-    state.emit(
-        bus::SESSION_STATUS,
-        bus::SessionStatus {
-            session_id,
-            status: "idle".into(),
-        },
-    );
-
-    // D4b: `stop` won the teardown race (unregister returned true) — flip the
-    // agent's browser tab to `ended` (read-only until the human closes it). A
-    // late EOF for this id finds a bumped epoch and skips its own mark, so this
-    // is the sole marker. No-op for a tab-less agent; the 2s poll repaints.
-    runtime::browser::mark_ended(&id);
-
     Ok(Value::Null)
+}
+
+/// Tear down one runtime while the caller already holds the workspace guard
+/// (READ or WRITE) and per-agent lock. Returns whether this call removed a live
+/// generation; dead instances are still normalized to idle and disarmed.
+pub(crate) async fn teardown_under_lifecycle_lock(
+    state: &AppState,
+    id: &str,
+) -> Result<bool, AppError> {
+    state.clear_restart_pending(id);
+    let session_id = state.runtime.session_id(id);
+    let stopped_live = state.runtime.unregister(id);
+    repo::workspace_agent::set_status(&state.db, id, "idle").await?;
+    if stopped_live {
+        if let Some(session_id) = session_id {
+            state.emit(
+                bus::SESSION_STATUS,
+                bus::SessionStatus {
+                    session_id,
+                    status: "idle".into(),
+                },
+            );
+        }
+    }
+    runtime::browser::mark_ended(id);
+    Ok(stopped_live)
+}
+
+/// Resume a retained workspace-agent identity with its existing 1:1 session.
+/// Availability becomes active only after a generation is live.
+pub async fn resume(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: InstanceReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let id = req.workspace_agent_id;
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&id);
+    let _agent_guard = agent_lock.lock().await;
+
+    let current = require_launch_eligible(state, &id, LaunchMode::Resume).await?;
+    let session = spawn_locked(state, &id, LaunchMode::Resume).await?;
+    if let Err(error) = repo::workspace_agent::set_availability(&state.db, &id, "active").await {
+        let _ = teardown_under_lifecycle_lock(state, &id).await;
+        return Err(error.into());
+    }
+    runtime::browser::mark_resumed(&id);
+    if current.availability != "active" {
+        state.emit(
+            bus::ROSTER_CHANGED,
+            bus::RosterChanged {
+                workspace_id: current.workspace_id,
+            },
+        );
+    }
+    Ok(session)
 }
 
 /// Restart a CLI agent's process and resume it from a saved handoff.
@@ -1615,7 +1741,22 @@ pub async fn restart(state: &AppState, payload: Value) -> Result<Value, AppError
     let req: InstanceReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let id = req.workspace_agent_id;
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&id);
+    let _agent_guard = agent_lock.lock().await;
+    require_launch_eligible(state, &id, LaunchMode::Normal).await?;
+    restart_locked(state, id, req.self_triggered).await
+}
 
+async fn restart_locked(
+    state: &AppState,
+    id: String,
+    self_triggered: bool,
+) -> Result<Value, AppError> {
     let instance = repo::workspace_agent::get(&state.db, &id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
@@ -1638,7 +1779,7 @@ pub async fn restart(state: &AppState, payload: Value) -> Result<Value, AppError
         // instant it reads the prompt must find the arm set (mirrors compact).
         state.mark_restart_pending(&id);
 
-        if req.self_triggered {
+        if self_triggered {
             // ADR 0006: the caller IS the agent, mid-turn — it already knows
             // a restart is coming (it triggered this itself), so injecting a
             // prompt into its own TUI would interleave with its own output.
@@ -1700,6 +1841,28 @@ pub(crate) async fn run_respawn_resume(
     if kill_first {
         // Let the agent render its "saved" confirmation, then kill its process.
         tokio::time::sleep(std::time::Duration::from_millis(RESTART_SETTLE_MS)).await;
+    }
+
+    let eligibility =
+        match repo::workspace_agent::runtime_eligibility(&state.db, &instance_id).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("restart: eligibility lookup failed for instance {instance_id}: {e}");
+                return;
+            }
+        };
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&instance_id);
+    let _agent_guard = agent_lock.lock().await;
+
+    if let Err(e) = require_launch_eligible(&state, &instance_id, LaunchMode::Normal).await {
+        eprintln!("restart: instance {instance_id} is no longer eligible: {e}");
+        return;
+    }
+
+    if kill_first {
         if state.runtime.unregister(&instance_id) {
             // Mirror `stop`: persist + emit idle so the UI sees the transition.
             let _ = repo::workspace_agent::set_status(&state.db, &instance_id, "idle").await;
@@ -1726,15 +1889,11 @@ pub(crate) async fn run_respawn_resume(
         _ => false,
     };
 
-    if let Err(e) = spawn(
-        &state,
-        serde_json::json!({ "workspaceAgentId": instance_id }),
-    )
-    .await
-    {
+    if let Err(e) = spawn_locked(&state, &instance_id, LaunchMode::Normal).await {
         eprintln!("restart: respawn failed for instance {instance_id}: {e}");
         return;
     }
+    runtime::browser::mark_resumed(&instance_id);
 
     // Fresh start with nothing to resume from — done after the respawn.
     if !has_handoff {
@@ -1917,6 +2076,10 @@ mod tests {
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
             .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .expect("start fixture workspace")
+            .expect("fixture workspace exists");
         let def = agent_definition::create(
             &state.db,
             &AgentDefinitionInput {
@@ -3023,6 +3186,9 @@ mod tests {
         let ws = workspace::create(&state.db, "WS", &ws_folder.to_string_lossy(), None)
             .await
             .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .expect("start fixture workspace");
         let def = agent_definition::create(
             &state.db,
             &AgentDefinitionInput {
@@ -4019,5 +4185,133 @@ mod tests {
             Some(false),
             "restart must NOT mark the tab ended (D-1)"
         );
+    }
+
+    #[tokio::test]
+    async fn generic_spawn_and_restart_reject_stopped_state() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let eligibility = workspace_agent::runtime_eligibility(&state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        workspace::set_run_state(&state.db, &eligibility.workspace_id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            spawn(&state, json!({ "workspaceAgentId": id })).await,
+            Err(AppError::Invalid(_))
+        ));
+        workspace::set_run_state(&state.db, &eligibility.workspace_id, "started")
+            .await
+            .unwrap();
+        workspace_agent::set_availability(&state.db, &id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            spawn(&state, json!({ "workspaceAgentId": id })).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            restart(&state, json!({ "workspaceAgentId": id })).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(!state.runtime.is_live(&id));
+    }
+
+    #[tokio::test]
+    async fn agent_stop_and_resume_are_idempotent_and_retain_identity_history() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO message (id,session_id,role,text,created_at) \
+             VALUES ('retained-message',?,'agent','durable','2020-01-01')",
+        )
+        .bind(&session.id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        runtime::browser::test_seed_agent_tab(&id);
+        spawn(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .unwrap();
+        state.mark_restart_pending(&id);
+
+        stop(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .unwrap();
+        stop(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .unwrap();
+        let retained = workspace_agent::get(&state.db, &id).await.unwrap().unwrap();
+        assert_eq!(retained.availability, "stopped");
+        assert_eq!(retained.status, "idle");
+        assert!(!state.runtime.is_live(&id));
+        assert!(!state.take_restart_pending(&id), "stop must disarm restart");
+        assert_eq!(tab_ended(&id), Some(true));
+
+        let resumed = resume(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .unwrap();
+        assert_eq!(resumed["id"], session.id);
+        let resumed_twice = resume(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .unwrap();
+        assert_eq!(resumed_twice["id"], session.id);
+        assert_eq!(
+            workspace_agent::get(&state.db, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .availability,
+            "active"
+        );
+        assert!(state.runtime.is_live(&id));
+        assert_eq!(tab_ended(&id), Some(false));
+        let history: Vec<(String, String)> =
+            sqlx::query_as("SELECT id,text FROM message WHERE session_id=? ORDER BY created_at")
+                .bind(&session.id)
+                .fetch_all(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0], ("retained-message".into(), "durable".into()));
+    }
+
+    #[tokio::test]
+    async fn resume_failure_leaves_agent_stopped_and_workspace_stop_rejects_resume() {
+        let state = AppState::for_tests().await;
+        let id = fixture_instance_typed(&state, "cli", None).await;
+        workspace_agent::set_availability(&state.db, &id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            resume(&state, json!({ "workspaceAgentId": id })).await,
+            Err(AppError::NotImplemented(_))
+        ));
+        assert_eq!(
+            workspace_agent::get(&state.db, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .availability,
+            "stopped"
+        );
+        let eligibility = workspace_agent::runtime_eligibility(&state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        workspace::set_run_state(&state.db, &eligibility.workspace_id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            resume(&state, json!({ "workspaceAgentId": id })).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(!state.runtime.is_live(&id));
     }
 }
