@@ -901,7 +901,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn mark_resumed_clears_ended_and_noops_unknown_id() {
         let seeded = "t1-resumed-seeded";
