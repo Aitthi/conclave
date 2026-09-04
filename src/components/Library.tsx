@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { UsersRound, Search, Plus, Pencil, Trash2, Waypoints, X } from "lucide-react";
+import { UsersRound, Search, Plus, Pencil, Trash2, Waypoints, X, Sparkles } from "lucide-react";
 import { ipc } from "../ipc";
 import type { AgentDefinition } from "../ipc";
 
@@ -9,6 +9,8 @@ export interface LibraryProps {
   onClose: () => void;
   /** Pass `def` to open Builder in edit mode; omit for "New agent". */
   onOpenBuilder: (def?: AgentDefinition) => void;
+  /** Open the AI drafter in agent mode ("Draft with AI"). */
+  onOpenDrafter?: () => void;
   /** Increment to force the def list to re-fetch (e.g. after Builder saves). */
   refreshKey?: number;
   /** Notify the parent that workspace agent sets may have changed (a delete
@@ -121,7 +123,7 @@ function AgentCard({ def, onEdit, onDelete, deleting }: AgentCardProps) {
 
 // ── Library (right-side Sheet) ─────────────────────────────────────────────────
 
-export function Library({ onClose, onOpenBuilder, refreshKey, onAgentsChanged }: LibraryProps) {
+export function Library({ onClose, onOpenBuilder, onOpenDrafter, refreshKey, onAgentsChanged }: LibraryProps) {
   const [defs, setDefs] = useState<AgentDefinition[]>([]);
   const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState("");
@@ -232,14 +234,22 @@ export function Library({ onClose, onOpenBuilder, refreshKey, onAgentsChanged }:
           )}
         </div>
 
-        {/* New agent */}
-        <div className="border-t border-overlay/[0.06] p-2 shrink-0">
+        {/* New agent · Draft with AI */}
+        <div className="border-t border-overlay/[0.06] p-2 shrink-0 flex items-center gap-2">
           <button
             onClick={() => onOpenBuilder()}
-            className="w-full flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg bg-accent text-white hover:brightness-105"
+            className="flex-1 flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg bg-accent text-white hover:brightness-105"
           >
             <Plus className="w-4 h-4" />
             <span className="text-[12.5px] font-semibold">New agent</span>
+          </button>
+          <button
+            onClick={onOpenDrafter}
+            disabled={!onOpenDrafter}
+            className="flex-1 flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg bg-overlay/[0.06] text-text-primary hover:bg-overlay/[0.10] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Sparkles className="w-4 h-4 text-accent" />
+            <span className="text-[12.5px] font-semibold">Draft with AI</span>
           </button>
         </div>
       </div>

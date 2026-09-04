@@ -11,6 +11,7 @@ import {
   X,
   Pencil,
   LoaderCircle,
+  Sparkles,
 } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type {
@@ -304,6 +305,9 @@ interface RosterProps {
   onSelect: (instanceId: string) => void;
   /** Open the Builder to define a brand-new agent (from inside the picker). */
   onCreateAgent?: () => void;
+  /** Open the AI drafter in team mode ("Build team with AI"). Disabled when no
+   *  workspace is active — a team is applied to a specific roster (spec D2). */
+  onBuildTeam?: () => void;
   /** Bumped externally whenever the workspace's agent set changes (re-fetch). */
   agentsVersion?: number;
   /** Notify the parent that this workspace's agent set changed (add / remove). */
@@ -335,6 +339,7 @@ export function Roster({
   selectedId,
   onSelect,
   onCreateAgent,
+  onBuildTeam,
   agentsVersion,
   onAgentsChanged,
   onOpenBlackboard,
@@ -725,6 +730,16 @@ export function Roster({
             <Plus className="w-[15px] h-[15px]" />
           </div>
           <span className="text-[12.5px] font-semibold">Add agent</span>
+        </button>
+        <button
+          onClick={onBuildTeam}
+          disabled={workspaceId === null || !onBuildTeam}
+          className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-accent hover:bg-accent/10 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <div className="w-7 h-7 rounded-[8px] bg-accent/[0.16] grid place-items-center shrink-0">
+            <Sparkles className="w-[15px] h-[15px]" />
+          </div>
+          <span className="text-[12.5px] font-semibold">Build team with AI</span>
         </button>
         <button
           onClick={onOpenBlackboard}
