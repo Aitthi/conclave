@@ -69,8 +69,14 @@ export function topoOrder(positions: DraftPosition[]): string[] {
  *  Builder sends (`Builder.tsx` handleSave), so a drafted agent and a
  *  hand-built one launch identically (spec D10: launch flags keep Builder
  *  defaults). */
-function saveRequest(agent: DraftAgent, roleId: string, roleName?: string) {
+function saveRequest(agent: DraftAgent, roleId: string, roleName: string | undefined, roleSkillIds: string[]) {
   const cliKind = agent.cliKind ?? "claude-code";
+  // ADR 0005 COPY semantics: `agentDef.save` seeds a new definition from the
+  // role's default bundle ONLY when `skillIds` is absent — an explicit array,
+  // `[]` included, is taken as the final list (commands/agent.rs:247-252). The
+  // Builder never hits this because it pre-copies the bundle into its checkbox
+  // state, so do the same here: union the role bundle with the drafted extras.
+  const skillIds = Array.from(new Set([...roleSkillIds, ...agent.skillIds]));
   return {
     name: agent.name ?? agent.key,
     type: "cli" as const,
@@ -87,7 +93,7 @@ function saveRequest(agent: DraftAgent, roleId: string, roleName?: string) {
     // Builder's "200k" default (only "1m" changes the launch, see
     // `effective_claude_model` in commands/instance.rs:54), and Codex derives
     // its window from the model backend-side.
-    skillIds: agent.skillIds,
+    skillIds,
     defaultLevel: agent.defaultLevel ?? null,
   };
 }
@@ -113,6 +119,7 @@ export async function applyTeamDraft(
   let roster: WorkspaceAgent[] = await ipc.instance.list({ workspaceId });
   const roles = await ipc.role.list();
   const roleNameById = new Map(roles.map((r) => [r.id, r.name]));
+  const roleSkillIdsById = new Map(roles.map((r) => [r.id, r.skillIds ?? []]));
 
   let created = 0;
   for (const key of order) {
@@ -130,6 +137,7 @@ export async function applyTeamDraft(
       } else {
         let roleId = agent.roleId ?? "";
         let roleName = roleId ? roleNameById.get(roleId) : undefined;
+        let roleSkillIds = roleId ? (roleSkillIdsById.get(roleId) ?? []) : [];
         if (agent.newRole) {
           const role = await ipc.role.save({
             name: agent.newRole.name,
@@ -138,9 +146,11 @@ export async function applyTeamDraft(
           });
           roleId = role.id;
           roleName = role.name;
+          roleSkillIds = role.skillIds ?? [];
           roleNameById.set(role.id, role.name);
+          roleSkillIdsById.set(role.id, roleSkillIds);
         }
-        const def = await ipc.agentDef.save(saveRequest(agent, roleId, roleName));
+        const def = await ipc.agentDef.save(saveRequest(agent, roleId, roleName, roleSkillIds));
         defId = def.id;
         created += 1;
         onProgress({ key, status: "created" });
