@@ -27,6 +27,8 @@ import type {
   BrowserActionResult,
   BrowserBounds,
   BrowserShot,
+  DraftMode,
+  DraftResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -140,6 +142,10 @@ export interface Commands {
   "role.delete": {
     req: { id: string };
     res: void;
+  };
+  "draft.agents": {
+    req: { mode: DraftMode; brief: string; drafterDefId: string; workspaceId?: string };
+    res: DraftResponse;
   };
   "instance.list": {
     req: { workspaceId: string };
@@ -424,6 +430,9 @@ export const ipc = {
     list: () => call("role.list"),
     save: (req: Commands["role.save"]["req"]) => call("role.save", req),
     delete: (req: Commands["role.delete"]["req"]) => call("role.delete", req),
+  },
+  draft: {
+    agents: (req: Commands["draft.agents"]["req"]) => call("draft.agents", req),
   },
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
