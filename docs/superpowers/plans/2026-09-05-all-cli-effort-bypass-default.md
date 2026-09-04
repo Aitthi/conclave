@@ -71,6 +71,12 @@ Codex model presets. New first-class CLI agent definitions must default to
 - On create only, `agentDef.save` supplies `bypassPermissions` when a
   first-class CLI request omitted permission mode. On update, omission keeps the
   existing behavior; do not use the new-create default to rewrite old rows.
+- Explicit Antigravity `Default` must be sent as `permissionMode: "default"`,
+  including on new definitions. The former Builder omission convention conflicts
+  with the new create-time default: omitting a user-selected Default would save
+  Bypass instead. The existing Antigravity launch builder already omits flags
+  for explicit `default`, so this needs no launch mapping change. Verify a new
+  Antigravity definition explicitly set to Default saves and reopens as Default.
 
 ## Exact boundary
 
