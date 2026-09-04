@@ -92,7 +92,10 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     setError(null);
     setSending(true);
     try {
-      await ipc.message.send({ sessionId, text });
+      // `paste: true`: the composed text travels as ONE bracketed paste, so a
+      // line longer than the PTY's ~1 KB read chunk is not head-truncated by
+      // the TUI's burst detection. The \r below stays a raw keystroke.
+      await ipc.message.send({ sessionId, text, paste: true });
       await new Promise((r) => setTimeout(r, 40));
       await ipc.message.send({ sessionId, text: "\r" });
       if (mounted.current) setValue("");

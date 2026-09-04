@@ -188,6 +188,9 @@ pub fn spawn_cli(
         stdin_tx,
         shutdown,
         resize,
+        // A CLI TUI behind a PTY: text writes go through the bracketed-paste
+        // envelope (see `Runtime::send_stdin_paste`).
+        bracketed_paste: true,
     };
     Ok(CliBackend { handle, output_rx })
 }
