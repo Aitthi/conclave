@@ -22,6 +22,10 @@
 pub mod browser;
 pub mod browser_tabs;
 pub mod chat;
+// The one-shot print-mode runner lands before its `commands::draft`
+// consumer (plan tasks A2 → A4).
+#[allow(dead_code)]
+pub mod cli_oneshot;
 pub mod design_host;
 // The memory-v1 embedder seam lands before its T3/T4 consumers.
 #[allow(dead_code)]

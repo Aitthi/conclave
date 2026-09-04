@@ -76,10 +76,9 @@ pub fn prefix_conclave_path_with(launch: String, bin: Option<&Path>) -> String {
 
 /// Resolve the bundled `conclave` shim dir and prepend it to the child shell's
 /// PATH. Identity when the shim cannot be staged.
-// The one-shot print-mode runner (`runtime::cli_oneshot`, Task A2) is this
-// helper's consumer and lands in the next commit; `instance::spawn` uses
-// `prefix_conclave_path_with` because it already holds the resolved path.
-#[allow(dead_code)]
+// Used by the one-shot print-mode runner (`runtime::cli_oneshot`);
+// `instance::spawn` uses `prefix_conclave_path_with` because it already holds
+// the resolved path.
 pub fn prefix_conclave_path(launch: String) -> String {
     prefix_conclave_path_with(
         launch,
