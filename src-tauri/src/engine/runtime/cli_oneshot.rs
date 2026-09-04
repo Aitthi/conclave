@@ -52,9 +52,13 @@ pub struct OneshotSpec {
     pub timeout: Duration,
 }
 
+/// These `Display` strings are shown VERBATIM as the error headline in the
+/// AgentDrafter panel (Arta's design acceptance, 2026-09-04), so they read as
+/// sentences and start with a capital. `Exit` is the exception on purpose: it
+/// opens with the binary's own name (`claude` / `codex`).
 #[derive(Debug, thiserror::Error)]
 pub enum OneshotError {
-    #[error("the drafter did not answer in {0} s")]
+    #[error("The drafter did not answer in {0} s")]
     Timeout(u64),
     #[error("{cli} exited with code {code}: {stderr_tail}")]
     Exit {
@@ -62,11 +66,11 @@ pub enum OneshotError {
         code: i32,
         stderr_tail: String,
     },
-    #[error("the drafter reported an error: {0}")]
+    #[error("The drafter reported an error: {0}")]
     Model(String),
-    #[error("could not parse the drafter's output: {0}")]
+    #[error("Could not parse the drafter's output: {0}")]
     Parse(String),
-    #[error("could not launch {0}")]
+    #[error("Could not launch {0}")]
     Spawn(String),
 }
 
