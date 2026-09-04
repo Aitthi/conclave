@@ -131,6 +131,13 @@ editing it.
   focused effort/save/launch tests, then
   `cargo test --manifest-path src-tauri/Cargo.toml`.
 - `git diff --check` on the lane diff.
+- Formatting ruling for Dabin's challenge `a9ec1768`: main `058cf1a` independently
+  reproduces the global fmt failure in six out-of-boundary files (`agentctx.rs`,
+  `commands/browser.rs`, `repo/workspace_agent.rs`, `runtime/browser.rs`,
+  `runtime/task_timer.rs`, and `lib.rs`). Record the failing global gate; accept
+  this lane with standalone rustfmt checks passing on all six in-boundary Rust
+  files and a final global check showing no additional offending files. Do not
+  expand this feature into the separately planned formatting sweep.
 - UI pixel protocol before READY:
   1. Check `lsof -nP -iTCP:1420 -sTCP:LISTEN` and stop any Vite server owned by
      another checkout/worktree.
