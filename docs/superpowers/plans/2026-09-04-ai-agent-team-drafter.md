@@ -233,7 +233,7 @@ pub enum Oneshot { Live, #[cfg(test)] Mock(Result<serde_json::Value, String>) }
 impl Oneshot { pub async fn run(&self, spec: &OneshotSpec) -> Result<serde_json::Value, OneshotError> }
 
 pub fn claude_launch(model: Option<&str>, schema: &serde_json::Value) -> String;
-pub fn codex_launch(model: Option<&str>, schema_path: &std::path::Path, out_path: &std::path::Path) -> String;
+pub fn codex_launch(model: Option<&str>, out_path: &std::path::Path) -> String; // no --output-schema (R2 fired, ruling 2026-09-04)
 pub fn extract_last_json_object(stdout: &str) -> Option<serde_json::Value>;
 pub fn claude_structured_result(envelope: &serde_json::Value) -> Result<serde_json::Value, OneshotError>;
 pub fn parse_codex_last_message(text: &str) -> Result<serde_json::Value, OneshotError>;
@@ -264,11 +264,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_launch_uses_exec_json_schema_and_last_message_file() {
-        let s = codex_launch(Some("gpt-5.5"), std::path::Path::new("/t/s.json"), std::path::Path::new("/t/o.json"));
+    fn codex_launch_uses_exec_json_and_last_message_file_without_output_schema() {
+        // R2 fired: OpenAI strict structured outputs reject a schema with optional
+        // properties (HTTP 400), so codex gets the schema in the prompt only.
+        let s = codex_launch(Some("gpt-5.5"), std::path::Path::new("/t/o.json"));
         assert_eq!(
             s,
-            "codex exec --json --ephemeral --skip-git-repo-check --output-schema '/t/s.json' -o '/t/o.json' -m 'gpt-5.5' -"
+            "codex exec --json --ephemeral --skip-git-repo-check -o '/t/o.json' -m 'gpt-5.5' -"
         );
     }
 
