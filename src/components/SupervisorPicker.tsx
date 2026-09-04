@@ -154,8 +154,13 @@ function CandidateRow({
           <TrackIcon track={candidate.roleName} size={9} className="shrink-0" />
           <span className="truncate">
             {candidate.roleName ?? "Agent"} · {candidate.level ? levelOf(candidate.level).name : "Unranked"}
-            {candidate.providerChip ? ` · ${candidate.providerChip}` : ""}
           </span>
+          {/* Own shrink-0 span, outside the truncate: the provider reads at the
+              same priority as it does on a roster row, so a long role name
+              clips instead of eating the chip. */}
+          {candidate.providerChip && (
+            <span className="shrink-0">· {candidate.providerChip}</span>
+          )}
         </span>
       </span>
       {disabled ? (
