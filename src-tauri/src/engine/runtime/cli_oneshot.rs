@@ -1,5 +1,5 @@
 //! One-shot, non-PTY invocation of a CLI harness in print mode
-//! (`claude -p --json-schema …` / `codex exec --output-schema …`). Used by
+//! (`claude -p --json-schema …` / `codex exec …`). Used by
 //! `commands::draft` (spec D1). Launched through the user's login shell with the
 //! same PATH prefix and env overrides as `instance::spawn`, but with no PTY, no
 //! session row and no instance id. Tests never spawn a binary (`Mock`).
@@ -83,12 +83,19 @@ pub fn claude_launch(model: Option<&str>, schema: &Value) -> String {
     s
 }
 
-/// `codex exec` reading the prompt from stdin (`-`), with the schema and the
-/// last-message sink as files (codex takes neither inline).
-pub fn codex_launch(model: Option<&str>, schema_path: &Path, out_path: &Path) -> String {
+/// `codex exec` reading the prompt from stdin (`-`), writing its last message
+/// to a file (codex takes no inline sink).
+///
+/// Deliberately NO `--output-schema`: it routes to OpenAI's strict Structured
+/// Outputs, which rejects any schema whose `required` does not list every
+/// property — our draft schema has optional fields by design, so codex answered
+/// HTTP 400 `invalid_json_schema` before the model ran (spec R2, verified in the
+/// Task A5 probe; ruling 2026-09-04). The schema instead reaches the model as
+/// text inside the prompt (`draft_prompt::build_prompt`), and
+/// `commands::draft::validate_draft` is what actually guarantees the shape.
+pub fn codex_launch(model: Option<&str>, out_path: &Path) -> String {
     let mut s = format!(
-        "codex exec --json --ephemeral --skip-git-repo-check --output-schema {} -o {}",
-        shell_quote(&schema_path.to_string_lossy()),
+        "codex exec --json --ephemeral --skip-git-repo-check -o {}",
         shell_quote(&out_path.to_string_lossy())
     );
     if let Some(m) = model {
@@ -168,18 +175,12 @@ impl Oneshot {
 }
 
 async fn run_live(spec: &OneshotSpec) -> Result<Value, OneshotError> {
-    // Temp dir outlives the child: codex reads the schema from it and writes
-    // its last message into it.
+    // Temp dir outlives the child: codex writes its last message into it.
     let tmp = tempfile::tempdir().map_err(|e| OneshotError::Spawn(e.to_string()))?;
-    let schema_path = tmp.path().join("schema.json");
     let out_path = tmp.path().join("last.json");
     let launch = match spec.cli_kind {
         CliKind::ClaudeCode => claude_launch(spec.model.as_deref(), &spec.json_schema),
-        CliKind::Codex => {
-            std::fs::write(&schema_path, spec.json_schema.to_string())
-                .map_err(|e| OneshotError::Spawn(e.to_string()))?;
-            codex_launch(spec.model.as_deref(), &schema_path, &out_path)
-        }
+        CliKind::Codex => codex_launch(spec.model.as_deref(), &out_path),
     };
     let launch = prefix_conclave_path(launch);
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -263,16 +264,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_launch_uses_exec_json_schema_and_last_message_file() {
-        let s = codex_launch(
-            Some("gpt-5.5"),
-            std::path::Path::new("/t/s.json"),
-            std::path::Path::new("/t/o.json"),
-        );
+    fn codex_launch_uses_exec_json_and_last_message_file_without_output_schema() {
+        // R2 fired: OpenAI strict structured outputs reject a schema with optional
+        // properties (HTTP 400), so codex gets the schema in the prompt only.
+        let s = codex_launch(Some("gpt-5.5"), std::path::Path::new("/t/o.json"));
         assert_eq!(
             s,
-            "codex exec --json --ephemeral --skip-git-repo-check --output-schema '/t/s.json' -o '/t/o.json' -m 'gpt-5.5' -"
+            "codex exec --json --ephemeral --skip-git-repo-check -o '/t/o.json' -m 'gpt-5.5' -"
         );
+        assert!(!s.contains("--output-schema"));
     }
 
     #[test]

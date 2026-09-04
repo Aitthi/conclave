@@ -1178,4 +1178,45 @@ pub(crate) mod tests {
             .unwrap_err()
             .contains("model"));
     }
+    /// The REAL answer codex-cli 0.153.2 (gpt-5.5) gave the SAME shipped prompt
+    /// in the Task A5 probe, read back from its `-o last.json` sink
+    /// (/tmp/draft-probe/last-noschema.json). Prose fields shortened; every
+    /// id-bearing field verbatim. This is the evidence behind the R2 ruling:
+    /// with no `--output-schema`, the schema embedded in the prompt is enough —
+    /// codex answered catalogue ids only, and the validator accepts it.
+    #[test]
+    fn recorded_codex_last_message_parses_and_validates() {
+        let last_json = r##"{
+            "agents": [
+                {"key":"lead","cliKind":"codex","color":"#5e5ce6","defaultLevel":"principal",
+                 "model":"gpt-5.6-sol","name":"Mara","roleId":"lead","rationale":"r"},
+                {"key":"porter","existingAgentDefId":"def-existing","rationale":"r"},
+                {"key":"reviewer","cliKind":"codex","color":"#0a84ff","defaultLevel":"senior",
+                 "model":"gpt-5.6-terra","name":"Iris",
+                 "newRole":{"name":"Reviewer","description":"d","skillIds":["implementer"]},
+                 "rationale":"r"}
+            ],
+            "positions": [
+                {"key":"lead","level":"principal","supervisorKey":null},
+                {"key":"porter","level":"senior","supervisorKey":"lead"},
+                {"key":"reviewer","level":"senior","supervisorKey":"lead"}
+            ],
+            "notes": "n"
+        }"##;
+
+        let parsed =
+            crate::engine::runtime::cli_oneshot::parse_codex_last_message(last_json).unwrap();
+        let draft: DraftResponse = serde_json::from_value(json!({
+            "agents": parsed["agents"],
+            "positions": parsed["positions"],
+            "notes": parsed["notes"],
+            "drafter": {"defId": "d", "cliKind": "codex", "model": "gpt-5.5"}
+        }))
+        .expect("the recorded codex message deserializes into the wire types");
+
+        validate_draft(&draft, DraftMode::Team, &cat()).expect("the real codex draft validates");
+        // An explicit `"supervisorKey": null` must read as "no supervisor",
+        // not as a supervisor named null — codex emits the key, claude omits it.
+        assert!(draft.positions[0].supervisor_key.is_none());
+    }
 }
