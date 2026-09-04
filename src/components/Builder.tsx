@@ -55,6 +55,14 @@ type CliAvailability =
   | { state: "available" | "missing"; installUrl: string }
   | { state: "error"; message: string };
 
+/** The authenticated Antigravity model catalog (`instance.cliModels`). Queried
+ *  only once availability says `agy` is there, so `error` here always means the
+ *  QUERY failed (auth/network) — never that the CLI is missing. */
+type CliModelCatalog =
+  | { state: "idle" | "loading" }
+  | { state: "ready"; models: { id: string; label: string }[] }
+  | { state: "error" };
+
 const ANTIGRAVITY_MODE_HELP: Record<Exclude<PermissionMode, "auto">, string> = {
   default: "Pauses for diff review before applying changes.",
   acceptEdits: "Applies file edits automatically. Shell and web actions still ask.",
@@ -209,6 +217,7 @@ export function Builder({
   const [cliAvailability, setCliAvailability] = useState<CliAvailability>({
     state: initialDef?.cliKind === "antigravity" ? "checking" : "idle",
   });
+  const [modelCatalog, setModelCatalog] = useState<CliModelCatalog>({ state: "idle" });
   const [contextWindow, setContextWindow] = useState<string>(() => initialContextWindow(initialDef));
   // Token filter (rtk): absent/null on the definition means enabled (default ON).
   const [rtkEnabled, setRtkEnabled] = useState<boolean>(initialDef?.rtkEnabled ?? true);
@@ -397,6 +406,11 @@ export function Builder({
     cliAvailability.state !== "available" &&
     cliAvailability.state !== "error";
   const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
+  const catalogModels = modelCatalog.state === "ready" ? modelCatalog.models : [];
+  // Editing must be lossless: a saved model the catalog no longer lists keeps
+  // its own selected option instead of being silently reset to Auto.
+  const savedModelUnlisted =
+    isAntigravity && model !== "" && !catalogModels.some((entry) => entry.id === model);
   const positionEnabled = Boolean(
     scopedAgent && workspaceId && workspaceAgentId && initialDef?.id,
   );
@@ -445,6 +459,28 @@ export function Builder({
     }
     void checkAntigravityAvailability();
   }, [checkAntigravityAvailability, isAntigravity]);
+
+  const loadAntigravityModels = useCallback(async () => {
+    setModelCatalog({ state: "loading" });
+    try {
+      const { models } = await ipc.instance.cliModels({ cliKind: "antigravity" });
+      setModelCatalog({ state: "ready", models });
+    } catch {
+      // The backend's message is raw shell/auth text — surface a fixed retryable
+      // line instead and keep the detail out of the UI copy.
+      setModelCatalog({ state: "error" });
+    }
+  }, []);
+
+  // Discovery is gated on availability, so "Check again" (which flips
+  // available -> checking -> available) re-runs the catalog query too.
+  useEffect(() => {
+    if (!isAntigravity || cliAvailability.state !== "available") {
+      setModelCatalog({ state: "idle" });
+      return;
+    }
+    void loadAntigravityModels();
+  }, [cliAvailability.state, isAntigravity, loadAntigravityModels]);
 
   async function openAntigravityInstallGuide() {
     if (cliAvailability.state !== "missing") return;
@@ -1319,24 +1355,81 @@ export function Builder({
                     <label htmlFor="cli-model" className="text-[12.5px] text-text-secondary shrink-0">
                       Model
                     </label>
-                    <input
-                      id="cli-model"
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      placeholder={
-                        isAntigravity
-                          ? "Auto (authenticated default)"
-                          : isCodex
-                            ? "gpt-5.5"
-                            : "claude-opus-4-8"
-                      }
-                      className="min-w-0 flex-1 bg-transparent text-right font-mono text-[12.5px] outline-none placeholder:text-text-tertiary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-accent"
-                    />
+                    {isAntigravity ? (
+                      // Antigravity's models are discovered from the user's own
+                      // authenticated CLI, so there is nothing to type and no
+                      // list to hardcode — same native select as Execution mode.
+                      // Fixed width, not min-width: a native select sizes
+                      // itself to its WIDEST option, so one long model id would
+                      // otherwise stretch this control across the row. 240px is
+                      // the smallest width that shows "Auto (authenticated
+                      // default)" (158px of text) whole; longer labels clip, and
+                      // the exact id stays reachable through the option title
+                      // and the hint line below.
+                      <div className="relative w-[240px] shrink-0">
+                        <select
+                          id="cli-model"
+                          value={model}
+                          disabled={modelCatalog.state === "loading"}
+                          onChange={(event) => setModel(event.target.value)}
+                          title={model || "Auto (authenticated default)"}
+                          className="h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:text-text-muted"
+                        >
+                          <option value="">Auto (authenticated default)</option>
+                          {savedModelUnlisted && (
+                            <option value={model} title={model}>
+                              {modelCatalog.state === "ready" ? `${model} (unavailable)` : model}
+                            </option>
+                          )}
+                          {catalogModels.map((entry) => (
+                            <option key={entry.id} value={entry.id} title={entry.id}>
+                              {entry.label}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="pointer-events-none absolute right-2 top-2 h-3 w-3 text-text-muted" />
+                      </div>
+                    ) : (
+                      <input
+                        id="cli-model"
+                        value={model}
+                        onChange={(e) => setModel(e.target.value)}
+                        placeholder={isCodex ? "gpt-5.5" : "claude-opus-4-8"}
+                        className="min-w-0 flex-1 bg-transparent text-right font-mono text-[12.5px] outline-none placeholder:text-text-tertiary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-accent"
+                      />
+                    )}
                   </div>
                   {isAntigravity ? (
-                    <p className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
-                      Leave blank for Antigravity to choose from your authenticated models.
-                    </p>
+                    <div className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
+                      {modelCatalog.state === "loading" ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <RefreshCw className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+                          Loading your authenticated models…
+                        </span>
+                      ) : modelCatalog.state === "error" ? (
+                        <span className="inline-flex flex-wrap items-center gap-1.5 text-warning">
+                          Couldn’t load your Antigravity models.
+                          <button
+                            type="button"
+                            onClick={() => void loadAntigravityModels()}
+                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-semibold hover:bg-warning/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning"
+                          >
+                            <RefreshCw className="h-3 w-3" /> Retry
+                          </button>
+                        </span>
+                      ) : savedModelUnlisted ? (
+                        <span className="text-warning">
+                          <span className="font-mono">{model}</span> isn’t in your authenticated
+                          models. It is kept until you pick another.
+                        </span>
+                      ) : model ? (
+                        <>
+                          Launches as <span className="font-mono">{model}</span>.
+                        </>
+                      ) : (
+                        "Auto lets Antigravity choose from your authenticated models."
+                      )}
+                    </div>
                   ) : (
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {modelPresets.map((m) => (
