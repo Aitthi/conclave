@@ -1,7 +1,7 @@
 ---
 name: Comms Protocol
 description: Use whenever you are about to send a message to another agent or to the human in a Conclave workspace — a question, a request, a status update, a result, an escalation — or when a message you received looks cut off. Also use when the human has asked for less chatter or for all coordination to go through the lead.
-mandatory: false
+mandatory: true
 ---
 
 The human owns the workspace and reads only what the lead sends. Messages are
