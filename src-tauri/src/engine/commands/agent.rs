@@ -381,15 +381,30 @@ pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError>
         .await?
         .ok_or_else(|| AppError::NotFound(format!("agent_definition id={id} not found")))?;
 
+    // Acquire every affected workspace WRITE lock in stable order before any
+    // teardown, preventing cross-workspace delete inversions.
+    let mut instances = repo::workspace_agent::list_by_agent_def(&state.db, &id).await?;
+    instances.sort_by(|a, b| (&a.workspace_id, &a.id).cmp(&(&b.workspace_id, &b.id)));
+    let mut workspace_ids: Vec<String> = instances
+        .iter()
+        .map(|row| row.workspace_id.clone())
+        .collect();
+    workspace_ids.sort();
+    workspace_ids.dedup();
+    let workspace_locks: Vec<_> = workspace_ids
+        .iter()
+        .map(|workspace_id| state.workspace_lifecycle_lock(workspace_id))
+        .collect();
+    let mut _workspace_guards = Vec::with_capacity(workspace_locks.len());
+    for lock in workspace_locks {
+        _workspace_guards.push(lock.write_owned().await);
+    }
+
     // Remove every instance of this def across all workspaces.
-    let instances = repo::workspace_agent::list_by_agent_def(&state.db, &id).await?;
     for inst in &instances {
-        // Tear down any live backend before deleting the rows.
-        let _ = state.runtime.unregister(&inst.id);
-        repo::workspace_agent::remove(&state.db, &inst.id).await?;
-        // D2: the row is gone — delete its skill sidecar so the skills dir
-        // doesn't accrue an orphan until the next startup sweep.
-        crate::engine::agentctx::remove_skill_sidecar(&inst.id);
+        let agent_lock = state.agent_lifecycle_lock(&inst.id);
+        let _agent_guard = agent_lock.lock().await;
+        super::instance::remove_under_workspace_write(state, &inst.id).await?;
     }
 
     repo::agent_definition::delete(&state.db, &id).await?;
@@ -907,5 +922,57 @@ mod tests {
             !ids_b.contains(&"fix-optional".to_string()),
             "agent B must not inherit agent A's optional builtin selection"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_tears_down_instances_across_workspaces_in_stable_lock_order() {
+        let state = AppState::for_tests().await;
+        let def = repo::agent_definition::create(
+            &state.db,
+            &repo::agent_definition::AgentDefinitionInput {
+                name: "Everywhere".into(),
+                agent_type: "orchestrator".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut ids = Vec::new();
+        for (name, path) in [("Zulu", "/tmp/z"), ("Alpha", "/tmp/a")] {
+            let workspace = repo::workspace::create(&state.db, name, path, None)
+                .await
+                .unwrap();
+            let agent = repo::workspace_agent::instantiate(&state.db, &workspace.id, &def.id)
+                .await
+                .unwrap();
+            let session = repo::session::get_by_instance(&state.db, &agent.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(state
+                .runtime
+                .register(
+                    &agent.id,
+                    crate::engine::runtime::LiveHandle::placeholder(&session.id),
+                )
+                .is_some());
+            ids.push(agent.id);
+        }
+
+        delete(&state, serde_json::json!({ "id": def.id }))
+            .await
+            .unwrap();
+        assert!(repo::agent_definition::get(&state.db, &def.id)
+            .await
+            .unwrap()
+            .is_none());
+        for id in ids {
+            assert!(!state.runtime.is_live(&id));
+            assert!(repo::workspace_agent::get(&state.db, &id)
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 }

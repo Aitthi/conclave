@@ -35,6 +35,27 @@ struct MessageAck {
     created_at: String,
 }
 
+async fn require_delivery_eligible(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<repo::workspace_agent::RuntimeEligibility, AppError> {
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, instance_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={instance_id} not found")))?;
+    if eligibility.run_state != "started" {
+        return Err(AppError::Invalid(format!(
+            "workspace {} is stopped — start it before sending messages",
+            eligibility.workspace_id
+        )));
+    }
+    if eligibility.availability != "active" {
+        return Err(AppError::Invalid(format!(
+            "workspace_agent id={instance_id} is stopped — resume it before sending messages"
+        )));
+    }
+    Ok(eligibility)
+}
+
 /// Send a line of user input to a running CLI agent's live PTY.
 ///
 /// Resolves the session by id, routes `text` verbatim to the live backend's
@@ -54,6 +75,13 @@ pub async fn send(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let session = repo::session::get(&state.db, &session_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("session id={session_id} not found")))?;
+
+    let eligibility = require_delivery_eligible(state, &session.workspace_agent_id).await?;
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&session.workspace_agent_id);
+    let _agent_guard = agent_lock.lock().await;
+    require_delivery_eligible(state, &session.workspace_agent_id).await?;
 
     // Route the text to the live PTY keyed by the owning workspace_agent. The
     // ack below still owns `text` — the runtime borrows it.
@@ -127,9 +155,48 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
         text,
     } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
-    // Validate BOTH instances exist — name which one is missing for clarity.
-    // Resolving the sender row here doubles as its existence check AND yields the
-    // display name for the `[from …]` tag, so we don't query the sender twice.
+    // Resolve both endpoints before locking so cross-workspace injection can
+    // acquire every workspace READ guard in one deterministic order. Reverse
+    // injections (A→B and B→A) therefore cannot deadlock. Same-workspace and
+    // self-injection dedupe down to one workspace/agent lock respectively.
+    let source_eligibility = require_delivery_eligible(state, &from_instance_id).await?;
+    let target_eligibility = require_delivery_eligible(state, &to_instance_id).await?;
+    let mut workspace_ids = vec![
+        source_eligibility.workspace_id,
+        target_eligibility.workspace_id,
+    ];
+    workspace_ids.sort_unstable();
+    workspace_ids.dedup();
+    let mut _workspace_guards = Vec::with_capacity(workspace_ids.len());
+    for workspace_id in workspace_ids {
+        _workspace_guards.push(
+            state
+                .workspace_lifecycle_lock(&workspace_id)
+                .read_owned()
+                .await,
+        );
+    }
+
+    // Lock agents only after all workspace guards, again in deterministic
+    // order. These owned guards stay live through stdin delivery and durable
+    // persistence, making either endpoint's Stop linearizable with inject.
+    let mut instance_ids = vec![from_instance_id.as_str(), to_instance_id.as_str()];
+    instance_ids.sort_unstable();
+    instance_ids.dedup();
+    let mut _agent_guards = Vec::with_capacity(instance_ids.len());
+    for instance_id in instance_ids {
+        _agent_guards.push(state.agent_lifecycle_lock(instance_id).lock_owned().await);
+    }
+
+    // State may have changed between the optimistic lookup and lock
+    // acquisition. Re-read both halves while holding every lifecycle guard;
+    // rejection occurs before any stdin write or queued-row insert.
+    require_delivery_eligible(state, &from_instance_id).await?;
+    require_delivery_eligible(state, &to_instance_id).await?;
+
+    // Resolve the sender row for the display name used by the `[from …]` tag.
+    // Existence and lifecycle eligibility were already validated above while
+    // holding both endpoint guards.
     let sender = match repo::workspace_agent::get(&state.db, &from_instance_id).await? {
         Some(inst) => repo::agent_definition::get(&state.db, &inst.agent_def_id)
             .await?
@@ -141,12 +208,6 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
             )))
         }
     };
-    if !repo::workspace_agent::exists(&state.db, &to_instance_id).await? {
-        return Err(AppError::NotFound(format!(
-            "target instance id={to_instance_id} not found"
-        )));
-    }
-
     // Prefix the delivered input with the sender's name AND id so the receiving
     // agent knows who it's from and can reply directly with `conclave tell <id>`
     // (no roster lookup needed). The persisted row + UI carry origin separately,
@@ -365,6 +426,9 @@ mod tests {
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
             .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .expect("start fixture workspace");
         let def = agent_definition::create(
             &state.db,
             &AgentDefinitionInput {
@@ -401,6 +465,9 @@ mod tests {
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
             .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .expect("start fixture workspace");
         let def = agent_definition::create(
             &state.db,
             &AgentDefinitionInput {
@@ -433,6 +500,9 @@ mod tests {
         let ws = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
             .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .expect("start fixture workspace");
         let mut ids = Vec::new();
         for name in ["Alpha", "Bravo"] {
             let def = agent_definition::create(
@@ -656,6 +726,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn self_inject_deduplicates_endpoint_locks() {
+        let state = AppState::for_tests().await;
+        let instance_id = fixture_instance_id(&state, "SelfSender").await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            inject(
+                &state,
+                json!({
+                    "fromInstanceId": instance_id,
+                    "toInstanceId": instance_id,
+                    "text": "note to self"
+                }),
+            ),
+        )
+        .await
+        .expect("self-inject must not deadlock on the same endpoint")
+        .expect("eligible self-inject should queue");
+
+        assert_eq!(result.get("status").and_then(Value::as_str), Some("queued"));
+    }
+
+    #[tokio::test]
     async fn list_unknown_instance_not_found() {
         let state = AppState::for_tests().await;
         let err = list(&state, json!({ "instanceId": "nope" }))
@@ -850,5 +943,321 @@ mod tests {
             "\r",
             "Enter stays a keystroke"
         );
+    }
+
+    #[tokio::test]
+    async fn stopped_workspace_or_agent_rejects_inject_without_delivery_or_queue() {
+        let state = AppState::for_tests().await;
+        let (workspace_id, from, to) = fixture_workspace_pair(&state).await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        workspace::set_run_state(&state.db, &workspace_id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "blocked" }),
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "no stdin write after workspace stop"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM inter_agent_message WHERE to_instance_id=?")
+                .bind(&to)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "rejection must not create a queued row");
+
+        workspace::set_run_state(&state.db, &workspace_id, "started")
+            .await
+            .unwrap();
+        workspace_agent::set_availability(&state.db, &to, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "blocked" }),
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(rx.try_recv().is_err(), "no stdin write after agent stop");
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM inter_agent_message WHERE to_instance_id=?")
+                .bind(&to)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn stopped_source_agent_rejects_inject_without_delivery_or_queue() {
+        let state = AppState::for_tests().await;
+        let (_workspace_id, from, to) = fixture_workspace_pair(&state).await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        workspace_agent::set_availability(&state.db, &from, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "blocked-source" }),
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(rx.try_recv().is_err(), "stopped source must not deliver");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message \
+             WHERE from_instance_id=? AND text='blocked-source'",
+        )
+        .bind(&from)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "rejection must not create a queued row");
+    }
+
+    #[tokio::test]
+    async fn stopped_source_workspace_rejects_cross_workspace_inject_without_queue() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let source = workspace_agent::runtime_eligibility(&state.db, &from)
+            .await
+            .unwrap()
+            .unwrap();
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        workspace::set_run_state(&state.db, &source.workspace_id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "blocked-workspace" }),
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "stopped source workspace must not deliver"
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message \
+             WHERE from_instance_id=? AND text='blocked-workspace'",
+        )
+        .bind(&from)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "rejection must not create a queued row");
+    }
+
+    #[tokio::test]
+    async fn stopped_workspace_rejects_direct_send_without_stdin_write() {
+        let state = AppState::for_tests().await;
+        let session_id = fixture_session_id(&state).await;
+        let session = session::get(&state.db, &session_id).await.unwrap().unwrap();
+        let eligibility =
+            workspace_agent::runtime_eligibility(&state.db, &session.workspace_agent_id)
+                .await
+                .unwrap()
+                .unwrap();
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state
+            .runtime
+            .register(&session.workspace_agent_id, handle)
+            .is_some());
+        workspace::set_run_state(&state.db, &eligibility.workspace_id, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            send(
+                &state,
+                json!({ "sessionId": session_id, "text": "blocked" })
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_stop_race_either_commits_delivery_before_stop_or_rejects_without_row() {
+        let state = std::sync::Arc::new(AppState::for_tests().await);
+        let (_workspace_id, from, to) = fixture_workspace_pair(&state).await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, _rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        let (delivery, stopped) = tokio::join!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "race" }),
+            ),
+            super::super::instance::stop(&state, json!({ "workspaceAgentId": to })),
+        );
+        stopped.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message WHERE to_instance_id=? AND text='race'",
+        )
+        .bind(&to)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        match delivery {
+            Ok(_) => assert_eq!(count, 1, "delivery that won must be durable"),
+            Err(AppError::Invalid(_)) => {
+                assert_eq!(count, 0, "delivery that lost must not queue")
+            }
+            other => panic!("unexpected race outcome: {other:?}"),
+        }
+        assert!(!state.runtime.is_live(&to));
+        assert_eq!(
+            workspace_agent::get(&state.db, &to)
+                .await
+                .unwrap()
+                .unwrap()
+                .availability,
+            "stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_agent_stop_race_rejects_after_stop_wins_without_row() {
+        let state = std::sync::Arc::new(AppState::for_tests().await);
+        let (_workspace_id, from, to) = fixture_workspace_pair(&state).await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        // Hold the source mutex while queueing Stop first, then inject. Tokio's
+        // mutex is FIFO, so releasing this guard makes Stop the lifecycle
+        // winner. A correct inject waits behind it and rejects before delivery.
+        let source_lock = state.agent_lifecycle_lock(&from);
+        let source_guard = source_lock.lock().await;
+        let stop_state = std::sync::Arc::clone(&state);
+        let stop_from = from.clone();
+        let stop_task = tokio::spawn(async move {
+            super::super::instance::stop(&stop_state, json!({ "workspaceAgentId": stop_from }))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let inject_state = std::sync::Arc::clone(&state);
+        let inject_from = from.clone();
+        let inject_to = to.clone();
+        let inject_task = tokio::spawn(async move {
+            inject(
+                &inject_state,
+                json!({
+                    "fromInstanceId": inject_from,
+                    "toInstanceId": inject_to,
+                    "text": "source-race"
+                }),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        drop(source_guard);
+
+        stop_task.await.unwrap().unwrap();
+        assert!(matches!(
+            inject_task.await.unwrap(),
+            Err(AppError::Invalid(_))
+        ));
+        assert!(rx.try_recv().is_err(), "losing inject must not deliver");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message \
+             WHERE from_instance_id=? AND text='source-race'",
+        )
+        .bind(&from)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "losing inject must not persist a row");
+    }
+
+    #[tokio::test]
+    async fn workspace_stop_race_either_commits_delivery_before_stop_or_rejects_without_row() {
+        let state = std::sync::Arc::new(AppState::for_tests().await);
+        let (workspace_id, from, to) = fixture_workspace_pair(&state).await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, _rx) = LiveHandle::for_test(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        let (delivery, stopped) = tokio::join!(
+            inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": "workspace-race" }),
+            ),
+            super::super::workspace::stop(&state, json!({ "workspaceId": workspace_id }),),
+        );
+        stopped.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inter_agent_message \
+             WHERE to_instance_id=? AND text='workspace-race'",
+        )
+        .bind(&to)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        match delivery {
+            Ok(_) => assert_eq!(count, 1, "delivery that won must be durable"),
+            Err(AppError::Invalid(_)) => {
+                assert_eq!(count, 0, "delivery that lost must not queue")
+            }
+            other => panic!("unexpected race outcome: {other:?}"),
+        }
+        assert_eq!(
+            workspace::get(&state.db, &workspace_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_state,
+            "stopped"
+        );
+        assert!(!state.runtime.is_live(&to));
     }
 }

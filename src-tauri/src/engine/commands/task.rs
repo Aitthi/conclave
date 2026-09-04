@@ -803,6 +803,29 @@ pub async fn claim(state: &AppState, payload: Value) -> Result<Value, AppError> 
     require_workspace(state, &req.workspace_id).await?;
     enforce_scope(state, &req.workspace_id, &req.actor_id, "actor").await?;
 
+    let workspace_lock = state.workspace_lifecycle_lock(&req.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(&req.actor_id);
+    let _agent_guard = agent_lock.lock().await;
+    let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, &req.actor_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("actor id={} not found", req.actor_id)))?;
+    if eligibility.workspace_id != req.workspace_id {
+        return Err(AppError::Invalid(
+            "actor does not belong to this workspace".into(),
+        ));
+    }
+    if eligibility.run_state != "started" {
+        return Err(AppError::Invalid(
+            "workspace is stopped — start it before claiming tasks".into(),
+        ));
+    }
+    if eligibility.availability != "active" {
+        return Err(AppError::Invalid(
+            "actor is stopped — resume it before claiming tasks".into(),
+        ));
+    }
+
     let row = repo::task::claim(&state.db, &req.workspace_id, &req.slug, &req.actor_id).await?;
     emit_changed(state, &row);
     notify_watchers(
@@ -1661,10 +1684,13 @@ mod tests {
     use std::sync::Arc;
 
     async fn fixture_workspace(state: &AppState) -> String {
-        workspace::create(&state.db, "WS", "/tmp/ws", None)
+        let workspace = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
-            .expect("create workspace failed")
-            .id
+            .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &workspace.id, "started")
+            .await
+            .expect("start fixture workspace");
+        workspace.id
     }
 
     async fn fixture_instance(state: &AppState, workspace_id: &str, name: &str) -> String {
@@ -2981,6 +3007,66 @@ mod tests {
         .await
         .expect_err("cross-workspace actor must fail");
         assert!(matches!(err, AppError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_stopped_workspace_or_agent_without_mutation() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let actor = fixture_instance(&state, &ws, "Agent").await;
+        create(
+            &state,
+            json!({ "workspaceId": ws, "slug": "blocked", "title": "Blocked" }),
+        )
+        .await
+        .unwrap();
+
+        workspace::set_run_state(&state.db, &ws, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim(
+                &state,
+                json!({ "workspaceId": ws, "slug": "blocked", "actorId": actor }),
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        let unchanged = repo::task::get(&state.db, &ws, "blocked")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, "planned");
+        assert!(unchanged.implementer_agent_id.is_none());
+        assert!(repo::task::events_for(&state.db, &unchanged.id, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo::task::watchers(&state.db, &unchanged.id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        workspace::set_run_state(&state.db, &ws, "started")
+            .await
+            .unwrap();
+        workspace_agent::set_availability(&state.db, &actor, "stopped")
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim(
+                &state,
+                json!({ "workspaceId": ws, "slug": "blocked", "actorId": actor }),
+            )
+            .await,
+            Err(AppError::Invalid(_))
+        ));
+        let unchanged = repo::task::get(&state.db, &ws, "blocked")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, "planned");
+        assert!(unchanged.implementer_agent_id.is_none());
     }
 
     #[tokio::test]

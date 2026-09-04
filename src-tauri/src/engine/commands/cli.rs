@@ -75,8 +75,24 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 }
                 Ok(("workspace.use", json!({ "workspaceId": workspace_id })))
             }
+            Some("start") | Some("stop") => {
+                let verb = argv[1].as_str();
+                let usage = format!("cli: ws {verb} <workspaceId>");
+                let workspace_id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid(usage.clone()))?;
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid(usage));
+                }
+                let method = if verb == "start" {
+                    "workspace.start"
+                } else {
+                    "workspace.stop"
+                };
+                Ok((method, json!({ "workspaceId": workspace_id })))
+            }
             _ => Err(AppError::Invalid(
-                "cli: ws <list|use> — unknown ws subcommand".into(),
+                "cli: ws <list|use|start|stop> — unknown ws subcommand".into(),
             )),
         },
 
@@ -91,8 +107,27 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 }
                 Ok(("instance.list", json!({ "workspaceId": workspace_id })))
             }
+            Some("stop") | Some("resume") => {
+                let verb = argv[1].as_str();
+                let usage = format!("cli: agent {verb} <workspaceAgentId>");
+                let workspace_agent_id = argv
+                    .get(2)
+                    .ok_or_else(|| AppError::Invalid(usage.clone()))?;
+                if argv.len() != 3 {
+                    return Err(AppError::Invalid(usage));
+                }
+                let method = if verb == "stop" {
+                    "instance.stop"
+                } else {
+                    "instance.resume"
+                };
+                Ok((
+                    method,
+                    json!({ "workspaceAgentId": workspace_agent_id }),
+                ))
+            }
             _ => Err(AppError::Invalid(
-                "cli: agent <list> — unknown agent subcommand".into(),
+                "cli: agent <list|stop|resume> — unknown agent subcommand".into(),
             )),
         },
 
@@ -1567,6 +1602,24 @@ mod tests {
     }
 
     #[test]
+    fn ws_lifecycle_maps_with_exact_arity() {
+        assert_eq!(ok_method(&["ws", "start", "ws1"]), "workspace.start");
+        assert_eq!(ok_method(&["ws", "stop", "ws1"]), "workspace.stop");
+        assert_eq!(
+            ok_params(&["ws", "start", "ws1"]),
+            json!({ "workspaceId": "ws1" })
+        );
+        for args in [
+            &["ws", "start"][..],
+            &["ws", "stop"][..],
+            &["ws", "start", "ws1", "extra"][..],
+            &["ws", "stop", "ws1", "extra"][..],
+        ] {
+            assert!(is_invalid(args));
+        }
+    }
+
+    #[test]
     fn ws_list_rejects_extra_args() {
         assert!(is_invalid(&["ws", "list", "extra"]));
     }
@@ -1584,6 +1637,24 @@ mod tests {
     #[test]
     fn ws_unknown_sub_is_invalid() {
         assert!(is_invalid(&["ws", "delete"]));
+    }
+
+    #[test]
+    fn agent_lifecycle_maps_with_exact_arity() {
+        assert_eq!(ok_method(&["agent", "stop", "a1"]), "instance.stop");
+        assert_eq!(ok_method(&["agent", "resume", "a1"]), "instance.resume");
+        assert_eq!(
+            ok_params(&["agent", "resume", "a1"]),
+            json!({ "workspaceAgentId": "a1" })
+        );
+        for args in [
+            &["agent", "stop"][..],
+            &["agent", "resume"][..],
+            &["agent", "stop", "a1", "extra"][..],
+            &["agent", "resume", "a1", "extra"][..],
+        ] {
+            assert!(is_invalid(args));
+        }
     }
 
     // ── agent ─────────────────────────────────────────────────────────────

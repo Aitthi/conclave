@@ -25,6 +25,7 @@ pub const TASK_CHANGED: &str = "task:changed";
 pub const MEMORY_CHANGED: &str = "memory:changed";
 pub const ARTIFACT_CHANGED: &str = "artifact:changed";
 pub const ROSTER_CHANGED: &str = "roster:changed";
+pub const WORKSPACE_CHANGED: &str = "workspace:changed";
 
 // ---------------------------------------------------------------------------
 // Payload structs
@@ -190,6 +191,14 @@ pub struct RosterChanged {
     pub workspace_id: String,
 }
 
+/// Payload for persistent workspace lifecycle changes.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChanged {
+    pub workspace_id: String,
+    pub run_state: String,
+}
+
 // ---------------------------------------------------------------------------
 // Generic emit helper
 // ---------------------------------------------------------------------------
@@ -255,6 +264,10 @@ pub fn artifact_changed(app: &AppHandle, payload: ArtifactChanged) -> tauri::Res
 /// membership/position just changed.
 pub fn roster_changed(app: &AppHandle, payload: RosterChanged) -> tauri::Result<()> {
     emit(app, ROSTER_CHANGED, payload)
+}
+
+pub fn workspace_changed(app: &AppHandle, payload: WorkspaceChanged) -> tauri::Result<()> {
+    emit(app, WORKSPACE_CHANGED, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +492,16 @@ mod tests {
         })
         .unwrap();
         assert_eq!(val, json!({ "workspaceId": "ws1" }));
+    }
+
+    #[test]
+    fn workspace_changed_camel_case() {
+        let val = serde_json::to_value(WorkspaceChanged {
+            workspace_id: "ws1".into(),
+            run_state: "stopped".into(),
+        })
+        .unwrap();
+        assert_eq!(val, json!({ "workspaceId": "ws1", "runState": "stopped" }));
     }
 
     #[test]

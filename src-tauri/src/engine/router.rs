@@ -16,6 +16,8 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "workspace.link" => workspace::link(state, payload).await,
         "workspace.use" => workspace::use_workspace(state, payload).await,
         "workspace.update" => workspace::update(state, payload).await,
+        "workspace.start" => workspace::start(state, payload).await,
+        "workspace.stop" => workspace::stop(state, payload).await,
         "workspace.delete" => workspace::delete(state, payload).await,
 
         // ── agentDef ──────────────────────────────────────────────────────
@@ -41,6 +43,8 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "instance.list" => instance::list(state, payload).await,
         "instance.spawn" => instance::spawn(state, payload).await,
         "instance.restart" => instance::restart(state, payload).await,
+        "instance.stop" => instance::stop(state, payload).await,
+        "instance.resume" => instance::resume(state, payload).await,
         "instance.remove" => instance::remove(state, payload).await,
         "instance.setPosition" => instance::set_position(state, payload).await,
         "session.resize" => instance::resize(state, payload).await,

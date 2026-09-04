@@ -475,6 +475,13 @@ pub fn mark_ended(agent_id: &str) {
     with_registry(|r| r.mark_ended(agent_id));
 }
 
+/// Clear an agent tab's ended marker after a fresh runtime generation has
+/// registered successfully. Registry-only; the frontend's status poll observes
+/// the update, matching [`mark_ended`].
+pub fn mark_resumed(agent_id: &str) {
+    with_registry(|r| r.mark_resumed(agent_id));
+}
+
 /// Test-only: seed an AGENT tab straight into the process-global registry
 /// (app-less, no native webview) so lifecycle tests in `instance.rs` can assert
 /// `mark_ended` flips it. Callers MUST use a process-unique `agent_id` (the
@@ -891,6 +898,28 @@ mod tests {
         assert!(
             !tabs.iter().any(|t| t.tab_id == unknown),
             "mark_ended must not create a tab for an unknown id"
+        );
+    }
+
+    #[test]
+    fn mark_resumed_clears_ended_and_noops_unknown_id() {
+        let seeded = "t1-resumed-seeded";
+        let unknown = "t1-resumed-unknown";
+
+        test_seed_agent_tab(seeded);
+        mark_ended(seeded);
+        mark_resumed(seeded);
+        mark_resumed(unknown);
+
+        let tabs = state().tabs;
+        let seeded_tab = tabs
+            .iter()
+            .find(|t| t.tab_id == seeded)
+            .expect("seeded tab present");
+        assert!(!seeded_tab.ended, "resumed agent tab must be live again");
+        assert!(
+            !tabs.iter().any(|t| t.tab_id == unknown),
+            "mark_resumed must not create an unknown tab"
         );
     }
 

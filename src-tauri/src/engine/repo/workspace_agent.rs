@@ -35,12 +35,20 @@ pub struct WorkspaceAgentRow {
     pub workspace_id: String, // → "workspaceId"
     pub agent_def_id: String, // → "agentDefId"
     pub status: String,
+    pub availability: String,
     pub added_at: String, // → "addedAt"
 }
 
 // ── Column list (shared by SELECT queries) ───────────────────────────────────
 
-const COLS: [&str; 5] = ["id", "workspace_id", "agent_def_id", "status", "added_at"];
+const COLS: [&str; 6] = [
+    "id",
+    "workspace_id",
+    "agent_def_id",
+    "status",
+    "availability",
+    "added_at",
+];
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +82,7 @@ pub async fn create(
             ("workspace_id", Bind::Text(workspace_id.clone())),
             ("agent_def_id", Bind::Text(agent_def_id.clone())),
             ("status", Bind::Text(status.clone())),
+            ("availability", Bind::Text("active".to_owned())),
             ("added_at", Bind::Text(added_at.clone())),
         ])
         .execute(pool)
@@ -85,6 +94,7 @@ pub async fn create(
         workspace_id,
         agent_def_id,
         status,
+        availability: "active".to_owned(),
         added_at,
     })
 }
@@ -445,6 +455,7 @@ pub struct WorkspaceAgentWithSkills {
     pub workspace_id: String,
     pub agent_def_id: String,
     pub status: String,
+    pub availability: String,
     pub added_at: String,
     /// The agent definition's display name.
     pub name: String,
@@ -526,6 +537,7 @@ struct RosterQueryRow {
     workspace_id: String,
     agent_def_id: String,
     status: String,
+    availability: String,
     added_at: String,
     launched_skill_ids: Option<String>,
     context_tokens: Option<i64>,
@@ -561,7 +573,7 @@ pub async fn list_by_workspace_with_launched_skills(
     // If that FK is ever dropped or made ON DELETE SET NULL, a widowed instance
     // would silently VANISH from the roster here; make it a LEFT JOIN then.
     let rows: Vec<RosterQueryRow> = sqlx::query_as(
-        "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.added_at, \
+        "SELECT wa.id, wa.workspace_id, wa.agent_def_id, wa.status, wa.availability, wa.added_at, \
          wa.level, wa.supervisor_agent_id, supervisor_def.name AS supervisor_name, \
          sess.launched_skill_ids, sess.context_tokens, sess.context_limit, \
          ad.name AS agent_name, ad.role_id AS role_id, ad.role AS role_text, \
@@ -619,6 +631,7 @@ pub async fn list_by_workspace_with_launched_skills(
                 workspace_id: r.workspace_id,
                 agent_def_id: r.agent_def_id,
                 status: r.status,
+                availability: r.availability,
                 added_at: r.added_at,
                 name: r.agent_name,
                 level: r.level,
@@ -740,8 +753,8 @@ pub async fn instantiate(
 
     sqlx::query(
         "INSERT INTO workspace_agent \
-         (id, workspace_id, agent_def_id, status, added_at, level) \
-         SELECT ?, ?, id, 'idle', ?, default_level \
+         (id, workspace_id, agent_def_id, status, availability, added_at, level) \
+         SELECT ?, ?, id, 'idle', 'active', ?, default_level \
          FROM agent_definition WHERE id = ?",
     )
     .bind(&wa_id)
@@ -770,8 +783,44 @@ pub async fn instantiate(
         workspace_id: workspace_id.to_owned(),
         agent_def_id: agent_def_id.to_owned(),
         status: "idle".to_owned(),
+        availability: "active".to_owned(),
         added_at,
     })
+}
+
+/// Runtime eligibility for a workspace agent, resolved in one joined query so
+/// command guards cannot accidentally check only one half of the contract.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct RuntimeEligibility {
+    pub workspace_id: String,
+    pub run_state: String,
+    pub availability: String,
+}
+
+pub async fn runtime_eligibility(
+    pool: &SqlitePool,
+    id: &str,
+) -> sqlx::Result<Option<RuntimeEligibility>> {
+    sqlx::query_as(
+        "SELECT wa.workspace_id, w.run_state, wa.availability \
+         FROM workspace_agent wa JOIN workspace w ON w.id = wa.workspace_id \
+         WHERE wa.id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Persist an agent's individual availability. The database CHECK restricts
+/// the value to `active | stopped`.
+pub async fn set_availability(pool: &SqlitePool, id: &str, availability: &str) -> sqlx::Result<()> {
+    QueryBuilder::<Sqlite>::table("workspace_agent")
+        .update([("availability", Bind::Text(availability.to_owned()))])
+        .where_eq("id", id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
 }
 
 /// `cli_kind` of the agent_definition behind a workspace_agent (`None` for
@@ -1153,6 +1202,7 @@ mod tests {
         assert_eq!(row.workspace_id, ws_id);
         assert_eq!(row.agent_def_id, def_id);
         assert_eq!(row.status, "idle");
+        assert_eq!(row.availability, "active");
         assert!(!row.id.is_empty());
         assert!(!row.added_at.is_empty());
 
@@ -1752,6 +1802,10 @@ mod tests {
         assert!(json.get("workspaceId").is_some(), "must have workspaceId");
         assert!(json.get("agentDefId").is_some(), "must have agentDefId");
         assert!(json.get("addedAt").is_some(), "must have addedAt");
+        assert_eq!(
+            json.get("availability").and_then(|v| v.as_str()),
+            Some("active")
+        );
 
         // snake_case must NOT appear
         assert!(
