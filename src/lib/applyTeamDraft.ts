@@ -83,9 +83,10 @@ function saveRequest(agent: DraftAgent, roleId: string, roleName?: string) {
     shareBlackboard: true,
     autoSubmitInjected: true,
     allowedSenders: "all" as const,
-    // Claude Code keeps the Builder's default window; Codex derives it from
-    // the model backend-side (R2/R4 — "Auto").
-    contextWindow: cliKind === "claude-code" ? "200k" : undefined,
+    // contextWindow is omitted on purpose: absent behaves exactly like the
+    // Builder's "200k" default (only "1m" changes the launch, see
+    // `effective_claude_model` in commands/instance.rs:54), and Codex derives
+    // its window from the model backend-side.
     skillIds: agent.skillIds,
     defaultLevel: agent.defaultLevel ?? null,
   };
