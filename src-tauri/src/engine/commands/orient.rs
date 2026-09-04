@@ -241,10 +241,13 @@ mod tests {
     };
 
     async fn fixture_workspace(state: &AppState) -> String {
-        workspace::create(&state.db, "WS", "/tmp/ws", None)
+        let workspace = workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
-            .expect("create workspace failed")
-            .id
+            .expect("create workspace failed");
+        workspace::set_run_state(&state.db, &workspace.id, "started")
+            .await
+            .expect("start fixture workspace");
+        workspace.id
     }
 
     async fn fixture_instance(state: &AppState, workspace_id: &str, name: &str) -> String {

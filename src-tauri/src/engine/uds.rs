@@ -438,8 +438,11 @@ mod tests {
         let state = Arc::new(AppState::for_tests().await);
         let ws = crate::engine::repo::workspace::create(&state.db, "WS", "/tmp/ws", None)
             .await
-            .expect("create workspace failed")
-            .id;
+            .expect("create workspace failed");
+        crate::engine::repo::workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .expect("start fixture workspace");
+        let ws = ws.id;
         let agent_def = crate::engine::repo::agent_definition::create(
             &state.db,
             &crate::engine::repo::agent_definition::AgentDefinitionInput {
