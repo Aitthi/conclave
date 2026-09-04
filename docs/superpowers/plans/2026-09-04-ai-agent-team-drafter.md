@@ -1042,7 +1042,7 @@ Use ids that exist in `agentDefs` / `roles` / `skills` of `data.ts` (check `role
 - Create: `src/lib/applyTeamDraft.ts`
 
 **Interfaces:**
-- Consumes: `ipc.role.save`, `ipc.agentDef.save` (request shape: copy the object literal from `Builder.tsx` `handleSave` ~:453 and fill: `id: undefined, name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "own"`, everything else omitted), `ipc.agentDef.addToWorkspace({ agentDefId, workspaceIds: [workspaceId] })`, `ipc.instance.list({ workspaceId })`, `ipc.instance.setPosition`.
+- Consumes: `ipc.role.save`, `ipc.agentDef.save` (request shape: copy the object literal from `Builder.tsx` `handleSave` ~:453 and fill: `id: undefined, name, role: <role display name>, roleId, type: "cli", cliKind, model, color, skillIds, defaultLevel` PLUS Builder's fixed constants verbatim: `harnessMode: "central", shareBlackboard: true, autoSubmitInjected: true, allowedSenders: "all"` (Builder.tsx:466-472 — found by Tiësto, challenge 27c3493c; spec D10 = Builder defaults, and Builder's default is central), everything else omitted), `ipc.agentDef.addToWorkspace({ agentDefId, workspaceIds: [workspaceId] })`, `ipc.instance.list({ workspaceId })`, `ipc.instance.setPosition`.
 - Produces:
 
 ```ts
@@ -1075,7 +1075,7 @@ export async function applyTeamDraft(
 
 **Interfaces:**
 - `AgentDrafterProps { mode: DraftMode; workspaceId?: string; workspaceName?: string; onClose: () => void; onDraftAgent: (def: AgentDefinition, draftedBy: string) => void; onTeamApplied: () => void; onOpenBuilder: () => void }`
-- `export function draftToInitialDef(a: DraftAgent, roleName?: string): AgentDefinition` — id-less object: `{ id: "", name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "own", createdAt: "" }` (when `newRole` is present the Builder cannot show it, so agent mode first calls `ipc.role.save` for the new role and passes its id; when `existingAgentDefId` is present, pass that def fetched via `agentDef.list`).
+- `export function draftToInitialDef(a: DraftAgent, roleName?: string): AgentDefinition` — id-less object: `{ id: "", name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "central", createdAt: "" }` (Builder re-sends its own constants on save, so only `harnessMode` needs a value here) (when `newRole` is present the Builder cannot show it, so agent mode first calls `ipc.role.save` for the new role and passes its id; when `existingAgentDefId` is present, pass that def fetched via `agentDef.list`).
 - AppShell: `const [showDrafter, setShowDrafter] = useState<{ mode: DraftMode } | null>(null); const [draftSeq, setDraftSeq] = useState(0); const [builderDraftedBy, setBuilderDraftedBy] = useState<string | undefined>()`; view map adds `drafter: () => setShowDrafter({ mode: "team" })`; Builder `key={builderInitialDef?.id || \`draft-${draftSeq}\`}` and `draftedBy={builderDraftedBy}`; `onDraftAgent={(def, by) => { setBuilderInitialDef(def); setBuilderDraftedBy(by); setDraftSeq(s => s + 1); setShowDrafter(null); setShowBuilder(true); }}`; `onTeamApplied={() => { setShowDrafter(null); setLibraryRefreshKey(k => k + 1); setAgentsVersion(v => v + 1); }}`.
 - Library: new prop `onOpenDrafter: () => void`, button beside "New agent". Roster: new prop `onBuildTeam?: () => void`, button beside "Add agent" (disabled when `workspaceId === null`).
 
