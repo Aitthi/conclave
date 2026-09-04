@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-    SqlitePool,
+    Acquire, SqliteConnection, SqlitePool,
 };
 
 /// Returns `~/Library/Application Support/Conclave/conclave.db` (macOS).
@@ -61,9 +61,10 @@ pub async fn connect() -> sqlx::Result<SqlitePool> {
 ///
 /// **Adding future migrations**: append another `if version < N { … }` block.
 pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
+    let mut connection = pool.acquire().await?;
     // Read the version INSIDE the transaction so check-and-bump is atomic —
     // no TOCTOU window between two separate pool checkouts.
-    let mut tx = pool.begin().await?;
+    let mut tx = connection.begin().await?;
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *tx)
         .await?;
@@ -316,7 +317,66 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     }
 
     tx.commit().await?;
+
+    if version < 28 {
+        migrate_0028(&mut connection).await?;
+    }
     Ok(())
+}
+
+/// Apply the v28 `agent_definition` rebuild without letting inbound foreign
+/// keys cascade away. SQLite ignores `PRAGMA foreign_keys=OFF` inside an open
+/// transaction, so this migration deliberately owns one connection, disables
+/// enforcement before BEGIN, commits the rebuild and version bump atomically,
+/// checks the resulting graph, and restores enforcement on every exit path.
+async fn migrate_0028(connection: &mut SqliteConnection) -> sqlx::Result<()> {
+    sqlx::raw_sql("PRAGMA foreign_keys = OFF;")
+        .execute(&mut *connection)
+        .await?;
+
+    let migration_result = async {
+        let mut tx = connection.begin().await?;
+        let apply_result = async {
+            sqlx::raw_sql(include_str!("migrations/0028_antigravity_cli.sql"))
+                .execute(&mut *tx)
+                .await?;
+            sqlx::raw_sql("PRAGMA user_version = 28;")
+                .execute(&mut *tx)
+                .await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+
+        match apply_result {
+            Ok(()) => tx.commit().await?,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        }
+
+        let violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&mut *connection)
+                .await?;
+        if !violations.is_empty() {
+            return Err(sqlx::Error::Protocol(format!(
+                "migration 0028 left foreign-key violations: {violations:?}"
+            )));
+        }
+        Ok(())
+    }
+    .await;
+
+    let restore_result = sqlx::raw_sql("PRAGMA foreign_keys = ON;")
+        .execute(&mut *connection)
+        .await
+        .map(|_| ());
+    match (migration_result, restore_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 /// Opens an in-memory SQLite pool suitable for unit tests.
@@ -520,6 +580,256 @@ mod tests {
                 .await
                 .unwrap();
         assert!(violations.is_empty(), "dangling FKs: {violations:?}");
+    }
+
+    async fn connect_at_v27() -> SqlitePool {
+        let pool = connect_at_v26().await;
+        let mut tx = pool.begin().await.expect("begin v27 setup");
+        sqlx::raw_sql(include_str!("migrations/0027_workspace_lifecycle.sql"))
+            .execute(&mut *tx)
+            .await
+            .expect("apply 0027 migration");
+        sqlx::raw_sql("PRAGMA user_version = 27;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 27");
+        tx.commit().await.expect("commit v27 setup");
+        pool
+    }
+
+    #[tokio::test]
+    async fn migrate_0028_preserves_populated_agent_definition_graph() {
+        let pool = connect_at_v27().await;
+        sqlx::query("INSERT INTO provider (id,name,stored_in) VALUES ('p','custom','keychain')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO workspace (id,name,folder_path,hidden,run_state,created_at) \
+             VALUES ('ws','WS','/tmp/ws',0,'started','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_definition (\
+                 id,name,role,type,cli_kind,color,provider_id,model,harness_mode,\
+                 share_blackboard,auto_submit_injected,allowed_senders,created_at,\
+                 permission_mode,custom_args,custom_env,secret_env_keys,context_window,\
+                 selected_builtin_skill_ids,role_id,default_level,rtk_enabled,proxy_enabled\
+             ) VALUES (\
+                 'def','Builder','Lead','cli','codex','#123456','p','gpt-x','central',\
+                 1,0,'selected','2020-01-02','plan','--expert','{\"A\":\"B\"}',\
+                 '[\"TOKEN\"]','1m','[\"skill-optional\"]','lead','principal',0,1\
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO workspace_agent \
+             (id,workspace_id,agent_def_id,status,added_at,availability) \
+             VALUES ('wa','ws','def','idle','2020-01-03','active')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO tool (id,name,kind,is_core) VALUES ('tool','Tool','builtin',0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_tool (agent_def_id,tool_id,enabled) VALUES ('def','tool',1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO skill (id,name,description,icon) VALUES ('skill','Skill','D','i')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_skill (agent_def_id,skill_id,sort_order) VALUES ('def','skill',1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO fusion_config \
+             (id,orchestrator_id,judge_model,force_fusion,panel_temperature,max_tool_calls) \
+             VALUES ('fc','wa','judge',1,0.5,3)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO fusion_panel_member (fusion_config_id,agent_def_id,sort_order) \
+             VALUES ('fc','def',1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.expect("0028 migration");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 28);
+        use sqlx::Row as _;
+        let retained = sqlx::query(
+            "SELECT id,name,role,type,cli_kind,color,provider_id,model,harness_mode,\
+             share_blackboard,auto_submit_injected,allowed_senders,created_at,\
+             permission_mode,custom_args,custom_env,secret_env_keys,context_window,\
+             selected_builtin_skill_ids,role_id,default_level,rtk_enabled,proxy_enabled,effort \
+             FROM agent_definition WHERE id='def'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained.try_get::<String, _>("id").unwrap(), "def");
+        assert_eq!(retained.try_get::<String, _>("name").unwrap(), "Builder");
+        assert_eq!(retained.try_get::<String, _>("role").unwrap(), "Lead");
+        assert_eq!(retained.try_get::<String, _>("type").unwrap(), "cli");
+        assert_eq!(retained.try_get::<String, _>("cli_kind").unwrap(), "codex");
+        assert_eq!(retained.try_get::<String, _>("color").unwrap(), "#123456");
+        assert_eq!(retained.try_get::<String, _>("provider_id").unwrap(), "p");
+        assert_eq!(retained.try_get::<String, _>("model").unwrap(), "gpt-x");
+        assert_eq!(
+            retained.try_get::<String, _>("harness_mode").unwrap(),
+            "central"
+        );
+        assert_eq!(retained.try_get::<i64, _>("share_blackboard").unwrap(), 1);
+        assert_eq!(
+            retained.try_get::<i64, _>("auto_submit_injected").unwrap(),
+            0
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("allowed_senders").unwrap(),
+            "selected"
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("created_at").unwrap(),
+            "2020-01-02"
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("permission_mode").unwrap(),
+            "plan"
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("custom_args").unwrap(),
+            "--expert"
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("custom_env").unwrap(),
+            r#"{"A":"B"}"#
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("secret_env_keys").unwrap(),
+            r#"["TOKEN"]"#
+        );
+        assert_eq!(
+            retained.try_get::<String, _>("context_window").unwrap(),
+            "1m"
+        );
+        assert_eq!(
+            retained
+                .try_get::<String, _>("selected_builtin_skill_ids")
+                .unwrap(),
+            r#"["skill-optional"]"#
+        );
+        assert_eq!(retained.try_get::<String, _>("role_id").unwrap(), "lead");
+        assert_eq!(
+            retained.try_get::<String, _>("default_level").unwrap(),
+            "principal"
+        );
+        assert_eq!(retained.try_get::<i64, _>("rtk_enabled").unwrap(), 0);
+        assert_eq!(
+            retained.try_get::<i64, _>("proxy_enabled").unwrap(),
+            1,
+            "dormant proxy_enabled must survive"
+        );
+        assert_eq!(
+            retained.try_get::<Option<String>, _>("effort").unwrap(),
+            None
+        );
+
+        for (table, query) in [
+            ("workspace_agent", "SELECT COUNT(*) FROM workspace_agent"),
+            ("agent_tool", "SELECT COUNT(*) FROM agent_tool"),
+            ("agent_skill", "SELECT COUNT(*) FROM agent_skill"),
+            (
+                "fusion_panel_member",
+                "SELECT COUNT(*) FROM fusion_panel_member",
+            ),
+        ] {
+            let count: i64 = sqlx::query_scalar(query).fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 1, "{table} relation must survive");
+        }
+
+        sqlx::query(
+            "UPDATE agent_definition SET cli_kind='antigravity',effort='high' WHERE id='def'",
+        )
+        .execute(&pool)
+        .await
+        .expect("new cli_kind and effort must be accepted");
+        assert!(
+            sqlx::query("UPDATE agent_definition SET cli_kind='invalid' WHERE id='def'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("UPDATE agent_definition SET effort='extreme' WHERE id='def'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        let violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(violations.is_empty(), "dangling FKs: {violations:?}");
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1, "foreign key enforcement must be restored");
+
+        migrate(&pool)
+            .await
+            .expect("0028 migration must be idempotent");
+        let version_after_second_run: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version_after_second_run, 28);
+    }
+
+    #[tokio::test]
+    async fn migrate_0028_restores_foreign_keys_after_rebuild_error() {
+        let pool = connect_at_v27().await;
+        sqlx::raw_sql("ALTER TABLE agent_definition DROP COLUMN proxy_enabled;")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(migrate(&pool).await.is_err());
+
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1, "error path must restore foreign keys");
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 27, "failed rebuild must not bump the version");
     }
 
     /// Build an in-memory DB at schema **v13** — the state just before 0014 —
@@ -868,7 +1178,7 @@ mod tests {
         assert_eq!(count, 31, "expected 31 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 19.
+    /// Running migrate twice must not error and must leave user_version == 28.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -901,7 +1211,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 27, "user_version should be 27");
+        assert_eq!(version, 28, "user_version should be 28");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =

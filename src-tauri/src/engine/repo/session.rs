@@ -241,6 +241,22 @@ pub async fn set_context_reading(
     Ok(())
 }
 
+/// Clear both context fields when the active harness has no trustworthy usage
+/// source. Antigravity's conversation files are opaque protobufs, so storing a
+/// synthetic `0 / 200000` reading would present fiction as telemetry.
+pub async fn clear_context_reading(pool: &SqlitePool, session_id: &str) -> sqlx::Result<()> {
+    QueryBuilder::<Sqlite>::table("session")
+        .update([
+            ("context_tokens", Bind::Null),
+            ("context_limit", Bind::Null),
+        ])
+        .where_eq("id", session_id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
 /// Persist the ordered list of skill ids actually used for the most recent
 /// launch. Compared against an agent definition's CURRENT attachments
 /// (`repo::skill::custom_skill_ids_by_agent` + builtin ids) to detect drift
@@ -430,6 +446,24 @@ mod tests {
         assert!(
             fetched.last_active_at.is_some(),
             "last_active_at must be stamped after a reading update"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_context_reading_sets_both_fields_to_null() {
+        let pool = connect_in_memory().await;
+        let instance_id = fixture_instance(&pool).await;
+        let row = create_for_instance(&pool, &instance_id).await.unwrap();
+        set_context_reading(&pool, &row.id, 321, 8_000)
+            .await
+            .unwrap();
+
+        clear_context_reading(&pool, &row.id).await.unwrap();
+
+        let cleared = get(&pool, &row.id).await.unwrap().unwrap();
+        assert_eq!(
+            (cleared.context_tokens, cleared.context_limit),
+            (None, None)
         );
     }
 

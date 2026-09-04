@@ -66,6 +66,7 @@ struct SaveAgentReq {
     color: Option<String>,
     provider_id: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     harness_mode: Option<String>,
     share_blackboard: Option<bool>,
     auto_submit_injected: Option<bool>,
@@ -216,6 +217,18 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         }
     }
 
+    let cli_kind = nonblank(req.cli_kind);
+    let effort = nonblank(req.effort);
+    if let Some(value) = effort.as_deref() {
+        const ALLOWED_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+        if !ALLOWED_EFFORTS.contains(&value) {
+            return Err(AppError::Invalid(format!("invalid effort: {value}")));
+        }
+    }
+    let effort = (cli_kind.as_deref() == Some("antigravity"))
+        .then_some(effort)
+        .flatten();
+
     // ── Role (ADR 0005) ──────────────────────────────────────────────────────
     // Resolve the chosen first-class role (builtin folder or custom DB row).
     // The legacy `role` free-text column becomes the role's display name (a
@@ -296,11 +309,12 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         role: role_display,
         role_id,
         agent_type: req.agent_type,
-        cli_kind: req.cli_kind,
+        cli_kind,
         color: req.color,
         default_level,
         provider_id: req.provider_id,
         model: req.model,
+        effort,
         harness_mode: req.harness_mode.unwrap_or_else(|| "own".to_owned()),
         share_blackboard: req.share_blackboard,
         auto_submit_injected: req.auto_submit_injected,
@@ -974,5 +988,69 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn save_validates_roundtrips_and_normalizes_antigravity_effort() {
+        let state = AppState::for_tests().await;
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "AGY",
+                "type": "cli",
+                "cliKind": "antigravity",
+                "model": "gemini-pro",
+                "effort": "low",
+                "harnessMode": "own"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.get("effort").and_then(Value::as_str), Some("low"));
+        let id = created.get("id").and_then(Value::as_str).unwrap();
+
+        let updated = save(
+            &state,
+            serde_json::json!({
+                "id": id,
+                "name": "AGY",
+                "type": "cli",
+                "cliKind": "antigravity",
+                "effort": "high",
+                "harnessMode": "own"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.get("effort").and_then(Value::as_str), Some("high"));
+
+        let normalized = save(
+            &state,
+            serde_json::json!({
+                "id": id,
+                "name": "Codex",
+                "type": "cli",
+                "cliKind": "codex",
+                "effort": "medium",
+                "harnessMode": "own"
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(normalized.get("effort").is_none());
+
+        let error = save(
+            &state,
+            serde_json::json!({
+                "name": "Invalid",
+                "type": "cli",
+                "cliKind": "antigravity",
+                "effort": "extreme",
+                "harnessMode": "own"
+            }),
+        )
+        .await
+        .expect_err("invalid effort must be rejected before persistence");
+        assert!(matches!(error, AppError::Invalid(message) if message.contains("invalid effort")));
     }
 }
