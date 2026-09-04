@@ -233,7 +233,7 @@ pub enum Oneshot { Live, #[cfg(test)] Mock(Result<serde_json::Value, String>) }
 impl Oneshot { pub async fn run(&self, spec: &OneshotSpec) -> Result<serde_json::Value, OneshotError> }
 
 pub fn claude_launch(model: Option<&str>, schema: &serde_json::Value) -> String;
-pub fn codex_launch(model: Option<&str>, schema_path: &std::path::Path, out_path: &std::path::Path) -> String;
+pub fn codex_launch(model: Option<&str>, out_path: &std::path::Path) -> String; // no --output-schema (R2 fired, ruling 2026-09-04)
 pub fn extract_last_json_object(stdout: &str) -> Option<serde_json::Value>;
 pub fn claude_structured_result(envelope: &serde_json::Value) -> Result<serde_json::Value, OneshotError>;
 pub fn parse_codex_last_message(text: &str) -> Result<serde_json::Value, OneshotError>;
@@ -264,11 +264,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_launch_uses_exec_json_schema_and_last_message_file() {
-        let s = codex_launch(Some("gpt-5.5"), std::path::Path::new("/t/s.json"), std::path::Path::new("/t/o.json"));
+    fn codex_launch_uses_exec_json_and_last_message_file_without_output_schema() {
+        // R2 fired: OpenAI strict structured outputs reject a schema with optional
+        // properties (HTTP 400), so codex gets the schema in the prompt only.
+        let s = codex_launch(Some("gpt-5.5"), std::path::Path::new("/t/o.json"));
         assert_eq!(
             s,
-            "codex exec --json --ephemeral --skip-git-repo-check --output-schema '/t/s.json' -o '/t/o.json' -m 'gpt-5.5' -"
+            "codex exec --json --ephemeral --skip-git-repo-check -o '/t/o.json' -m 'gpt-5.5' -"
         );
     }
 
@@ -742,7 +744,7 @@ pub fn draft_schema(mode: DraftMode) -> Value {
 Validator (`validate_draft`), in this order, each returning `Err(format!("draft.{field}: {reason}"))`:
 1. `agents` non-empty; Agent mode → `agents.len() == 1` and `positions.is_empty()` (fields `draft.agents` / `draft.positions`); Team mode → `agents.len() <= MAX_TEAM_SIZE` (reason contains "12").
 2. Keys unique (`draft.agents[i].key: duplicate`).
-3. Per agent: if `existing_agent_def_id` is Some → must be in `cat.existing` ids and every other optional field None / `skill_ids` empty (`draft.agents[i].existingAgentDefId`). Else: `name` Some+non-empty (`.name`), `cli_kind` ∈ {claude-code, codex} (`.cliKind`), `model` ∈ the list for that cli_kind (`.model`), exactly one of `role_id`/`new_role` (`.roleId: give roleId or newRole, not both/neither` — the test expects the string "roleId" for the both case and "role" for neither), `role_id` ∈ `cat.roles` ids (`.roleId`), `new_role.name` not equal (case-insensitive) to any `cat.roles[].name` or id (`.newRole.name`), `new_role.skill_ids` and `skill_ids` ⊆ `cat.skills` ids (`.skillIds` / `.newRole.skillIds`), `color` ∈ COLOR_SWATCHES if Some (`.color`), `default_level` ∈ LEVELS if Some (`.defaultLevel`).
+3. Per agent: if `existing_agent_def_id` is Some → must be in `cat.existing` ids AND unique across the draft (two keys naming the same definition would collapse onto one roster row and the second position would overwrite the first — Mellow L2; error `draft.agents[i].existingAgentDefId: already used by <key>`) and every other optional field None / `skill_ids` empty (`draft.agents[i].existingAgentDefId`). Else: `name` Some+non-empty (`.name`), `cli_kind` ∈ {claude-code, codex} (`.cliKind`), `model` ∈ the list for that cli_kind (`.model`), exactly one of `role_id`/`new_role` (`.roleId: give roleId or newRole, not both/neither` — the test expects the string "roleId" for the both case and "role" for neither), `role_id` ∈ `cat.roles` ids (`.roleId`), `new_role.name` not equal (case-insensitive) to any `cat.roles[].name` or id (`.newRole.name`), `new_role.skill_ids` and `skill_ids` ⊆ `cat.skills` ids (`.skillIds` / `.newRole.skillIds`), `color` ∈ COLOR_SWATCHES if Some (`.color`), `default_level` ∈ LEVELS if Some (`.defaultLevel`).
 4. Team mode: every agent key has exactly one position and vice versa (`draft.positions: every agent needs one position`); `level` ∈ LEVELS; `supervisor_key` names another agent key (`draft.positions[i].supervisorKey`); no cycle — walk supervisor links from each key with a visited set, error text contains "cycle".
 
 `build_catalogue`: roles = `repo::role::list_builtin()` followed by `repo::role::list(db).await?`; skills = `repo::skill::list_builtin()` + `repo::skill::list(db).await?` filtered to `!mandatory`; existing = `repo::agent_definition::list(db).await?` mapped to `ExistingDef` (role_name = `role` column fallback, or resolve `role_id` through the roles vec); roster = when `workspace_id` is Some, `repo::workspace_agent::list_by_workspace(db, ws)` joined with the defs for names, supervisor name resolved within the same list.
@@ -1042,7 +1044,7 @@ Use ids that exist in `agentDefs` / `roles` / `skills` of `data.ts` (check `role
 - Create: `src/lib/applyTeamDraft.ts`
 
 **Interfaces:**
-- Consumes: `ipc.role.save`, `ipc.agentDef.save` (request shape: copy the object literal from `Builder.tsx` `handleSave` ~:453 and fill: `id: undefined, name, role: <role display name>, roleId, type: "cli", cliKind, model, color, skillIds, defaultLevel` PLUS Builder's fixed constants verbatim: `harnessMode: "central", shareBlackboard: true, autoSubmitInjected: true, allowedSenders: "all"` (Builder.tsx:466-472 — found by Tiësto, challenge 27c3493c; spec D10 = Builder defaults, and Builder's default is central), everything else omitted), `ipc.agentDef.addToWorkspace({ agentDefId, workspaceIds: [workspaceId] })`, `ipc.instance.list({ workspaceId })`, `ipc.instance.setPosition`.
+- Consumes: `ipc.role.save`, `ipc.agentDef.save` (request shape: copy the object literal from `Builder.tsx` `handleSave` ~:453 and fill: `id: undefined, name, role: <role display name>, roleId, type: "cli", cliKind, model, color, skillIds, defaultLevel` PLUS Builder's fixed constants verbatim: `harnessMode: "central", shareBlackboard: true, autoSubmitInjected: true, allowedSenders: "all", permissionMode: "auto"` (Builder.tsx:201 seeds "auto" for every claude-code/codex def and :474 sends it; absent stores NULL and the launch drops `--permission-mode` / `--ask-for-approval never` — review finding H1 by Mellow, 2026-09-04) (Builder.tsx:466-472 — found by Tiësto, challenge 27c3493c; spec D10 = Builder defaults, and Builder's default is central), everything else omitted), `ipc.agentDef.addToWorkspace({ agentDefId, workspaceIds: [workspaceId] })`, `ipc.instance.list({ workspaceId })`, `ipc.instance.setPosition`.
 - Produces:
 
 ```ts
@@ -1060,11 +1062,13 @@ export async function applyTeamDraft(
 - [ ] **Step 2:** Implement `applyTeamDraft`:
   1. `const roster = await ipc.instance.list({ workspaceId })`; `const keyToWsAgent = new Map<string, string>()`.
   2. For each key in `topoOrder(draft.positions)`: find the agent; `onProgress({key, status:"pending"})`.
-     - `defId`: if `existingAgentDefId` → it; else if `newRole` → `const role = await ipc.role.save({ name, description, skillIds })` then `roleId = role.id`; then `const def = await ipc.agentDef.save({...})` → `def.id`; `onProgress created`.
-     - If the roster already has a row with `agentDefId === defId` → reuse its `id` (status `skipped` for the add step); else `await ipc.agentDef.addToWorkspace({ agentDefId: defId, workspaceIds: [workspaceId] })`, then `const after = await ipc.instance.list({ workspaceId })` and take the row with `agentDefId === defId` that was not in `roster`; `onProgress added`.
+     - `defId`: if `existingAgentDefId` → it; else if `newRole` → `const role = await ipc.role.save({ name, description, skillIds })` then `roleId = role.id`; then `const def = await ipc.agentDef.save({...})` → `def.id`; `onProgress created`. **skillIds sent = union(role's `skillIds`, agent's `skillIds`)**, deduplicated, order role-first — `agentDef.save` treats ANY present array (even `[]`) as explicit and then skips the ADR 0005 role-bundle copy (`commands/agent.rs:219-253`), whereas the Builder pre-copies the bundle into its checkbox state; without the union a drafted implementer launches with no implementer skill (integration review finding 2026-09-04, Detoro).
+     - If the roster already has a row with `agentDefId === defId` → reuse its `id` (status `skipped` for the add step); else `const rows = await ipc.agentDef.addToWorkspace({ agentDefId: defId, workspaceIds: [workspaceId] })` and `workspaceAgentId = rows[0].id` — the command returns the created-or-found `WorkspaceAgent` per workspace (`commands/agent.rs:437-454`, `repo::workspace_agent::instantiate` is find-or-create), so no re-list/diff (earlier plan text prescribed a diff; plan defect, found by Mellow M3); `onProgress added`.
      - Position: `supervisorAgentId = position.supervisorKey ? keyToWsAgent.get(position.supervisorKey) ?? null : null`; `await ipc.instance.setPosition({ workspaceId, workspaceAgentId, level: position.level, supervisorAgentId })`; `onProgress positioned`; `keyToWsAgent.set(key, workspaceAgentId)`.
      - Any throw → `onProgress({key, status:"failed", message: String(err)})` and `return { created, failedKey: key, error: String(err) }`.
-  3. Return `{ created }`.
+  3. After the loop, any `draft.agents` key that is not in `order` (an agent with no position — unreachable for a validated draft, reachable after preview edits) gets `onProgress({ key, status: "failed", message: "no position for this agent" })` and the function returns `{ created, failedKey: key, error }` (Mellow L1). Then return `{ created }`.
+  4. The prologue (`topoOrder`, `instance.list`, `role.list`) is inside a try as well: any throw returns `{ created: 0, error: String(err) }` — the function never rejects (Mellow M2).
+  5. `applyTeamDraft` is SINGLE-SHOT (Mellow M1): a second call on the same draft would create duplicate roles/definitions. The doc comment says so; Task C4's UI offers only "Done" / "Close" after a run, never "Apply again".
 - [ ] **Step 3:** Gate — `pnpm exec tsc --noEmit`. Commit — `git commit -m "feat(draft): applyTeamDraft — topological apply over existing role/agentDef/position commands" -- src/lib/applyTeamDraft.ts`.
 
 ### Task C4: `AgentDrafter.tsx` overlay + AppShell/Library/Roster wiring
@@ -1075,7 +1079,7 @@ export async function applyTeamDraft(
 
 **Interfaces:**
 - `AgentDrafterProps { mode: DraftMode; workspaceId?: string; workspaceName?: string; onClose: () => void; onDraftAgent: (def: AgentDefinition, draftedBy: string) => void; onTeamApplied: () => void; onOpenBuilder: () => void }`
-- `export function draftToInitialDef(a: DraftAgent, roleName?: string): AgentDefinition` — id-less object: `{ id: "", name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "central", createdAt: "" }` (Builder re-sends its own constants on save, so only `harnessMode` needs a value here) (when `newRole` is present the Builder cannot show it, so agent mode first calls `ipc.role.save` for the new role and passes its id; when `existingAgentDefId` is present, pass that def fetched via `agentDef.list`).
+- `export function draftToInitialDef(a: DraftAgent, roleSkillIds: string[]): AgentDefinition` — id-less object whose `skillIds` = union(roleSkillIds, a.skillIds) for the same reason as Task C3 (Builder seeds its checkbox state from `initialDef.skillIds` at :222 and does not re-copy the role bundle for a pre-filled role): `{ id: "", name, color, type: "cli", cliKind, model, roleId, skillIds, defaultLevel, harnessMode: "central", permissionMode: "auto", createdAt: "" }` (Builder re-sends its own constants on save, so only `harnessMode` needs a value here) (when `newRole` is present the Builder cannot show it, so agent mode first calls `ipc.role.save` for the new role and passes its id; when `existingAgentDefId` is present, pass that def fetched via `agentDef.list`).
 - AppShell: `const [showDrafter, setShowDrafter] = useState<{ mode: DraftMode } | null>(null); const [draftSeq, setDraftSeq] = useState(0); const [builderDraftedBy, setBuilderDraftedBy] = useState<string | undefined>()`; view map adds `drafter: () => setShowDrafter({ mode: "team" })`; Builder `key={builderInitialDef?.id || \`draft-${draftSeq}\`}` and `draftedBy={builderDraftedBy}`; `onDraftAgent={(def, by) => { setBuilderInitialDef(def); setBuilderDraftedBy(by); setDraftSeq(s => s + 1); setShowDrafter(null); setShowBuilder(true); }}`; `onTeamApplied={() => { setShowDrafter(null); setLibraryRefreshKey(k => k + 1); setAgentsVersion(v => v + 1); }}`.
 - Library: new prop `onOpenDrafter: () => void`, button beside "New agent". Roster: new prop `onBuildTeam?: () => void`, button beside "Add agent" (disabled when `workspaceId === null`).
 
