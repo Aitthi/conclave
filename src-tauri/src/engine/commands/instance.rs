@@ -51,6 +51,15 @@ const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
 
 const ANTIGRAVITY_INSTALL_URL: &str = "https://antigravity.google/docs/cli/install/";
 
+/// Upper bound on `agy models`. The catalog query reaches Google over the
+/// network behind whatever auth state the CLI is in, so it can stall rather
+/// than fail — and an unbounded stall leaves the Builder's model selector
+/// disabled forever with no way back. Generous enough for a cold auth refresh
+/// on a slow link; short enough that a stuck query becomes a retry offer
+/// instead of a dead form. Found in integration review by Aoki (challenge
+/// 545f3091).
+const CLI_MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Emit codex's numeric context-window `-c` overrides for `model`, resolved
 /// through [`crate::engine::codex_models::codex_model_context_window`] (plan
 /// ruling R2 — "Auto" derives the value from the model, the Builder no
@@ -278,7 +287,21 @@ fn parse_antigravity_models(stdout: &str) -> Vec<Value> {
 /// is [`cli_status`]'s job, and conflating the two would tell a user with a
 /// perfectly good install to reinstall it. `agy` writes a progress line to
 /// stderr on success, so stderr is deliberately not inspected.
+///
+/// The query is bounded by [`CLI_MODELS_TIMEOUT`]; a timeout is the same
+/// retryable class as a non-zero exit, so the Builder shows its retry affordance
+/// rather than staying stuck in `loading`.
 async fn cli_models_for_shell(shell: &str, cli_kind: &str) -> Result<Value, AppError> {
+    cli_models_for_shell_within(shell, cli_kind, CLI_MODELS_TIMEOUT).await
+}
+
+/// [`cli_models_for_shell`] with the bound as a parameter, so the timeout path
+/// is testable without a test that actually waits [`CLI_MODELS_TIMEOUT`].
+async fn cli_models_for_shell_within(
+    shell: &str,
+    cli_kind: &str,
+    timeout: std::time::Duration,
+) -> Result<Value, AppError> {
     let command = match cli_kind {
         "antigravity" => "agy models",
         other => {
@@ -287,13 +310,25 @@ async fn cli_models_for_shell(shell: &str, cli_kind: &str) -> Result<Value, AppE
             )))
         }
     };
-    let output = tokio::process::Command::new(shell)
+    let mut query = tokio::process::Command::new(shell);
+    query
         .args(["-l", "-i", "-c", command])
-        .output()
-        .await
-        .map_err(|error| {
+        // Dropping the timed-out future drops the Child, and kill_on_drop turns
+        // that drop into a kill — without it a stalled login shell would outlive
+        // the query it can no longer answer, once per retry the user clicks.
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(timeout, query.output()).await {
+        Err(_elapsed) => {
+            return Err(AppError::Internal(
+                "Antigravity took too long to list your models. Check that you are signed in \
+                 to the Antigravity CLI, then try again."
+                    .to_string(),
+            ))
+        }
+        Ok(result) => result.map_err(|error| {
             AppError::Internal(format!("list models in login shell {shell}: {error}"))
-        })?;
+        })?,
+    };
     if !output.status.success() {
         return Err(AppError::Internal(
             "Antigravity could not list your models. Check that you are signed in to the \
@@ -2463,6 +2498,49 @@ mod tests {
         assert!(matches!(error, AppError::Internal(_)));
         let message = error.to_string();
         assert!(message.contains("signed in"), "{message}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_times_out_and_kills_the_stalled_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("agy-models-timeout");
+        let shell = root.join("login-shell");
+        let marker = root.join("finished");
+        // Stalls well past the bound, then — only if it is still alive — writes
+        // a marker. The marker is how the test observes the kill: a child that
+        // merely outlived the timeout would still create it.
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\nsleep 2\nprintf 'done' > '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = cli_models_for_shell_within(
+            &shell.to_string_lossy(),
+            "antigravity",
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .expect_err("a stalled catalog query must not hang the Builder forever");
+        // Same retryable class as a non-zero exit — never Invalid, which the
+        // UI would have no retry path for.
+        assert!(matches!(error, AppError::Internal(_)));
+        let message = error.to_string();
+        assert!(message.contains("too long"), "{message}");
+
+        // Outlive the stub's own sleep: if kill_on_drop had not fired, the
+        // orphaned shell would reach its printf and leave the marker behind.
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+        assert!(
+            !marker.exists(),
+            "timed-out login shell survived the dropped query"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
