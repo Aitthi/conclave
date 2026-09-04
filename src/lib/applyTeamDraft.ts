@@ -89,13 +89,10 @@ function saveRequest(agent: DraftAgent, roleId: string, roleName: string | undef
     shareBlackboard: true,
     autoSubmitInjected: true,
     allowedSenders: "all" as const,
-    // Every hand-built claude-code/codex definition stores "auto"
-    // (Builder.tsx:201-203 seeds it, :456 always sends it for a CLI kind), and
-    // commands/agent.rs:203 has NO default — an absent value writes NULL and
-    // instance.rs:760/:808 then omit --permission-mode / --ask-for-approval
-    // entirely, so a drafted agent would stall on approval prompts an
-    // identical hand-built one never sees. Spec D10: keep Builder defaults.
-    permissionMode: "auto" as const,
+    // New first-class CLI definitions default to full bypass from every
+    // creation path. Send it explicitly so this path remains aligned with the
+    // Builder even if backend create defaults change later.
+    permissionMode: "bypassPermissions" as const,
     // contextWindow is omitted on purpose: absent behaves exactly like the
     // Builder's "200k" default (only "1m" changes the launch, see
     // `effective_claude_model` in commands/instance.rs:54), and Codex derives

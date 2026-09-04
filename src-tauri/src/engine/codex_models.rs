@@ -17,6 +17,11 @@
 /// (`Option<String>`), which callers pass through as `Option<&str>`.
 pub fn codex_model_context_window(model: &str) -> Option<i64> {
     match model.trim() {
+        // Codex-effective window reported by codex-cli 0.153.2 (`codex debug
+        // models`) on 2026-09-05. This intentionally differs from any API
+        // headline window: launch/compaction safety follows the runtime cap.
+        "gpt-6-astra" => Some(272_000),
+
         // GPT-5.6 family: OpenAI's frontier-models page documents a 1.05M
         // API context window, but Codex enforces a SERVER-side ceiling well
         // below that — live-verified 2026-07-11 (`codex debug models` on
@@ -56,6 +61,7 @@ mod tests {
 
     #[test]
     fn known_models_resolve_documented_max() {
+        assert_eq!(codex_model_context_window("gpt-6-astra"), Some(272_000));
         assert_eq!(codex_model_context_window("gpt-5.4"), Some(1_050_000));
         assert_eq!(codex_model_context_window("gpt-5.5"), Some(400_000));
         assert_eq!(codex_model_context_window("gpt-5.4-mini"), Some(400_000));

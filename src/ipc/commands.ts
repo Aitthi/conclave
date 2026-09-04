@@ -97,6 +97,7 @@ export interface Commands {
       // the Keychain and persists only the rest. `secretEnvKeys` is derived
       // server-side, so it is not sent here.
       permissionMode?: "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
+      /** First-class CLI reasoning effort; absent means use the provider default. */
       effort?: "low" | "medium" | "high";
       customArgs?: string;
       customEnv?: Record<string, string>;

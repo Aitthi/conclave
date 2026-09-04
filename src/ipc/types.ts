@@ -57,7 +57,7 @@ export interface AgentDefinition {
   // ── Claude Code / CLI launch config ────────────────────────────────────────
   /** `--permission-mode` value passed to the CLI. */
   permissionMode?: "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
-  /** Antigravity reasoning effort. Absent means Auto / omit the CLI flag. */
+  /** First-class CLI reasoning effort. Absent means Auto / omit the provider override. */
   effort?: "low" | "medium" | "high";
   /** Extra CLI args appended verbatim to the launch command. */
   customArgs?: string;
