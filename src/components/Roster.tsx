@@ -950,7 +950,7 @@ export function Roster({
           Failed to load agents
         </div>
       ) : entries.length === 0 ? (
-        <div className="flex-1 grid place-items-center text-[12px] text-text-tertiary px-4 text-center">
+        <div className="min-h-0 flex-1 overflow-hidden grid place-items-center text-[12px] text-text-tertiary px-4 text-center">
           No agents in this workspace yet
         </div>
       ) : (
