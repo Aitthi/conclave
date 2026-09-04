@@ -1125,6 +1125,7 @@ pub(crate) mod tests {
             default_level: None,
             provider_id: None,
             model: Some("claude-sonnet-5".to_owned()),
+            effort: None,
             harness_mode: "own".to_owned(),
             share_blackboard: None,
             auto_submit_injected: None,
