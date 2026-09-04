@@ -11,11 +11,17 @@
 //! `validate_draft` rejects anything else with the offending field named. There
 //! is no silent coercion.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
+use super::draft_prompt::build_prompt;
 use crate::engine::repo::{self, role::RoleRow, skill::SkillRow};
-use crate::engine::AppError;
+use crate::engine::runtime::cli_oneshot::{CliKind, Oneshot, OneshotSpec};
+use crate::engine::runtime::launch_common::{agent_env_overrides, effective_claude_model};
+use crate::engine::{AppError, AppState};
 
 // ── Catalogue constants ──────────────────────────────────────────────────────
 
@@ -522,6 +528,119 @@ fn validate_positions(draft: &DraftResponse, _cat: &Catalogue) -> Result<(), Str
     Ok(())
 }
 
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+/// Fixed one-shot budget (spec D9). No cancel in v1 — the panel shows elapsed
+/// seconds and this timeout kills the child.
+const DRAFT_TIMEOUT: Duration = Duration::from_secs(120);
+
+pub async fn run(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: DraftRequest =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let out = run_with(&state.db, &Oneshot::Live, req).await?;
+    serde_json::to_value(out).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// The whole command with the runner injected, so tests drive it end to end
+/// without spawning a binary (spec D7).
+///
+/// Request validation runs BEFORE the runner: a bad brief or a non-CLI drafter
+/// must never cost the user a 120 s model call.
+pub async fn run_with(
+    db: &SqlitePool,
+    oneshot: &Oneshot,
+    req: DraftRequest,
+) -> Result<DraftResponse, AppError> {
+    let brief = req.brief.trim();
+    if brief.is_empty() {
+        return Err(AppError::Invalid("draft.brief: brief is empty".into()));
+    }
+    if brief.chars().count() > BRIEF_MAX_CHARS {
+        return Err(AppError::Invalid(format!(
+            "draft.brief: longer than {BRIEF_MAX_CHARS} characters"
+        )));
+    }
+
+    let def = repo::agent_definition::get(db, &req.drafter_def_id)
+        .await?
+        .ok_or_else(|| AppError::Invalid("draft.drafterDefId: no such agent definition".into()))?;
+    let cli_kind = def
+        .cli_kind
+        .as_deref()
+        .filter(|_| def.r#type == "cli")
+        .and_then(CliKind::parse)
+        .ok_or_else(|| {
+            AppError::Invalid(
+                "draft.drafterDefId: the drafter must be a Claude Code or Codex CLI agent".into(),
+            )
+        })?;
+    let model = def.model.clone().filter(|m| !m.is_empty());
+    let model_for_launch = match cli_kind {
+        CliKind::ClaudeCode => model
+            .as_deref()
+            .map(|m| effective_claude_model(m, def.context_window.as_deref())),
+        CliKind::Codex => model.clone(),
+    };
+
+    let cat = build_catalogue(db, req.workspace_id.as_deref()).await?;
+    let schema = draft_schema(req.mode);
+    let prompt = build_prompt(req.mode, brief, &cat, &schema);
+
+    // Run inside the workspace folder so the drafter's own rc/env resolve the
+    // way a spawned agent's would; no workspace (agent mode from the Library)
+    // falls back to the temp dir.
+    let cwd = match req.workspace_id.as_deref() {
+        Some(ws) => repo::workspace::get(db, ws)
+            .await?
+            .map(|w| PathBuf::from(w.folder_path))
+            .unwrap_or_else(std::env::temp_dir),
+        None => std::env::temp_dir(),
+    };
+
+    let spec = OneshotSpec {
+        cli_kind,
+        model: model_for_launch,
+        prompt,
+        json_schema: schema,
+        extra_env: agent_env_overrides(&def),
+        cwd,
+        timeout: DRAFT_TIMEOUT,
+    };
+    // Timeout / non-zero exit / model errors surface verbatim so the panel can
+    // show the CLI's own words (spec error table).
+    let raw = oneshot
+        .run(&spec)
+        .await
+        .map_err(|e| AppError::Invalid(format!("draft.run: {e}")))?;
+
+    /// The model answers the schema, which has no `drafter` field — that is
+    /// filled in here from the definition the user picked.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModelOut {
+        agents: Vec<DraftAgent>,
+        #[serde(default)]
+        positions: Vec<DraftPosition>,
+        #[serde(default)]
+        notes: String,
+    }
+    let parsed: ModelOut =
+        serde_json::from_value(raw).map_err(|e| AppError::Invalid(format!("draft.parse: {e}")))?;
+
+    let resp = DraftResponse {
+        agents: parsed.agents,
+        positions: parsed.positions,
+        notes: parsed.notes,
+        drafter: DrafterInfo {
+            def_id: def.id.clone(),
+            cli_kind: def.cli_kind.clone().unwrap_or_default(),
+            model: model.unwrap_or_default(),
+        },
+    };
+    validate_draft(&resp, req.mode, &cat).map_err(AppError::Invalid)?;
+    Ok(resp)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -804,5 +923,148 @@ pub(crate) mod tests {
             draft_schema(DraftMode::Agent)["properties"]["agents"]["maxItems"],
             1
         );
+    }
+    // ── run_with: the command end to end, runner mocked ──────────────────
+
+    use crate::engine::db::connect_in_memory;
+    use crate::engine::repo::agent_definition::AgentDefinitionInput;
+
+    /// A minimal CLI drafter definition. `agent_type` is what makes it eligible
+    /// (`"cli"` + a known `cli_kind`); tests flip either to prove the rejection.
+    fn drafter_input(agent_type: &str, cli_kind: Option<&str>) -> AgentDefinitionInput {
+        AgentDefinitionInput {
+            name: "Drafter".to_owned(),
+            role: None,
+            role_id: None,
+            agent_type: agent_type.to_owned(),
+            cli_kind: cli_kind.map(str::to_owned),
+            color: None,
+            default_level: None,
+            provider_id: None,
+            model: Some("claude-sonnet-5".to_owned()),
+            harness_mode: "own".to_owned(),
+            share_blackboard: None,
+            auto_submit_injected: None,
+            allowed_senders: None,
+            permission_mode: None,
+            custom_args: None,
+            custom_env: None,
+            secret_env_keys: None,
+            context_window: None,
+            selected_builtin_skill_ids: None,
+            rtk_enabled: None,
+        }
+    }
+
+    fn canned_team() -> Value {
+        json!({
+            "agents": [{
+                "key": "lead",
+                "name": "Nova",
+                "color": COLOR_SWATCHES[0],
+                "cliKind": "claude-code",
+                "model": "claude-sonnet-5",
+                "roleId": "lead",
+                "skillIds": [],
+                "defaultLevel": "principal",
+                "rationale": "r"
+            }],
+            "positions": [{"key": "lead", "level": "principal", "supervisorKey": null}],
+            "notes": "n"
+        })
+    }
+
+    fn req(def_id: &str, brief: &str) -> DraftRequest {
+        DraftRequest {
+            mode: DraftMode::Team,
+            brief: brief.to_owned(),
+            drafter_def_id: def_id.to_owned(),
+            workspace_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_mock_returns_validated_response() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        let out = run_with(&db, &Oneshot::Mock(Ok(canned_team())), req(&def.id, "b"))
+            .await
+            .unwrap();
+        assert_eq!(out.agents[0].name.as_deref(), Some("Nova"));
+        assert_eq!(out.drafter.def_id, def.id);
+        assert_eq!(out.drafter.cli_kind, "claude-code");
+        assert_eq!(out.drafter.model, "claude-sonnet-5");
+        assert_eq!(out.notes, "n");
+    }
+
+    #[tokio::test]
+    async fn run_with_rejects_invalid_model_output_as_invalid() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        let mut canned = canned_team();
+        canned["agents"][0]["roleId"] = json!("ghost");
+        let err = run_with(&db, &Oneshot::Mock(Ok(canned)), req(&def.id, "b"))
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Invalid(m) => assert!(m.contains("roleId"), "got {m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_rejects_empty_brief_and_non_cli_drafter() {
+        let db = connect_in_memory().await;
+        let cli_def =
+            repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+                .await
+                .unwrap();
+        let chat_def = repo::agent_definition::create(&db, &drafter_input("chat", None))
+            .await
+            .unwrap();
+
+        // `Mock(Err(...))` would surface as `draft.run: …` — asserting on the
+        // Invalid instead proves the runner was never reached.
+        let must_not_run = Oneshot::Mock(Err("must not run".into()));
+
+        let err = run_with(&db, &must_not_run, req(&cli_def.id, "   "))
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Invalid(m) => assert!(m.starts_with("draft.brief"), "got {m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+
+        let err = run_with(&db, &must_not_run, req(&chat_def.id, "b"))
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Invalid(m) => assert!(m.starts_with("draft.drafterDefId"), "got {m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+
+        let err = run_with(&db, &must_not_run, req("ghost-def", "b"))
+            .await
+            .unwrap_err();
+        match err {
+            AppError::Invalid(m) => assert!(m.starts_with("draft.drafterDefId"), "got {m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_catalogue_lists_builtin_roles_and_omits_mandatory_skills() {
+        let db = connect_in_memory().await;
+        let cat = build_catalogue(&db, None).await.unwrap();
+        assert!(cat.roles.iter().any(|r| r.id == "lead"), "builtin roles");
+        assert!(
+            cat.skills.iter().all(|s| !s.mandatory),
+            "mandatory skills must not be offered"
+        );
+        assert!(cat.roster.is_empty(), "no workspace -> no roster");
     }
 }
