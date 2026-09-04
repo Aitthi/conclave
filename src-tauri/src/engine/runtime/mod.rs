@@ -26,6 +26,7 @@ pub mod design_host;
 // The memory-v1 embedder seam lands before its T3/T4 consumers.
 #[allow(dead_code)]
 pub mod embedder;
+pub mod launch_common;
 pub mod provider;
 pub mod pty;
 pub mod sandbox_config;
