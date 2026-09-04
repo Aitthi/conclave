@@ -12,10 +12,16 @@ import {
   Pencil,
   LoaderCircle,
   Sparkles,
+  AlertCircle,
+  CirclePause,
+  MoreHorizontal,
+  Play,
+  Square,
 } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type {
   AgentDefinition,
+  Workspace,
   WorkspaceAgent,
   SessionStatusEvent,
   SessionOutputEvent,
@@ -43,6 +49,7 @@ interface RosterEntry {
   color: string;
   type: AgentDefinition["type"];
   status: WorkspaceAgent["status"];
+  availability: WorkspaceAgent["availability"];
   /** Subtitle derived honestly from the def / enriched roster — no fabricated
    *  strings. Prefers the first-class role name (ADR 0005) over the legacy
    *  free-text label. */
@@ -156,8 +163,13 @@ interface AgentRowProps {
   entry: RosterEntry;
   isSelected: boolean;
   onSelect: () => void;
-  onRemove: () => void;
-  removing: boolean;
+  onRequestRemove: (trigger: HTMLButtonElement) => void;
+  onRequestStop: (trigger: HTMLButtonElement) => void;
+  onResume: () => void;
+  lifecycleAvailable: boolean;
+  lifecycleBusy: boolean;
+  lifecycleError?: string;
+  focusLifecycleAction: boolean;
   onEditSupervisor: () => void;
 }
 
@@ -165,130 +177,261 @@ function AgentRow({
   entry,
   isSelected,
   onSelect,
-  onRemove,
-  removing,
+  onRequestRemove,
+  onRequestStop,
+  onResume,
+  lifecycleAvailable,
+  lifecycleBusy,
+  lifecycleError,
+  focusLifecycleAction,
   onEditSupervisor,
 }: AgentRowProps) {
   const statusColor = STATUS_COLOR[entry.status];
   // Name-line provider chip — replaces the generic `>_` icon, which said the
   // same thing for every CLI agent (human request 2026-09-04).
   const chip = providerChip(entry);
-  // Two-step removal so a stray click can't delete an agent: the first click
-  // arms the confirm, the second (red) click commits.
-  const [confirming, setConfirming] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const lifecycleButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (focusLifecycleAction && !lifecycleBusy) lifecycleButtonRef.current?.focus();
+  }, [focusLifecycleAction, lifecycleBusy]);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMoreOpen(false);
+      moreButtonRef.current?.focus();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [moreOpen]);
 
   return (
-    // Not a <button> (it now nests buttons) — a div with a role for the a11y tree.
     <div
-      className={`group w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg transition-colors cursor-pointer${
+      className={`group w-full rounded-lg px-2 py-1.5 transition-colors${
         isSelected ? " bg-accent/10 ring-1 ring-accent/30" : " hover:bg-overlay/[0.04]"
       }`}
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-      onMouseLeave={() => setConfirming(false)}
     >
-      <AgentAvatar entry={entry} />
-
-      <div className="flex-1 text-left leading-tight min-w-0">
-        <div className="text-[12.5px] font-semibold flex items-center gap-1.5 min-w-0">
-          <span className="truncate">{entry.name}</span>
-          {chip && (
-            <span
-              className="text-[10px] text-text-tertiary font-medium tracking-tight shrink-0"
-              title={entry.model ?? undefined}
-            >
-              {chip}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center min-w-0 mt-0.5">
-          <PositionLine
-            levelId={entry.level}
-            track={entry.meta}
-            compact
-            trackTitle={entry.roleDescription}
-            className="flex-1 min-w-0"
-          />
-          {/* Reports-to chip as a button (plan supervisor-picker-ui, Lane C
-              step 5) — stopPropagation so it doesn't also select/deselect the
-              row; ReportsTo itself is Position.tsx's unmodified export, just
-              wrapped here for interactivity. */}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onEditSupervisor();
-            }}
-            // The row's onKeyDown listens for Enter/Space directly (not via
-            // onClick), so it fires from the raw keydown bubbling BEFORE the
-            // button's own Enter/Space→click synthesis — stopping only
-            // onClick's propagation isn't enough (Armin, review).
-            onKeyDown={(e) => e.stopPropagation()}
-            onKeyUp={(e) => e.stopPropagation()}
-            className="ml-auto shrink-0 pl-1 rounded-md hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-            aria-label={`Change supervisor for ${entry.name}`}
-          >
-            <ReportsTo supervisor={entry.supervisor} />
-          </button>
-        </div>
-        <WorkLine working={entry.working} />
-      </div>
-
-      {confirming ? (
-        // Confirm step — commits the removal.
+      <div className="flex w-full items-start gap-2">
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-          disabled={removing}
-          className="text-[10.5px] font-semibold text-white bg-danger px-2 py-0.5 rounded-md shrink-0 disabled:opacity-50 self-start"
-          title="Confirm removal from this workspace"
+          type="button"
+          onClick={onSelect}
+          className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
         >
-          {removing ? "Removing…" : "Remove"}
+          <AgentAvatar entry={entry} />
+          <span className="min-w-0 flex-1 leading-tight">
+            <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] font-semibold">
+              <span className="truncate">{entry.name}</span>
+              {chip && (
+                <span
+                  className="shrink-0 text-[10px] font-medium tracking-tight text-text-tertiary"
+                  title={entry.model ?? undefined}
+                >
+                  {chip}
+                </span>
+              )}
+            </span>
+            <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+              <PositionLine
+                levelId={entry.level}
+                track={entry.meta}
+                compact
+                trackTitle={entry.roleDescription}
+                className="min-w-0 flex-1"
+              />
+              {entry.availability === "stopped" && (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-overlay/[0.06] px-1.5 py-0.5 text-[9.5px] font-semibold text-text-secondary">
+                  <CirclePause className="h-2.5 w-2.5" />
+                  Stopped
+                </span>
+              )}
+            </span>
+            <WorkLine working={entry.availability === "active" && entry.working} />
+          </span>
         </button>
-      ) : (
-        <>
-          {/* Status dot — carries the agent's status only (running/waiting/idle);
-              the "working" signal is now the animated WorkLine sub-line above, not
-              this dot (pre-D6 division of labor, restored by human override). Keeps
-              D6's --color-status-* token mapping. Hidden on hover to make room for
-              the remove affordance; `self-start` pins it to the name line instead
-              of stretching to full row height when the WorkLine slot opens. */}
+
+        {entry.availability === "stopped" ? (
+          <CirclePause
+            className="mt-1 h-3.5 w-3.5 shrink-0 text-text-tertiary"
+            role="img"
+            aria-label="stopped"
+          />
+        ) : (
           <span
-            className="w-2 h-2 rounded-full shrink-0 group-hover:hidden self-start mt-0.5"
+            className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
             style={{ backgroundColor: statusColor }}
             role="img"
             aria-label={entry.status}
           />
-          {entry.skillsStale && (
-            <span
-              className="text-[9px] font-semibold text-warning bg-warning/[0.1] px-1.5 py-px rounded-md shrink-0 self-start"
-              title="This agent's skills changed since it last launched — restart to apply"
-            >
-              Restart to apply
-            </span>
-          )}
+        )}
+      </div>
+
+      <div className="ml-9 mt-1 flex min-w-0 items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onEditSupervisor}
+          className="shrink-0 rounded-md hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+          aria-label={`Change supervisor for ${entry.name}`}
+        >
+          <ReportsTo supervisor={entry.supervisor} />
+        </button>
+
+        <span className="min-w-0 flex-1" />
+
+        {lifecycleAvailable && (
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setConfirming(true);
+            ref={lifecycleButtonRef}
+            type="button"
+            disabled={lifecycleBusy}
+            onClick={(event) => {
+              if (entry.availability === "stopped") onResume();
+              else onRequestStop(event.currentTarget);
             }}
-            className="hidden group-hover:grid w-5 h-5 place-items-center rounded-md text-text-muted hover:bg-overlay/[0.06] hover:text-danger shrink-0 self-start"
-            title="Remove from workspace"
-            aria-label={`Remove ${entry.name} from workspace`}
+            aria-label={`${entry.availability === "stopped" ? "Resume" : "Stop"} agent ${entry.name}`}
+            className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-55 ${
+              entry.availability === "stopped"
+                ? "bg-accent text-white hover:bg-accent-hover"
+                : "bg-overlay/[0.06] text-text-secondary hover:bg-overlay/[0.1] hover:text-text-primary"
+            }`}
           >
-            <X className="w-3.5 h-3.5" />
+            {lifecycleBusy ? (
+              <LoaderCircle className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+            ) : entry.availability === "stopped" ? (
+              <Play className="h-3 w-3" />
+            ) : (
+              <Square className="h-2.5 w-2.5" />
+            )}
+            {lifecycleBusy
+              ? entry.availability === "stopped"
+                ? "Resuming…"
+                : "Stopping…"
+              : entry.availability === "stopped"
+                ? "Resume"
+                : "Stop"}
           </button>
-        </>
+        )}
+
+        <button
+          ref={moreButtonRef}
+          type="button"
+          aria-label={`More actions for ${entry.name}`}
+          aria-expanded={moreOpen}
+          onClick={() => setMoreOpen((open) => !open)}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-text-muted transition-colors hover:bg-overlay/[0.06] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <MoreHorizontal className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {moreOpen && (
+        <div className="mt-1.5 flex justify-end border-t border-overlay/[0.06] pt-1.5">
+          <button
+            type="button"
+            onClick={(event) => {
+              setMoreOpen(false);
+              onRequestRemove(moreButtonRef.current ?? event.currentTarget);
+            }}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10.5px] font-semibold text-danger hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+          >
+            <X className="h-3 w-3" />
+            Remove agent
+          </button>
+        </div>
       )}
+
+      {entry.skillsStale && entry.availability === "active" && (
+        <div className="mt-1 text-[9.5px] font-semibold text-warning">Restart to apply skills</div>
+      )}
+      {lifecycleError && (
+        <div role="alert" className="mt-1.5 flex items-start gap-1.5 text-[10.5px] text-danger">
+          <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+          <span>{lifecycleError}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfirmLifecycleDialog({
+  kind,
+  workspaceName,
+  entry,
+  onCancel,
+  onConfirm,
+}: {
+  kind: "workspace-stop" | "agent-stop" | "remove";
+  workspaceName?: string;
+  entry?: RosterEntry;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const remove = kind === "remove";
+  const workspaceStop = kind === "workspace-stop";
+  const title = remove
+    ? `Remove ${entry?.name ?? "agent"} from ${workspaceName ?? "this workspace"}?`
+    : workspaceStop
+      ? `Stop ${workspaceName ?? "workspace"} while an agent is working?`
+      : `Stop ${entry?.name ?? "agent"} while working?`;
+  const detail = remove
+    ? "This removes workspace membership and its attached workspace records. This is separate from stopping the runtime."
+    : workspaceStop
+      ? "All live agent runtimes and current work terminate immediately. The workspace, agents, configuration, tasks, messages, and history stay."
+      : "The current runtime and work terminate immediately. Workspace membership, configuration, supervisor links, and history stay.";
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/55 px-5" role="presentation">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lifecycle-confirm-title"
+        className="w-full max-w-[380px] rounded-[14px] bg-surface-raised p-5 shadow-xl"
+      >
+        <div className="flex items-start gap-3">
+          <div
+            className={`grid h-9 w-9 shrink-0 place-items-center rounded-[10px] ${
+              remove ? "bg-danger/[0.12] text-danger" : "bg-warning/[0.12] text-warning"
+            }`}
+          >
+            {remove ? <X className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+          </div>
+          <div>
+            <h2 id="lifecycle-confirm-title" className="text-[14px] font-semibold text-text-primary">
+              {title}
+            </h2>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-text-secondary">{detail}</p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md bg-fill-soft px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            autoFocus
+            onClick={onConfirm}
+            className={`rounded-md px-3 py-1.5 text-[12px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              remove ? "bg-danger text-white" : "bg-text-primary text-surface"
+            }`}
+          >
+            {remove ? "Remove agent" : workspaceStop ? "Stop workspace" : "Stop agent"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -301,6 +444,15 @@ interface RosterProps {
   workspaceId: string | null;
   workspaceName?: string;
   folderPath?: string;
+  workspaceRunState?: Workspace["runState"];
+  workspaceLifecyclePhase?: "idle" | "starting" | "stopping";
+  workspaceLifecycleError?: string | null;
+  onStartWorkspace?: () => void;
+  onStopWorkspace?: () => void;
+  onAgentLifecycleChanged?: (
+    instanceId: string,
+    availability: WorkspaceAgent["availability"],
+  ) => void;
   selectedId: string | null;
   onSelect: (instanceId: string) => void;
   /** Open the Builder to define a brand-new agent (from inside the picker). */
@@ -336,6 +488,12 @@ export function Roster({
   workspaceId,
   workspaceName,
   folderPath,
+  workspaceRunState = "stopped",
+  workspaceLifecyclePhase = "idle",
+  workspaceLifecycleError,
+  onStartWorkspace,
+  onStopWorkspace,
+  onAgentLifecycleChanged,
   selectedId,
   onSelect,
   onCreateAgent,
@@ -364,9 +522,25 @@ export function Roster({
   const [editingSupervisorFor, setEditingSupervisorFor] = useState<string | null>(null);
   const [supervisorSubmitting, setSupervisorSubmitting] = useState(false);
   const [supervisorError, setSupervisorError] = useState<string | null>(null);
-  // Instance id currently being removed (disables its confirm button).
-  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [lifecycleBusyId, setLifecycleBusyId] = useState<string | null>(null);
+  const [lifecycleErrors, setLifecycleErrors] = useState<Record<string, string>>({});
+  const [focusLifecycleId, setFocusLifecycleId] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<
+    | { kind: "workspace-stop" }
+    | { kind: "agent-stop"; entry: RosterEntry }
+    | { kind: "remove"; entry: RosterEntry }
+    | null
+  >(null);
+  const dialogTriggerRef = useRef<HTMLButtonElement | null>(null);
   const loadSeq = useRef(0);
+
+  useEffect(() => {
+    setLifecycleBusyId(null);
+    setLifecycleErrors({});
+    setFocusLifecycleId(null);
+    setDialog(null);
+    dialogTriggerRef.current = null;
+  }, [workspaceId]);
 
   // Roster-chip edit (D6-adjacent: clearing an EXISTING supervisor link is
   // the action, so unlike the add-flow this always calls setPosition, even
@@ -386,14 +560,11 @@ export function Roster({
   }
 
   async function handleRemove(instanceId: string) {
-    setRemovingId(instanceId);
     try {
       await ipc.instance.remove({ workspaceAgentId: instanceId });
       onAgentsChanged?.();
     } catch (err) {
       if (import.meta.env.DEV) console.error("Roster: instance.remove failed", err);
-    } finally {
-      setRemovingId(null);
     }
   }
 
@@ -439,6 +610,7 @@ export function Roster({
             color: def.color ?? "#6e6e73",
             type: def.type,
             status: inst.status,
+            availability: inst.availability,
             // The enriched roster's resolved role name wins over the legacy
             // free-text label; deriveMeta covers the role-less case.
             meta: inst.roleName ?? deriveMeta(def),
@@ -474,6 +646,68 @@ export function Roster({
     },
     [workspaceId],
   );
+
+  const closeDialog = useCallback(() => {
+    setDialog(null);
+    window.setTimeout(() => dialogTriggerRef.current?.focus(), 0);
+  }, []);
+
+  function openDialog(
+    next:
+      | { kind: "workspace-stop" }
+      | { kind: "agent-stop"; entry: RosterEntry }
+      | { kind: "remove"; entry: RosterEntry },
+    trigger: HTMLButtonElement,
+  ) {
+    dialogTriggerRef.current = trigger;
+    setDialog(next);
+  }
+
+  async function stopAgent(entry: RosterEntry) {
+    setLifecycleBusyId(entry.instanceId);
+    setLifecycleErrors((prev) => {
+      const next = { ...prev };
+      delete next[entry.instanceId];
+      return next;
+    });
+    try {
+      await ipc.instance.stop({ workspaceAgentId: entry.instanceId });
+      setFocusLifecycleId(entry.instanceId);
+      onAgentLifecycleChanged?.(entry.instanceId, "stopped");
+      await loadEntries(false);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setLifecycleErrors((prev) => ({
+        ...prev,
+        [entry.instanceId]: `Couldn’t stop ${entry.name}: ${detail}`,
+      }));
+    } finally {
+      setLifecycleBusyId(null);
+    }
+  }
+
+  async function resumeAgent(entry: RosterEntry) {
+    setLifecycleBusyId(entry.instanceId);
+    setLifecycleErrors((prev) => {
+      const next = { ...prev };
+      delete next[entry.instanceId];
+      return next;
+    });
+    try {
+      await ipc.instance.resume({ workspaceAgentId: entry.instanceId });
+      setFocusLifecycleId(entry.instanceId);
+      onAgentLifecycleChanged?.(entry.instanceId, "active");
+      await loadEntries(false);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setLifecycleErrors((prev) => ({
+        ...prev,
+        [entry.instanceId]: `Couldn’t resume ${entry.name}: ${detail}`,
+      }));
+    } finally {
+      setLifecycleBusyId(null);
+    }
+  }
 
   // Fetch + join instances with their definitions whenever the workspace changes.
   useEffect(() => {
@@ -577,6 +811,30 @@ export function Roster({
 
   // Workspace header: use real name/folderPath; static blue avatar (no fake state).
   const wsLetter = workspaceName ? workspaceName[0].toUpperCase() : "—";
+  const workspaceBusy = workspaceLifecyclePhase !== "idle";
+  const anyAgentWorking = entries.some(
+    (entry) => entry.availability === "active" && entry.working,
+  );
+
+  const renderAgentRow = (entry: RosterEntry) => (
+    <AgentRow
+      key={entry.instanceId}
+      entry={entry}
+      isSelected={selectedId === entry.instanceId}
+      onSelect={() => onSelect(entry.instanceId)}
+      onRequestRemove={(trigger) => openDialog({ kind: "remove", entry }, trigger)}
+      onRequestStop={(trigger) => {
+        if (entry.working) openDialog({ kind: "agent-stop", entry }, trigger);
+        else void stopAgent(entry);
+      }}
+      onResume={() => void resumeAgent(entry)}
+      lifecycleAvailable={workspaceRunState === "started" && !workspaceBusy}
+      lifecycleBusy={lifecycleBusyId === entry.instanceId}
+      lifecycleError={lifecycleErrors[entry.instanceId]}
+      focusLifecycleAction={focusLifecycleId === entry.instanceId}
+      onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
+    />
+  );
 
   return (
     <aside className="w-[266px] vibrancy border-r border-overlay/[0.06] flex flex-col shrink-0">
@@ -594,16 +852,53 @@ export function Roster({
           {wsLetter}
         </div>
         <div className="flex-1 leading-tight text-left min-w-0 pointer-events-none">
-          <div className="text-[12.5px] font-semibold tracking-tight truncate">
+          <div className="truncate text-[12.5px] font-semibold tracking-tight">
             {workspaceName ?? "—"}
           </div>
           {folderPath && (
-            <div className="text-[10px] text-text-muted truncate flex items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1 text-[10px] text-text-muted">
+              {workspaceRunState === "stopped" && (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-overlay/[0.06] px-1.5 py-0.5 text-[9.5px] font-semibold text-text-secondary">
+                  <CirclePause className="h-2.5 w-2.5" />
+                  Stopped
+                </span>
+              )}
               <Folder className="w-2.5 h-2.5 shrink-0" />
-              <span className="font-mono">{folderPath}</span>
+              <span className="truncate font-mono">{folderPath}</span>
             </div>
           )}
         </div>
+        {workspaceId && (
+          <button
+            type="button"
+            disabled={workspaceBusy}
+            aria-label={`${workspaceRunState === "stopped" ? "Start" : "Stop"} workspace ${workspaceName ?? "workspace"}`}
+            onClick={(event) => {
+              if (workspaceRunState === "stopped") onStartWorkspace?.();
+              else if (anyAgentWorking) {
+                openDialog({ kind: "workspace-stop" }, event.currentTarget);
+              } else {
+                onStopWorkspace?.();
+              }
+            }}
+            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-overlay/[0.06] px-1.5 text-[10px] font-semibold text-text-secondary transition-colors hover:bg-overlay/[0.1] hover:text-text-primary disabled:cursor-wait disabled:opacity-55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            {workspaceBusy ? (
+              <LoaderCircle className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+            ) : workspaceRunState === "stopped" ? (
+              <Play className="h-3 w-3" />
+            ) : (
+              <Square className="h-2.5 w-2.5" />
+            )}
+            {workspaceLifecyclePhase === "starting"
+              ? "Starting…"
+              : workspaceLifecyclePhase === "stopping"
+                ? "Stopping…"
+                : workspaceRunState === "stopped"
+                  ? "Start workspace"
+                  : "Stop workspace"}
+          </button>
+        )}
         {onEditWorkspace && (
           <button
             onClick={onEditWorkspace}
@@ -615,6 +910,16 @@ export function Roster({
           </button>
         )}
       </div>
+
+      {workspaceLifecycleError && (
+        <div
+          role="alert"
+          className="mx-3 mt-2 flex items-start gap-1.5 rounded-lg bg-danger/[0.08] px-2.5 py-2 text-[10.5px] leading-relaxed text-danger"
+        >
+          <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+          <span>{workspaceLifecycleError}</span>
+        </div>
+      )}
 
       {/* Search — functional client-side filter */}
       <div className="px-3 pt-3 pb-2 shrink-0">
@@ -645,7 +950,7 @@ export function Roster({
           Failed to load agents
         </div>
       ) : entries.length === 0 ? (
-        <div className="flex-1 grid place-items-center text-[12px] text-text-tertiary px-4 text-center">
+        <div className="min-h-0 flex-1 overflow-hidden grid place-items-center text-[12px] text-text-tertiary px-4 text-center">
           No agents in this workspace yet
         </div>
       ) : (
@@ -659,17 +964,7 @@ export function Roster({
                   <div className="px-2 mb-1 text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
                     Orchestrator
                   </div>
-                  {orchestrators.map((entry) => (
-                    <AgentRow
-                      key={entry.instanceId}
-                      entry={entry}
-                      isSelected={selectedId === entry.instanceId}
-                      onSelect={() => onSelect(entry.instanceId)}
-                      onRemove={() => handleRemove(entry.instanceId)}
-                      removing={removingId === entry.instanceId}
-                      onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
-                    />
-                  ))}
+                  {orchestrators.map(renderAgentRow)}
                 </div>
               )}
 
@@ -679,17 +974,7 @@ export function Roster({
                     CLI agents
                   </div>
                   <div className="space-y-0.5">
-                    {cliAgents.map((entry) => (
-                      <AgentRow
-                        key={entry.instanceId}
-                        entry={entry}
-                        isSelected={selectedId === entry.instanceId}
-                        onSelect={() => onSelect(entry.instanceId)}
-                        onRemove={() => handleRemove(entry.instanceId)}
-                        removing={removingId === entry.instanceId}
-                        onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
-                      />
-                    ))}
+                    {cliAgents.map(renderAgentRow)}
                   </div>
                 </div>
               )}
@@ -700,17 +985,7 @@ export function Roster({
                     Chat agents
                   </div>
                   <div className="space-y-0.5">
-                    {chatAgents.map((entry) => (
-                      <AgentRow
-                        key={entry.instanceId}
-                        entry={entry}
-                        isSelected={selectedId === entry.instanceId}
-                        onSelect={() => onSelect(entry.instanceId)}
-                        onRemove={() => handleRemove(entry.instanceId)}
-                        removing={removingId === entry.instanceId}
-                        onEditSupervisor={() => setEditingSupervisorFor(entry.instanceId)}
-                      />
-                    ))}
+                    {chatAgents.map(renderAgentRow)}
                   </div>
                 </div>
               )}
@@ -868,6 +1143,26 @@ export function Roster({
             />
           );
         })()}
+
+      {dialog && (
+        <ConfirmLifecycleDialog
+          kind={dialog.kind}
+          workspaceName={workspaceName}
+          entry={"entry" in dialog ? dialog.entry : undefined}
+          onCancel={closeDialog}
+          onConfirm={() => {
+            const confirmed = dialog;
+            closeDialog();
+            if (confirmed.kind === "workspace-stop") {
+              onStopWorkspace?.();
+            } else if (confirmed.kind === "agent-stop") {
+              void stopAgent(confirmed.entry);
+            } else {
+              void handleRemove(confirmed.entry.instanceId);
+            }
+          }}
+        />
+      )}
     </aside>
   );
 }

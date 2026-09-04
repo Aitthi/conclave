@@ -1,5 +1,6 @@
 import type { FixtureHandlers } from "../backend";
 import type { BrowserTab, Workspace } from "../../ipc/types";
+import { emitFixtureEvent } from "../events";
 
 // `empty` scenario — the "fresh install" look. DECISION (F3 Step 4): keep ONE
 // linked-but-empty workspace rather than zero. With zero workspaces the shell
@@ -14,6 +15,7 @@ const emptyWorkspace: Workspace[] = [
     name: "new-project",
     folderPath: "/Users/dev/code/new-project",
     color: "#7c6af2",
+    runState: "stopped",
     createdAt: "2026-07-05T12:00:00.000Z",
   },
 ];
@@ -32,6 +34,23 @@ function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
 export const handlers: FixtureHandlers = {
   "workspace.list": () => emptyWorkspace,
   "workspace.use": () => undefined,
+  "workspace.start": ({ workspaceId }) => {
+    const workspace: Workspace = { ...emptyWorkspace[0], id: workspaceId, runState: "started" };
+    emptyWorkspace[0] = workspace;
+    emitFixtureEvent("workspace:changed", { workspaceId, runState: "started" });
+    return {
+      workspace,
+      readyAgentIds: [],
+      skippedStoppedAgentIds: [],
+      failures: [],
+    };
+  },
+  "workspace.stop": ({ workspaceId }) => {
+    const workspace: Workspace = { ...emptyWorkspace[0], id: workspaceId, runState: "stopped" };
+    emptyWorkspace[0] = workspace;
+    emitFixtureEvent("workspace:changed", { workspaceId, runState: "stopped" });
+    return { workspace, stoppedRuntimeIds: [] };
+  },
   "instance.list": () => [],
   "agentDef.list": () => [],
   "task.list": () => [],

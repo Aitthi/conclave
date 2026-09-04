@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   Check,
+  CirclePause,
   CornerUpRight,
   Terminal as TerminalIcon,
   MessageSquare,
@@ -20,6 +21,7 @@ export interface RoutingTarget {
   name: string;
   color: string;
   type: "cli" | "chat" | "orchestrator";
+  availability: "active" | "stopped";
 }
 
 interface RoutingPickerProps {
@@ -96,6 +98,8 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
             <span className="truncate min-w-0 max-w-[110px] font-medium text-text-primary">{selected.name}</span>
             {isSelf ? (
               <span className="shrink-0 whitespace-nowrap text-text-tertiary">· self</span>
+            ) : selected.availability === "stopped" ? (
+              <span className="shrink-0 whitespace-nowrap text-text-tertiary">· Stopped</span>
             ) : hint ? (
               <span className="shrink-0 whitespace-nowrap text-text-tertiary">· {hint.label}</span>
             ) : null}
@@ -115,15 +119,19 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
             const tHint = typeHint(t.type);
             const self = t.instanceId === selfId;
             const isActive = t.instanceId === value;
+            const stopped = t.availability === "stopped";
             return (
               <button
                 key={t.instanceId}
                 type="button"
+                disabled={stopped}
+                aria-disabled={stopped}
+                aria-label={stopped ? `${t.name}, stopped and unavailable` : undefined}
                 onClick={() => {
                   onChange(t.instanceId);
                   setOpen(false);
                 }}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12.5px] hover:bg-overlay/[0.04] text-left"
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12.5px] hover:bg-overlay/[0.04] text-left disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent"
               >
                 <span
                   className="w-2.5 h-2.5 rounded-full shrink-0"
@@ -133,10 +141,17 @@ export function RoutingPicker({ selfId, roster, value, onChange, disabled }: Rou
                   {t.name}
                   {self && <span className="text-text-tertiary font-normal"> · self</span>}
                 </span>
-                <span className="flex items-center gap-1 text-[10.5px] text-text-tertiary shrink-0">
-                  <tHint.Icon className="w-3 h-3" />
-                  {tHint.label}
-                </span>
+                {stopped ? (
+                  <span className="flex items-center gap-1 text-[10.5px] font-semibold text-text-tertiary shrink-0">
+                    <CirclePause className="w-3 h-3" />
+                    Stopped
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-[10.5px] text-text-tertiary shrink-0">
+                    <tHint.Icon className="w-3 h-3" />
+                    {tHint.label}
+                  </span>
+                )}
                 {isActive && <Check className="w-3.5 h-3.5 text-accent shrink-0" />}
               </button>
             );

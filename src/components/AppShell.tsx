@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { ipc } from "../ipc";
-import { useEvent } from "../ipc/events";
+import { useEffect, useRef, useState } from "react";
+import { EVENT_NAMES, ipc } from "../ipc";
+import { useEvent, type WorkspaceChangedEvent } from "../ipc/events";
 import { setThemePref } from "../lib/theme";
 import type { Workspace, AgentDefinition, DraftMode } from "../ipc";
 import { Rail } from "./Rail";
@@ -12,7 +12,7 @@ import { SkillLibrary } from "./SkillLibrary";
 import { LinkFolder } from "./LinkFolder";
 import { EditWorkspace } from "./EditWorkspace";
 import { Settings } from "./Settings";
-import { WorkspacePane } from "./WorkspacePane";
+import { WorkspacePane, type WorkspaceStartBatch } from "./WorkspacePane";
 import { Blackboard } from "./Blackboard";
 import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
@@ -38,6 +38,18 @@ export function AppShell() {
   // ── Workspace state ────────────────────────────────────────────────────
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
+  const activeWorkspaceIdRef = useRef<string | null>(null);
+  const [workspaceLifecyclePhase, setWorkspaceLifecyclePhase] = useState<
+    "idle" | "starting" | "stopping"
+  >("idle");
+  const workspaceLifecyclePhaseRef = useRef<"idle" | "starting" | "stopping">("idle");
+  const workspaceLifecycleGenerationRef = useRef(0);
+  const [workspaceLifecycleError, setWorkspaceLifecycleError] = useState<string | null>(null);
+  const [workspaceStartBatch, setWorkspaceStartBatch] = useState<WorkspaceStartBatch | null>(
+    null,
+  );
+  const [lifecycleAnnouncement, setLifecycleAnnouncement] = useState("");
+  const [focusWorkspaceStart, setFocusWorkspaceStart] = useState(false);
 
   // ── Blackboard state ───────────────────────────────────────────────────
   const [showBlackboard, setShowBlackboard] = useState(false);
@@ -113,6 +125,10 @@ export function AppShell() {
   //    fetch has settled, gating the readiness sentinel below. ────────────────
   const [booted, setBooted] = useState(false);
 
+  useEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspaceId;
+  }, [activeWorkspaceId]);
+
   // Load workspaces from the DB on mount.
   // Falls back to an empty list if Tauri is not present (plain Vite dev).
   useEffect(() => {
@@ -139,6 +155,35 @@ export function AppShell() {
         setBooted(true);
       });
   }, []);
+
+  // Workspace lifecycle events can originate from a CLI or another window. The
+  // start command emits its own `started` event before its agent batch finishes,
+  // so ignore the active workspace's event while our own transition is in flight;
+  // the command result below carries the authoritative batch outcome.
+  useEvent<WorkspaceChangedEvent>(EVENT_NAMES.workspaceChanged, (payload) => {
+    if (
+      payload.workspaceId === activeWorkspaceId &&
+      workspaceLifecyclePhaseRef.current !== "idle"
+    ) {
+      return;
+    }
+    setWorkspaces((prev) =>
+      prev.map((workspace) =>
+        workspace.id === payload.workspaceId
+          ? { ...workspace, runState: payload.runState }
+          : workspace,
+      ),
+    );
+    if (payload.workspaceId === activeWorkspaceId) {
+      setFocusWorkspaceStart(false);
+      setWorkspaceLifecycleError(null);
+      setWorkspaceStartBatch(null);
+      setAgentsVersion((version) => version + 1);
+      setLifecycleAnnouncement(
+        payload.runState === "started" ? "Workspace started." : "Workspace stopped.",
+      );
+    }
+  });
 
   // Fixture mode (DEV-only): route the initial view from the URL hash so a
   // headless capture (scripts/uishot.mjs) can open any screen directly via
@@ -272,9 +317,16 @@ export function AppShell() {
   function handleSelectWorkspace(id: string) {
     // Optimistically update selection; handler only validates on the Rust side.
     setActiveWorkspaceId(id);
+    activeWorkspaceIdRef.current = id;
+    workspaceLifecycleGenerationRef.current += 1;
     // Clear the previous workspace's agent selection so a stale instance id
     // isn't carried into the remounted pane as focus.
     setSelectedId(null);
+    workspaceLifecyclePhaseRef.current = "idle";
+    setWorkspaceLifecyclePhase("idle");
+    setWorkspaceLifecycleError(null);
+    setWorkspaceStartBatch(null);
+    setFocusWorkspaceStart(false);
     // Switching workspace returns to that workspace's agent pane.
     setShowBlackboard(false);
     setShowChat(false);
@@ -291,6 +343,126 @@ export function AppShell() {
   const activeWorkspace = activeWorkspaceId
     ? (workspaces.find((w) => w.id === activeWorkspaceId) ?? null)
     : null;
+
+  async function handleStartWorkspace() {
+    const workspaceId = activeWorkspaceId;
+    if (!workspaceId || workspaceLifecyclePhaseRef.current !== "idle") return;
+
+    workspaceLifecyclePhaseRef.current = "starting";
+    const generation = ++workspaceLifecycleGenerationRef.current;
+    setWorkspaceLifecyclePhase("starting");
+    setWorkspaceLifecycleError(null);
+    setWorkspaceStartBatch(null);
+    setFocusWorkspaceStart(false);
+    try {
+      const result = await ipc.workspace.start({ workspaceId });
+      setWorkspaces((prev) =>
+        prev.map((workspace) => (workspace.id === workspaceId ? result.workspace : workspace)),
+      );
+      if (
+        activeWorkspaceIdRef.current === workspaceId &&
+        workspaceLifecycleGenerationRef.current === generation
+      ) {
+        setWorkspaceStartBatch({
+          readyAgentIds: result.readyAgentIds,
+          skippedStoppedAgentIds: result.skippedStoppedAgentIds,
+          failures: result.failures,
+        });
+        setAgentsVersion((version) => version + 1);
+        setLifecycleAnnouncement(
+          result.failures.length === 0
+            ? "Workspace started."
+            : `Workspace started with ${result.failures.length} agent ${result.failures.length === 1 ? "failure" : "failures"}.`,
+        );
+      }
+    } catch (error) {
+      if (
+        activeWorkspaceIdRef.current === workspaceId &&
+        workspaceLifecycleGenerationRef.current === generation
+      ) {
+        const detail = error instanceof Error ? error.message : String(error);
+        setWorkspaceLifecycleError(`Couldn’t start workspace: ${detail}`);
+      }
+    } finally {
+      if (
+        workspaceLifecycleGenerationRef.current === generation &&
+        workspaceLifecyclePhaseRef.current === "starting"
+      ) {
+        workspaceLifecyclePhaseRef.current = "idle";
+        setWorkspaceLifecyclePhase("idle");
+      }
+    }
+  }
+
+  async function handleStopWorkspace() {
+    const workspaceId = activeWorkspaceId;
+    if (!workspaceId || workspaceLifecyclePhaseRef.current !== "idle") return;
+
+    workspaceLifecyclePhaseRef.current = "stopping";
+    const generation = ++workspaceLifecycleGenerationRef.current;
+    setWorkspaceLifecyclePhase("stopping");
+    setWorkspaceLifecycleError(null);
+    setFocusWorkspaceStart(false);
+    try {
+      const result = await ipc.workspace.stop({ workspaceId });
+      setWorkspaces((prev) =>
+        prev.map((workspace) => (workspace.id === workspaceId ? result.workspace : workspace)),
+      );
+      if (
+        activeWorkspaceIdRef.current === workspaceId &&
+        workspaceLifecycleGenerationRef.current === generation
+      ) {
+        setWorkspaceStartBatch(null);
+        setFocusWorkspaceStart(true);
+        setAgentsVersion((version) => version + 1);
+        setLifecycleAnnouncement("Workspace stopped.");
+      }
+    } catch (error) {
+      if (
+        activeWorkspaceIdRef.current === workspaceId &&
+        workspaceLifecycleGenerationRef.current === generation
+      ) {
+        const detail = error instanceof Error ? error.message : String(error);
+        setWorkspaceLifecycleError(
+          `Couldn’t stop workspace: ${detail}. One or more agents may still be running.`,
+        );
+      }
+    } finally {
+      if (
+        workspaceLifecycleGenerationRef.current === generation &&
+        workspaceLifecyclePhaseRef.current === "stopping"
+      ) {
+        workspaceLifecyclePhaseRef.current = "idle";
+        setWorkspaceLifecyclePhase("idle");
+      }
+    }
+  }
+
+  function handleAgentLifecycleChanged(
+    instanceId: string,
+    availability: "active" | "stopped",
+  ) {
+    setWorkspaceStartBatch((batch) => {
+      if (!batch) return batch;
+      return {
+        readyAgentIds:
+          availability === "active"
+            ? Array.from(new Set([...batch.readyAgentIds, instanceId]))
+            : batch.readyAgentIds.filter((id) => id !== instanceId),
+        skippedStoppedAgentIds:
+          availability === "stopped"
+            ? Array.from(new Set([...batch.skippedStoppedAgentIds, instanceId]))
+            : batch.skippedStoppedAgentIds.filter((id) => id !== instanceId),
+        failures: batch.failures.filter(
+          (failure) => failure.workspaceAgentId !== instanceId,
+        ),
+      };
+    });
+    setAgentsVersion((version) => version + 1);
+    setLifecycleAnnouncement(
+      availability === "active" ? "Agent resumed." : "Agent stopped.",
+    );
+  }
 
   // Center-pane destinations that REPLACE the live WorkspacePane (each renders
   // full-page instead of it). This is the ONE canonical list — adding a new
@@ -453,6 +625,12 @@ export function AppShell() {
               workspaceId={activeWorkspaceId}
               workspaceName={activeWorkspace?.name}
               folderPath={activeWorkspace?.folderPath}
+              workspaceRunState={activeWorkspace?.runState}
+              workspaceLifecyclePhase={workspaceLifecyclePhase}
+              workspaceLifecycleError={workspaceLifecycleError}
+              onStartWorkspace={() => void handleStartWorkspace()}
+              onStopWorkspace={() => void handleStopWorkspace()}
+              onAgentLifecycleChanged={handleAgentLifecycleChanged}
               selectedId={selectedId}
               onSelect={(id) => {
                 // Selecting an agent returns from any center-pane screen to the
@@ -576,6 +754,26 @@ export function AppShell() {
                 key={`${activeWorkspaceId}:${agentsVersion}`}
                 workspaceId={activeWorkspaceId}
                 workspaceName={activeWorkspace?.name}
+                workspaceRunState={activeWorkspace?.runState ?? "stopped"}
+                workspaceLifecyclePhase={workspaceLifecyclePhase}
+                workspaceLifecycleError={workspaceLifecycleError}
+                workspaceStartBatch={workspaceStartBatch}
+                focusStartAction={focusWorkspaceStart}
+                onStartWorkspace={() => void handleStartWorkspace()}
+                onAgentLifecycleChanged={handleAgentLifecycleChanged}
+                onStartRetryComplete={(readyAgentIds, failures) => {
+                  setWorkspaceStartBatch((batch) =>
+                    batch
+                      ? {
+                          ...batch,
+                          readyAgentIds: Array.from(
+                            new Set([...batch.readyAgentIds, ...readyAgentIds]),
+                          ),
+                          failures,
+                        }
+                      : batch,
+                  );
+                }}
                 focusInstanceId={selectedId}
                 onActiveInstanceChange={(id) => setSelectedId(id)}
                 designOpen={showDesign}
@@ -707,6 +905,8 @@ export function AppShell() {
           onDeleted={(deletedId) => {
             setWorkspaces((prev) => prev.filter((w) => w.id !== deletedId));
             setActiveWorkspaceId(null);
+            activeWorkspaceIdRef.current = null;
+            workspaceLifecycleGenerationRef.current += 1;
             setSelectedId(null);
             setShowBlackboard(false);
             setShowChat(false);
@@ -718,6 +918,9 @@ export function AppShell() {
           }}
         />
       )}
+      <div className="sr-only" aria-live="polite">
+        {lifecycleAnnouncement}
+      </div>
     </div>
   );
 }
