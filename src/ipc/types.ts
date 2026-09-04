@@ -7,6 +7,7 @@ export interface Workspace {
   name: string;
   folderPath: string;
   color?: string;
+  runState: "started" | "stopped";
   createdAt: string;
 }
 
@@ -113,6 +114,7 @@ export interface WorkspaceAgent {
   workspaceId: string;
   agentDefId: string;
   status: "running" | "idle" | "waiting";
+  availability: "active" | "stopped";
   addedAt: string;
   /** Annotated by `instance.list` (ADR 0005 self-describing roster): the agent
    *  definition's display name. */

@@ -54,6 +54,19 @@ export interface Commands {
     req: { workspaceId: string; name: string; color?: string };
     res: Workspace;
   };
+  "workspace.start": {
+    req: { workspaceId: string };
+    res: {
+      workspace: Workspace;
+      readyAgentIds: string[];
+      skippedStoppedAgentIds: string[];
+      failures: { workspaceAgentId: string; error: string }[];
+    };
+  };
+  "workspace.stop": {
+    req: { workspaceId: string };
+    res: { workspace: Workspace; stoppedRuntimeIds: string[] };
+  };
   "workspace.delete": {
     req: { workspaceId: string };
     res: void;
@@ -152,6 +165,14 @@ export interface Commands {
     res: WorkspaceAgent[];
   };
   "instance.spawn": {
+    req: { workspaceAgentId: string };
+    res: Session;
+  };
+  "instance.stop": {
+    req: { workspaceAgentId: string };
+    res: void;
+  };
+  "instance.resume": {
     req: { workspaceAgentId: string };
     res: Session;
   };
@@ -407,6 +428,8 @@ export const ipc = {
     link: (req: Commands["workspace.link"]["req"]) => call("workspace.link", req),
     use: (req: Commands["workspace.use"]["req"]) => call("workspace.use", req),
     update: (req: Commands["workspace.update"]["req"]) => call("workspace.update", req),
+    start: (req: Commands["workspace.start"]["req"]) => call("workspace.start", req),
+    stop: (req: Commands["workspace.stop"]["req"]) => call("workspace.stop", req),
     delete: (req: Commands["workspace.delete"]["req"]) => call("workspace.delete", req),
   },
   agentDef: {
@@ -437,6 +460,8 @@ export const ipc = {
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
+    stop: (req: Commands["instance.stop"]["req"]) => call("instance.stop", req),
+    resume: (req: Commands["instance.resume"]["req"]) => call("instance.resume", req),
     restart: (req: Commands["instance.restart"]["req"]) => call("instance.restart", req),
     remove: (req: Commands["instance.remove"]["req"]) => call("instance.remove", req),
     setPosition: (req: Commands["instance.setPosition"]["req"]) =>

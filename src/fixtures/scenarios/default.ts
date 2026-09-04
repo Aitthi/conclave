@@ -1,5 +1,6 @@
 import type { FixtureHandlers } from "../backend";
-import type { BrowserTab } from "../../ipc/types";
+import type { BrowserTab, Session, Workspace, WorkspaceAgent } from "../../ipc/types";
+import { emitFixtureEvent } from "../events";
 import {
   workspaces,
   agents,
@@ -56,6 +57,19 @@ let tabsState: BrowserTab[] = [
 ];
 let activeTabIdState: string | undefined = "human-1";
 let humanSeq = 1;
+let workspaceState: Workspace = workspaces[0];
+let agentsState: WorkspaceAgent[] = agents.map((agent) => ({ ...agent }));
+
+function fixtureSession(workspaceAgentId: string): Session {
+  return {
+    id: `fx-sess-${workspaceAgentId}`,
+    workspaceAgentId,
+    contextTokens: 42000,
+    contextLimit: 200000,
+    startedAt: "2026-07-05T11:00:00.000Z",
+    lastActiveAt: "2026-07-05T11:58:00.000Z",
+  };
+}
 
 function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
   return { tabs: tabsState, activeTabId: activeTabIdState };
@@ -68,22 +82,65 @@ function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
 // intentionally absent — reaching one in a screenshot is a real bug worth the
 // loud failure.
 export const handlers: FixtureHandlers = {
-  "workspace.list": () => workspaces,
+  "workspace.list": () => [workspaceState],
   "workspace.use": () => undefined,
+  "workspace.start": ({ workspaceId }) => {
+    workspaceState = { ...workspaceState, id: workspaceId, runState: "started" };
+    const readyAgentIds = agentsState
+      .filter((agent) => agent.availability === "active")
+      .map((agent) => agent.id);
+    const skippedStoppedAgentIds = agentsState
+      .filter((agent) => agent.availability === "stopped")
+      .map((agent) => agent.id);
+    emitFixtureEvent("workspace:changed", { workspaceId, runState: "started" });
+    return { workspace: workspaceState, readyAgentIds, skippedStoppedAgentIds, failures: [] };
+  },
+  "workspace.stop": ({ workspaceId }) => {
+    workspaceState = { ...workspaceState, id: workspaceId, runState: "stopped" };
+    const stoppedRuntimeIds = agentsState
+      .filter((agent) => agent.availability === "active" && agent.status === "running")
+      .map((agent) => agent.id);
+    agentsState = agentsState.map((agent) => ({
+      ...agent,
+      status: "idle",
+      working: false,
+      sessionId: undefined,
+    }));
+    emitFixtureEvent("workspace:changed", { workspaceId, runState: "stopped" });
+    return { workspace: workspaceState, stoppedRuntimeIds };
+  },
   "instance.list": ({ workspaceId }) =>
-    agents.filter((a) => a.workspaceId === workspaceId),
+    agentsState.filter((a) => a.workspaceId === workspaceId),
   // The WorkspacePane auto-opens a session for the focused agent on mount.
   // Synthesize a deterministic one; the Terminal then renders an empty frame
   // (no session:output on the fixture bus) — the accepted PTY-in-fixture v1
   // limitation, not an error.
-  "instance.spawn": ({ workspaceAgentId }) => ({
-    id: `fx-sess-${workspaceAgentId}`,
-    workspaceAgentId,
-    contextTokens: 42000,
-    contextLimit: 200000,
-    startedAt: "2026-07-05T11:00:00.000Z",
-    lastActiveAt: "2026-07-05T11:58:00.000Z",
-  }),
+  "instance.spawn": ({ workspaceAgentId }) => {
+    const agent = agentsState.find((candidate) => candidate.id === workspaceAgentId);
+    if (workspaceState.runState !== "started") {
+      throw new Error("[fixture] attempted to spawn an agent in a stopped workspace");
+    }
+    if (!agent || agent.availability !== "active") {
+      throw new Error("[fixture] attempted to spawn a stopped or missing agent");
+    }
+    return fixtureSession(workspaceAgentId);
+  },
+  "instance.stop": ({ workspaceAgentId }) => {
+    agentsState = agentsState.map((agent) =>
+      agent.id === workspaceAgentId
+        ? { ...agent, availability: "stopped", status: "idle", working: false, sessionId: undefined }
+        : agent,
+    );
+  },
+  "instance.resume": ({ workspaceAgentId }) => {
+    const session = fixtureSession(workspaceAgentId);
+    agentsState = agentsState.map((agent) =>
+      agent.id === workspaceAgentId
+        ? { ...agent, availability: "active", status: "running", working: false, sessionId: session.id }
+        : agent,
+    );
+    return session;
+  },
   "agentDef.list": () => agentDefs,
   "task.list": ({ workspaceId, state }) =>
     tasks.filter((t) => t.workspaceId === workspaceId && (!state || t.state === state)),

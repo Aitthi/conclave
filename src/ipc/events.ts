@@ -16,6 +16,7 @@ export const EVENT_NAMES = {
   memoryChanged: "memory:changed",
   artifactChanged: "artifact:changed",
   rosterChanged: "roster:changed",
+  workspaceChanged: "workspace:changed",
 } as const;
 
 export type EventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
@@ -128,6 +129,12 @@ export interface ArtifactChangedEvent {
  */
 export interface RosterChangedEvent {
   workspaceId: string;
+}
+
+/** A workspace transitioned between its persistent started/stopped states. */
+export interface WorkspaceChangedEvent {
+  workspaceId: string;
+  runState: "started" | "stopped";
 }
 
 /**
@@ -369,6 +376,16 @@ export function useRosterChanged(
   cb: (event: RosterChangedEvent) => void,
 ): void {
   useEvent<RosterChangedEvent>(EVENT_NAMES.rosterChanged, (payload) => {
+    if (payload.workspaceId === workspaceId) cb(payload);
+  });
+}
+
+/** Subscribe to lifecycle changes for one workspace. */
+export function useWorkspaceChanged(
+  workspaceId: string,
+  cb: (event: WorkspaceChangedEvent) => void,
+): void {
+  useEvent<WorkspaceChangedEvent>(EVENT_NAMES.workspaceChanged, (payload) => {
     if (payload.workspaceId === workspaceId) cb(payload);
   });
 }

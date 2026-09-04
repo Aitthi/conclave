@@ -70,6 +70,7 @@ export function ChatView({
   const [sending, setSending] = useState(false);
   // Routing target for the NEXT send. Default = self (own session).
   const [targetId, setTargetId] = useState(instanceId);
+  const [routingAnnouncement, setRoutingAnnouncement] = useState("");
 
   const avatarLetter = agentName[0]?.toUpperCase() ?? "A";
 
@@ -88,6 +89,20 @@ export function ChatView({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  useEffect(() => {
+    const selected = roster.find((target) => target.instanceId === targetId);
+    if (selected?.availability !== "stopped") return;
+    const fallback =
+      roster.find(
+        (target) => target.instanceId === instanceId && target.availability === "active",
+      ) ?? roster.find((target) => target.availability === "active");
+    if (!fallback || fallback.instanceId === targetId) return;
+    setTargetId(fallback.instanceId);
+    setRoutingAnnouncement(
+      `${selected.name} stopped. Routing reset to ${fallback.name}${fallback.instanceId === instanceId ? " (self)" : ""}.`,
+    );
+  }, [instanceId, roster, targetId]);
 
   // Insert file paths into the draft (same behavior as the CLI stdin bar).
   // Space-separated for multiple files, trailing space to ready the next
@@ -159,6 +174,11 @@ export function ChatView({
 
     // Routed send (→ another agent) takes a different path from a self send.
     const target = roster.find((t) => t.instanceId === targetId);
+    if (target?.availability === "stopped") {
+      setTargetId(instanceId);
+      setRoutingAnnouncement(`${target.name} stopped. Routing reset to self.`);
+      return;
+    }
     if (target && target.instanceId !== instanceId) {
       await handleRoutedSend(target, text);
       return;
@@ -280,6 +300,9 @@ export function ChatView({
       {/* Composer */}
       <div className="border-t border-overlay/[0.07] px-8 py-3 bg-surface shrink-0">
         <div className="max-w-[720px] mx-auto">
+          <div className="sr-only" aria-live="polite">
+            {routingAnnouncement}
+          </div>
           {/* Route reply into… — default self, choose another agent to inject. */}
           <div className="mb-2 flex items-center gap-2">
             <RoutingPicker

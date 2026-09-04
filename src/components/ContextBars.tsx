@@ -112,7 +112,7 @@ export function ContextTopBar({
   const effectiveSkillIds = def.skillIds ?? [];
   const skillsStale = computeSkillsStale(def, launchedSkillIds);
 
-  // ── Session (restart · resume), moved verbatim. ────────────────────────────
+  // ── Session (restart · restore snapshot), moved verbatim. ─────────────────
   const [restartConfirming, setRestartConfirming] = useState(false);
   const [restartPhase, setRestartPhase] = useState<"saving" | "respawning" | null>(null);
   const [resumeBusy, setResumeBusy] = useState(false);
@@ -143,7 +143,7 @@ export function ContextTopBar({
         if (import.meta.env.DEV) {
           console.error("ContextTopBar: snapshot.resume failed", err);
         }
-        if (mounted.current) setSessionError("Couldn't resume this agent");
+        if (mounted.current) setSessionError("Couldn't restore the latest snapshot");
       })
       .finally(() => {
         setTimeout(() => {
@@ -224,10 +224,11 @@ export function ContextTopBar({
           <button
             onClick={doResume}
             disabled={!hasHandoff || resumeBusy || status !== "running"}
+            aria-label="Restore snapshot"
             title={
               hasHandoff
-                ? "Ask the agent to reload its last handoff and continue"
-                : "No handoff snapshot to resume from yet"
+                ? "Restore snapshot from the latest handoff"
+                : "No handoff snapshot to restore yet"
             }
             className="w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary disabled:opacity-40"
           >
@@ -236,7 +237,7 @@ export function ContextTopBar({
           <button
             onClick={() => setRestartConfirming((v) => !v)}
             disabled={restartPhase !== null}
-            title="Save a handoff, restart the process, resume from it"
+            title="Save a handoff, restart the process, and restore it"
             className={`w-6 h-6 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary disabled:opacity-40${
               restartPhase !== null ? " animate-pulse" : ""
             }`}
@@ -249,7 +250,7 @@ export function ContextTopBar({
                 <>
                   <div>
                     The agent saves a handoff, its process is killed and relaunched, then it
-                    resumes from that handoff. Continue?
+                    restores that handoff. Continue?
                   </div>
                   <div className="flex items-center gap-3">
                     <button
@@ -354,7 +355,8 @@ export function ContextTopBar({
               })}
               {skillsStale && (
                 <div className="text-[10.5px] text-warning leading-snug pt-1.5 mt-0.5 border-t border-overlay/[0.06]">
-                  Launched with a different skill set — Restart · resume applies the current one.
+                  Launched with a different skill set — Restart or Restore snapshot applies the
+                  current one.
                 </div>
               )}
             </div>

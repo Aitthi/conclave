@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Terminal as TerminalIcon, MessageSquare, Waypoints } from "lucide-react";
+import {
+  AlertCircle,
+  CirclePause,
+  LoaderCircle,
+  MessageSquare,
+  Play,
+  Terminal as TerminalIcon,
+  Waypoints,
+} from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
-import type { AgentDefinition, Session, WorkspaceAgent, SessionStatusEvent } from "../ipc";
+import type {
+  AgentDefinition,
+  Session,
+  SessionStatusEvent,
+  Workspace,
+  WorkspaceAgent,
+} from "../ipc";
 import { Terminal } from "./Terminal";
 import { StdinBar } from "./StdinBar";
 import { ChatView } from "./ChatView";
@@ -23,10 +37,30 @@ const termTabMode = getTermTabMode();
 // routing roster as a workspace concept; the type itself lives with the picker.
 export type { RoutingTarget };
 
+export interface WorkspaceStartBatch {
+  readyAgentIds: string[];
+  skippedStoppedAgentIds: string[];
+  failures: { workspaceAgentId: string; error: string }[];
+}
+
 interface WorkspacePaneProps {
   workspaceId: string;
   /** For the Design view's header (DesignView has no other way to know it). */
   workspaceName?: string;
+  workspaceRunState: Workspace["runState"];
+  workspaceLifecyclePhase: "idle" | "starting" | "stopping";
+  workspaceLifecycleError?: string | null;
+  workspaceStartBatch?: WorkspaceStartBatch | null;
+  focusStartAction?: boolean;
+  onStartWorkspace?: () => void;
+  onAgentLifecycleChanged?: (
+    instanceId: string,
+    availability: WorkspaceAgent["availability"],
+  ) => void;
+  onStartRetryComplete?: (
+    readyAgentIds: string[],
+    failures: WorkspaceStartBatch["failures"],
+  ) => void;
   /** Optional: when set, switches the active tab to the matching instanceId (if
    *  it exists in the loaded tabs). Used to honor Roster selection. The existing
    *  auto-focus-first-tab behavior in the load effect is unaffected — this effect
@@ -64,6 +98,7 @@ interface AgentTab {
   color: string;
   type: AgentDefinition["type"];
   status: WorkspaceAgent["status"];
+  availability: WorkspaceAgent["availability"];
   def: AgentDefinition;
   /** Skill ids the live session actually launched with (undefined before any
    *  launch) — feeds the Context drawer's Skills section drift hint. */
@@ -90,6 +125,169 @@ function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
   }
 }
 
+function WorkspaceLifecyclePane({
+  workspaceName,
+  phase,
+  error,
+  tabs,
+  onStart,
+  focusStartAction = false,
+}: {
+  workspaceName?: string;
+  phase: "idle" | "starting" | "stopping";
+  error?: string | null;
+  tabs: AgentTab[];
+  onStart?: () => void;
+  focusStartAction?: boolean;
+}) {
+  const name = workspaceName ?? "Workspace";
+  const starting = phase === "starting";
+  const stopping = phase === "stopping";
+  const activeCount = tabs.filter((tab) => tab.availability === "active").length;
+  const stoppedCount = tabs.length - activeCount;
+  const startButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (focusStartAction && phase === "idle") startButtonRef.current?.focus();
+  }, [focusStartAction, phase]);
+
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-surface px-6">
+      <div className="flex max-w-lg flex-col items-center text-center">
+        <div
+          className={`grid h-12 w-12 place-items-center rounded-xl bg-fill-soft ${
+            starting ? "text-accent" : "text-text-secondary"
+          }`}
+        >
+          {starting || stopping ? (
+            <LoaderCircle className="h-6 w-6 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <CirclePause className="h-6 w-6" />
+          )}
+        </div>
+        <h1 className="mt-4 text-[18px] font-semibold tracking-[-0.02em] text-text-primary">
+          {starting ? `Starting ${name}…` : stopping ? `Stopping ${name}…` : `${name} is stopped`}
+        </h1>
+        <p className="mt-2 max-w-[52ch] text-[12.5px] leading-relaxed text-text-secondary">
+          {starting
+            ? "Launching individually active agents. Agents stopped on their own remain stopped."
+            : stopping
+              ? "Ending live runtimes now. Workspace configuration, tasks, messages, and history remain saved."
+              : "Inspect agents, tasks, messages, configuration, and history without launching any agent runtime."}
+        </p>
+
+        {starting && tabs.length > 0 && (
+          <div className="mt-4 w-full max-w-xs space-y-1.5 text-left text-[11.5px]">
+            {tabs.map((tab) => (
+              <div key={tab.instanceId} className="flex items-center gap-2 rounded-md bg-fill-soft px-2.5 py-1.5">
+                {tab.availability === "stopped" ? (
+                  <CirclePause className="h-3 w-3 text-text-tertiary" />
+                ) : (
+                  <LoaderCircle className="h-3 w-3 animate-spin text-accent motion-reduce:animate-none" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{tab.name}</span>
+                <span className="text-text-muted">
+                  {tab.availability === "stopped" ? "Individually stopped" : "Starting…"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!starting && !stopping && (
+          <button
+            ref={startButtonRef}
+            type="button"
+            onClick={onStart}
+            className="mt-5 inline-flex min-w-32 items-center justify-center gap-1.5 rounded-md bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-white transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+          >
+            <Play className="h-3.5 w-3.5" />
+            Start workspace
+          </button>
+        )}
+        {!starting && !stopping && tabs.length > 0 && (
+          <p className="mt-2 text-[10.5px] text-text-tertiary">
+            Starts {activeCount} individually active {activeCount === 1 ? "agent" : "agents"}
+            {stoppedCount > 0
+              ? ` · keeps ${stoppedCount} individually stopped`
+              : ""}
+          </p>
+        )}
+        {error && (
+          <div
+            role="alert"
+            className="mt-3 flex max-w-sm items-start gap-2 rounded-lg bg-danger/[0.1] px-3 py-2 text-left text-[11.5px] leading-relaxed text-danger"
+          >
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StoppedAgentPane({
+  tab,
+  busy,
+  error,
+  onResume,
+}: {
+  tab: AgentTab;
+  busy: boolean;
+  error?: string;
+  onResume: () => void;
+}) {
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-surface px-6">
+      <div className="flex max-w-md flex-col items-center text-center">
+        <div className="grid h-12 w-12 place-items-center rounded-xl bg-fill-soft text-text-secondary">
+          {busy ? (
+            <LoaderCircle className="h-6 w-6 animate-spin text-accent motion-reduce:animate-none" />
+          ) : (
+            <CirclePause className="h-6 w-6" />
+          )}
+        </div>
+        <h1 className="mt-4 text-[18px] font-semibold tracking-[-0.02em] text-text-primary">
+          {busy ? `Resuming ${tab.name}…` : `${tab.name} is stopped`}
+        </h1>
+        <p className="mt-2 max-w-[46ch] text-[12.5px] leading-relaxed text-text-secondary">
+          {busy
+            ? "Starting a fresh runtime for the same workspace agent."
+            : `${tab.name} remains in this workspace with its role, configuration, supervisor links, and history.`}
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onResume}
+          className="mt-5 inline-flex min-w-32 items-center justify-center gap-1.5 rounded-md bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-wait disabled:opacity-65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+        >
+          {busy ? (
+            <LoaderCircle className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+          {busy ? "Resuming agent…" : "Resume agent"}
+        </button>
+        {!busy && (
+          <p className="mt-2 text-[10.5px] text-text-tertiary">
+            Starts a fresh runtime; saved records stay attached.
+          </p>
+        )}
+        {error && (
+          <div
+            role="alert"
+            className="mt-3 flex max-w-sm items-start gap-2 rounded-lg bg-danger/[0.1] px-3 py-2 text-left text-[11.5px] leading-relaxed text-danger"
+          >
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /**
  * The main workspace pane: a tab strip of ALL the workspace's agents and the
  * body for the focused one, dispatched by agent type (cli → terminal, chat →
@@ -102,6 +300,14 @@ function TypeGlyph({ type }: { type: AgentDefinition["type"] }) {
 export function WorkspacePane({
   workspaceId,
   workspaceName,
+  workspaceRunState,
+  workspaceLifecyclePhase,
+  workspaceLifecycleError,
+  workspaceStartBatch,
+  focusStartAction,
+  onStartWorkspace,
+  onAgentLifecycleChanged,
+  onStartRetryComplete,
   focusInstanceId,
   onActiveInstanceChange,
   onOpenChat,
@@ -125,6 +331,11 @@ export function WorkspacePane({
   const [sessionObjs, setSessionObjs] = useState<Record<string, Session>>({});
   // instanceId → spawn error message (claude not installed, etc.).
   const [spawnErrors, setSpawnErrors] = useState<Record<string, string>>({});
+  const [resumeBusyId, setResumeBusyId] = useState<string | null>(null);
+  const [resumeErrors, setResumeErrors] = useState<Record<string, string>>({});
+  const [startFailures, setStartFailures] = useState(workspaceStartBatch?.failures ?? []);
+  const [retryingFailures, setRetryingFailures] = useState(false);
+  const [lifecycleAnnouncement, setLifecycleAnnouncement] = useState("");
   // Instances a spawn has already been kicked off for — kept in a ref so it
   // does NOT drive the spawn effect (including it in deps re-fires in-flight
   // spawns → duplicate spawn calls). The component remounts per workspace
@@ -150,6 +361,8 @@ export function WorkspacePane({
     setSessions({});
     setSessionObjs({});
     setSpawnErrors({});
+    setResumeBusyId(null);
+    setResumeErrors({});
     spawnAttempted.current = new Set();
 
     Promise.all([ipc.instance.list({ workspaceId }), ipc.agentDef.list()])
@@ -166,6 +379,7 @@ export function WorkspacePane({
             color: def.color ?? "#6e6e73",
             type: def.type,
             status: inst.status,
+            availability: inst.availability,
             def,
             launchedSkillIds: inst.launchedSkillIds,
           });
@@ -201,6 +415,10 @@ export function WorkspacePane({
     };
   }, [workspaceId]);
 
+  useEffect(() => {
+    setStartFailures(workspaceStartBatch?.failures ?? []);
+  }, [workspaceStartBatch]);
+
   // Last focusInstanceId this effect actually APPLIED. `tabs` gets a fresh array
   // identity on every `session:status` event (the status-patch setState below
   // maps a new array), so this effect re-fires constantly — without this guard
@@ -233,22 +451,28 @@ export function WorkspacePane({
   // leaving the session id never recorded (stuck on "Opening session…").
   // setState on an unmounted component is a no-op in React 18+, so resolving
   // unconditionally is safe and avoids that StrictMode trap.
-  const spawnInstance = useCallback((id: string) => {
-    if (spawnAttempted.current.has(id)) return;
+  const spawnInstance = useCallback(async (id: string): Promise<Session | null> => {
+    if (spawnAttempted.current.has(id)) return null;
     spawnAttempted.current.add(id);
 
-    ipc.instance
-      .spawn({ workspaceAgentId: id })
-      .then((session) => {
-        setSessions((prev) => ({ ...prev, [id]: session.id }));
-        setSessionObjs((prev) => ({ ...prev, [id]: session }));
-      })
-      .catch((err: unknown) => {
-        // Allow a retry on a later re-select by clearing the attempt mark.
-        spawnAttempted.current.delete(id);
-        const msg = err instanceof Error ? err.message : String(err);
-        setSpawnErrors((prev) => ({ ...prev, [id]: msg }));
-      });
+    setSpawnErrors((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const session = await ipc.instance.spawn({ workspaceAgentId: id });
+      setSessions((prev) => ({ ...prev, [id]: session.id }));
+      setSessionObjs((prev) => ({ ...prev, [id]: session }));
+      return session;
+    } catch (err) {
+      // Allow a deliberate retry by clearing the attempt mark.
+      spawnAttempted.current.delete(id);
+      const msg = err instanceof Error ? err.message : String(err);
+      setSpawnErrors((prev) => ({ ...prev, [id]: msg }));
+      throw err;
+    }
   }, []);
 
   // Eager-spawn EVERY agent in the workspace as soon as the roster loads — so an
@@ -256,13 +480,30 @@ export function WorkspacePane({
   // clicked its tab. Previously only the active tab spawned, so an unopened agent
   // stayed offline and messages to it merely queued. Idempotent via the ref guard.
   useEffect(() => {
-    for (const t of tabs) spawnInstance(t.instanceId);
-  }, [tabs, spawnInstance]);
+    if (workspaceRunState !== "started" || workspaceLifecyclePhase !== "idle") return;
+    const readyIds = workspaceStartBatch
+      ? new Set(workspaceStartBatch.readyAgentIds)
+      : null;
+    for (const tab of tabs) {
+      if (tab.availability !== "active") continue;
+      if (readyIds && !readyIds.has(tab.instanceId)) continue;
+      void spawnInstance(tab.instanceId).catch(() => {});
+    }
+  }, [tabs, spawnInstance, workspaceLifecyclePhase, workspaceRunState, workspaceStartBatch]);
 
   // Fallback: also spawn whatever becomes active (e.g. a tab added after load).
   useEffect(() => {
-    if (activeInstanceId !== null) spawnInstance(activeInstanceId);
-  }, [activeInstanceId, spawnInstance]);
+    if (workspaceRunState !== "started" || workspaceLifecyclePhase !== "idle") return;
+    const activeTab = tabs.find((tab) => tab.instanceId === activeInstanceId);
+    if (!activeTab || activeTab.availability !== "active") return;
+    if (
+      workspaceStartBatch &&
+      !workspaceStartBatch.readyAgentIds.includes(activeTab.instanceId)
+    ) {
+      return;
+    }
+    void spawnInstance(activeTab.instanceId).catch(() => {});
+  }, [activeInstanceId, spawnInstance, tabs, workspaceLifecyclePhase, workspaceRunState, workspaceStartBatch]);
 
   // Live status dots on the tab strip. Spawning a session flips the
   // workspace_agent to "running" and emits `session:status`, but the tabs were
@@ -284,10 +525,35 @@ export function WorkspacePane({
             // unchanged rows.
             const skillsChanged =
               JSON.stringify(next.launchedSkillIds) !== JSON.stringify(t.launchedSkillIds);
-            if (next.status === t.status && !skillsChanged) return t;
-            return { ...t, status: next.status, launchedSkillIds: next.launchedSkillIds };
+            if (
+              next.status === t.status &&
+              next.availability === t.availability &&
+              !skillsChanged
+            ) {
+              return t;
+            }
+            return {
+              ...t,
+              status: next.status,
+              availability: next.availability,
+              launchedSkillIds: next.launchedSkillIds,
+            };
           }),
         );
+        const stoppedIds = new Set(
+          instances
+            .filter((instance) => instance.availability === "stopped")
+            .map((instance) => instance.id),
+        );
+        if (stoppedIds.size > 0) {
+          setSessions((prev) =>
+            Object.fromEntries(Object.entries(prev).filter(([id]) => !stoppedIds.has(id))),
+          );
+          setSessionObjs((prev) =>
+            Object.fromEntries(Object.entries(prev).filter(([id]) => !stoppedIds.has(id))),
+          );
+          stoppedIds.forEach((id) => spawnAttempted.current.delete(id));
+        }
       })
       .catch(() => {
         // Transient failure — the dot just stays at its last value.
@@ -305,6 +571,7 @@ export function WorkspacePane({
         name: t.name,
         color: t.color,
         type: t.type,
+        availability: t.availability,
       })),
     [tabs],
   );
@@ -325,10 +592,89 @@ export function WorkspacePane({
   const activeSessionId = activeInstanceId ? (sessions[activeInstanceId] ?? null) : null;
   const activeSession = activeInstanceId ? (sessionObjs[activeInstanceId] ?? null) : null;
 
+  async function resumeAgent(tab: AgentTab) {
+    if (resumeBusyId !== null || tab.availability !== "stopped") return;
+    setResumeBusyId(tab.instanceId);
+    setResumeErrors((prev) => {
+      const next = { ...prev };
+      delete next[tab.instanceId];
+      return next;
+    });
+    try {
+      const session = await ipc.instance.resume({ workspaceAgentId: tab.instanceId });
+      setSessions((prev) => ({ ...prev, [tab.instanceId]: session.id }));
+      setSessionObjs((prev) => ({ ...prev, [tab.instanceId]: session }));
+      spawnAttempted.current.add(tab.instanceId);
+      setTabs((prev) =>
+        prev.map((entry) =>
+          entry.instanceId === tab.instanceId
+            ? { ...entry, availability: "active", status: "running" }
+            : entry,
+        ),
+      );
+      setLifecycleAnnouncement(`${tab.name} resumed.`);
+      onAgentLifecycleChanged?.(tab.instanceId, "active");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setResumeErrors((prev) => ({
+        ...prev,
+        [tab.instanceId]: `Couldn’t resume ${tab.name}: ${detail}. The agent remains stopped.`,
+      }));
+    } finally {
+      setResumeBusyId(null);
+    }
+  }
+
+  async function retryFailedAgents() {
+    if (retryingFailures || startFailures.length === 0) return;
+    const retryable = startFailures.filter((failure) =>
+      tabs.some(
+        (tab) =>
+          tab.instanceId === failure.workspaceAgentId && tab.availability === "active",
+      ),
+    );
+    if (retryable.length === 0) return;
+
+    setRetryingFailures(true);
+    const results = await Promise.all(
+      retryable.map(async (failure) => {
+        try {
+          await spawnInstance(failure.workspaceAgentId);
+          return { readyId: failure.workspaceAgentId, failure: null };
+        } catch (error) {
+          return {
+            readyId: null,
+            failure: {
+              workspaceAgentId: failure.workspaceAgentId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      }),
+    );
+    const unresolved = results.map((result) => result.failure).filter(
+      (failure): failure is { workspaceAgentId: string; error: string } => failure !== null,
+    );
+    const readyIds = results
+      .map((result) => result.readyId)
+      .filter((id): id is string => id !== null);
+    setStartFailures(unresolved);
+    onStartRetryComplete?.(readyIds, unresolved);
+    setRetryingFailures(false);
+    setLifecycleAnnouncement(
+      unresolved.length === 0
+        ? "All failed agents started."
+        : `${unresolved.length} ${unresolved.length === 1 ? "agent is" : "agents are"} still unavailable.`,
+    );
+  }
+
   // Single shared snapshot fetcher for the active session (plan-review F2) —
   // both ContextTopBar's Resume gate and ContextBottomBar's popover (Task 6)
   // consume THIS instance, never a second one of their own.
   const sessionSnapshots = useSessionSnapshots(activeSessionId ?? "");
+
+  const workspaceOperational =
+    workspaceRunState === "started" && workspaceLifecyclePhase === "idle";
 
   // Loading / empty / load-error states also carry the design slot — no
   // Terminal exists in either (nothing to protect from remounting), but
@@ -353,19 +699,34 @@ export function WorkspacePane({
           ) : null}
         </div>
         <main className={slotOpen ? "w-[420px] min-w-[360px] shrink-0 flex flex-col" : "flex-1 flex flex-col min-w-0"}>
-          <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary px-6 text-center">
-            {loading
-              ? "Loading…"
-              : loadError
-                ? "Failed to load agents"
-                : "No agents in this workspace yet"}
-          </div>
+          {loading || loadError || workspaceOperational ? (
+            <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary px-6 text-center">
+              {loading
+                ? "Loading…"
+                : loadError
+                  ? "Failed to load agents"
+                  : "No agents in this workspace yet"}
+            </div>
+          ) : (
+            <WorkspaceLifecyclePane
+              workspaceName={workspaceName}
+              phase={workspaceLifecyclePhase}
+              error={workspaceLifecycleError}
+              tabs={tabs}
+              onStart={onStartWorkspace}
+              focusStartAction={focusStartAction}
+            />
+          )}
         </main>
       </div>
     );
   }
 
-  const activeError = activeInstanceId ? (spawnErrors[activeInstanceId] ?? null) : null;
+  const activeError = activeInstanceId
+    ? (spawnErrors[activeInstanceId] ??
+      startFailures.find((failure) => failure.workspaceAgentId === activeInstanceId)?.error ??
+      null)
+    : null;
 
   return (
     <div className="flex-1 flex min-w-0 bg-surface">
@@ -418,36 +779,111 @@ export function WorkspacePane({
                   setActiveInstanceId(tab.instanceId);
                   onActiveInstanceChange?.(tab.instanceId);
                 }}
+                aria-label={`${tab.name}${tab.availability === "stopped" ? ", stopped" : ""}`}
                 className={`flex items-center gap-2 px-3 h-7 rounded-md text-[13px] transition-colors${
                   isActive ? " bg-overlay/[0.06] font-semibold" : " hover:bg-overlay/[0.04] text-text-secondary"
                 }`}
               >
-                <span
-                  className="w-2 h-2 rounded-full shrink-0"
-                  style={{ backgroundColor: STATUS_COLOR[tab.status] }}
-                />
+                {tab.availability === "stopped" ? (
+                  <CirclePause className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                ) : (
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: STATUS_COLOR[tab.status] }}
+                    aria-hidden="true"
+                  />
+                )}
                 <span className="truncate max-w-[140px]">{tab.name}</span>
+                {tab.availability === "stopped" && (
+                  <span className="rounded-md bg-overlay/[0.06] px-1.5 py-0.5 text-[9.5px] font-semibold text-text-secondary">
+                    Stopped
+                  </span>
+                )}
                 <TypeGlyph type={tab.type} />
               </button>
             );
           })}
         </div>
 
-        {/* Center top context bar — Skills popover + Session (Resume/Restart)
-            + Config popover (R5), for the ACTIVE agent only. */}
-        {activeTab && (
-          <ContextTopBar
-            def={activeTab.def}
-            status={activeTab.status}
-            instanceId={activeTab.instanceId}
-            roster={roster}
-            session={activeSession}
-            hasHandoff={sessionSnapshots.hasHandoff}
-            launchedSkillIds={activeTab.launchedSkillIds}
-          />
+        {workspaceOperational && startFailures.length > 0 && (
+          <div
+            role="alert"
+            className="flex shrink-0 items-start gap-2 border-b border-warning/20 bg-warning-soft px-3 py-2 text-[11.5px] leading-relaxed text-text-body"
+          >
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold text-text-primary">
+                {workspaceName ?? "Workspace"} started with an issue
+              </div>
+              <ul className="mt-0.5 list-disc pl-4 text-text-secondary">
+                {startFailures.map((failure) => {
+                  const name =
+                    tabs.find((tab) => tab.instanceId === failure.workspaceAgentId)?.name ??
+                    failure.workspaceAgentId;
+                  return (
+                    <li key={failure.workspaceAgentId}>
+                      Couldn’t start {name}: {failure.error}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+            <button
+              type="button"
+              disabled={retryingFailures}
+              onClick={() => void retryFailedAgents()}
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-overlay/[0.06] px-2.5 font-semibold text-text-secondary transition-colors hover:bg-overlay/[0.1] hover:text-text-primary disabled:cursor-wait disabled:opacity-55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {retryingFailures && (
+                <LoaderCircle className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+              )}
+              {retryingFailures ? "Retrying…" : "Retry failed agents"}
+            </button>
+          </div>
+        )}
+        {workspaceOperational && workspaceLifecycleError && (
+          <div
+            role="alert"
+            className="flex shrink-0 items-start gap-2 border-b border-danger/20 bg-danger-soft px-3 py-2 text-[11.5px] leading-relaxed text-danger"
+          >
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{workspaceLifecycleError}</span>
+          </div>
         )}
 
-        {/* CLI terminals — rendered per the terminal tab mode (src/lib/termMode.ts):
+        {!workspaceOperational ? (
+          <WorkspaceLifecyclePane
+            workspaceName={workspaceName}
+            phase={workspaceLifecyclePhase}
+            error={workspaceLifecycleError}
+            tabs={tabs}
+            onStart={onStartWorkspace}
+            focusStartAction={focusStartAction}
+          />
+        ) : activeTab?.availability === "stopped" ? (
+          <StoppedAgentPane
+            tab={activeTab}
+            busy={resumeBusyId === activeTab.instanceId}
+            error={resumeErrors[activeTab.instanceId]}
+            onResume={() => void resumeAgent(activeTab)}
+          />
+        ) : (
+          <>
+            {/* Center top context bar — Skills popover + Session (Restore/Restart)
+                + Config popover (R5), for the ACTIVE running agent only. */}
+            {activeTab && (
+              <ContextTopBar
+                def={activeTab.def}
+                status={activeTab.status}
+                instanceId={activeTab.instanceId}
+                roster={roster}
+                session={activeSession}
+                hasHandoff={sessionSnapshots.hasHandoff}
+                launchedSkillIds={activeTab.launchedSkillIds}
+              />
+            )}
+
+            {/* CLI terminals — rendered per the terminal tab mode (src/lib/termMode.ts):
             • "keep-alive" (pre-remount behavior): every cli tab keeps its xterm
               MOUNTED and we only toggle visibility (`hidden`). A tab switch never
               remounts, so scrollback and the app's alt-screen / mouse modes survive
@@ -459,13 +895,16 @@ export function WorkspacePane({
               tabs unmount and remount on return, restoring their pre-remount buffer
               from a serialize snapshot above a divider (see Terminal.tsx). The live
               TUI frame below is re-drawn by the mount jiggle's SIGWINCH. */}
-        {tabs
-          .filter((t) => t.type === "cli")
+            {tabs
+          .filter((t) => t.type === "cli" && t.availability === "active")
           .filter((t) => termTabMode === "keep-alive" || t.instanceId === activeInstanceId)
           .map((tab) => {
             const isActive = tab.instanceId === activeInstanceId;
             const sid = sessions[tab.instanceId] ?? null;
-            const err = spawnErrors[tab.instanceId] ?? null;
+            const err =
+              spawnErrors[tab.instanceId] ??
+              startFailures.find((failure) => failure.workspaceAgentId === tab.instanceId)?.error ??
+              null;
             return (
               <div
                 key={tab.instanceId}
@@ -505,9 +944,9 @@ export function WorkspacePane({
             );
           })}
 
-        {/* Non-cli active body — chat / orchestrator / nothing selected. (cli is
+            {/* Non-cli active body — chat / orchestrator / nothing selected. (cli is
             handled by the always-mounted layer above.) */}
-        {activeTab === null ? (
+            {activeTab === null ? (
           <div className="flex-1 grid place-items-center text-[13px] text-text-tertiary">
             Select an agent
           </div>
@@ -552,6 +991,11 @@ export function WorkspacePane({
             <FusionView instanceId={activeTab.instanceId} def={activeTab.def} roster={roster} />
           </>
         ) : null}
+          </>
+        )}
+        <div className="sr-only" aria-live="polite">
+          {lifecycleAnnouncement}
+        </div>
       </main>
 
       {/* Right Chats rail — workspace-scoped, NOT per-tab: mounted

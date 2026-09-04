@@ -1,5 +1,14 @@
 import type { ReactNode } from "react";
-import { Globe, Hexagon, FolderPlus, Package, PenTool, UsersRound, Wand2 } from "lucide-react";
+import {
+  CirclePause,
+  Globe,
+  Hexagon,
+  FolderPlus,
+  Package,
+  PenTool,
+  UsersRound,
+  Wand2,
+} from "lucide-react";
 
 import type { Workspace } from "../ipc";
 
@@ -102,7 +111,8 @@ export function Rail({
                 isActive ? "" : " opacity-90 hover:opacity-100"
               }`}
               style={{ backgroundColor: color }}
-              title={ws.name}
+              title={`${ws.name} · ${ws.runState}`}
+              aria-label={`${ws.name}, workspace ${ws.runState}`}
               onClick={() => onSelectWorkspace(ws.id)}
             >
               {/* Active selection pill */}
@@ -113,6 +123,11 @@ export function Rail({
                 />
               )}
               {letter}
+              {ws.runState === "stopped" && (
+                <span className="absolute -bottom-1 -right-1 grid h-4 w-4 place-items-center rounded-full bg-sidebar text-text-secondary ring-1 ring-overlay/15">
+                  <CirclePause className="h-2.5 w-2.5" aria-hidden="true" />
+                </span>
+              )}
             </button>
           );
         })}

@@ -40,6 +40,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   const [targetId, setTargetId] = useState(instanceId);
   // Last routed-send confirmation (cleared on the next keystroke).
   const [outbox, setOutbox] = useState<OutboxNote | null>(null);
+  const [routingAnnouncement, setRoutingAnnouncement] = useState("");
   // Composer wrapper width, not shell mode — this fixes any narrow context
   // (Design pane, Artifacts pane, a resized window) for free.
   const [narrow, setNarrow] = useState(false);
@@ -62,7 +63,24 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   useEffect(() => {
     setTargetId(instanceId);
     setOutbox(null);
+    setRoutingAnnouncement("");
   }, [instanceId]);
+
+  // A stopped target remains visible in the picker but cannot receive new
+  // work. Reset before the next send and announce the routing change.
+  useEffect(() => {
+    const selected = roster.find((target) => target.instanceId === targetId);
+    if (selected?.availability !== "stopped") return;
+    const fallback =
+      roster.find(
+        (target) => target.instanceId === instanceId && target.availability === "active",
+      ) ?? roster.find((target) => target.availability === "active");
+    if (!fallback || fallback.instanceId === targetId) return;
+    setTargetId(fallback.instanceId);
+    setRoutingAnnouncement(
+      `${selected.name} stopped. Routing reset to ${fallback.name}${fallback.instanceId === instanceId ? " (self)" : ""}.`,
+    );
+  }, [instanceId, roster, targetId]);
 
   const routingToOther = targetId !== instanceId;
   // Self send needs a live session; a routed inject only needs own instanceId.
@@ -73,6 +91,12 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
     if (text.length === 0) return;
 
     const target = roster.find((t) => t.instanceId === targetId);
+    if (target?.availability === "stopped") {
+      setError(`${target.name} is stopped. Resume the agent before sending new work.`);
+      setTargetId(instanceId);
+      setRoutingAnnouncement(`${target.name} stopped. Routing reset to self.`);
+      return;
+    }
     if (target && target.instanceId !== instanceId) {
       await handleRoutedSend(target, text);
       return;
@@ -287,10 +311,18 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
   return (
     <div className="shrink-0 border-t border-overlay/[0.06] bg-surface">
       {error && (
-        <div className="px-3 pt-1.5 text-[11px] text-danger">{error}</div>
+        <div role="alert" className="px-3 pt-1.5 text-[11px] text-danger">
+          {error}
+        </div>
       )}
+      <div className="sr-only" aria-live="polite">
+        {routingAnnouncement}
+      </div>
       {outbox && (
-        <div className="px-3 pt-1.5 text-[11px] flex items-center gap-1.5 text-text-secondary">
+        <div
+          className="px-3 pt-1.5 text-[11px] flex items-center gap-1.5 text-text-secondary"
+          aria-live="polite"
+        >
           <CornerUpRight className="w-3 h-3 shrink-0 text-text-tertiary" />
           <span className="font-medium text-text-primary">→ sent to {outbox.toName}</span>
           {outbox.status === "delivered" ? (
