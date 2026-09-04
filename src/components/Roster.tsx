@@ -871,6 +871,10 @@ interface AddAgentPickerProps {
 function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAgentPickerProps) {
   const [available, setAvailable] = useState<AgentDefinition[] | null>(null);
   const [members, setMembers] = useState<WorkspaceAgent[]>([]);
+  // The FULL def list, kept beside `available` (which is filtered to defs not
+  // yet in the workspace): step 2's candidate rows need each member's `type`
+  // and `providerId`, which a WorkspaceAgent does not carry.
+  const [defsById, setDefsById] = useState<Map<string, AgentDefinition>>(new Map());
   const [error, setError] = useState(false);
   // Step 2 (plan supervisor-picker-ui, Lane C step 4): picking an agent
   // doesn't call the API immediately — it swaps to the supervisor step in
@@ -893,6 +897,7 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
         if (!active) return;
         const present = new Set(instances.map((i) => i.agentDefId));
         setAvailable(defs.filter((d) => !present.has(d.id)));
+        setDefsById(new Map(defs.map((d) => [d.id, d])));
         setMembers(instances);
       })
       .catch(() => {
@@ -950,16 +955,26 @@ function AddAgentPicker({ workspaceId, onClose, onAdded, onCreateAgent }: AddAge
     }
   }
 
-  const step2Members: SupervisorCandidate[] = members.map((m) => ({
-    id: m.id,
-    name: m.name,
-    color: undefined,
-    level: m.level,
-    roleName: m.roleName,
-    // `instance.list` annotates `cliKind` only for CLI agents, so its presence
-    // IS the type here — a WorkspaceAgent carries no `type` column.
-    providerChip: providerChip({ type: m.cliKind ? "cli" : undefined, cliKind: m.cliKind, model: m.model }) ?? undefined,
-  }));
+  const step2Members: SupervisorCandidate[] = members.map((m) => {
+    // Join the def in for `type`/`providerId` so a chat agent reads
+    // "Chat · Anthropic" here exactly as it does in the roster row — the two
+    // candidate builders must agree (Mellow M1).
+    const def = defsById.get(m.agentDefId);
+    return {
+      id: m.id,
+      name: m.name,
+      color: def?.color,
+      level: m.level,
+      roleName: m.roleName,
+      providerChip:
+        providerChip({
+          type: def?.type,
+          cliKind: m.cliKind ?? def?.cliKind,
+          providerId: def?.providerId,
+          model: m.model ?? def?.model,
+        }) ?? undefined,
+    };
+  });
 
   if (pendingDef) {
     if (partialFailure) {
