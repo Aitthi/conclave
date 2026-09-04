@@ -169,6 +169,14 @@ export interface Commands {
     req: { cliKind: "antigravity" };
     res: { available: boolean; installUrl: string };
   };
+  // The models the user's AUTHENTICATED CLI can launch — queried only after
+  // `instance.cliStatus` reports the harness available, so a failure here means
+  // auth/network, never a missing install. The catalog is per-user and changes
+  // over time; nothing about it is hardcoded on either side of the seam.
+  "instance.cliModels": {
+    req: { cliKind: "antigravity" };
+    res: { models: { id: string; label: string }[] };
+  };
   "instance.spawn": {
     req: { workspaceAgentId: string };
     res: Session;
@@ -465,6 +473,7 @@ export const ipc = {
   instance: {
     list: (req: Commands["instance.list"]["req"]) => call("instance.list", req),
     cliStatus: (req: Commands["instance.cliStatus"]["req"]) => call("instance.cliStatus", req),
+    cliModels: (req: Commands["instance.cliModels"]["req"]) => call("instance.cliModels", req),
     spawn: (req: Commands["instance.spawn"]["req"]) => call("instance.spawn", req),
     stop: (req: Commands["instance.stop"]["req"]) => call("instance.stop", req),
     resume: (req: Commands["instance.resume"]["req"]) => call("instance.resume", req),

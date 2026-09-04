@@ -56,6 +56,13 @@ export const handlers: FixtureHandlers = {
     available: false,
     installUrl: "https://antigravity.google/docs/cli/install/",
   }),
+  // Fresh install: `agy` is missing, so the Builder never reaches the catalog
+  // query. The handler exists anyway because FixtureHandlers is Partial and a
+  // missing one throws the loud `[fixture]` error the moment anything does
+  // reach it — this scenario's job is to prove the no-CLI path stays silent.
+  "instance.cliModels": () => {
+    throw new Error("instance.cliModels must not be queried while agy is unavailable");
+  },
   "agentDef.list": () => [],
   "task.list": () => [],
   "memory.graph": () => ({ nodes: [], edges: [] }),

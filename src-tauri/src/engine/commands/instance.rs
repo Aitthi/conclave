@@ -108,6 +108,14 @@ struct CliStatusReq {
     cli_kind: String,
 }
 
+/// Payload for the read-only authenticated-model catalog query. Same allowlist
+/// discipline as [`CliStatusReq`]: the renderer names a *kind*, never a binary.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CliModelsReq {
+    cli_kind: String,
+}
+
 /// Payload for `instance.spawn` / `instance.stop` / `instance.restart` —
 /// targets a single instance. `self_triggered` (wire field `self`) is only
 /// meaningful for `restart` (ADR 0006: the agent restarting itself vs. a
@@ -230,6 +238,87 @@ pub async fn cli_status(_state: &AppState, payload: Value) -> Result<Value, AppE
     let req: CliStatusReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     cli_status_for_shell(&launch_shell(), &req.cli_kind).await
+}
+
+/// Parse `agy models` stdout into `{ id, label }` rows.
+///
+/// Antigravity prints one model per line as tab-separated `id<TAB>label`.
+/// Blank lines (and rows whose id column is empty) are dropped; a row with no
+/// label — or an all-whitespace one — falls back to the id so the dropdown
+/// always has something to render. The catalog is user- and auth-specific, so
+/// nothing here is hardcoded: whatever the authenticated CLI lists is what the
+/// Builder offers.
+fn parse_antigravity_models(stdout: &str) -> Vec<Value> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split('\t');
+            let id = columns.next().unwrap_or_default().trim();
+            if id.is_empty() {
+                return None;
+            }
+            let label = columns
+                .next()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(id);
+            Some(serde_json::json!({ "id": id, "label": label }))
+        })
+        .collect()
+}
+
+/// Ask the authenticated CLI which models it can launch, through the SAME
+/// login+interactive shell as [`cli_status_for_shell`] and the real PTY spawn —
+/// a Finder-launched app inherits neither the user's PATH nor their auth
+/// environment, so probing our own process would answer for the wrong session.
+///
+/// The command is a backend literal (`agy models`) selected by an allowlisted
+/// kind; nothing the renderer sends is ever interpolated into the shell string.
+/// A non-zero exit is a *query* failure, not a missing executable — availability
+/// is [`cli_status`]'s job, and conflating the two would tell a user with a
+/// perfectly good install to reinstall it. `agy` writes a progress line to
+/// stderr on success, so stderr is deliberately not inspected.
+async fn cli_models_for_shell(shell: &str, cli_kind: &str) -> Result<Value, AppError> {
+    let command = match cli_kind {
+        "antigravity" => "agy models",
+        other => {
+            return Err(AppError::Invalid(format!(
+                "CLI model discovery is not supported for cliKind={other}"
+            )))
+        }
+    };
+    let output = tokio::process::Command::new(shell)
+        .args(["-l", "-i", "-c", command])
+        .output()
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("list models in login shell {shell}: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(AppError::Internal(
+            "Antigravity could not list your models. Check that you are signed in to the \
+             Antigravity CLI, then try again."
+                .to_string(),
+        ));
+    }
+    let models = parse_antigravity_models(&String::from_utf8_lossy(&output.stdout));
+    if models.is_empty() {
+        return Err(AppError::Internal(
+            "Antigravity returned no models. Check that you are signed in to the \
+             Antigravity CLI, then try again."
+                .to_string(),
+        ));
+    }
+    Ok(serde_json::json!({ "models": models }))
+}
+
+/// List the models available to the user's authenticated CLI. Read-only; maps
+/// to `instance.cliModels`. Callers query this only once `instance.cliStatus`
+/// reports the harness available.
+pub async fn cli_models(_state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: CliModelsReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    cli_models_for_shell(&launch_shell(), &req.cli_kind).await
 }
 
 #[derive(Debug)]
@@ -2269,6 +2358,129 @@ mod tests {
     #[tokio::test]
     async fn cli_status_rejects_unsupported_cli_kind() {
         let error = cli_status_for_shell("/bin/sh", "custom")
+            .await
+            .expect_err("renderer must not choose an arbitrary CLI executable");
+        assert!(matches!(error, AppError::Invalid(_)));
+    }
+
+    /// A stub login shell that records the argv it was handed, prints
+    /// `stdout` verbatim, writes a stderr progress line the way `agy` does,
+    /// and exits with `code`.
+    fn stub_models_shell(root: &Path, stdout: &str, code: i32) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shell = root.join("login-shell");
+        let args_path = root.join("args");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'Fetching models…\\n' >&2\nprintf '%s' '{}'\nexit {}\n",
+            args_path.display(),
+            stdout.replace('\'', "'\\''"),
+            code
+        );
+        std::fs::write(&shell, body).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (shell, args_path)
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_runs_the_allowlisted_login_shell_command() {
+        let root = temp_root("agy-models-argv");
+        let (shell, args_path) = stub_models_shell(&root, "gemini-3.8-pro\tGemini 3.8 Pro\n", 0);
+
+        cli_models_for_shell(&shell.to_string_lossy(), "antigravity")
+            .await
+            .expect("model catalog");
+
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec!["-l", "-i", "-c", "agy models"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_parses_rows_and_falls_back_to_the_id() {
+        let root = temp_root("agy-models-parse");
+        let (shell, _) = stub_models_shell(
+            &root,
+            "gemini-3.8-pro\tGemini 3.8 Pro\n\n  \ngemini-3.8-flash\t   \ngemini-3.8-ultra\tGemini 3.8 Ultra\textra\n",
+            0,
+        );
+
+        let catalog = cli_models_for_shell(&shell.to_string_lossy(), "antigravity")
+            .await
+            .expect("model catalog");
+        let models = catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models array");
+        let rows: Vec<(&str, &str)> = models
+            .iter()
+            .map(|m| {
+                (
+                    m.get("id").and_then(Value::as_str).unwrap(),
+                    m.get("label").and_then(Value::as_str).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("gemini-3.8-pro", "Gemini 3.8 Pro"),
+                // Blank label column falls back to the id, never to an empty
+                // option the user cannot tell apart from Auto.
+                ("gemini-3.8-flash", "gemini-3.8-flash"),
+                ("gemini-3.8-ultra", "Gemini 3.8 Ultra"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_rejects_a_successful_but_empty_catalog() {
+        let root = temp_root("agy-models-empty");
+        let (shell, _) = stub_models_shell(&root, "\n   \n\n", 0);
+
+        let error = cli_models_for_shell(&shell.to_string_lossy(), "antigravity")
+            .await
+            .expect_err("an empty catalog is not a usable dropdown");
+        assert!(matches!(error, AppError::Internal(_)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_treats_a_nonzero_exit_as_a_query_failure() {
+        let root = temp_root("agy-models-exit");
+        let (shell, _) = stub_models_shell(&root, "", 1);
+
+        let error = cli_models_for_shell(&shell.to_string_lossy(), "antigravity")
+            .await
+            .expect_err("a failed query must not read as a usable catalog");
+        // Internal, not Invalid: the executable exists (cliStatus said so) —
+        // this is auth/network, and the UI offers a retry rather than an
+        // install guide.
+        assert!(matches!(error, AppError::Internal(_)));
+        let message = error.to_string();
+        assert!(message.contains("signed in"), "{message}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_keeps_shell_failures_as_errors() {
+        let root = temp_root("agy-models-shell-error");
+        let missing_shell = root.join("missing-login-shell");
+
+        let error = cli_models_for_shell(&missing_shell.to_string_lossy(), "antigravity")
+            .await
+            .expect_err("shell launch failure must not look like an empty catalog");
+        assert!(matches!(error, AppError::Internal(_)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_models_rejects_unsupported_cli_kind() {
+        let error = cli_models_for_shell("/bin/sh", "custom")
             .await
             .expect_err("renderer must not choose an arbitrary CLI executable");
         assert!(matches!(error, AppError::Invalid(_)));

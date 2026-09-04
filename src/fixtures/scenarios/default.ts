@@ -117,6 +117,20 @@ export const handlers: FixtureHandlers = {
     available: true,
     installUrl: "https://antigravity.google/docs/cli/install/",
   }),
+  // Deterministic stand-in for `agy models` on an authenticated machine. These
+  // ids are FIXTURE DATA, not a product model list — the real catalog comes
+  // from the user's own CLI. The long third row is deliberate: it is how the
+  // dropdown's truncation gets inspected in the pixel gate.
+  "instance.cliModels": () => ({
+    models: [
+      { id: "gemini-3.8-pro", label: "Gemini 3.8 Pro" },
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+      {
+        id: "gemini-3.8-pro-experimental-context-extended",
+        label: "Gemini 3.8 Pro Experimental (extended context)",
+      },
+    ],
+  }),
   // The WorkspacePane auto-opens a session for the focused agent on mount.
   // Synthesize a deterministic one; the Terminal then renders an empty frame
   // (no session:output on the fixture bus) — the accepted PTY-in-fixture v1
