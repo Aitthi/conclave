@@ -23,6 +23,7 @@ import {
 export const meta = { title: "Agent lifecycle — stop and resume" };
 
 type PreviewState = "stopped" | "resuming" | "resume-error" | "active";
+type WorkspacePreview = "started" | "stopped" | "starting" | "partial";
 
 const identity = {
   aoki: "var(--color-agent-indigo)",
@@ -78,6 +79,8 @@ function AgentRow({
   selected,
   action,
   onAction,
+  availabilityLabel,
+  dimmed,
 }: {
   name: string;
   role: string;
@@ -87,12 +90,14 @@ function AgentRow({
   selected?: boolean;
   action?: "stop" | "resume";
   onAction?: () => void;
+  availabilityLabel?: string;
+  dimmed?: boolean;
 }) {
   return (
     <div
       className={`group flex min-h-11 w-full items-start gap-2.5 rounded-lg px-2 py-1.5 transition-colors ${
         selected ? "bg-accent/[0.08] ring-1 ring-accent/20" : "hover:bg-overlay/[0.04]"
-      }`}
+      } ${dimmed ? "opacity-70" : ""}`}
     >
       <Avatar name={name} color={color} />
       <div className="min-w-0 flex-1 leading-tight">
@@ -108,6 +113,11 @@ function AgentRow({
             <span className="inline-flex items-center gap-1 rounded-md bg-fill px-1.5 py-0.5 font-semibold text-text-secondary">
               <CirclePause className="h-2.5 w-2.5" />
               Stopped
+            </span>
+          )}
+          {state !== "stopped" && availabilityLabel && (
+            <span className="truncate rounded-md bg-fill px-1.5 py-0.5 font-semibold text-text-secondary">
+              {availabilityLabel}
             </span>
           )}
         </div>
@@ -244,12 +254,83 @@ function StoppedPane({ state, setState }: { state: PreviewState; setState: (stat
   );
 }
 
-function WorkspaceFrame({ preview, setPreview, openStop, openRemove }: {
+function WorkspaceStatusPane({ state, setState }: { state: WorkspacePreview; setState: (state: WorkspacePreview) => void }) {
+  const starting = state === "starting";
+  const partial = state === "partial";
+
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-surface px-6">
+      <div className="flex max-w-lg flex-col items-center text-center">
+        <div className={`grid h-12 w-12 place-items-center rounded-[12px] bg-fill ${partial ? "text-waiting" : starting ? "text-accent" : "text-text-secondary"}`}>
+          {starting ? (
+            <LoaderCircle className="h-6 w-6 animate-spin motion-reduce:animate-none" />
+          ) : partial ? (
+            <AlertCircle className="h-6 w-6" />
+          ) : (
+            <CirclePause className="h-6 w-6" />
+          )}
+        </div>
+        <h1 className="mt-4 text-[18px] font-semibold tracking-[-0.02em] text-text-primary">
+          {starting ? "Starting codeup…" : partial ? "codeup started with an issue" : "codeup is stopped"}
+        </h1>
+        <p className="mt-2 max-w-[52ch] text-[12.5px] leading-relaxed text-text-secondary">
+          {starting
+            ? "Launching Aoki and Dew. Hardwell stays stopped because its individual availability is stopped."
+            : partial
+              ? "Aoki started. Dew could not start, and Hardwell stayed stopped by design. Retained workspace records remain available."
+              : "Inspect agents, tasks, messages, configuration, and history without launching any agent runtime."}
+        </p>
+
+        {starting && (
+          <div className="mt-4 w-full max-w-xs space-y-1.5 text-left text-[11.5px]">
+            <div className="flex items-center gap-2 rounded-md bg-fill px-2.5 py-1.5"><LoaderCircle className="h-3 w-3 animate-spin text-accent motion-reduce:animate-none" /><span className="flex-1">Aoki</span><span className="text-text-muted">Starting…</span></div>
+            <div className="flex items-center gap-2 rounded-md bg-fill px-2.5 py-1.5"><CirclePause className="h-3 w-3 text-text-tertiary" /><span className="flex-1">Hardwell</span><span className="text-text-muted">Individually stopped</span></div>
+            <div className="flex items-center gap-2 rounded-md bg-fill px-2.5 py-1.5"><LoaderCircle className="h-3 w-3 animate-spin text-accent motion-reduce:animate-none" /><span className="flex-1">Dew</span><span className="text-text-muted">Queued</span></div>
+          </div>
+        )}
+
+        {partial && (
+          <div role="alert" className="mt-4 flex max-w-sm items-start gap-2 rounded-lg bg-waiting/[0.10] px-3 py-2 text-left text-[11.5px] leading-relaxed text-waiting">
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>Couldn’t start Dew: CLI executable is unavailable. The workspace remains started with Aoki active.</span>
+          </div>
+        )}
+
+        <div className="mt-5 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={starting}
+            onClick={() => setState("starting")}
+            className="inline-flex min-w-32 items-center justify-center gap-1.5 rounded-md bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-wait disabled:opacity-65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+          >
+            {starting ? <LoaderCircle className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <Play className="h-3.5 w-3.5" />}
+            {starting ? "Starting workspace…" : partial ? "Retry 1 agent" : "Start workspace"}
+          </button>
+          {partial && (
+            <button type="button" onClick={() => setState("stopped")} className="rounded-md bg-overlay/[0.06] px-3 py-2 text-[12px] font-semibold text-text-secondary hover:bg-overlay/[0.10] hover:text-text-primary">
+              Stop workspace
+            </button>
+          )}
+        </div>
+        {!starting && !partial && (
+          <p className="mt-2 text-[10.5px] text-text-tertiary">Starts 2 individually active agents · keeps 1 individually stopped</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceFrame({ preview, setPreview, workspacePreview, setWorkspacePreview, openStop, openRemove, openWorkspaceStop }: {
   preview: PreviewState;
   setPreview: (state: PreviewState) => void;
+  workspacePreview: WorkspacePreview;
+  setWorkspacePreview: (state: WorkspacePreview) => void;
   openStop: () => void;
   openRemove: () => void;
+  openWorkspaceStop: () => void;
 }) {
+  const workspaceStarted = workspacePreview === "started";
+  const workspaceRunning = workspacePreview === "started" || workspacePreview === "partial";
   const stopped = preview !== "active";
   return (
     <div className="flex h-[650px] min-w-[1040px] overflow-hidden rounded-[14px] bg-surface ring-1 ring-border">
@@ -266,11 +347,28 @@ function WorkspaceFrame({ preview, setPreview, openStop, openRemove }: {
         <div className="flex h-12 items-center gap-2 border-b border-border px-3.5">
           <span className="grid h-6 w-6 place-items-center rounded-[7px] bg-accent text-[11px] font-bold text-white">C</span>
           <div className="min-w-0 flex-1 leading-tight">
-            <div className="truncate text-[12.5px] font-semibold">codeup</div>
+            <div className="flex items-center gap-1.5 truncate text-[12.5px] font-semibold">
+              <span>codeup</span>
+              {!workspaceRunning && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-fill px-1.5 py-0.5 text-[9.5px] font-semibold text-text-secondary">
+                  <CirclePause className="h-2.5 w-2.5" /> {workspacePreview === "starting" ? "Starting" : "Stopped"}
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-1 truncate font-mono text-[9.5px] text-text-muted">
               <Folder className="h-2.5 w-2.5" /> /Users/dev/code/codeup
             </div>
           </div>
+          <button
+            type="button"
+            disabled={workspacePreview === "starting"}
+            onClick={workspaceRunning ? openWorkspaceStop : () => setWorkspacePreview("starting")}
+            aria-label={workspaceRunning ? "Stop workspace codeup" : "Start workspace codeup"}
+            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md bg-overlay/[0.06] px-1.5 text-[10px] font-semibold text-text-secondary hover:bg-overlay/[0.10] hover:text-text-primary disabled:opacity-50"
+          >
+            {workspacePreview === "starting" ? <LoaderCircle className="h-3 w-3 animate-spin motion-reduce:animate-none" /> : workspaceRunning ? <Square className="h-2.5 w-2.5" /> : <Play className="h-3 w-3" />}
+            {workspacePreview === "starting" ? "Starting" : workspaceRunning ? "Stop" : "Start"}
+          </button>
         </div>
         <div className="px-3 pb-2 pt-3">
           <div className="flex h-7 items-center gap-2 rounded-lg bg-overlay/[0.05] px-2.5">
@@ -285,25 +383,30 @@ function WorkspaceFrame({ preview, setPreview, openStop, openRemove }: {
               name="Aoki"
               role="Lead"
               color={identity.aoki}
-              state="running"
-              working
-              action="stop"
-              onAction={openStop}
+              state={workspaceRunning ? "running" : "idle"}
+              working={workspaceStarted}
+              action={workspaceStarted ? "stop" : undefined}
+              onAction={workspaceStarted ? openStop : undefined}
+              availabilityLabel={!workspaceRunning ? (workspacePreview === "starting" ? "Starting" : "Auto-start") : undefined}
+              dimmed={!workspaceRunning}
             />
             <AgentRow
               name="Hardwell"
               role="Designer"
               color={identity.hardwell}
               state={stopped ? "stopped" : "running"}
-              selected
+              selected={workspaceStarted}
+              dimmed={!workspaceRunning}
             />
             <AgentRow
               name="Dew"
               role="Implementer"
               color={identity.dew}
               state="idle"
-              action="stop"
-              onAction={openStop}
+              action={workspaceStarted ? "stop" : undefined}
+              onAction={workspaceStarted ? openStop : undefined}
+              availabilityLabel={workspacePreview === "partial" ? "Start failed" : !workspaceRunning ? (workspacePreview === "starting" ? "Queued" : "Auto-start") : undefined}
+              dimmed={!workspaceRunning || workspacePreview === "partial"}
             />
           </div>
           <p className="px-2 pt-3 text-[10.5px] leading-relaxed text-text-tertiary">
@@ -327,27 +430,46 @@ function WorkspaceFrame({ preview, setPreview, openStop, openRemove }: {
 
       <main className="flex min-w-0 flex-1 flex-col bg-surface">
         <div className="flex h-12 items-center gap-1 border-b border-border bg-sidebar px-2">
-          <button type="button" className="flex h-7 items-center gap-2 rounded-md bg-overlay/[0.06] px-3 text-[12.5px] font-semibold">
-            <StatusDot state={stopped ? "stopped" : "running"} />
-            <span>Hardwell</span>
-            {stopped && <span className="text-[10px] font-medium text-text-muted">Stopped</span>}
-            <Terminal className="h-3 w-3 text-text-muted" />
-          </button>
+          {workspaceStarted ? (
+            <button type="button" className="flex h-7 items-center gap-2 rounded-md bg-overlay/[0.06] px-3 text-[12.5px] font-semibold">
+              <StatusDot state={stopped ? "stopped" : "running"} />
+              <span>Hardwell</span>
+              {stopped && <span className="text-[10px] font-medium text-text-muted">Stopped</span>}
+              <Terminal className="h-3 w-3 text-text-muted" />
+            </button>
+          ) : (
+            <div className="flex h-7 items-center gap-2 rounded-md bg-overlay/[0.06] px-3 text-[12.5px] font-semibold">
+              {workspacePreview === "partial" ? <AlertCircle className="h-3.5 w-3.5 text-waiting" /> : <CirclePause className="h-3.5 w-3.5 text-text-tertiary" />}
+              <span>Workspace</span>
+              <span className="text-[10px] font-medium text-text-muted">{workspacePreview === "starting" ? "Starting" : workspacePreview === "partial" ? "Started with issue" : "Stopped"}</span>
+            </div>
+          )}
         </div>
-        <div className="flex h-10 items-center gap-2 border-b border-border px-3 text-[11.5px] text-text-secondary">
-          <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-overlay/[0.05]">
-            <Shield className="h-3.5 w-3.5 text-accent" /> Skills <ChevronDown className="h-3 w-3" />
-          </button>
-          <span className="h-4 w-px bg-border" />
-          <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-overlay/[0.05]" title="Restore a saved snapshot">
-            <History className="h-3.5 w-3.5" /> Restore snapshot
-          </button>
-          <div className="flex-1" />
-          <button type="button" className="rounded-md p-1.5 hover:bg-overlay/[0.05]" aria-label="Agent configuration">
-            <Settings2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-        <StoppedPane state={preview} setState={setPreview} />
+        {workspaceStarted ? (
+          <div className="flex h-10 items-center gap-2 border-b border-border px-3 text-[11.5px] text-text-secondary">
+            <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-overlay/[0.05]">
+              <Shield className="h-3.5 w-3.5 text-accent" /> Skills <ChevronDown className="h-3 w-3" />
+            </button>
+            <span className="h-4 w-px bg-border" />
+            <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-overlay/[0.05]" title="Restore a saved snapshot">
+              <History className="h-3.5 w-3.5" /> Restore snapshot
+            </button>
+            <div className="flex-1" />
+            <button type="button" className="rounded-md p-1.5 hover:bg-overlay/[0.05]" aria-label="Agent configuration">
+              <Settings2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex h-10 items-center gap-2 border-b border-border px-4 text-[11.5px] text-text-muted">
+            <CirclePause className="h-3.5 w-3.5" />
+            <span>Inspect only · retained workspace records are available</span>
+          </div>
+        )}
+        {workspaceStarted ? (
+          <StoppedPane state={preview} setState={setPreview} />
+        ) : (
+          <WorkspaceStatusPane state={workspacePreview} setState={setWorkspacePreview} />
+        )}
       </main>
 
       <ChatRail />
@@ -423,8 +545,9 @@ function StateSpecimen({
   );
 }
 
-function ConfirmDialog({ kind, close, confirm }: { kind: "stop" | "remove"; close: () => void; confirm: () => void }) {
+function ConfirmDialog({ kind, close, confirm }: { kind: "stop" | "remove" | "workspace-stop"; close: () => void; confirm: () => void }) {
   const remove = kind === "remove";
+  const workspaceStop = kind === "workspace-stop";
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/55 px-5" role="presentation">
       <div role="dialog" aria-modal="true" aria-labelledby="confirm-title" className="w-full max-w-[380px] rounded-[14px] bg-surface-raised p-5 shadow-xl">
@@ -433,10 +556,14 @@ function ConfirmDialog({ kind, close, confirm }: { kind: "stop" | "remove"; clos
             {remove ? <X className="h-4.5 w-4.5" /> : <Square className="h-4 w-4" />}
           </div>
           <div>
-            <h2 id="confirm-title" className="text-[14px] font-semibold text-text-primary">{remove ? "Remove Hardwell from codeup?" : "Stop Aoki while working?"}</h2>
+            <h2 id="confirm-title" className="text-[14px] font-semibold text-text-primary">
+              {remove ? "Remove Hardwell from codeup?" : workspaceStop ? "Stop codeup while an agent is working?" : "Stop Aoki while working?"}
+            </h2>
             <p className="mt-1.5 text-[12px] leading-relaxed text-text-secondary">
               {remove
                 ? "This removes workspace membership and its attached workspace records. This is separate from stopping the runtime."
+                : workspaceStop
+                  ? "All live agent runtimes and current work terminate immediately. The workspace, agents, configuration, tasks, messages, and history stay."
                 : "The current runtime and work terminate immediately. Workspace membership, configuration, supervisor links, and history stay."}
             </p>
           </div>
@@ -444,7 +571,7 @@ function ConfirmDialog({ kind, close, confirm }: { kind: "stop" | "remove"; clos
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" onClick={close} className="rounded-md bg-fill px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">Cancel</button>
           <button type="button" autoFocus onClick={confirm} className={`rounded-md px-3 py-1.5 text-[12px] font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${remove ? "bg-danger" : "bg-text-primary text-surface"}`}>
-            {remove ? "Remove agent" : "Stop agent"}
+            {remove ? "Remove agent" : workspaceStop ? "Stop workspace" : "Stop agent"}
           </button>
         </div>
       </div>
@@ -454,7 +581,9 @@ function ConfirmDialog({ kind, close, confirm }: { kind: "stop" | "remove"; clos
 
 export default function AgentStopResume() {
   const [preview, setPreview] = useState<PreviewState>("stopped");
-  const [dialog, setDialog] = useState<"stop" | "remove" | null>(null);
+  const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreview>("started");
+  const [dialog, setDialog] = useState<"stop" | "remove" | "workspace-stop" | null>(null);
+  const workspaceStarted = workspacePreview === "started";
 
   return (
     <div className="h-screen overflow-y-auto bg-canvas font-sans text-text-primary antialiased">
@@ -464,39 +593,84 @@ export default function AgentStopResume() {
             <div className="flex items-center gap-2 text-[11px] font-semibold text-text-muted">
               <span>Home</span><span>·</span><span>Lifecycle canon</span>
             </div>
-            <h1 className="mt-1 text-[24px] font-semibold tracking-[-0.025em] text-text-primary">Stop an agent without removing it</h1>
+            <h1 className="mt-1 text-[24px] font-semibold tracking-[-0.025em] text-text-primary">Stop workspaces and agents without removing them</h1>
             <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-text-secondary">
-              A focused engineering lead pauses one runtime during an active work session. Identity and records stay visible; routing and runtime state become unambiguous.
+              A focused engineering lead pauses every runtime or one agent during an active work session. Identity and records stay visible; routing and runtime state remain unambiguous.
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-1 rounded-lg bg-fill p-1" aria-label="Preview state">
-            {([
-              ["stopped", "Stopped"],
-              ["resuming", "Resuming"],
-              ["resume-error", "Error"],
-              ["active", "Resumed"],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setPreview(value)}
-                aria-pressed={preview === value}
-                className={`rounded-md px-2.5 py-1.5 text-[11.5px] font-semibold transition-colors ${
-                  preview === value ? "bg-surface-raised text-text-primary ring-1 ring-border" : "text-text-muted hover:text-text-primary"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="shrink-0 space-y-1.5 text-right">
+            <div className="flex items-center justify-end gap-1" aria-label="Workspace preview state">
+              <span className="mr-1 text-[10.5px] font-semibold text-text-tertiary">Workspace</span>
+              <div className="flex items-center gap-1 rounded-lg bg-fill p-1">
+                {([
+                  ["started", "Started"],
+                  ["stopped", "Stopped"],
+                  ["starting", "Starting"],
+                  ["partial", "Partial"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setWorkspacePreview(value)}
+                    aria-pressed={workspacePreview === value}
+                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-colors ${
+                      workspacePreview === value ? "bg-surface-raised text-text-primary ring-1 ring-border" : "text-text-muted hover:text-text-primary"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-1" aria-label="Agent preview state">
+              <span className="mr-1 text-[10.5px] font-semibold text-text-tertiary">Agent</span>
+              <div className="flex items-center gap-1 rounded-lg bg-fill p-1">
+                {([
+                  ["stopped", "Stopped"],
+                  ["resuming", "Resuming"],
+                  ["resume-error", "Error"],
+                  ["active", "Resumed"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    disabled={!workspaceStarted}
+                    onClick={() => setPreview(value)}
+                    aria-pressed={preview === value}
+                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                      preview === value ? "bg-surface-raised text-text-primary ring-1 ring-border" : "text-text-muted hover:text-text-primary"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </header>
 
         <WorkspaceFrame
           preview={preview}
           setPreview={setPreview}
+          workspacePreview={workspacePreview}
+          setWorkspacePreview={setWorkspacePreview}
           openStop={() => setDialog("stop")}
           openRemove={() => setDialog("remove")}
+          openWorkspaceStop={() => setDialog("workspace-stop")}
         />
+
+        <section className="mt-6 overflow-hidden rounded-[12px] bg-surface ring-1 ring-border">
+          <div className="border-b border-border px-5 py-3">
+            <h2 className="text-[14px] font-semibold text-text-primary">Workspace lifecycle states</h2>
+            <p className="mt-0.5 text-[11.5px] text-text-secondary">Workspace availability controls every runtime without changing individual agent availability.</p>
+          </div>
+          <div className="flex divide-x divide-border">
+            <StateSpecimen title="Stopped workspace" body="Retained content stays inspectable; no runtime starts on entry." state="stopped" action="Start workspace" />
+            <StateSpecimen title="Starting" body="Launch only individually active agents and keep stopped agents stopped." state="stopped" action="Starting workspace…" busy />
+            <StateSpecimen title="Partial launch" body="Keep successful agents active; name each failure and offer a scoped retry." state="running" action="Retry 1 agent" />
+            <StateSpecimen title="Started workspace" body="Stop workspace is neutral lifecycle control, never a destructive Remove." state="running" action="Stop workspace" />
+          </div>
+        </section>
 
         <section className="mt-6 overflow-hidden rounded-[12px] bg-surface ring-1 ring-border">
           <div className="border-b border-border px-5 py-3">
@@ -522,6 +696,9 @@ export default function AgentStopResume() {
               <div><strong className="block text-text-primary">Keyboard and focus</strong><span className="text-text-secondary">Row, Stop, Resume, and More actions are independently reachable. Escape returns to the trigger. Disabled routing options are skipped by selection and identify “Stopped” in their accessible name.</span></div>
               <div><strong className="block text-text-primary">Concurrent routing</strong><span className="text-text-secondary">If the selected recipient stops, reset Send to self (or the first active target) before the next send and announce the change. Never queue work to a stopped target.</span></div>
               <div><strong className="block text-text-primary">Removal</strong><span className="text-text-secondary">Remove remains under More actions, uses red destructive styling, and confirms separately. Never relabel Remove as Stop or place it in the blue primary action slot.</span></div>
+              <div><strong className="block text-text-primary">Stopped workspace entry</strong><span className="text-text-secondary">Load retained navigation, roster, task, message, and history surfaces without auto-launch. Center the explicit Start workspace action; keep agent lifecycle actions unavailable until started.</span></div>
+              <div><strong className="block text-text-primary">Workspace start</strong><span className="text-text-secondary">Start only individually active agents. Keep per-agent progress visible. Partial success keeps successful runtimes active, names failures inline, and offers Retry failed agents.</span></div>
+              <div><strong className="block text-text-primary">Workspace stop</strong><span className="text-text-secondary">If any agent is working, confirm that all live runtimes and current work terminate immediately. “Stopping workspace…” disables duplicate input. Success preserves every record; failure names agents still running.</span></div>
             </div>
           </div>
         </section>
@@ -539,6 +716,7 @@ export default function AgentStopResume() {
           confirm={() => {
             setDialog(null);
             if (dialog === "stop") setPreview("stopped");
+            if (dialog === "workspace-stop") setWorkspacePreview("stopped");
           }}
         />
       )}
