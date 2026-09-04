@@ -79,8 +79,8 @@ pub struct AgentDefRow {
     pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Antigravity reasoning effort. `None` means Auto/omit; non-Antigravity
-    /// definitions are normalized to `None` on every write.
+    /// First-class CLI reasoning effort. `None` means Auto/omit; custom and
+    /// non-CLI definitions are normalized to `None` on every write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     pub harness_mode: String,
@@ -237,8 +237,8 @@ pub struct AgentDefinitionInput {
     pub default_level: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
-    /// Antigravity reasoning effort (`low` / `medium` / `high`). `None` means
-    /// Auto and is also the normalized value for every other CLI harness.
+    /// First-class CLI reasoning effort (`low` / `medium` / `high`). `None`
+    /// means Auto and is also the normalized value for non-CLI/custom agents.
     pub effort: Option<String>,
     pub harness_mode: String,
     pub share_blackboard: Option<bool>,
@@ -330,7 +330,12 @@ pub async fn create(pool: &SqlitePool, input: &AgentDefinitionInput) -> sqlx::Re
     let id = Uuid::new_v4().to_string();
     let created_at = Utc::now().to_rfc3339();
     let mut input = input.clone();
-    if input.cli_kind.as_deref() != Some("antigravity") {
+    if input.agent_type != "cli"
+        || !matches!(
+            input.cli_kind.as_deref(),
+            Some("claude-code" | "codex" | "antigravity")
+        )
+    {
         input.effort = None;
     }
 
@@ -494,7 +499,12 @@ pub async fn update(
     input: &AgentDefinitionInput,
 ) -> sqlx::Result<Option<AgentDefRow>> {
     let mut input = input.clone();
-    if input.cli_kind.as_deref() != Some("antigravity") {
+    if input.agent_type != "cli"
+        || !matches!(
+            input.cli_kind.as_deref(),
+            Some("claude-code" | "codex" | "antigravity")
+        )
+    {
         input.effort = None;
     }
 
@@ -1081,70 +1091,126 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn antigravity_effort_roundtrips_and_other_harnesses_normalize_to_null() {
+    async fn first_class_cli_effort_roundtrips_and_other_definitions_normalize_to_null() {
         let pool = connect_in_memory().await;
-        let input = AgentDefinitionInput {
-            name: "AGY".into(),
-            agent_type: "cli".into(),
-            cli_kind: Some("antigravity".into()),
-            model: Some("gemini-pro".into()),
-            effort: Some("medium".into()),
-            harness_mode: "own".into(),
-            ..Default::default()
-        };
+        for kind in ["claude-code", "codex", "antigravity"] {
+            let input = AgentDefinitionInput {
+                name: kind.into(),
+                agent_type: "cli".into(),
+                cli_kind: Some(kind.into()),
+                effort: Some("medium".into()),
+                harness_mode: "own".into(),
+                ..Default::default()
+            };
 
-        let row = create(&pool, &input).await.unwrap();
-        assert_eq!(row.effort.as_deref(), Some("medium"));
-        assert_eq!(
-            get(&pool, &row.id).await.unwrap().unwrap().effort,
-            row.effort
-        );
-        assert_eq!(
-            list(&pool).await.unwrap()[0].effort.as_deref(),
-            Some("medium")
-        );
-        assert_eq!(
-            list_with_counts(&pool).await.unwrap()[0].effort.as_deref(),
-            Some("medium")
-        );
+            let row = create(&pool, &input).await.unwrap();
+            assert_eq!(row.effort.as_deref(), Some("medium"), "{kind}");
+            assert_eq!(
+                get(&pool, &row.id).await.unwrap().unwrap().effort,
+                row.effort,
+                "get {kind}"
+            );
+            assert_eq!(
+                list(&pool)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|item| item.id == row.id)
+                    .unwrap()
+                    .effort
+                    .as_deref(),
+                Some("medium"),
+                "list {kind}"
+            );
+            assert_eq!(
+                list_with_counts(&pool)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|item| item.id == row.id)
+                    .unwrap()
+                    .effort
+                    .as_deref(),
+                Some("medium"),
+                "list_with_counts {kind}"
+            );
 
-        let updated = update(
-            &pool,
-            &row.id,
-            &AgentDefinitionInput {
-                effort: Some("high".into()),
-                ..input.clone()
-            },
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(updated.effort.as_deref(), Some("high"));
+            let updated = update(
+                &pool,
+                &row.id,
+                &AgentDefinitionInput {
+                    effort: Some("high".into()),
+                    ..input
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(updated.effort.as_deref(), Some("high"), "update {kind}");
+        }
 
-        let normalized = update(
-            &pool,
-            &row.id,
-            &AgentDefinitionInput {
-                cli_kind: Some("codex".into()),
-                effort: Some("low".into()),
-                ..input
-            },
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(normalized.effort.is_none());
+        for (agent_type, cli_kind) in [("cli", "custom"), ("chat", "codex")] {
+            let normalized = create(
+                &pool,
+                &AgentDefinitionInput {
+                    name: format!("{agent_type}-{cli_kind}"),
+                    agent_type: agent_type.into(),
+                    cli_kind: Some(cli_kind.into()),
+                    effort: Some("low".into()),
+                    harness_mode: "own".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(normalized.effort.is_none(), "{agent_type}/{cli_kind}");
+        }
+
+        for (agent_type, cli_kind) in [("cli", "custom"), ("chat", "codex")] {
+            let first_class = create(
+                &pool,
+                &AgentDefinitionInput {
+                    name: "switching".into(),
+                    agent_type: "cli".into(),
+                    cli_kind: Some("codex".into()),
+                    effort: Some("high".into()),
+                    harness_mode: "own".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let normalized = update(
+                &pool,
+                &first_class.id,
+                &AgentDefinitionInput {
+                    name: "switched".into(),
+                    agent_type: agent_type.into(),
+                    cli_kind: Some(cli_kind.into()),
+                    effort: Some("high".into()),
+                    harness_mode: "own".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                normalized.effort.is_none(),
+                "update {agent_type}/{cli_kind}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn antigravity_effort_check_rejects_unknown_value() {
+    async fn first_class_cli_effort_check_rejects_unknown_value() {
         let pool = connect_in_memory().await;
         let error = create(
             &pool,
             &AgentDefinitionInput {
-                name: "AGY".into(),
+                name: "Codex".into(),
                 agent_type: "cli".into(),
-                cli_kind: Some("antigravity".into()),
+                cli_kind: Some("codex".into()),
                 effort: Some("extreme".into()),
                 harness_mode: "own".into(),
                 ..Default::default()

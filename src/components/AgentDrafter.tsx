@@ -268,12 +268,10 @@ export function draftToInitialDef(a: DraftAgent, roleSkillIds: string[]): AgentD
     skillIds: Array.from(new Set([...roleSkillIds, ...a.skillIds])),
     defaultLevel: a.defaultLevel ?? null,
     // Builder re-sends its own fixed constants on save; these two need a value
-    // so the pre-fill is a faithful CLI definition. permissionMode "auto" is
-    // what every hand-built claude-code/codex definition stores
-    // (Builder.tsx:201-203) — leaving it unset would open the Builder showing
-    // "auto" over a definition that would save NULL.
+    // so the pre-fill is a faithful CLI definition. New first-class CLI
+    // definitions default to full bypass from every creation path.
     harnessMode: "central",
-    permissionMode: "auto",
+    permissionMode: "bypassPermissions",
     createdAt: "",
   };
 }

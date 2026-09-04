@@ -169,6 +169,7 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let default_level_field = parse_optional_string_field(obj, "defaultLevel", "agentDef.save")?;
     let req: SaveAgentReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let is_new = req.id.is_none();
 
     // ── Split custom_env into non-secret (→ DB JSON) and secret (→ Keychain) ──
     // Secret VALUES never enter the DB; only their NAMES are recorded (so the
@@ -201,7 +202,14 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     // interpolated UNQUOTED into the `zsh -c` launch string, so an arbitrary
     // value with whitespace/metacharacters could alter the command. The set
     // mirrors Claude Code's `--permission-mode` choices.
-    let permission_mode = nonblank(req.permission_mode);
+    let cli_kind = nonblank(req.cli_kind);
+    let is_first_class_cli = req.agent_type == "cli"
+        && matches!(
+            cli_kind.as_deref(),
+            Some("claude-code" | "codex" | "antigravity")
+        );
+    let permission_mode = nonblank(req.permission_mode)
+        .or_else(|| (is_new && is_first_class_cli).then(|| "bypassPermissions".to_owned()));
     if let Some(mode) = permission_mode.as_deref() {
         const ALLOWED: [&str; 5] = [
             "default",
@@ -217,7 +225,6 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
         }
     }
 
-    let cli_kind = nonblank(req.cli_kind);
     let effort = nonblank(req.effort);
     if let Some(value) = effort.as_deref() {
         const ALLOWED_EFFORTS: [&str; 3] = ["low", "medium", "high"];
@@ -225,16 +232,13 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
             return Err(AppError::Invalid(format!("invalid effort: {value}")));
         }
     }
-    let effort = (cli_kind.as_deref() == Some("antigravity"))
-        .then_some(effort)
-        .flatten();
+    let effort = is_first_class_cli.then_some(effort).flatten();
 
     // ── Role (ADR 0005) ──────────────────────────────────────────────────────
     // Resolve the chosen first-class role (builtin folder or custom DB row).
     // The legacy `role` free-text column becomes the role's display name (a
     // sensible fallback label) when a role is chosen; otherwise it keeps
     // whatever free text the request carried.
-    let is_new = req.id.is_none();
     let role_id = nonblank(req.role_id.clone());
     let resolved_role = match role_id.as_deref() {
         Some(rid) => repo::role::find_any(&state.db, rid).await?,
@@ -991,60 +995,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_validates_roundtrips_and_normalizes_antigravity_effort() {
+    async fn save_validates_roundtrips_and_normalizes_first_class_cli_effort() {
         let state = AppState::for_tests().await;
-        let created = save(
-            &state,
-            serde_json::json!({
-                "name": "AGY",
-                "type": "cli",
-                "cliKind": "antigravity",
-                "model": "gemini-pro",
-                "effort": "low",
-                "harnessMode": "own"
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(created.get("effort").and_then(Value::as_str), Some("low"));
-        let id = created.get("id").and_then(Value::as_str).unwrap();
+        for kind in ["claude-code", "codex", "antigravity"] {
+            let created = save(
+                &state,
+                serde_json::json!({
+                    "name": kind,
+                    "type": "cli",
+                    "cliKind": kind,
+                    "effort": "low",
+                    "permissionMode": "auto",
+                    "harnessMode": "own"
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                created.get("effort").and_then(Value::as_str),
+                Some("low"),
+                "{kind}"
+            );
+            let id = created.get("id").and_then(Value::as_str).unwrap();
 
-        let updated = save(
-            &state,
-            serde_json::json!({
-                "id": id,
-                "name": "AGY",
-                "type": "cli",
-                "cliKind": "antigravity",
-                "effort": "high",
-                "harnessMode": "own"
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(updated.get("effort").and_then(Value::as_str), Some("high"));
+            let updated = save(
+                &state,
+                serde_json::json!({
+                    "id": id,
+                    "name": kind,
+                    "type": "cli",
+                    "cliKind": kind,
+                    "effort": "high",
+                    "permissionMode": "auto",
+                    "harnessMode": "own"
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                updated.get("effort").and_then(Value::as_str),
+                Some("high"),
+                "{kind}"
+            );
+        }
 
-        let normalized = save(
-            &state,
-            serde_json::json!({
-                "id": id,
-                "name": "Codex",
-                "type": "cli",
-                "cliKind": "codex",
-                "effort": "medium",
-                "harnessMode": "own"
-            }),
-        )
-        .await
-        .unwrap();
-        assert!(normalized.get("effort").is_none());
+        for (agent_type, cli_kind) in [("cli", "custom"), ("chat", "codex")] {
+            let normalized = save(
+                &state,
+                serde_json::json!({
+                    "name": format!("{agent_type}-{cli_kind}"),
+                    "type": agent_type,
+                    "cliKind": cli_kind,
+                    "effort": "medium",
+                    "harnessMode": "own"
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(
+                normalized.get("effort").is_none(),
+                "{agent_type}/{cli_kind}"
+            );
+        }
 
         let error = save(
             &state,
             serde_json::json!({
                 "name": "Invalid",
                 "type": "cli",
-                "cliKind": "antigravity",
+                "cliKind": "codex",
                 "effort": "extreme",
                 "harnessMode": "own"
             }),
@@ -1052,5 +1071,112 @@ mod tests {
         .await
         .expect_err("invalid effort must be rejected before persistence");
         assert!(matches!(error, AppError::Invalid(message) if message.contains("invalid effort")));
+    }
+
+    #[tokio::test]
+    async fn save_defaults_new_first_class_cli_permissions_to_bypass_only() {
+        let state = AppState::for_tests().await;
+        for kind in ["claude-code", "codex", "antigravity"] {
+            let created = save(
+                &state,
+                serde_json::json!({
+                    "name": kind,
+                    "type": "cli",
+                    "cliKind": kind,
+                    "harnessMode": "own"
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                created.get("permissionMode").and_then(Value::as_str),
+                Some("bypassPermissions"),
+                "{kind}"
+            );
+        }
+
+        for (agent_type, cli_kind) in [("cli", "custom"), ("chat", "codex")] {
+            let created = save(
+                &state,
+                serde_json::json!({
+                    "name": format!("{agent_type}-{cli_kind}"),
+                    "type": agent_type,
+                    "cliKind": cli_kind,
+                    "harnessMode": "own"
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(
+                created.get("permissionMode").is_none(),
+                "{agent_type}/{cli_kind}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_update_omission_does_not_escalate_legacy_null_permission() {
+        let state = AppState::for_tests().await;
+        let legacy = repo::agent_definition::create(
+            &state.db,
+            &AgentDefinitionInput {
+                name: "Legacy".into(),
+                agent_type: "cli".into(),
+                cli_kind: Some("codex".into()),
+                harness_mode: "own".into(),
+                permission_mode: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = save(
+            &state,
+            serde_json::json!({
+                "id": legacy.id,
+                "name": "Legacy renamed",
+                "type": "cli",
+                "cliKind": "codex",
+                "harnessMode": "own"
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(updated.get("permissionMode").is_none());
+    }
+
+    #[tokio::test]
+    async fn save_antigravity_explicit_default_roundtrips_through_list() {
+        let state = AppState::for_tests().await;
+        let created = save(
+            &state,
+            serde_json::json!({
+                "name": "AGY Default",
+                "type": "cli",
+                "cliKind": "antigravity",
+                "permissionMode": "default",
+                "harnessMode": "own"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            created.get("permissionMode").and_then(Value::as_str),
+            Some("default")
+        );
+
+        let id = created.get("id").and_then(Value::as_str).unwrap();
+        let listed = list(&state, Value::Null).await.unwrap();
+        let reopened = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap();
+        assert_eq!(
+            reopened.get("permissionMode").and_then(Value::as_str),
+            Some("default")
+        );
     }
 }

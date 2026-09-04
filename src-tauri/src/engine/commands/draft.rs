@@ -41,6 +41,7 @@ pub const CLAUDE_MODELS: &[&str] = &[
 /// window is NOT drafted — the backend derives it per model
 /// (`codex_models::codex_model_context_window`).
 pub const CODEX_MODELS: &[&str] = &[
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -874,6 +875,30 @@ pub(crate) mod tests {
         assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c)
             .unwrap_err()
             .contains("defaultLevel"));
+    }
+
+    #[test]
+    fn codex_catalogue_matches_typescript_order_and_accepts_astra() {
+        let typescript = include_str!("../../../../src/lib/modelCatalogue.ts");
+        let block = typescript
+            .split("export const CODEX_MODELS = [")
+            .nth(1)
+            .and_then(|tail| tail.split("];").next())
+            .expect("TypeScript CODEX_MODELS block");
+        let typescript_models: Vec<&str> = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('"'))
+            .map(|line| line.trim_end_matches(',').trim_matches('"'))
+            .collect();
+        assert_eq!(typescript_models, CODEX_MODELS);
+        assert_eq!(CODEX_MODELS.first().copied(), Some("gpt-6-astra"));
+
+        let mut astra = agent("astra");
+        astra.cli_kind = Some("codex".into());
+        astra.model = Some("gpt-6-astra".into());
+        validate_draft(&resp(vec![astra], vec![]), DraftMode::Agent, &cat())
+            .expect("the highest-priority Codex preset must pass draft validation");
     }
 
     #[test]

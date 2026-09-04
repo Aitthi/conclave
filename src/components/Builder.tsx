@@ -47,7 +47,7 @@ export interface BuilderProps {
 type AgentType = "cli" | "chat" | "orchestrator";
 type CliKind = "claude-code" | "codex" | "antigravity" | "custom";
 type PermissionMode = "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
-type AntigravityEffort = "low" | "medium" | "high" | undefined;
+type CliEffort = "low" | "medium" | "high" | undefined;
 type ClaudeContextWindow = "1m" | "200k";
 
 type CliAvailability =
@@ -205,15 +205,21 @@ export function Builder({
   // Color picker popover (anchored to the avatar).
   const [showColors, setShowColors] = useState(false);
   const [model, setModel] = useState(initialDef?.model ?? "");
-  // ── Claude Code launch config ──────────────────────────────────────────────
+  // ── First-class CLI launch config ─────────────────────────────────────────
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
-    initialDef?.cliKind === "antigravity"
-      ? initialDef.permissionMode ?? "default"
-      : initialDef?.permissionMode === "bypassPermissions"
-        ? "bypassPermissions"
-        : "auto",
+    initialDef?.id
+      ? initialDef.cliKind === "antigravity"
+        ? initialDef.permissionMode ?? "default"
+        : initialDef.permissionMode === "bypassPermissions"
+          ? "bypassPermissions"
+          : "auto"
+      : initialDef?.permissionMode ?? "bypassPermissions",
   );
-  const [effort, setEffort] = useState<AntigravityEffort>(initialDef?.effort);
+  // Distinguishes a user-picked value from the display fallback for a legacy
+  // existing row whose stored permission_mode is NULL. An unrelated edit must
+  // not silently turn that NULL into a more permissive explicit mode.
+  const [permissionModeDirty, setPermissionModeDirty] = useState(false);
+  const [effort, setEffort] = useState<CliEffort>(initialDef?.effort);
   const [cliAvailability, setCliAvailability] = useState<CliAvailability>({
     state: initialDef?.cliKind === "antigravity" ? "checking" : "idle",
   });
@@ -492,6 +498,7 @@ export function Builder({
   }
 
   function selectCliKind(next: CliKind) {
+    if (next !== cliKind) setPermissionModeDirty(true);
     if (next === "antigravity" && permissionMode === "auto") {
       setPermissionMode("default");
     } else if (
@@ -525,15 +532,16 @@ export function Builder({
     const contextWindowForSave: string | undefined = isClaudeCode
       ? contextWindow === "1m" ? "1m" : "200k"
       : undefined;
-    const permissionModeForSave: AgentDefinition["permissionMode"] = isAntigravity
-      ? permissionMode === "default" || permissionMode === "auto"
-        ? undefined
-        : permissionMode
-      : isClaudeCode || isCodex
-        ? permissionMode === "bypassPermissions"
-          ? "bypassPermissions"
-          : "auto"
-        : undefined;
+    const permissionModeForSave: AgentDefinition["permissionMode"] =
+      isEditing && !permissionModeDirty && initialDef?.cliKind === cliKind
+        ? initialDef.permissionMode
+        : isAntigravity
+          ? permissionMode === "auto" ? "default" : permissionMode
+          : isClaudeCode || isCodex
+            ? permissionMode === "bypassPermissions"
+              ? "bypassPermissions"
+              : "auto"
+            : undefined;
     // Parse the custom env up front so a JSON error is reported before saving.
     // Claude Code only — Codex doesn't use ANTHROPIC_* env config.
     let customEnv: Record<string, string> | undefined;
@@ -573,10 +581,11 @@ export function Builder({
         // backend already behaves this way). Sent as fixed constants.
         autoSubmitInjected: true,
         allowedSenders: "all",
-        // Harness-specific launch config. Antigravity Default/Auto and effort
-        // Auto are omitted so the authenticated CLI defaults win.
+        // Harness-specific launch config. Auto effort is omitted so the
+        // provider default wins. Explicit Antigravity Default is preserved;
+        // only an untouched legacy NULL edit remains omitted.
         permissionMode: permissionModeForSave,
-        effort: isAntigravity ? effort : undefined,
+        effort: showCliConfig ? effort : undefined,
         contextWindow: contextWindowForSave,
         // Token filter (rtk) — claude-code + codex; the engine treats absent as ON.
         rtkEnabled: isClaudeCode || isCodex ? rtkEnabled : undefined,
@@ -1449,7 +1458,7 @@ export function Builder({
                   )}
                 </div>
 
-                {isAntigravity && (
+                {showCliConfig && (
                   <div className="px-3 py-2">
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-[12.5px] text-text-secondary">Effort</span>
@@ -1464,7 +1473,7 @@ export function Builder({
                             { value: "low", label: "low" },
                             { value: "medium", label: "medium" },
                             { value: "high", label: "high" },
-                          ] as { value: AntigravityEffort; label: string }[]
+                          ] as { value: CliEffort; label: string }[]
                         ).map(({ value, label }) => (
                           <button
                             key={label}
@@ -1484,7 +1493,7 @@ export function Builder({
                       </div>
                     </div>
                     <p className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
-                      Auto omits the effort flag.
+                      Auto uses the provider default and omits the effort override.
                     </p>
                   </div>
                 )}
@@ -1503,7 +1512,10 @@ export function Builder({
                         <select
                           id="antigravity-execution-mode"
                           value={permissionMode === "auto" ? "default" : permissionMode}
-                          onChange={(event) => setPermissionMode(event.target.value as PermissionMode)}
+                          onChange={(event) => {
+                            setPermissionMode(event.target.value as PermissionMode);
+                            setPermissionModeDirty(true);
+                          }}
                           className={`h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                             permissionMode === "bypassPermissions"
                               ? "text-danger"
@@ -1560,7 +1572,10 @@ export function Builder({
                             key={value}
                             role="radio"
                             aria-checked={permissionMode === value}
-                            onClick={() => setPermissionMode(value)}
+                            onClick={() => {
+                              setPermissionMode(value);
+                              setPermissionModeDirty(true);
+                            }}
                             className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
                               permissionMode === value
                                 ? "bg-surface shadow-sm font-semibold"

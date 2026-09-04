@@ -23,6 +23,31 @@ pub fn effective_claude_model(model: &str, context_window: Option<&str>) -> Stri
     }
 }
 
+/// Append the provider-specific reasoning-effort override.
+///
+/// Values are validated before persistence, but quoting remains mandatory: the
+/// launch string crosses `zsh -c`, and this helper is also deliberately safe if
+/// a malformed legacy row reaches it. Blank/absent values mean Auto and append
+/// nothing. Callers append expert `custom_args` only after this helper.
+pub fn append_cli_effort_override(launch: &mut String, cli_kind: &str, effort: Option<&str>) {
+    let Some(effort) = effort.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let effort = effort.trim();
+    match cli_kind {
+        "claude-code" | "antigravity" => {
+            launch.push_str(&format!(" --effort {}", shell_quote(effort)));
+        }
+        "codex" => {
+            launch.push_str(&format!(
+                " -c {}",
+                shell_quote(&format!(r#"model_reasoning_effort="{effort}""#))
+            ));
+        }
+        _ => {}
+    }
+}
+
 /// Build Antigravity's complete inner-shell command in Conclave-owned order.
 ///
 /// Typed fields are quoted and precede expert `custom_args`. `None`, blank
@@ -40,9 +65,7 @@ pub fn build_antigravity_launch(
     if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
         launch.push_str(&format!(" --model {}", shell_quote(model.trim())));
     }
-    if let Some(effort) = effort.filter(|value| !value.trim().is_empty()) {
-        launch.push_str(&format!(" --effort {}", shell_quote(effort.trim())));
-    }
+    append_cli_effort_override(&mut launch, "antigravity", effort);
     match permission_mode {
         Some("acceptEdits") => launch.push_str(" --mode 'accept-edits'"),
         Some("plan") => launch.push_str(" --mode 'plan'"),
@@ -178,6 +201,55 @@ mod tests {
         assert_eq!(
             effective_claude_model("claude-opus-4-8", None),
             "claude-opus-4-8"
+        );
+    }
+
+    #[test]
+    fn first_class_cli_effort_overrides_are_quoted_and_auto_is_omitted() {
+        for effort in ["low", "medium", "high"] {
+            for kind in ["claude-code", "codex", "antigravity"] {
+                let (mut launch, expected) = match kind {
+                    "claude-code" => ("claude".to_owned(), format!("claude --effort '{effort}'")),
+                    "codex" => (
+                        "codex".to_owned(),
+                        format!(r#"codex -c 'model_reasoning_effort="{effort}"'"#),
+                    ),
+                    _ => ("agy".to_owned(), format!("agy --effort '{effort}'")),
+                };
+                append_cli_effort_override(&mut launch, kind, Some(effort));
+                assert_eq!(launch, expected);
+                assert_eq!(
+                    launch.matches("model_reasoning_effort").count(),
+                    usize::from(kind == "codex")
+                );
+
+                launch.push_str(" --expert-custom-arg");
+                let typed = if kind == "codex" {
+                    launch.find("model_reasoning_effort").unwrap()
+                } else {
+                    launch.find("--effort").unwrap()
+                };
+                assert!(typed < launch.find("--expert-custom-arg").unwrap());
+            }
+        }
+
+        for kind in ["claude-code", "codex", "antigravity", "custom"] {
+            for effort in [None, Some(""), Some("   ")] {
+                let mut launch = kind.to_owned();
+                append_cli_effort_override(&mut launch, kind, effort);
+                assert_eq!(launch, kind, "{kind} {effort:?}");
+            }
+        }
+
+        let mut codex = "codex".to_owned();
+        append_cli_effort_override(
+            &mut codex,
+            "codex",
+            Some("high'; $(touch /tmp/conclave-effort-injection)"),
+        );
+        assert_eq!(
+            codex,
+            "codex -c 'model_reasoning_effort=\"high'\\''; $(touch /tmp/conclave-effort-injection)\"'"
         );
     }
 

@@ -1,6 +1,6 @@
 use crate::engine::runtime::launch_common::{
-    agent_env_overrides, build_antigravity_launch, effective_claude_model,
-    prefix_conclave_path_with, shell_quote,
+    agent_env_overrides, append_cli_effort_override, build_antigravity_launch,
+    effective_claude_model, prefix_conclave_path_with, shell_quote,
 };
 use crate::engine::{bus, repo, runtime, AppError, AppState};
 use chrono::{DateTime, Utc};
@@ -1012,6 +1012,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                     let eff = effective_claude_model(model, def.context_window.as_deref());
                     launch.push_str(&format!(" --model {}", shell_quote(&eff)));
                 }
+                append_cli_effort_override(&mut launch, "claude-code", def.effort.as_deref());
                 // Persistent system-prompt append → survives /clear.
                 launch.push_str(&format!(
                     " --append-system-prompt {}",
@@ -1046,6 +1047,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
                 }
                 append_codex_context_window_config(&mut launch, def.model.as_deref());
+                append_cli_effort_override(&mut launch, "codex", def.effort.as_deref());
                 // Codex's mode flags differ from claude's; map the shared
                 // permission_mode value to them. "auto" = never pause for
                 // approval but keep the sandbox; "bypass" = --yolo (alias of
@@ -2158,6 +2160,21 @@ mod tests {
         );
         assert!(
             launch.contains(" -c 'model_auto_compact_token_limit=121600'"),
+            "{launch}"
+        );
+    }
+
+    #[test]
+    fn codex_astra_launch_uses_runtime_effective_context_window() {
+        let mut launch = String::from("codex --model 'gpt-6-astra'");
+        append_codex_context_window_config(&mut launch, Some("gpt-6-astra"));
+
+        assert!(
+            launch.contains(" -c 'model_context_window=272000'"),
+            "{launch}"
+        );
+        assert!(
+            launch.contains(" -c 'model_auto_compact_token_limit=258400'"),
             "{launch}"
         );
     }
