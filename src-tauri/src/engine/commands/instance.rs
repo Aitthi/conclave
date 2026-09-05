@@ -2144,7 +2144,7 @@ pub async fn resize(state: &AppState, payload: Value) -> Result<Value, AppError>
     // Not-live just means there's no PTY to resize yet — best-effort.
     let _ = state
         .runtime
-        .resize(&session.workspace_agent_id, req.cols, req.rows);
+        .resize(&session.workspace_agent_id, req.cols, req.rows, 0, 0);
 
     Ok(Value::Null)
 }

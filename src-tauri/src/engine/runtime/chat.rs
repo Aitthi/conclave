@@ -82,7 +82,7 @@ pub fn spawn_chat(session_id: &str, provider: Provider, model: String) -> ChatBa
         shutdown: Box::new(move || loop_abort.abort()),
         // Chat backends have no PTY — resize is a no-op, and there is no
         // terminal to parse a paste envelope, so text arrives raw.
-        resize: Box::new(|_, _| {}),
+        resize: Box::new(|_, _, _, _| {}),
         bracketed_paste: false,
     };
     ChatBackend { handle, output_rx }

@@ -166,17 +166,25 @@ pub fn spawn_cli(
     // Forward (cols, rows) from the frontend's xterm fit to the PTY master so a
     // full-screen TUI (Claude Code, etc.) lays out at the real on-screen size
     // instead of the 80×24 default — without a matching size the redraws garble.
+    // The pixel dimensions travel with the cell dimensions: they are the other
+    // half of the same `TIOCSWINSZ` (`ws_xpixel`/`ws_ypixel`), the only way a
+    // child can learn its cell size, and the answer a terminal must give to the
+    // window-ops queries xterm now advertises (see `windowOptions` in
+    // Terminal.tsx). VS Code reports them the same way
+    // (vscode:…/browser/terminalInstance.ts:2095-2104). `0` means "not measured",
+    // which is exactly what we sent for every resize before this.
     let resize_master = std::sync::Arc::clone(&master);
-    let resize: Box<dyn Fn(u16, u16) + Send> = Box::new(move |cols, rows| {
-        if let Ok(m) = resize_master.lock() {
-            let _ = m.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
-        }
-    });
+    let resize: Box<dyn Fn(u16, u16, u16, u16) + Send> =
+        Box::new(move |cols, rows, pixel_width, pixel_height| {
+            if let Ok(m) = resize_master.lock() {
+                let _ = m.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width,
+                    pixel_height,
+                });
+            }
+        });
 
     // ── Teardown ────────────────────────────────────────────────────────────
     // Killing the child makes the reader hit EOF and exit its thread on its own;
@@ -505,9 +513,9 @@ mod tests {
 
         // Mirror Terminal.tsx's mount-jiggle: rows-1 then rows, a beat apart —
         // a guaranteed SIGWINCH even though the size nets out unchanged.
-        (backend.handle.resize)(80, 23);
+        (backend.handle.resize)(80, 23, 0, 0);
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-        (backend.handle.resize)(80, 24);
+        (backend.handle.resize)(80, 24, 0, 0);
 
         // Observation window: no stdin sent, just record what the jiggle provokes.
         let start = std::time::Instant::now();
