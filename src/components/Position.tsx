@@ -113,7 +113,7 @@ export function LevelTag({
   const level = levelOf(levelId);
   return (
     <span
-      className="inline-flex items-center gap-1.5"
+      className={`inline-flex items-center ${compact ? "gap-1" : "gap-1.5"}`}
       title={`${level.name} · level ${level.rung} of ${MAX_RUNG}`}
     >
       <LevelRung rung={level.rung} h={compact ? 10 : 12} />
@@ -207,7 +207,7 @@ export function PositionLine({
   className?: string;
 }) {
   return (
-    <div className={`flex items-center gap-1.5 min-w-0 ${className ?? ""}`}>
+    <div className={`flex items-center ${compact ? "gap-1" : "gap-1.5"} min-w-0 ${className ?? ""}`}>
       <LevelTag levelId={levelId} compact={compact} />
       {track && (
         <>
@@ -217,12 +217,12 @@ export function PositionLine({
           >
             ·
           </span>
-          <span className="inline-flex items-center gap-1 min-w-0">
+          <span className="flex items-center gap-1 min-w-0 flex-1">
             <span className="shrink-0" style={{ color: "var(--color-text-tertiary)" }}>
               <TrackIcon track={track} size={compact ? 11 : 12} className="shrink-0" />
             </span>
             <span
-              className="truncate"
+              className="min-w-0 flex-1 truncate"
               title={trackTitle}
               style={{
                 fontSize: compact ? "0.66rem" : "0.72rem",

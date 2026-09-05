@@ -211,31 +211,73 @@ function AgentRow({
 
   return (
     <div
-      className={`group w-full rounded-lg px-2 py-1.5 transition-colors${
-        isSelected ? " bg-accent/10 ring-1 ring-accent/30" : " hover:bg-overlay/[0.04]"
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          if (event.target === event.currentTarget) {
+            event.preventDefault();
+            onSelect();
+          }
+        }
+      }}
+      className={`group w-full rounded-lg px-2 py-1.5 transition-colors cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+        isSelected ? "bg-accent/10 ring-1 ring-accent/30" : "hover:bg-overlay/[0.04]"
       }`}
     >
-      <div className="flex w-full items-start gap-2">
-        <button
-          type="button"
-          onClick={onSelect}
-          className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-        >
-          <AgentAvatar entry={entry} />
-          <span className="min-w-0 flex-1 leading-tight">
-            <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] font-semibold">
-              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+      <div className="flex w-full items-center gap-2">
+        <AgentAvatar entry={entry} size="sm" />
+        <div className="min-w-0 flex-1 leading-tight">
+          {/* Row 1: Agent name, Supervisor, Provider/model chip, Status indicator */}
+          <div className="flex min-w-0 items-center justify-between gap-1.5">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="shrink-0 text-[12px] font-semibold text-text-primary">
+                {entry.name}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditSupervisor();
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                className="shrink-0 rounded hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+                aria-label={`Change supervisor for ${entry.name}`}
+              >
+                <ReportsTo supervisor={entry.supervisor} />
+              </button>
               {chip && (
                 <span
-                  className="max-w-[104px] min-w-0 shrink-0 truncate text-[10px] font-medium tracking-tight text-text-tertiary"
+                  className="min-w-0 truncate text-[9.5px] font-medium tracking-tight text-text-tertiary"
                   title={entry.model?.trim() || chip}
                   aria-label={chip}
                 >
                   {chip}
                 </span>
               )}
-            </span>
-            <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+            </div>
+            <div className="flex shrink-0 items-center pl-1">
+              {entry.availability === "stopped" ? (
+                <CirclePause
+                  className="h-3 w-3 shrink-0 text-text-tertiary"
+                  role="img"
+                  aria-label="stopped"
+                />
+              ) : (
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: statusColor }}
+                  role="img"
+                  aria-label={entry.status}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* Row 2: Level, Track/Role, Stopped badge, Lifecycle button, More button */}
+          <div className="mt-0.5 flex min-w-0 items-center justify-between gap-1 text-[10px]">
+            <div className="flex min-w-0 flex-1 items-center gap-1">
               <PositionLine
                 levelId={entry.level}
                 track={entry.meta}
@@ -243,112 +285,94 @@ function AgentRow({
                 trackTitle={entry.roleDescription}
                 className="min-w-0 flex-1"
               />
-              {entry.availability === "stopped" && (
-                <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-overlay/[0.06] px-1.5 py-0.5 text-[9.5px] font-semibold text-text-secondary">
-                  <CirclePause className="h-2.5 w-2.5" />
+              {entry.availability === "stopped" && !lifecycleAvailable && (
+                <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-overlay/[0.06] px-1 py-0.5 text-[9px] font-semibold text-text-secondary">
+                  <CirclePause className="h-2 w-2" />
                   Stopped
                 </span>
               )}
-            </span>
-            <WorkLine working={entry.availability === "active" && entry.working} />
-          </span>
-        </button>
+            </div>
 
-        {entry.availability === "stopped" ? (
-          <CirclePause
-            className="mt-1 h-3.5 w-3.5 shrink-0 text-text-tertiary"
-            role="img"
-            aria-label="stopped"
-          />
-        ) : (
-          <span
-            className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
-            style={{ backgroundColor: statusColor }}
-            role="img"
-            aria-label={entry.status}
-          />
-        )}
-      </div>
+            <div className="flex shrink-0 items-center gap-0.5 pl-0.5">
+              {lifecycleAvailable && (
+                <button
+                  ref={lifecycleButtonRef}
+                  type="button"
+                  disabled={lifecycleBusy}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (entry.availability === "stopped") onResume();
+                    else onRequestStop(event.currentTarget);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  aria-label={`${entry.availability === "stopped" ? "Resume" : "Stop"} agent ${entry.name}`}
+                  className={`inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[9.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-55 ${
+                    entry.availability === "stopped"
+                      ? "bg-accent text-white hover:bg-accent-hover"
+                      : "bg-overlay/[0.06] text-text-secondary hover:bg-overlay/[0.1] hover:text-text-primary"
+                  }`}
+                >
+                  {lifecycleBusy ? (
+                    <LoaderCircle className="h-2.5 w-2.5 animate-spin motion-reduce:animate-none" />
+                  ) : entry.availability === "stopped" ? (
+                    <Play className="h-2.5 w-2.5" />
+                  ) : (
+                    <Square className="h-2 w-2" />
+                  )}
+                  {lifecycleBusy
+                    ? entry.availability === "stopped"
+                      ? "Resuming…"
+                      : "Stopping…"
+                    : entry.availability === "stopped"
+                      ? "Resume"
+                      : "Stop"}
+                </button>
+              )}
 
-      <div className="ml-9 mt-1 flex min-w-0 items-center gap-1.5">
-        <button
-          type="button"
-          onClick={onEditSupervisor}
-          className="shrink-0 rounded-md hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-          aria-label={`Change supervisor for ${entry.name}`}
-        >
-          <ReportsTo supervisor={entry.supervisor} />
-        </button>
+              <button
+                ref={moreButtonRef}
+                type="button"
+                aria-label={`More actions for ${entry.name}`}
+                aria-expanded={moreOpen}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMoreOpen((open) => !open);
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                className="grid h-5 w-5 shrink-0 place-items-center rounded text-text-muted transition-colors hover:bg-overlay/[0.06] hover:text-text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              >
+                <MoreHorizontal className="h-3 w-3" />
+              </button>
+            </div>
+          </div>
 
-        <span className="min-w-0 flex-1" />
-
-        {lifecycleAvailable && (
-          <button
-            ref={lifecycleButtonRef}
-            type="button"
-            disabled={lifecycleBusy}
-            onClick={(event) => {
-              if (entry.availability === "stopped") onResume();
-              else onRequestStop(event.currentTarget);
-            }}
-            aria-label={`${entry.availability === "stopped" ? "Resume" : "Stop"} agent ${entry.name}`}
-            className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-55 ${
-              entry.availability === "stopped"
-                ? "bg-accent text-white hover:bg-accent-hover"
-                : "bg-overlay/[0.06] text-text-secondary hover:bg-overlay/[0.1] hover:text-text-primary"
-            }`}
-          >
-            {lifecycleBusy ? (
-              <LoaderCircle className="h-3 w-3 animate-spin motion-reduce:animate-none" />
-            ) : entry.availability === "stopped" ? (
-              <Play className="h-3 w-3" />
-            ) : (
-              <Square className="h-2.5 w-2.5" />
-            )}
-            {lifecycleBusy
-              ? entry.availability === "stopped"
-                ? "Resuming…"
-                : "Stopping…"
-              : entry.availability === "stopped"
-                ? "Resume"
-                : "Stop"}
-          </button>
-        )}
-
-        <button
-          ref={moreButtonRef}
-          type="button"
-          aria-label={`More actions for ${entry.name}`}
-          aria-expanded={moreOpen}
-          onClick={() => setMoreOpen((open) => !open)}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-text-muted transition-colors hover:bg-overlay/[0.06] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          <MoreHorizontal className="h-3.5 w-3.5" />
-        </button>
+          <WorkLine working={entry.availability === "active" && entry.working} />
+        </div>
       </div>
 
       {moreOpen && (
-        <div className="mt-1.5 flex justify-end border-t border-overlay/[0.06] pt-1.5">
+        <div className="mt-1 flex justify-end border-t border-overlay/[0.06] pt-1">
           <button
             type="button"
             onClick={(event) => {
+              event.stopPropagation();
               setMoreOpen(false);
               onRequestRemove(moreButtonRef.current ?? event.currentTarget);
             }}
-            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10.5px] font-semibold text-danger hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold text-danger hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-danger"
           >
-            <X className="h-3 w-3" />
+            <X className="h-2.5 w-2.5" />
             Remove agent
           </button>
         </div>
       )}
 
       {entry.skillsStale && entry.availability === "active" && (
-        <div className="mt-1 text-[9.5px] font-semibold text-warning">Restart to apply skills</div>
+        <div className="mt-0.5 text-[9px] font-semibold text-warning">Restart to apply skills</div>
       )}
       {lifecycleError && (
-        <div role="alert" className="mt-1.5 flex items-start gap-1.5 text-[10.5px] text-danger">
-          <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+        <div role="alert" className="mt-1 flex items-start gap-1 text-[10px] text-danger">
+          <AlertCircle className="mt-px h-2.5 w-2.5 shrink-0" />
           <span>{lifecycleError}</span>
         </div>
       )}
