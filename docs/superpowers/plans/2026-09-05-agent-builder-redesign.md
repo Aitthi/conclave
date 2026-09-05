@@ -29,6 +29,8 @@ Canon rulings already folded into this plan: rail active = fill tint (no side ba
 
 ## Global Constraints
 
+- **Authority split (ruled on Dew's challenge ebbcdebd, 2026-09-05):** canon `design/screens/agent-builder.tsx` @ b5d3d20 plus its 35-line checklist are authoritative for EVERY visual property (geometry, spacing, type scale, colour, icon, copy). This plan is authoritative for structure, props, state, interfaces, commit order and the file boundary. Every JSX sample below is illustrative: where a class, size or string differs from the canon, the canon wins and no challenge is needed — list the substitution in the READY note. Copy strings come from the canon's copy deck, not from this plan.
+- Selected-role line: `roleLook(role).tagline` for builtin roles, `selectedRole.description` for custom roles (roleLook has no per-custom tagline; ruled with the same challenge).
 - Provider marks come ONLY from task `provider-logos` (`design/assets/providers/`); never hand-draw a brand mark.
 - All UI copy English. Exact strings from the spec: `Name required`, `Install agy to continue`, `Checking agy…`, `Ready to create`, `Ready to save`, `Chat agent and Orchestrator are coming soon.`, `Advanced`, `Role & Level`, `Runtime`.
 - Modal outer: `w-[880px] max-h-[90vh]`. Rail: `w-[180px]`. Content column: `px-6 py-4`.
