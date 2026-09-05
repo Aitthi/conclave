@@ -349,9 +349,19 @@ function AgentRow({
                 >
                   <MoreHorizontal className="h-3 w-3" />
                 </PopoverTrigger>
-                {/* w-auto p-1 overrides the primitive's w-72 p-3 — one icon-only
-                    action, no text label (Detoro ruling 2026-09-05). */}
-                <PopoverContent side="bottom" align="end" sideOffset={4} className="w-auto p-1">
+                {/* Shrink the primitive's w-72 p-3 down to one icon-only action
+                    (Detoro ruling 2026-09-05). `p-1` needs Tailwind v4's `!`:
+                    both rules land at equal specificity, so class order in the
+                    attribute decides nothing and stylesheet order handed p-3 the
+                    win — a 48px box around a 24px icon (credit Mellow). `w-auto`
+                    already wins on its own and stays unmarked. */}
+                <PopoverContent
+                  side="bottom"
+                  align="end"
+                  sideOffset={4}
+                  aria-label={`Actions for ${entry.name}`}
+                  className="w-auto p-1!"
+                >
                   <button
                     type="button"
                     aria-label="Remove agent"
