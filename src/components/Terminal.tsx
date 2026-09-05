@@ -167,6 +167,13 @@ export function Terminal({ sessionId }: TerminalProps) {
       // bleeds into the next cell and the bleed survives as a stray fragment —
       // the orange leftovers seen after a resize.
       rescaleOverlappingGlyphs: true,
+      // Scroll on an erase-in-display, like VS Code
+      // (vscode:…/xterm/xtermTerminal.ts:270). `CSI 2 J` / `CSI 3 J` is what a
+      // TUI emits when it clears the screen; with this on, what was on screen is
+      // pushed into scrollback instead of being destroyed, so the transcript
+      // above a `clear` survives — and survives into the remount snapshot the
+      // serialize addon takes from that same scrollback.
+      scrollOnEraseInDisplay: true,
       // Answer the window-ops queries a real emulator answers
       // (vscode:…/xterm/xtermTerminal.ts:280-284 enables exactly these three).
       // A TUI that wants its pixel geometry asks CSI 14 t / 16 t / 18 t; with
