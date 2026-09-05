@@ -29,6 +29,27 @@ interface TerminalProps {
 // this feature. That loss IS the behavior keep-alive reverts to.
 const snapshots = new Map<string, { data: string; cols: number }>();
 
+// DEV-ONLY live-terminal registry for the GUI parity probe. The terminal defect
+// this lane chases only ever appears in the real app, so the human needs a way
+// to interrogate a live xterm from the devtools console:
+//
+//   [...window.__conclaveTerms.values()].map(t => t.modes.synchronizedOutputMode)
+//   [...window.__conclaveTerms.values()].forEach(t => t.clearTextureAtlas())
+//
+// Rows that heal on `clearTextureAtlas()` without new PTY output are a renderer
+// fault (H2); rows that stay are in the buffer (H1). `clearTextureAtlas` is what
+// VS Code's own forceRedraw calls
+// (vscode:src/vs/workbench/contrib/terminal/browser/xterm/xtermTerminal.ts:640-642).
+// Guarded by `import.meta.env.DEV`, so Vite tree-shakes the whole thing out of a
+// production build — the same pattern as `src/fixtures/`.
+const devTerms: Map<string, XtermTerminal> | undefined = import.meta.env.DEV
+  ? new Map<string, XtermTerminal>()
+  : undefined;
+if (import.meta.env.DEV && devTerms) {
+  (window as unknown as { __conclaveTerms: Map<string, XtermTerminal> }).__conclaveTerms =
+    devTerms;
+}
+
 /**
  * One live, INTERACTIVE xterm.js terminal bound to a single session.
  *
@@ -140,10 +161,19 @@ export function Terminal({ sessionId }: TerminalProps) {
       // Claude Code's frame is built from those (the box borders + the block
       // mascot), so this is what keeps them aligned. VS Code enables it too.
       const webgl = new WebglAddon({ customGlyphs: true });
-      webgl.onContextLoss(() => webgl.dispose());
+      // Mirror vscode:…/xtermTerminal.ts:941-944: a lost GPU context is a
+      // SILENT downgrade to the DOM renderer, and the DOM renderer is the one
+      // that strands stray cells on reflow. Say so, or a terminal that quietly
+      // fell back looks like a fresh xterm bug the next time it garbles.
+      webgl.onContextLoss((err) => {
+        console.warn("[terminal] webgl context lost, falling back to DOM renderer", err);
+        webgl.dispose();
+      });
       term.loadAddon(webgl);
-    } catch {
+    } catch (err) {
       // No WebGL in this webview — the DOM renderer stays active.
+      // Mirror vscode:…/xtermTerminal.ts:955-959.
+      console.warn("[terminal] webgl renderer unavailable, DOM fallback", err);
     }
 
     term.focus();
@@ -172,6 +202,7 @@ export function Terminal({ sessionId }: TerminalProps) {
     }
 
     termRef.current = term;
+    devTerms?.set(sessionId, term);
 
     // Fit the xterm grid to the container, then push the real (cols, rows) to
     // the PTY so a full-screen TUI lays out at the on-screen size instead of the
@@ -307,6 +338,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       el.removeEventListener("wheel", wheelHandler);
       dataSub.dispose();
       repushSizeRef.current = null;
+      devTerms?.delete(sessionId);
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
       // touch a disposed terminal.
       termRef.current = null;
