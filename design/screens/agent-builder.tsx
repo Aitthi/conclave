@@ -14,6 +14,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Terminal,
   X,
 } from "lucide-react";
 
@@ -84,11 +85,16 @@ export const meta = { title: "Agent Builder — New and Edit agent" };
   Toggle: w-9 h-5 rounded-full, knob 16px; on = bg-live, off = bg-overlay/20.
 
   ── Provider marks ───────────────────────────────────────────────────────────
-  The three geometric marks below are PLACEHOLDERS. Real logos land through
-  task provider-logos into design/assets/providers/<cliKind>.svg and are
-  inlined by the implementer into src/components/builder/providerLogos.tsx as
-  one map keyed by CliKind. The map carries five entries; only kinds present in
-  the CliKind union render as tiles. Artboard C draws the five-tile state so
+  PROVIDER_PATHS below carries the real 24x24 monochrome path data delivered by
+  task provider-logos (main 2060481, design/assets/providers/<cliKind>.svg,
+  sources MIT lobehub/lobe-icons and Apache-2.0 Untrivial-ai/agent-orchestrator,
+  nominative use only). Copy it verbatim into
+  src/components/builder/providerLogos.tsx as one map keyed by CliKind; do not
+  re-source or re-draw the marks. Muse Spark has NO vector: Detoro ruled a
+  lucide Terminal glyph stands in until Meta publishes one, and the reference
+  PNG is never embedded. Marks render at 16px in currentColor, so they follow
+  the tile's selected/idle colour with no per-brand hue. Only kinds present in
+  the CliKind union render as tiles; artboard C draws the five-tile target so
   the two-row grid is specified before opencode and Muse Spark ship.
 
   ── Copy strings, verbatim ───────────────────────────────────────────────────
@@ -208,36 +214,30 @@ const RUNTIMES: { kind: RuntimeKind; name: string; planned?: boolean }[] = [
   { kind: "muse-spark", name: "Muse Spark", planned: true },
 ];
 
+const PROVIDER_PATHS: Record<Exclude<RuntimeKind, "muse-spark">, string> = {
+  "claude-code":
+    "M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z",
+  codex:
+    "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z",
+  antigravity:
+    "M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z",
+  opencode: "M16 6H8v12h8V6zm4 16H4V2h16v20z",
+};
+
 function ProviderMark({ kind, className = "" }: { kind: RuntimeKind; className?: string }) {
-  const common = { viewBox: "0 0 16 16", className: `h-4 w-4 shrink-0 ${className}`, "aria-hidden": true } as const;
-  if (kind === "claude-code")
-    return (
-      <svg {...common} fill="currentColor">
-        <path d="M8 1.2 14.8 8 8 14.8 1.2 8 8 1.2Zm0 3.1L4.3 8 8 11.7 11.7 8 8 4.3Z" />
-      </svg>
-    );
-  if (kind === "codex")
-    return (
-      <svg {...common} fill="none" stroke="currentColor" strokeWidth="1.8">
-        <circle cx="8" cy="8" r="5.6" />
-        <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none" />
-      </svg>
-    );
-  if (kind === "antigravity")
-    return (
-      <svg {...common} fill="currentColor">
-        <path d="M8 1.6 15 14.4H1L8 1.6Zm0 4.2L4.6 12h6.8L8 5.8Z" />
-      </svg>
-    );
-  if (kind === "opencode")
-    return (
-      <svg {...common} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-        <path d="M6 3.2 2 8l4 4.8M10 3.2 14 8l-4 4.8" />
-      </svg>
-    );
+  // Muse Spark ships no vector (ruled 2026-09-05: lucide Terminal until Meta
+  // publishes one; the reference PNG is never embedded).
+  if (kind === "muse-spark") return <Terminal className={`h-4 w-4 shrink-0 ${className}`} aria-hidden="true" />;
   return (
-    <svg {...common} fill="currentColor">
-      <path d="M8 1.4 9.7 6.3 14.6 8 9.7 9.7 8 14.6 6.3 9.7 1.4 8l4.9-1.7L8 1.4Z" />
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      fillRule="evenodd"
+      clipRule="evenodd"
+      aria-hidden="true"
+      className={`h-4 w-4 shrink-0 ${className}`}
+    >
+      <path d={PROVIDER_PATHS[kind]} />
     </svg>
   );
 }
