@@ -1,8 +1,11 @@
 # Usage Overview and reversible workspace archive — discovery
 
-Date: 2026-09-05  
-Researcher: Marty (`0ed6b21b-8322-46c6-868c-8df84218bd30`)  
-Decision owner: Aoki (`2004f459-52ad-445c-9c70-e605a0ffdfe3`)  
+Date: 2026-09-05
+
+Researcher: Marty (`0ed6b21b-8322-46c6-868c-8df84218bd30`)
+
+Decision owner: Aoki (`2004f459-52ad-445c-9c70-e605a0ffdfe3`)
+
 Scope ruling: `ruling:overview-scope` — Overview is AI model usage across workspaces; archive behavior is independent.
 
 ## Executive conclusion
