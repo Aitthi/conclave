@@ -1,5 +1,6 @@
 .workspace-manager {
   --archive-danger-text: #b42318;
+  --workspace-tab-unselected: #646469;
   container-type: inline-size;
   position: relative;
   min-width: 0;
@@ -11,6 +12,7 @@
 
 .dark .workspace-manager {
   --archive-danger-text: #ff8a80;
+  --workspace-tab-unselected: var(--color-text-secondary);
 }
 
 .workspace-manager-navigation-error {
@@ -79,7 +81,7 @@
   border-radius: 7px;
   background: transparent;
   padding: 0 12px;
-  color: var(--color-text-secondary);
+  color: var(--workspace-tab-unselected);
   font-size: 12px;
 }
 
