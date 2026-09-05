@@ -340,11 +340,11 @@ try {
       x: Number(circle.getAttribute("cx")),
       y: Number(circle.getAttribute("cy")),
     }));
-    if (Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) > 5) break;
+    if (Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) > 20) break;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.ok(
-    Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) > 5,
+    Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) > 20,
     "node drag must move the selected node",
   );
 
