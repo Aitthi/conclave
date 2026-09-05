@@ -43,10 +43,11 @@ import { timeHint } from "../lib/timeHint";
    edge/label strokes ride `--color-overlay`, which inverts black↔white with the
    theme. */
 
-// Shared-protocol memories (sourceId null / unresolved) get macOS system purple
-// — the canon's `--color-a-violet` @ 73ac6fa. A literal hex (not a CSS var)
-// because the real app has no violet identity token and agent identity colours
-// are themselves theme-stable hex.
+// Shared-protocol memories and unresolved historical sources get macOS system
+// purple — the canon's `--color-a-violet` @ 73ac6fa. Historical sources retain
+// distinct labels/keys; only their missing identity colour falls back here. A
+// literal hex (not a CSS var) is used because the real app has no violet
+// identity token and agent identity colours are themselves theme-stable hex.
 const SHARED_COLOR = "#bf5af0";
 const SHARED_NAME = "Shared";
 
@@ -56,9 +57,10 @@ interface ViewNode {
   label: string; // first sentence of `text`, ≤64 chars
   body: string; // the full chunk text (detail card)
   color: string; // resolved hex — agent identity colour, or SHARED_COLOR
-  authorName: string; // resolved agent name, or "Shared"
+  authorName: string; // resolved agent, former-agent id hint, or "Shared"
   age: string; // relative, from createdAt
   sourceId: string | null;
+  groupKey: string;
 }
 
 // First sentence of a chunk, collapsed + capped at 64 — the store has no titles,
@@ -94,6 +96,11 @@ function seeded(seed: number) {
   };
 }
 
+// A deterministic unit direction for nodes that land on top of each other.
+// The old fallback used `i - j` while declaring the distance to be 1, so a
+// close pair could receive hundreds of times the configured repulsion along x.
+const COLLISION_ANGLE = 2.399963229728653;
+
 // One integration step of the hand-rolled force sim (repulsion + link springs +
 // centering). Mutates `ns` in place. Module-scope + pure so the same code both
 // pre-warms the layout synchronously and drives the live rAF loop. Unlike the
@@ -113,8 +120,10 @@ function tick(ns: Sim[], links: MemoryGraphEdge[], p: Params, alpha: number, hel
         dy = b.y - a.y,
         d2 = dx * dx + dy * dy;
       if (d2 < 1) {
+        const angle = (i * ns.length + j) * COLLISION_ANGLE;
+        dx = Math.cos(angle);
+        dy = Math.sin(angle);
         d2 = 1;
-        dx = i - j || 0.5;
       }
       const d = Math.sqrt(d2),
         f = (p.repel * alpha) / d2,
@@ -196,14 +205,17 @@ export function MemoryGraph({ workspaceId, workspaceName, onClose }: MemoryGraph
           }
           const view: ViewNode[] = graph.nodes.map((n: MemoryGraphNode) => {
             const who = n.sourceId ? identity.get(n.sourceId) : undefined;
+            const authorName =
+              who?.name ?? (n.sourceId ? `Former agent · ${n.sourceId.slice(0, 8)}` : SHARED_NAME);
             return {
               id: n.id,
               label: firstSentence(n.text),
               body: n.text,
               color: who?.color ?? SHARED_COLOR,
-              authorName: who?.name ?? SHARED_NAME,
+              authorName,
               age: timeHint(n.createdAt),
               sourceId: n.sourceId,
+              groupKey: n.sourceId ?? "__shared__",
             };
           });
           // Guard against an edge referencing a chunk that isn't in the node set
@@ -264,12 +276,20 @@ export function MemoryGraph({ workspaceId, workspaceName, onClose }: MemoryGraph
   // author groups for the legend — one bucket per resolved identity (Shared
   // folds every unauthored chunk together). Sorted by count desc for stability.
   const groups = useMemo(() => {
-    const m = new Map<string, { name: string; color: string; count: number }>();
+    const m = new Map<
+      string,
+      { key: string; name: string; color: string; count: number; sourceId: string | null }
+    >();
     for (const n of nodes) {
-      const key = n.sourceId ?? "__shared__";
-      const g = m.get(key) ?? { name: n.authorName, color: n.color, count: 0 };
+      const g = m.get(n.groupKey) ?? {
+        key: n.groupKey,
+        name: n.authorName,
+        color: n.color,
+        count: 0,
+        sourceId: n.sourceId,
+      };
       g.count += 1;
-      m.set(key, g);
+      m.set(n.groupKey, g);
     }
     return [...m.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }, [nodes]);
@@ -574,9 +594,10 @@ export function MemoryGraph({ workspaceId, workspaceName, onClose }: MemoryGraph
                 const op = nodeOpacity(n.id);
                 const isFocus = focus === n.id;
                 const isMatch = q ? matches(n.id) : false;
+                const isNeighbour = focus != null && adjacency[focus]?.has(n.id);
                 const showLabel =
                   op > 0.5 &&
-                  (view.k > 0.95 || isFocus || (focus != null && adjacency[focus]?.has(n.id)));
+                  (isFocus || isNeighbour || isMatch || (nodes.length <= 80 && view.k > 0.95));
                 return (
                   <g
                     key={n.id}
@@ -869,11 +890,14 @@ function ControlPanel({
   setQuery: (v: string) => void;
   forces: { center: number; repel: number; link: number; dist: number };
   setForces: (f: { center: number; repel: number; link: number; dist: number }) => void;
-  groups: { name: string; count: number; color: string }[];
+  groups: { key: string; name: string; count: number; color: string; sourceId: string | null }[];
 }) {
   const [open, setOpen] = useState<OpenState>({ filters: true, groups: true, forces: true });
   return (
-    <div className="absolute top-16 left-4 z-20" style={{ width: 236 }}>
+    <div
+      className="absolute top-16 left-4 z-20 overflow-y-auto overscroll-contain"
+      style={{ width: 236, maxHeight: "calc(100% - 80px)" }}
+    >
       <div
         className="rounded-xl overflow-hidden"
         style={{
@@ -917,7 +941,11 @@ function ControlPanel({
           ) : (
             <div className="flex flex-col gap-0.5">
               {groups.map((g) => (
-                <div key={g.name} className="flex items-center gap-2.5 px-1 py-1">
+                <div
+                  key={g.key}
+                  title={g.sourceId ?? undefined}
+                  className="flex items-center gap-2.5 px-1 py-1"
+                >
                   <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: g.color }} />
                   <span className="text-[0.74rem] flex-1 text-text-body">{g.name}</span>
                   <span className="font-mono tabular-nums text-text-tertiary text-[0.64rem]">{g.count}</span>
