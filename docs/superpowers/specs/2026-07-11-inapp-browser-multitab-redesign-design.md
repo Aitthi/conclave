@@ -24,12 +24,14 @@ The concrete problem being solved: today the in-app browser is a **singleton** n
 | D3 | **Vertical side rail (Arc-like) layout.** Tabs stacked on the left, each showing owner avatar/name + page title + status. | Surfaces "who owns this tab" — the defining element of per-agent tabs — and scales as agents come and go. |
 | D4a | **Tab count per owner:** human may open **multiple** manual tabs; **each agent gets exactly one** tab, reused on re-navigation (v1). | Keeps the `conclave browser` CLI contract simple ("my tab"). YAGNI on multi-tab-per-agent. |
 | D4b | **Agent-tab lifecycle:** when an agent finishes/dies, its tab **persists as read-only with an "ended" badge** until the human closes it. | Lets the human review what an agent browsed after the fact; nothing vanishes. |
+| D2-amend (2026-09-05, Detoro, human request) | **The human may force-close a LIVE agent tab.** Read-only still means no navigation/driving; it no longer means un-closable. Closing destroys the webview; the agent's next `browser open/goto` recreates its tab through the existing upsert path, and any other verb on the gone tab returns the existing "no webview for tab" error. | Agents never call `browser close`, so live tabs accumulate until RAM is exhausted (human report 2026-09-05). Viewing stays read-only; reclaiming memory is the human's call. |
 
 ## 3. Rejected alternatives
 
 - **iframe-based tabs (trivial in React DOM).** ❌ The in-app browser is driven by agents through `conclave browser` (eval/click/snapshot). A cross-origin iframe cannot be scripted, which breaks agent driving. Native webview is required, not a choice.
 - **One native webview, swap URL on tab switch.** ❌ Switching would reload the page (losing scroll/JS state) and, fatally, an agent's tab could not keep running in the background while another tab is active. This fails D1's "agents don't collide / run concurrently."
 - **Human can take over / drive an agent's tab.** ❌ Rejected at D2 — risks disrupting an agent mid-task.
+- **Human cannot close a live agent tab (original D2 reading).** ❌ Superseded by D2-amend 2026-09-05 — un-closable tabs leaked memory in practice.
 - **Auto-close an agent's tab when it finishes.** ❌ Rejected at D4b — the human loses the ability to review.
 - **LRU eviction of idle webviews.** Deferred to v2 (see §9 risk ledger). v1 keeps all live tabs; note the memory cost.
 
