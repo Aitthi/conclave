@@ -29,6 +29,27 @@ interface TerminalProps {
 // this feature. That loss IS the behavior keep-alive reverts to.
 const snapshots = new Map<string, { data: string; cols: number }>();
 
+// DEV-ONLY live-terminal registry for the GUI parity probe. The terminal defect
+// this lane chases only ever appears in the real app, so the human needs a way
+// to interrogate a live xterm from the devtools console:
+//
+//   [...window.__conclaveTerms.values()].map(t => t.modes.synchronizedOutputMode)
+//   [...window.__conclaveTerms.values()].forEach(t => t.clearTextureAtlas())
+//
+// Rows that heal on `clearTextureAtlas()` without new PTY output are a renderer
+// fault (H2); rows that stay are in the buffer (H1). `clearTextureAtlas` is what
+// VS Code's own forceRedraw calls
+// (vscode:src/vs/workbench/contrib/terminal/browser/xterm/xtermTerminal.ts:640-642).
+// Guarded by `import.meta.env.DEV`, so Vite tree-shakes the whole thing out of a
+// production build — the same pattern as `src/fixtures/`.
+const devTerms: Map<string, XtermTerminal> | undefined = import.meta.env.DEV
+  ? new Map<string, XtermTerminal>()
+  : undefined;
+if (import.meta.env.DEV && devTerms) {
+  (window as unknown as { __conclaveTerms: Map<string, XtermTerminal> }).__conclaveTerms =
+    devTerms;
+}
+
 /**
  * One live, INTERACTIVE xterm.js terminal bound to a single session.
  *
@@ -63,13 +84,51 @@ export function Terminal({ sessionId }: TerminalProps) {
   // clobber the snapshot on the first (immediate, output-free) cleanup; (b) a
   // fast tab flip before any output arrives. Reset to false on each mount.
   const receivedOutputRef = useRef(false);
+  // Output that arrived before this mount's xterm had its real size. Non-null
+  // means "queue, do not write yet" (see the first-sizing block in the effect);
+  // null means the grid is sized and writes go straight through.
+  const pendingRef = useRef<string[] | null>(null);
+  // Tail of the stdin chain — see `sendStdin`.
+  const stdinChainRef = useRef<Promise<void>>(Promise.resolve());
+
+  /**
+   * Write to the session's PTY stdin, preserving EMISSION ORDER.
+   *
+   * `ipc.message.send` is a Tauri invoke that resolves a session from the DB
+   * and runs two eligibility checks before it ever reaches `send_stdin`, so two
+   * sends fired back-to-back can reach the PTY in either order. That is not
+   * merely a typing-order nicety: xterm answers a terminal query burst — the
+   * XTVERSION report and the DA1 barrier that follows it — from ONE parse pass,
+   * as two `onData` calls in the same tick. If the DA1 reply overtakes the
+   * XTVERSION reply, Claude Code concludes there was no XTVERSION reply at all,
+   * skips its DECRQM(2026) check and runs the WHOLE session without
+   * synchronized output, so every multi-chunk frame can be shown mid-patch
+   * (audit §3 H3, rows 12-13).
+   *
+   * Chaining every write through one promise is VS Code's shape: `_handleOnData`
+   * awaits `_processManager.write` (vscode:…/browser/terminalInstance.ts:676-679
+   * → terminalProcessManager.ts:651-665), one ordered channel for keystrokes,
+   * replies and pasted text alike. The chain never rejects — a failed send is
+   * swallowed, exactly as before, so one dead invoke cannot wedge the rest.
+   */
+  const sendStdin = (text: string) => {
+    stdinChainRef.current = stdinChainRef.current
+      .then(() => ipc.message.send({ sessionId, text }))
+      .then(
+        () => {},
+        () => {
+          // Session not running / backend gone — the output stream will surface
+          // the state; dropping the write is the right behavior. Swallowed here
+          // so the next link still runs.
+        },
+      );
+  };
 
   // Drag a file onto the terminal → type its shell-quoted path into the PTY at
   // the cursor (no submit), exactly like dropping a file into a real terminal.
   // Written straight to stdin via message.send; the running TUI echoes it.
   const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
-    const insert = paths.map(shellQuotePath).join(" ") + " ";
-    void ipc.message.send({ sessionId, text: insert }).catch(() => {});
+    sendStdin(paths.map(shellQuotePath).join(" ") + " ");
   });
 
   useEffect(() => {
@@ -83,7 +142,16 @@ export function Terminal({ sessionId }: TerminalProps) {
     const isRemount = getTermTabMode() === "remount";
 
     const term = new XtermTerminal({
-      convertEol: true,
+      // NO `convertEol`. VS Code does not set it either
+      // (vscode:src/vs/workbench/contrib/terminal/browser/xterm/xtermTerminal.ts:241-285)
+      // and on our PTY it can only ever be a no-op or a hazard: the master keeps
+      // `opost onlcr` on for the whole child lifetime (verified with
+      // `stty -a -f /dev/ttysN` on a live Conclave-spawned `claude`, audit §0 F1),
+      // so every `\n` the child writes already reaches xterm as `\r\n`.
+      // `convertEol` only forces `x = 0` on an LF that was NOT preceded by a CR
+      // (@xterm/xterm InputHandler.ts, `lineFeed`), which never happens here —
+      // except for a child that deliberately disables ONLCR, where it would
+      // silently rewrite that child's intended cursor column.
       fontSize: 12,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: { background: "#1e1e1e", foreground: "#e5e5e5" },
@@ -99,6 +167,24 @@ export function Terminal({ sessionId }: TerminalProps) {
       // bleeds into the next cell and the bleed survives as a stray fragment —
       // the orange leftovers seen after a resize.
       rescaleOverlappingGlyphs: true,
+      // Scroll on an erase-in-display, like VS Code
+      // (vscode:…/xterm/xtermTerminal.ts:270). `CSI 2 J` / `CSI 3 J` is what a
+      // TUI emits when it clears the screen; with this on, what was on screen is
+      // pushed into scrollback instead of being destroyed, so the transcript
+      // above a `clear` survives — and survives into the remount snapshot the
+      // serialize addon takes from that same scrollback.
+      scrollOnEraseInDisplay: true,
+      // Answer the window-ops queries a real emulator answers
+      // (vscode:…/xterm/xtermTerminal.ts:280-284 enables exactly these three).
+      // A TUI that wants its pixel geometry asks CSI 14 t / 16 t / 18 t; with
+      // these off xterm stays silent and the child is left guessing — or
+      // waiting. Only the read-only "report" ops are enabled: nothing here lets
+      // a child move or resize our window.
+      windowOptions: {
+        getWinSizePixels: true,
+        getCellSizePixels: true,
+        getWinSizeChars: true,
+      },
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -131,13 +217,97 @@ export function Terminal({ sessionId }: TerminalProps) {
       // Claude Code's frame is built from those (the box borders + the block
       // mascot), so this is what keeps them aligned. VS Code enables it too.
       const webgl = new WebglAddon({ customGlyphs: true });
-      webgl.onContextLoss(() => webgl.dispose());
+      // Mirror vscode:…/xtermTerminal.ts:941-944: a lost GPU context is a
+      // SILENT downgrade to the DOM renderer, and the DOM renderer is the one
+      // that strands stray cells on reflow. Say so, or a terminal that quietly
+      // fell back looks like a fresh xterm bug the next time it garbles.
+      webgl.onContextLoss((err) => {
+        console.warn("[terminal] webgl context lost, falling back to DOM renderer", err);
+        webgl.dispose();
+      });
       term.loadAddon(webgl);
-    } catch {
+    } catch (err) {
       // No WebGL in this webview — the DOM renderer stays active.
+      // Mirror vscode:…/xtermTerminal.ts:955-959.
+      console.warn("[terminal] webgl renderer unavailable, DOM fallback", err);
     }
 
     term.focus();
+
+    // ── First sizing, SYNCHRONOUSLY, before anything is written ─────────────
+    // VS Code constructs its xterm already at the right size (it passes
+    // cols/rows to the constructor, vscode:…/xterm/xtermTerminal.ts:243-244), so
+    // no byte is ever parsed against a grid the PTY does not have. We only learn
+    // our size from the DOM, so we do the equivalent: fit here, before the
+    // snapshot restore and before `termRef` starts accepting live output.
+    //
+    // Why it matters: Claude Code positions every patch RELATIVE to its own
+    // idea of the cursor and never asks the terminal where the cursor is (audit
+    // S13). It used to be ~200 ms before we fitted, so a fresh mount parsed a
+    // real 153x55 frame into an 80x24 grid; every wrapped row landed somewhere
+    // the child did not intend, and from then on relative moves whose target
+    // column already matched the believed column emitted no horizontal move and
+    // landed at column 0 — the col-0 rows in the reported screenshot (audit §3
+    // H1). Fitting after the WebGL addon is loaded is deliberate: the GPU
+    // renderer's cell metrics differ from the DOM renderer's, which is why VS
+    // Code refreshes dimensions right after loading it (xtermTerminal.ts:947).
+    let firstFitDone = false;
+    const tryFit = (): boolean => {
+      // A hidden tab (display:none) has no used layout: getBoundingClientRect
+      // reads the USED width, which is genuinely 0 there — unlike FitAddon's
+      // proposeDimensions, which reads getComputedStyle, sees the COMPUTED
+      // '100%', parseInt's it and gets 100(px). That misread never rounds down
+      // to 0 cols, so it would slip past the cols/rows===0 guard and push a
+      // bogus ~11-col resize to the live PTY every time a tab is switched away
+      // from — the child then rewraps its transcript at 11 cols and pollutes
+      // scrollback permanently. Bail before fit() ever runs.
+      if (el.getBoundingClientRect().width === 0) return false;
+      try {
+        fitAddon.fit();
+      } catch {
+        // fit() can throw if the element is detached mid-teardown — ignore.
+        return false;
+      }
+      // An element detached mid-teardown fits to 0 — never treat that as sized.
+      if (term.cols === 0 || term.rows === 0) return false;
+      firstFitDone = true;
+      return true;
+    };
+    tryFit();
+
+    // The pane's pixel size, as VS Code reports it: xterm's own CANVAS
+    // dimensions, not the container's bounding box
+    // (vscode:…/browser/terminalInstance.ts:2095-2104 reads
+    // `rawXterm.dimensions?.css.canvas` and rounds). The container is the wrong
+    // source — its width includes the sub-cell remainder the grid does not
+    // cover, so a child dividing pixel_width by cols would derive a cell width
+    // that is slightly too large. Undefined before the first render, in which
+    // case we send nothing and the PTY keeps reporting 0.
+    const pixelDims = (): { pixelWidth?: number; pixelHeight?: number } => {
+      const canvas = term.dimensions?.css.canvas;
+      if (!canvas) return {};
+      return {
+        pixelWidth: Math.round(canvas.width),
+        pixelHeight: Math.round(canvas.height),
+      };
+    };
+
+    // If we could NOT size yet (hidden container), hold live output instead of
+    // writing it into the 80x24 default — mirror of VS Code's `_initialDataEvents`
+    // queue (vscode:…/browser/terminalInstance.ts:1586), which buffers everything
+    // the process emits until the terminal is attached and replays it in order.
+    // Nothing can arrive during this synchronous effect body, so the queue is
+    // only ever armed for the deferred path below.
+    pendingRef.current = firstFitDone ? null : [];
+    const flushPending = () => {
+      const queued = pendingRef.current;
+      if (!queued) return;
+      // Null FIRST: a write below can re-enter through xterm's parser and must
+      // find the queue already drained, never append to a list being iterated.
+      pendingRef.current = null;
+      if (queued.length > 0) receivedOutputRef.current = true;
+      for (const chunk of queued) term.write(chunk);
+    };
 
     // Restore the pre-remount buffer (remount tab mode) synchronously, BEFORE
     // termRef is set below — so a late useSessionOutput event can never land
@@ -151,10 +321,10 @@ export function Terminal({ sessionId }: TerminalProps) {
       // Explicit SGR reset — serialize output is not guaranteed to end reset, so
       // clear any lingering attributes before the divider and the live frame.
       term.write("\x1b[0m\r\n");
-      // Dim, full-width divider at the SAVED cols. The snapshot content is
-      // hard-wrapped at the width it originated from (fit() has not run yet on
-      // this fresh mount — term.cols is still the 80 default), so sizing the
-      // divider to snap.cols keeps it flush with the restored lines.
+      // Dim, full-width divider at the SAVED cols, NOT at term.cols: the
+      // snapshot content is hard-wrapped at the width it was serialized at, so
+      // sizing the divider to snap.cols is what keeps it flush with the restored
+      // lines even when this mount fitted to a different width just above.
       const label = "─── earlier output ───";
       const pad = Math.max(0, snap.cols - label.length);
       const left = Math.floor(pad / 2);
@@ -163,10 +333,13 @@ export function Terminal({ sessionId }: TerminalProps) {
     }
 
     termRef.current = term;
+    devTerms?.set(sessionId, term);
 
-    // Fit the xterm grid to the container, then push the real (cols, rows) to
-    // the PTY so a full-screen TUI lays out at the on-screen size instead of the
-    // 80×24 default. Best-effort + deduped (skip if unchanged).
+    // Push the fitted (cols, rows) to the PTY so a full-screen TUI lays out at
+    // the on-screen size instead of the 80×24 default. Best-effort + deduped
+    // (skip if unchanged). xterm's OWN grid is already sized synchronously
+    // above; what stays deferred here is only the PTY side — the SIGWINCH and
+    // the child's repaint.
     //
     // DEBOUNCED: a window drag-resize or zoom fires the ResizeObserver many
     // times in quick succession. Coalescing the gesture into one settle-time
@@ -187,57 +360,61 @@ export function Terminal({ sessionId }: TerminalProps) {
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     let jiggleTimer: ReturnType<typeof setTimeout> | undefined;
     const applyResize = () => {
-      // A hidden tab (display:none) has no used layout: getBoundingClientRect
-      // reads the USED width, which is genuinely 0 there — unlike FitAddon's
-      // proposeDimensions, which reads getComputedStyle and sees the COMPUTED
-      // value '100%', parses it with parseInt, and gets 100(px). That misread
-      // 100px never rounds down to 0 cols, so it slips past the cols/rows===0
-      // guard below and pushes a bogus ~11-col resize to the live PTY every
-      // time a tab is switched away from — the child then rewraps its
-      // transcript at 11 cols and pollutes scrollback permanently. Bail here,
-      // before fit() ever runs, so `firstSizing` stays unconsumed and the
-      // unhide path re-runs the normal 0 → real jiggle.
-      if (el.getBoundingClientRect().width === 0) return;
-      try {
-        fitAddon.fit();
-      } catch {
-        // fit() can throw if the element is detached mid-teardown — ignore.
-        return;
-      }
+      // `tryFit` carries the hidden-tab / detached-element guards: on a false
+      // return `firstSizing` stays unconsumed, so the unhide path still runs the
+      // normal 0 → real jiggle, and no zero-dimension resize reaches the PTY.
+      if (!tryFit()) return;
+      // The grid is now correct — anything held back can be replayed in order.
+      flushPending();
       const { cols, rows } = term;
-      // An element detached mid-teardown fits to 0 — never push a
-      // zero-dimension resize to the PTY (it would wedge the child's layout).
-      if (cols === 0 || rows === 0) return;
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
 
       const isFirst = firstSizing;
       firstSizing = false;
-      // Real resize (or a degenerate 1-row pane): one resize, natural SIGWINCH.
+      // Real resize (or a degenerate 1-row pane): xterm is already at (cols,
+      // rows) from the fit above, so one PTY push completes the pair and its
+      // genuine size change raises SIGWINCH on its own.
       if (!isFirst || rows <= 1) {
-        void ipc.session.resize({ sessionId, cols, rows }).catch(() => {});
+        void ipc.session
+          .resize({ sessionId, cols, rows, ...pixelDims() })
+          .catch(() => {});
         return;
       }
       // Mount: jiggle so the child repaints even if the persistent PTY already
       // has this size. `rows - 1` then `rows`, with a gap so the two SIGWINCHs
       // aren't coalesced into one.
-      void ipc.session.resize({ sessionId, cols, rows: rows - 1 }).catch(() => {});
+      //
+      // BOTH SIDES MOVE TOGETHER. VS Code's contract is that xterm and the PTY
+      // are always resized as one step — `xterm.resize(cols, rows)` immediately
+      // followed by the pty dimension update
+      // (vscode:…/browser/terminalInstance.ts:830-831); it never jiggles at all.
+      // We still have to, because our PTY outlives the component and an
+      // unchanged resize raises no SIGWINCH. But pushing `rows - 1` to the PTY
+      // while xterm stayed at `rows` opened exactly the grid disagreement F5
+      // closes at mount: the child re-laid its frame for `rows - 1` and we
+      // parsed it into a `rows` grid, desyncing its relative-move cursor model
+      // (audit §3 H1, rows 9/10). So each leg resizes xterm first, then the PTY.
+      term.resize(cols, rows - 1);
+      void ipc.session
+        .resize({ sessionId, cols, rows: rows - 1, ...pixelDims() })
+        .catch(() => {});
       clearTimeout(jiggleTimer);
       jiggleTimer = setTimeout(() => {
-        void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
+        term.resize(cols, rows);
+        void ipc.session.resize({ sessionId, cols, rows, ...pixelDims() }).catch(() => {
           // Session not running yet / no PTY — harmless.
         });
       }, 60);
     };
-    // Forward every keystroke (raw, including control sequences) to the PTY
-    // stdin. `sessionId` is stable for this mount (the component is keyed by it),
-    // so capturing it here is safe.
+    // Forward every keystroke (raw, including control sequences) AND every
+    // terminal-query reply xterm generates to the PTY stdin, through the single
+    // ordered channel (`sendStdin`) — the replies xterm emits in one parse pass
+    // must reach the child in the order it emitted them. `sessionId` is stable
+    // for this mount (the component is keyed by it), so capturing it is safe.
     const dataSub = term.onData((data) => {
-      void ipc.message.send({ sessionId, text: data }).catch(() => {
-        // Session not running / backend gone — the output stream will surface
-        // the state; dropping the keystroke is the right behavior.
-      });
+      sendStdin(data);
     });
 
     // Mouse-wheel scrolling for full-screen TUIs. The "alternate" screen buffer
@@ -253,7 +430,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       if (term.modes.mouseTrackingMode !== "none") return;
       e.preventDefault();
       const seq = e.deltaY < 0 ? "\x1b[A" : "\x1b[B"; // arrow up / down
-      void ipc.message.send({ sessionId, text: seq.repeat(3) }).catch(() => {});
+      sendStdin(seq.repeat(3));
     };
     el.addEventListener("wheel", wheelHandler, { passive: false });
 
@@ -264,18 +441,25 @@ export function Terminal({ sessionId }: TerminalProps) {
       resizeTimer = setTimeout(applyResize, 120);
     });
 
-    // Defer the first sizing+jiggle a beat, THEN start observing. The
+    // Defer the first PTY resize + jiggle a beat, THEN start observing. The
     // session-output listener (useSessionOutput) registers via Tauri's ASYNC
     // `listen()`, so on a page reload — where the PTY and its already-painted
     // frame persist — firing the jiggle synchronously makes the child repaint
     // before the listener is in place; that frame reaches no one and the pane
     // stays black until a manual resize. Waiting lets the listener attach first,
-    // so the forced repaint is actually received (the buffer is empty/black
-    // until then anyway, so this delay is invisible). We only `observe()` after
-    // the initial sizing so the observer's own first callback can't pre-empt the
-    // deferred jiggle. Cleared on teardown.
+    // so the forced repaint is actually received. This delay no longer costs
+    // correctness: xterm was fitted synchronously at mount, so any frame that
+    // arrives during it is parsed against the RIGHT grid. We only `observe()`
+    // after the initial sizing so the observer's own first callback can't
+    // pre-empt the deferred jiggle. Cleared on teardown.
     const initialTimer = setTimeout(() => {
       applyResize();
+      // Last resort: the pane may STILL be hidden (keep-alive tab mode), and
+      // holding output for an unbounded time would grow without limit and leave
+      // the tab black on unhide. Writing it into the default grid is exactly
+      // what happened before this queue existed, and the unhide path's 0 → real
+      // jiggle repaints over it — so the queue is bounded at ~200 ms of output.
+      flushPending();
       observer.observe(el);
     }, 200);
 
@@ -298,6 +482,11 @@ export function Terminal({ sessionId }: TerminalProps) {
       el.removeEventListener("wheel", wheelHandler);
       dataSub.dispose();
       repushSizeRef.current = null;
+      devTerms?.delete(sessionId);
+      // Drop anything still queued — this terminal is about to be disposed, and
+      // a late event must fall through to the null `termRef` instead of piling
+      // onto a queue nobody will flush.
+      pendingRef.current = null;
       // Null the ref BEFORE dispose so a late useSessionOutput write can't
       // touch a disposed terminal.
       termRef.current = null;
@@ -331,6 +520,15 @@ export function Terminal({ sessionId }: TerminalProps) {
   // Stream output chunks for this session into the terminal. The hook already
   // filters by sessionId, so we write every delivered chunk verbatim.
   useSessionOutput(sessionId, (e) => {
+    // Queued while this mount's xterm still has no real size: writing a frame
+    // into the 80x24 default desyncs the child's relative-move cursor model for
+    // the rest of the session (audit §3 H1). `flushPending` replays these in
+    // arrival order the moment the first fit succeeds.
+    const pending = pendingRef.current;
+    if (pending) {
+      pending.push(e.chunk);
+      return;
+    }
     receivedOutputRef.current = true;
     termRef.current?.write(e.chunk);
   });

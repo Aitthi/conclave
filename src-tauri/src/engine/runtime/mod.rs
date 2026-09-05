@@ -104,10 +104,12 @@ pub struct LiveHandle {
     /// Teardown closure run exactly once on `unregister` / `Drop`. Kills the
     /// child / aborts the backend task and drops any owned channels.
     shutdown: Box<dyn FnOnce() + Send>,
-    /// Resize the backing PTY to `(cols, rows)`. A no-op for backends without a
-    /// PTY (chat / placeholder). Built in `pty.rs` so this module stays free of
-    /// any `portable-pty` dependency (mirrors `shutdown`).
-    resize: Box<dyn Fn(u16, u16) + Send>,
+    /// Resize the backing PTY to `(cols, rows)` plus the pane's `(pixel_width,
+    /// pixel_height)`. A no-op for backends without a PTY (chat / placeholder).
+    /// Built in `pty.rs` so this module stays free of any `portable-pty`
+    /// dependency (mirrors `shutdown`). Pixels are `0` when the caller has none;
+    /// that is what every emulator reports when it cannot measure the pane.
+    resize: Box<dyn Fn(u16, u16, u16, u16) + Send>,
     /// `true` when stdin is a terminal that parses the bracketed-paste
     /// envelope (`ESC[200~ … ESC[201~`): CLI TUIs behind a PTY. [`Runtime::
     /// send_stdin_paste`] wraps text-shaped writes only when this is set — a
@@ -146,7 +148,7 @@ impl LiveHandle {
             epoch: 0,
             stdin_tx,
             shutdown: Box::new(move || abort.abort()),
-            resize: Box::new(|_, _| {}),
+            resize: Box::new(|_, _, _, _| {}),
             bracketed_paste: false,
         }
     }
@@ -184,7 +186,7 @@ impl LiveHandle {
                 epoch: 0,
                 stdin_tx,
                 shutdown: Box::new(|| {}),
-                resize: Box::new(|_, _| {}),
+                resize: Box::new(|_, _, _, _| {}),
                 bracketed_paste,
             },
             rx,
@@ -446,18 +448,27 @@ impl Runtime {
             .map_err(|_| StdinError::Closed)
     }
 
-    /// Resize the live session's PTY to `(cols, rows)`. A no-op for backends
-    /// without a PTY (chat / placeholder). Returns [`StdinError::NotLive`] if
-    /// the instance is not registered. The resize runs under the registry lock,
-    /// which is fine — `MasterPty::resize` is a fast, non-blocking ioctl.
-    pub fn resize(&self, instance_id: &str, cols: u16, rows: u16) -> Result<(), StdinError> {
+    /// Resize the live session's PTY to `(cols, rows)`, also reporting the
+    /// pane's pixel size (`0, 0` when the caller cannot measure it). A no-op for
+    /// backends without a PTY (chat / placeholder). Returns
+    /// [`StdinError::NotLive`] if the instance is not registered. The resize
+    /// runs under the registry lock, which is fine — `MasterPty::resize` is a
+    /// fast, non-blocking ioctl.
+    pub fn resize(
+        &self,
+        instance_id: &str,
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), StdinError> {
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let handle = guard.get(instance_id).ok_or(StdinError::NotLive)?;
         // Arm the echo-suppression horizon: a resize raises SIGWINCH, which is
         // exactly the mount-jiggle / real-resize repaint that must not read as
         // activity (the proven root cause — see ECHO_SUPPRESS_MS's doc comment).
         self.arm_echo_suppress(instance_id);
-        (handle.resize)(cols, rows);
+        (handle.resize)(cols, rows, pixel_width, pixel_height);
         Ok(())
     }
 }
@@ -740,7 +751,7 @@ mod tests {
         rt.register("inst-1", LiveHandle::placeholder("sess-1"))
             .expect("register");
 
-        rt.resize("inst-1", 80, 24).expect("resize");
+        rt.resize("inst-1", 80, 24, 0, 0).expect("resize");
         assert!(
             !rt.mark_activity_gated("inst-1"),
             "a repaint chunk immediately after resize must be suppressed"

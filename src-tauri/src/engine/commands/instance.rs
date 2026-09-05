@@ -92,6 +92,43 @@ fn append_codex_context_window_config(launch: &mut String, model: Option<&str>) 
 /// window (`runtime::transcript_context`) still takes precedence over this
 /// fallback once a real reading lands — this only seeds the meter before
 /// that happens.
+/// The env pairs Conclave itself contributes to a CLI child, in order, before
+/// the agent's own `custom_env` / Keychain overrides are appended.
+///
+/// Extracted from the spawn path so the rules below are testable without a PTY,
+/// a workspace row or the Keychain — `agent_env_overrides` deliberately stays
+/// out of it, because it reads secrets.
+///
+/// - `CONCLAVE_WORKSPACE_ID` / `CONCLAVE_INSTANCE_ID`: identity the `conclave`
+///   CLI reads. `CONCLAVE_INSTANCE_ID` is the sender `conclave tell` fills in
+///   (the server then tags the message `[from <name>]`); the workspace id saves
+///   the agent repeating it on every call.
+/// - `CLAUDE_CODE_FORCE_SYNC_OUTPUT`, **`claude-code` only**: Claude Code turns
+///   synchronized output (DECSET 2026) on at startup for a `TERM_PROGRAM`
+///   allowlist (iTerm.app, WezTerm, vscode, ghostty, …) that we are deliberately
+///   not on. Every other emulator gets a runtime probe — XTVERSION, a DA1
+///   barrier, then DECRQM(2026) — whose replies travel back over our
+///   per-keystroke IPC path. If DA1 overtakes XTVERSION, the CLI records "no
+///   XTVERSION reply", skips DECRQM, and paints the WHOLE session
+///   unsynchronized, so any multi-chunk frame can be shown mid-patch (audit §3
+///   H3, snippet S1). Forcing the flag makes the outcome independent of that
+///   race. It is meaningless to other harnesses, and faking a known
+///   `TERM_PROGRAM` to reach the allowlist is explicitly NOT the fix.
+fn conclave_spawn_env(
+    workspace_id: &str,
+    instance_id: &str,
+    cli_kind: &str,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("CONCLAVE_WORKSPACE_ID".to_string(), workspace_id.to_owned()),
+        ("CONCLAVE_INSTANCE_ID".to_string(), instance_id.to_owned()),
+    ];
+    if cli_kind == "claude-code" {
+        env.push(("CLAUDE_CODE_FORCE_SYNC_OUTPUT".to_string(), "1".to_string()));
+    }
+    env
+}
+
 fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Option<i64>) -> i64 {
     if cli_kind == "codex" {
         return crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
@@ -1107,14 +1144,10 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             // there is no path to point at).
             launch = prefix_conclave_path_with(launch, conclave_bin.as_deref());
 
-            // Env overrides: non-secret vars from the DB JSON object + secret
-            // values fetched back from the Keychain by their recorded names.
-            let mut extra_env: Vec<(String, String)> = Vec::new();
-            // Identity the conclave CLI reads: CONCLAVE_INSTANCE_ID is the sender
-            // `conclave tell` fills in (server then tags the message [from <name>]);
-            // CONCLAVE_WORKSPACE_ID saves the agent repeating its id on every call.
-            extra_env.push(("CONCLAVE_WORKSPACE_ID".to_string(), ws.id.clone()));
-            extra_env.push(("CONCLAVE_INSTANCE_ID".to_string(), id.clone()));
+            // Env Conclave itself contributes, then the agent's own overrides:
+            // non-secret vars from the DB JSON object + secret values fetched
+            // back from the Keychain by their recorded names.
+            let mut extra_env = conclave_spawn_env(&ws.id, &id, &cli_kind);
             extra_env.extend(agent_env_overrides(&def));
             // Launch the CLI INSIDE the user's login + interactive shell, the way
             // VS Code's integrated terminal does (it spawns the shell, not the
@@ -2105,14 +2138,26 @@ struct ResizeReq {
     session_id: String,
     cols: u16,
     rows: u16,
+    /// Pane size in pixels (`ws_xpixel`/`ws_ypixel`). `#[serde(default)]` — an
+    /// older frontend, or any caller that cannot measure the pane, simply omits
+    /// them and the PTY reports 0, exactly as it always did.
+    #[serde(default)]
+    pixel_width: u16,
+    #[serde(default)]
+    pixel_height: u16,
 }
 
 /// Resize a live CLI session's PTY to match the frontend xterm `(cols, rows)`.
 ///
-/// Payload `{ sessionId, cols, rows }`. Resolves the session to its owning
-/// instance and forwards the size to the PTY so a full-screen TUI lays out at
-/// the real on-screen size. Best-effort: a no-op (`null`) when the session
-/// isn't running or has no PTY (chat), or when the size is degenerate.
+/// Payload `{ sessionId, cols, rows, pixelWidth?, pixelHeight? }`. Resolves the
+/// session to its owning instance and forwards the size to the PTY so a
+/// full-screen TUI lays out at the real on-screen size. The pixel pair is the
+/// other half of the same TIOCSWINSZ and is what lets a child derive its cell
+/// size and answer window-ops queries (mirrors
+/// `vscode:…/browser/terminalInstance.ts:2095-2104`). Best-effort: a no-op
+/// (`null`) when the session isn't running or has no PTY (chat), or when the
+/// CELL size is degenerate — a pane that measures 0 pixels but real cells is
+/// still a valid resize, so only cols/rows gate it.
 pub async fn resize(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req: ResizeReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -2127,9 +2172,13 @@ pub async fn resize(state: &AppState, payload: Value) -> Result<Value, AppError>
         .ok_or_else(|| AppError::NotFound(format!("session id={} not found", req.session_id)))?;
 
     // Not-live just means there's no PTY to resize yet — best-effort.
-    let _ = state
-        .runtime
-        .resize(&session.workspace_agent_id, req.cols, req.rows);
+    let _ = state.runtime.resize(
+        &session.workspace_agent_id,
+        req.cols,
+        req.rows,
+        req.pixel_width,
+        req.pixel_height,
+    );
 
     Ok(Value::Null)
 }
@@ -2253,6 +2302,52 @@ mod tests {
             !launch.contains("model_auto_compact_token_limit"),
             "{launch}"
         );
+    }
+
+    /// F3: synchronized output is forced for Claude Code and for NOTHING else.
+    ///
+    /// Claude Code enables DECSET 2026 at startup only for a `TERM_PROGRAM`
+    /// allowlist we deliberately do not join (we advertise `Conclave`), so
+    /// without this variable the session depends on a probe whose replies race
+    /// on our IPC path (audit §3 H3). The negative half matters as much as the
+    /// positive one: the flag is meaningless to other harnesses, and setting it
+    /// for them would be lying to a CLI about what it supports.
+    #[test]
+    fn conclave_spawn_env_forces_sync_output_for_claude_code_only() {
+        let sync = ("CLAUDE_CODE_FORCE_SYNC_OUTPUT".to_string(), "1".to_string());
+
+        let claude = conclave_spawn_env("ws-1", "inst-1", "claude-code");
+        assert!(
+            claude.contains(&sync),
+            "claude-code must get CLAUDE_CODE_FORCE_SYNC_OUTPUT=1, got: {claude:?}"
+        );
+
+        for other in ["codex", "antigravity", "custom", ""] {
+            let env = conclave_spawn_env("ws-1", "inst-1", other);
+            assert!(
+                !env.iter()
+                    .any(|(k, _)| k == "CLAUDE_CODE_FORCE_SYNC_OUTPUT"),
+                "cliKind={other:?} must NOT get CLAUDE_CODE_FORCE_SYNC_OUTPUT, got: {env:?}"
+            );
+        }
+    }
+
+    /// The identity pair the `conclave` CLI reads goes to every CLI kind, and
+    /// carries the ids it was called with — a swap here would make `conclave
+    /// tell` attribute messages to the wrong agent.
+    #[test]
+    fn conclave_spawn_env_always_carries_identity() {
+        for kind in ["claude-code", "codex", "antigravity", "custom"] {
+            let env = conclave_spawn_env("ws-42", "inst-7", kind);
+            assert!(
+                env.contains(&("CONCLAVE_WORKSPACE_ID".to_string(), "ws-42".to_string())),
+                "cliKind={kind:?} lost CONCLAVE_WORKSPACE_ID: {env:?}"
+            );
+            assert!(
+                env.contains(&("CONCLAVE_INSTANCE_ID".to_string(), "inst-7".to_string())),
+                "cliKind={kind:?} lost CONCLAVE_INSTANCE_ID: {env:?}"
+            );
+        }
     }
 
     /// Create a workspace + agent_definition, instantiate an instance (idle,

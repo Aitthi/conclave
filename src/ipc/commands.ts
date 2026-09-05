@@ -218,7 +218,18 @@ export interface Commands {
     res: WorkspaceAgent;
   };
   "session.resize": {
-    req: { sessionId: string; cols: number; rows: number };
+    /** `pixelWidth`/`pixelHeight` are the pane's size in device-independent
+     *  pixels — the `ws_xpixel`/`ws_ypixel` half of the same TIOCSWINSZ, which
+     *  is the only way a child can derive its cell size and answer the
+     *  window-ops queries xterm advertises. Optional: omitted means "not
+     *  measured", and the PTY reports 0 as it did before. */
+    req: {
+      sessionId: string;
+      cols: number;
+      rows: number;
+      pixelWidth?: number;
+      pixelHeight?: number;
+    };
     res: void;
   };
   "message.send": {

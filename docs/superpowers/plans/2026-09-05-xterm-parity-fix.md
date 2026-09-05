@@ -161,3 +161,162 @@ boundary listed. Ruled: boundary widened by exactly that file for the mechanical
 gains `pixel_width/pixel_height`). Landed as its own scoped commit (`git commit --
 src-tauri/src/engine/runtime/mod.rs`). Lead defect: the importer was pinned instead of the
 defining file — see memory `lead-boundary-defining-file-not-importer`.
+
+## Outcome (Tiësto, 2026-09-05)
+
+Items F1–F9 landed, one commit per item (F8 split in two — see the boundary note).
+Branch `lane/xterm-parity-fix`.
+
+| Item | Commit | What changed |
+|---|---|---|
+| F1 | `ad3b994` | `convertEol` removed from the xterm constructor; the comment now records WHY it is absent (PTY keeps `onlcr`, audit §0 F1) so it does not get re-added. |
+| F2 | `30904ee` | xterm/webgl/unicode11/serialize/headless pinned to VS Code 1.138's exact builds (`vscode:package.json:137-146`). Closes H2. |
+| F3 | `ca7c3a5` | `TERM_PROGRAM=Conclave` + `TERM_PROGRAM_VERSION`; `LANG` now follows VS Code's `'auto'` UTF-8 rule instead of only firing when unset (extracted as `should_set_lang`); `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1` for `cliKind == claude-code` only. |
+| F4 | `c705eed` | `console.warn` on both WebGL-unavailable and context-loss; DEV-only `window.__conclaveTerms` registry for the GUI probe. |
+| F5 | `d047b38` | xterm fitted SYNCHRONOUSLY at mount (after the WebGL addon loads), before the snapshot restore and the first live write; output queued and replayed in order while the pane cannot be measured. Kills the ~200 ms 80×24-vs-real window. |
+| F6 | `9d511b9` | Both jiggle legs now move xterm and the PTY together. |
+| F7 | `bc3cdde` | One ordered stdin channel; all three call sites (onData, wheel, file-drop) join it. |
+| F8 | `fbedfb6` (seam) + `9d8e8c6` (wire-up) | Pixel dimensions carried through `LiveHandle.resize` → `PtySize`; `windowOptions` report ops enabled. |
+| F9 | `7a93280` | `scrollOnEraseInDisplay: true`. |
+
+### Gates (all recorded on task `xterm-parity-fix`, final sweep at `7a93280`)
+
+1. `pnpm build` — exit 0 (also run at `30904ee`, right after the bump).
+2. `node scripts/xterm-replay.mjs …/rec-a.jsonl` — exit 0, `LAYOUT INVARIANT: PASS`
+   (also at `30904ee`: the bumped headless build still renders the recording clean).
+3. `cargo test --manifest-path src-tauri/Cargo.toml pty::` — exit 0, 8 passed / 2 ignored,
+   including the two new tests `spawn_cli_advertises_terminal_identity` and
+   `should_set_lang_matches_vscode_auto_rule`. `runtime::` also green (190 passed).
+4. `pnpm uishot home` — exit 0, `.shots/home-default.png` written AND inspected: chrome,
+   roster, chat panel and composer all intact; the terminal pane is black with a cursor
+   block, which is the documented fixture-mode caveat, not a regression.
+5. rustfmt — see the note below.
+
+### Review round 1 (Mellow, ruled by Detoro)
+
+| Ask | Commit | Result |
+|---|---|---|
+| Defer size-at-spawn for the respawn 80x24 window | `711500a` | Added to Deferred below, with the fix shape and the VS Code citation so the follow-up lane does not re-derive it. |
+| Unit-test that `CLAUDE_CODE_FORCE_SYNC_OUTPUT` is set for `claude-code` and absent otherwise | `faba591` | `conclave_spawn_env` extracted from the spawn path (pure: no PTY, no DB, no Keychain); two tests — the flag for `claude-code` only, and the CONCLAVE_* identity pair for every kind. Falsified by making the flag unconditional: the suite then fails (exit 101). |
+
+Gates re-recorded at `faba591`, all exit 0: `cargo test … instance::` (67 passed),
+`cargo test … pty::` (8 passed / 2 ignored), `pnpm build`, lane-scoped rustfmt. The
+extraction is behaviour-preserving, so the frontend gates (uishot, replay) were not
+re-run — no `src/` file changed in this round.
+
+### Boundary
+
+`src-tauri/src/engine/runtime/mod.rs` is out of the declared boundary and was ruled in by
+Detoro (challenge `602f6ff7`); it lands in its own commit `fbedfb6`. That commit also carries
+**`src-tauri/src/engine/runtime/chat.rs`** — a one-line `|_, _|` → `|_, _, _, _|` on the chat
+backend's no-op resize stub. It is a third construction site of the same closure that the
+challenge missed; the compiler found it, grep had not. It is named here and in the READY note
+rather than filed as a second challenge, because leaving it out simply does not build.
+The one-line `(…, 0, 0)` caller update in `instance.rs` rides along in `fbedfb6` for the same
+reason: every commit in this lane builds and tests green on its own.
+
+### Deviations and judgment calls (logged as task notes, not escalated)
+
+- **F8 pixel source.** The plan's wording said `el.getBoundingClientRect()`; the implementation
+  reads `term.dimensions?.css.canvas`, rounded. The plan cites
+  `vscode:…/browser/terminalInstance.ts:2095-2104` as the thing to mirror and that line reads
+  `rawXterm.dimensions?.css.canvas`. The container box includes the sub-cell remainder the grid
+  does not cover, so a child dividing `pixel_width` by `cols` would derive a cell width slightly
+  too large. `term.dimensions` is public API in `@xterm/xterm 6.1.0-beta.303`
+  (`typings/xterm.d.ts:987`).
+- **F5 fit position.** The synchronous fit runs after the WebGL addon is loaded, not immediately
+  after `term.open()`. WebGL cell metrics differ from the DOM renderer's, which is why VS Code
+  fires `_onDidRequestRefreshDimensions` at exactly that point (`xtermTerminal.ts:947`).
+- **F6.** No same-size SIGWINCH exists to replace the jiggle with — `TIOCSWINSZ` with unchanged
+  dimensions signals nothing on macOS. The jiggle stays; audit §4 item 10 remains the
+  structural fix.
+- **rustfmt gate shape.** `rustfmt <file>` follows the `mod` declarations in `runtime/mod.rs`
+  and reports pre-existing drift in `browser.rs` and `task_timer.rs`, which this lane never
+  touched (matching the recorded "cargo fmt drift on main"). `--skip-children` /
+  `--unstable-features` are not available on this stable rustfmt. The recorded gate therefore
+  greps the diff for THIS lane's four files only and passes when none appear. It was falsified
+  before being trusted: deliberately misformatting one line in `chat.rs` makes it exit 1.
+
+### Deferred (unchanged from the plan, plus one)
+
+- Audit §4 item 10 (keep xterm alive across tab switches) — structural, after GUI confirmation.
+- Audit §4 item 11 (output coalescing + flow control) — needs the `seq` probe first.
+- Audit §4 item 7's Rust form (reordering in `message.rs`) — out of boundary, and unnecessary
+  now that the TS side is a single ordered channel. Remaining exposure: a terminal write racing
+  a NON-terminal stdin source, e.g. `message.inject`.
+- **Size-at-spawn** (raised by Mellow in review, ruled deferred by Detoro). `spawn_cli` still
+  opens every PTY at the hardcoded 80x24 (`pty.rs`, the `openpty` call) and only learns the real
+  size when the frontend's first `session.resize` arrives. VS Code never has that window: cols
+  and rows are constructor arguments to the process itself
+  (`vscode:src/vs/platform/terminal/node/terminalProcess.ts:136-137`), so the child is born at
+  the right size. F5 closed the window on the XTERM side for a fresh mount, but a RESPAWN
+  (restart · resume) creates a brand-new PTY at 80x24 while the component stays mounted, and the
+  child can paint into that before `repushSizeRef`'s 300 ms re-fit lands — the same
+  wrong-grid-first-frame mechanism as H1, just on the PTY side of the pair. Fix shape: thread
+  `cols`/`rows` into `spawn_cli` and seed `PtySize` with them, defaulting to 80x24 when the
+  caller has no measurement. Deferred because it changes `spawn_cli`'s signature and therefore
+  every caller and their tests, which is a wider blast radius than this lane's boundary; it is
+  the natural first task of a follow-up lane.
+
+### Cross-check against lane R3's H1 replay (merged from main at `078c3b1`)
+
+R3's findings were recorded on `@xterm/headless 6.1.0-beta.287`; F2 bumped it to
+`.302`, so their cells were re-run on the new build to confirm the bump does not
+invalidate them. It does not — the numbers reproduce exactly:
+
+| Cell | Invocation (on `rec-a.jsonl`) | R3 @ .287 | Here @ .302 |
+|---|---|---|---|
+| I (control) | `--start-size 153x55` | cursor absoluteRow 8, 55 rows | identical |
+| H (repro) | `--start-size 80x24 --resize-at-ms 2000` | absoluteRow 20, 57 rows, buffer offset | identical |
+
+Note what this does and does not prove. Cell H is the *harness* simulating the
+pre-F5 mount window; it holds the mismatch itself, so it will keep reproducing
+regardless of what the app does. It is evidence for the MECHANISM F5 removes
+(bytes written into a wrong-size grid damage the buffer and leave the cursor 12
+rows low), not a regression test on this lane's code — the app-side proof is that
+the window no longer exists, which only the live GUI probe below can show. R3's own
+verdict stands: this supports H1's general desynchronization mechanism without
+establishing that the 200 ms window caused the reported screenshot.
+
+### Gate 5 — human acceptance, VISUAL ONLY (Detoro ruling, 2026-09-05)
+
+The built app ships without devtools, so the human cannot open a console. Acceptance
+is therefore what the eye can see; the `__conclaveTerms` probe below is a DEV-BUILD
+tool and is not part of this gate. Needs a rebuilt + relaunched app either way — a
+`pnpm tauri dev` instance cannot take `conclave.sock` and its janitor prunes the live DB.
+
+What to do, and what a pass looks like:
+
+1. Open a Claude Code agent tab and let it finish painting. **Pass:** the frame fills
+   the pane at the real size on the first paint — no black pane, no 80-column-wide
+   frame sitting in a wider pane, no rows left over from a narrower layout.
+2. Type `/`, then `s`, then ` at` — slowly, one key at a time. **Pass:** every row of
+   the autocomplete popup keeps its `  /` indent. **Fail:** any row's first segment
+   jumps to column 0 while the rest of the row is stale — that is the reported
+   screenshot (`docs/superpowers/plans/assets/2026-09-05-xterm-autocomplete-garble.png`).
+3. Switch workspace, or open the Lane board and come back. This remounts every terminal
+   (`AppShell.tsx:288`), which is the exact path F5 and F6 change. **Pass:** the pane
+   repaints at the right size with no column-0 rows and no stray fragments.
+4. Resize the window a few times, including narrow. **Pass:** one clean repaint per
+   settle, no leftover glyph fragments at the old width.
+
+**What this gate cannot tell you.** With no console there is no `clearTextureAtlas()`,
+so a failure at step 2 cannot be attributed to a renderer fault (H2) versus a buffer
+fault (H1) by eye — both look identical. If step 2 fails, the next move is to reproduce
+it on a dev build and run the probe below; do not re-rank the hypotheses from the
+screenshot alone.
+
+#### Dev-build-only probe (not part of gate 5)
+
+On a dev build, where devtools are available:
+
+- `[...window.__conclaveTerms.values()].map(t => t.modes.synchronizedOutputMode)`
+  → expect `true` while output is flowing. `false` means F3's
+  `CLAUDE_CODE_FORCE_SYNC_OUTPUT` did not take (check the agent is `cliKind:
+  claude-code` and that the binary was actually rebuilt).
+- `[...window.__conclaveTerms.values()].forEach(t => t.clearTextureAtlas())` when garble
+  is on screen. Rows that HEAL with no new PTY output → renderer fault (H2), closed by
+  the F2 bump. Rows that STAY → buffer fault (H1), what F5/F6 target.
+
+The registry is behind `import.meta.env.DEV` and is tree-shaken out of the packaged
+build, so it is absent from the app the human accepts — by design, not by omission.
