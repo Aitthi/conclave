@@ -29,6 +29,8 @@ import type {
   BrowserShot,
   DraftMode,
   DraftResponse,
+  UsageOverviewRequest,
+  UsageOverview,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -384,6 +386,10 @@ export interface Commands {
     req: void;
     res: Provider[];
   };
+  "usage.overview": {
+    req: UsageOverviewRequest;
+    res: UsageOverview;
+  };
   "tool.list": {
     req: void;
     res: Tool[];
@@ -511,6 +517,9 @@ export const ipc = {
   },
   session: {
     resize: (req: Commands["session.resize"]["req"]) => call("session.resize", req),
+  },
+  usage: {
+    overview: (req: Commands["usage.overview"]["req"]) => call("usage.overview", req),
   },
   message: {
     send: (req: Commands["message.send"]["req"]) => call("message.send", req),

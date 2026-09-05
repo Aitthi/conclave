@@ -21,4 +21,5 @@ pub mod skill_draft;
 pub mod snapshot;
 pub mod task;
 pub mod tool;
+pub mod usage;
 pub mod workspace;
