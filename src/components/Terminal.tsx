@@ -304,7 +304,9 @@ export function Terminal({ sessionId }: TerminalProps) {
 
       const isFirst = firstSizing;
       firstSizing = false;
-      // Real resize (or a degenerate 1-row pane): one resize, natural SIGWINCH.
+      // Real resize (or a degenerate 1-row pane): xterm is already at (cols,
+      // rows) from the fit above, so one PTY push completes the pair and its
+      // genuine size change raises SIGWINCH on its own.
       if (!isFirst || rows <= 1) {
         void ipc.session.resize({ sessionId, cols, rows }).catch(() => {});
         return;
@@ -312,9 +314,22 @@ export function Terminal({ sessionId }: TerminalProps) {
       // Mount: jiggle so the child repaints even if the persistent PTY already
       // has this size. `rows - 1` then `rows`, with a gap so the two SIGWINCHs
       // aren't coalesced into one.
+      //
+      // BOTH SIDES MOVE TOGETHER. VS Code's contract is that xterm and the PTY
+      // are always resized as one step — `xterm.resize(cols, rows)` immediately
+      // followed by the pty dimension update
+      // (vscode:…/browser/terminalInstance.ts:830-831); it never jiggles at all.
+      // We still have to, because our PTY outlives the component and an
+      // unchanged resize raises no SIGWINCH. But pushing `rows - 1` to the PTY
+      // while xterm stayed at `rows` opened exactly the grid disagreement F5
+      // closes at mount: the child re-laid its frame for `rows - 1` and we
+      // parsed it into a `rows` grid, desyncing its relative-move cursor model
+      // (audit §3 H1, rows 9/10). So each leg resizes xterm first, then the PTY.
+      term.resize(cols, rows - 1);
       void ipc.session.resize({ sessionId, cols, rows: rows - 1 }).catch(() => {});
       clearTimeout(jiggleTimer);
       jiggleTimer = setTimeout(() => {
+        term.resize(cols, rows);
         void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
           // Session not running yet / no PTY — harmless.
         });
