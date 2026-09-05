@@ -34,6 +34,11 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 chain-builder = { version = "3", default-features = false, features = ["sqlx_sqlite"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["clock"] }
+# IANA timezone database. `iana-time-zone` (already present transitively via
+# chrono's "clock" feature) only DETECTS the local zone name; it carries no tz
+# database and cannot resolve an arbitrary zone or its DST transitions, which
+# the Overview's local calendar buckets require.
+chrono-tz = "0.10"
 dirs = "6"
 portable-pty = "0.9.0"
 futures-util = "0.3.32"

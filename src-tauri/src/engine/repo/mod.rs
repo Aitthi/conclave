@@ -25,6 +25,7 @@ pub mod inter_agent_message;
 #[allow(dead_code)]
 pub mod memory;
 pub mod memory_proposal;
+pub mod model_usage;
 pub mod provider;
 pub mod role;
 pub mod session;
