@@ -12,7 +12,20 @@ owner: 30fa04f4-e047-4241-a9ed-f452529952be · authority: in-loop
 
 **Spec:** `docs/superpowers/specs/2026-09-05-agent-builder-redesign-design.md` (decisions D1–D12 are final; challenge with evidence, never improvise).
 
-**Design canon:** `design/screens/agent-builder.tsx` at the SHA pinned in task `agent-builder-canon`'s READY note. Read its CANON comment block before Task 1. Designer escalation target: Arta (ff647599). Lead: Detoro (30fa04f4).
+**Design canon:** `design/screens/agent-builder.tsx` pinned at main **b5d3d20** (task `agent-builder-canon`, Arta). Read its CANON comment block and the 35-line acceptance checklist (READY note on that task, also blackboard key `design:agent-builder`) before Task 1. Shots to compare against: `.shots/design-agent-builder-{new-empty,new-filled,edit-advanced,edit-position,edit-antigravity,dark,artboards-bc}.png`. Designer escalation target: Arta (ff647599). Lead: Detoro (30fa04f4).
+
+**Canon token mapping (canon is authored against design-host tokens that `src/styles/app.css` does NOT define — map by role, never copy the name):**
+
+| canon class | app class |
+|---|---|
+| `bg-fill` | `bg-fill-soft` |
+| `border-border` / `divide-border` | `border-overlay/[0.06]` / `divide-overlay/[0.06]` |
+| `text-waiting` (amber bypass line) | `text-warning` |
+| `bg-live` (toggle on) | `bg-success` |
+| `bg-canvas` | `bg-bg-canvas` |
+| `text-danger`, `bg-surface`, `text-text-*`, `accent`, `ring-overlay/*` | same |
+
+Canon rulings already folded into this plan: rail active = fill tint (no side bar); scroll-spy clamps `scrollTop <= 4` → first section and at-bottom → last; Position renders its kickers directly on the surface with no outer panel (content unchanged); sections after the first carry `mt-5 border-t border-overlay/[0.06] pt-5`.
 
 ## Global Constraints
 
@@ -208,6 +221,11 @@ export function useScrollSpy(
       const rootTop = root.getBoundingClientRect().top;
       const threshold = root.clientHeight / 3;
       let current = sections[0].getAttribute(SECTION_ATTR) ?? "";
+      // Canon clamp: at rest (scrollTop <= 4) the first section is active.
+      if (root.scrollTop <= 4) {
+        setActiveId(current);
+        return;
+      }
       for (const el of sections) {
         const top = el.getBoundingClientRect().top - rootTop;
         if (top <= threshold) current = el.getAttribute(SECTION_ATTR) ?? current;
@@ -439,7 +457,7 @@ Cut the Skills `<section>` and wrap with `<Section id="skills" title="Skills">`.
 
 - [ ] **Step 3: Create `PositionSection.tsx`**
 
-Cut the Position `<section>` body (inside `{positionEnabled && (…)}`) and wrap with `<Section id="position" title="Position">`. Keep the `HumanChip`, `PositionLine`, `levelOf`, `wouldCycle`, `LEVELS` imports it needs (`../Position`, `../../lib/positions`).
+Cut the Position `<section>` body (inside `{positionEnabled && (…)}`) and wrap with `<Section id="position" title="Position">`. Keep the `HumanChip`, `PositionLine`, `levelOf`, `wouldCycle`, `LEVELS` imports it needs (`../Position`, `../../lib/positions`). Canon rule 29: drop the outer `rounded-xl ring-1 … p-3` panel that wraps Track / Level / Supervisor / Escalation chain today; the four kickers and their content sit directly on the surface (`space-y-3`), otherwise unchanged. Rule 30: Position KEEPS its four Level cards (it edits the live instance), distinct from Role & Level's segmented control (definition default).
 
 - [ ] **Step 4: Render the three components from `Builder.tsx`**
 
@@ -812,7 +830,7 @@ Hooks must stay above any early return; `useRef` joins the existing `react` impo
 </div>
 ```
 
-Section separators: add `divide-y divide-overlay/[0.06]` is NOT used; instead give each `Section` a top border via the `space-y-5` gap plus a `border-t border-overlay/[0.06] pt-4` on every section except the first (add `className` support to `Section` only if the canon shows separators; otherwise leave the gap only — follow the canon).
+Section separators (canon rule 9): the scroll container uses `px-6 py-5` with NO `space-y`; every `Section` after the first carries `mt-5 border-t border-overlay/[0.06] pt-5`. Implement by giving `Section` an optional `first?: boolean` prop (Identity passes `first`) that omits those classes.
 
 - [ ] **Step 3: Remove dead code**
 
