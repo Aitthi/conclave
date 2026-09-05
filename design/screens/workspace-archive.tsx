@@ -72,7 +72,8 @@ export default function WorkspaceArchive() {
     notify("Prototype navigation target: "+row.name+". Opening does not start agents.");
   }
 
-  return <div className="flex h-screen min-w-[760px] overflow-hidden bg-canvas font-sans text-text-primary">
+  return <div className="archive-canon flex h-screen min-w-[760px] overflow-hidden bg-canvas font-sans text-text-primary">
+    <style>{`.archive-canon { --color-danger: #b42318; } .dark .archive-canon { --color-danger: #ff8a80; } .archive-canon [role="alert"].text-danger { background:color-mix(in srgb,var(--color-danger) 10%,var(--color-surface)); }`}</style>
     <nav aria-label="Primary" className="flex w-14 shrink-0 flex-col items-center gap-2 border-r border-border bg-sidebar py-2">
       <Link to="/workspace-overview" aria-label="Overview" title="AI usage Overview" className={"grid h-9 w-9 place-items-center rounded-lg text-text-secondary "+focus}><Mark /></Link>
       {active.map(row => <button key={row.id} onClick={() => openWorkspace(row)} aria-label={"Open "+row.name} title={row.name} className={"relative mt-1 grid h-9 w-9 place-items-center rounded-[10px] bg-accent/10 text-[13px] font-semibold text-accent "+focus}>{row.name[0].toUpperCase()}{!row.started && <CirclePause className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full bg-sidebar text-text-secondary" />}</button>)}
