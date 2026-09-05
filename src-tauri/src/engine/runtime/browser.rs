@@ -861,9 +861,10 @@ pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), BrowserError> {
 /// Close ONE tab: destroy its native webview (if any) and drop it from the
 /// registry, which reselects the first remaining tab as active. Reveals that new
 /// active tab — while the Browser view is on screen — so the overlay never goes
-/// blank while a tab remains. A failed reveal is REPORTED, not swallowed: the
-/// tab is already gone, so returning Ok would hand the caller a tab list that
-/// does not describe what the human sees. Returns the updated tab list.
+/// blank while a tab remains. That reveal is BEST-EFFORT (Decision 6): this call
+/// reports whether the CLOSE succeeded, and a tab that closed cleanly must not
+/// report failure because the tab behind it could not be shown. Returns the
+/// updated tab list.
 pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
     if let Some(view) = webview_for(app, tab_id) {
         view.close()
@@ -877,9 +878,22 @@ pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserE
         // Same reveal rule as `set_active`: reposition first (the promoted tab
         // has been hidden, so its frame may predate the current window size),
         // and reveal only while the Browser view is on screen.
+        //
+        // INVARIANT (Decision 6): this call REPORTS THE CLOSE, not the
+        // promotion. The tab is already destroyed and dropped from the registry
+        // by the time we get here, so a failed reveal must NOT become an `Err` —
+        // the frontend would show "Couldn't close the tab" (false) and skip
+        // `applyState`, leaving the closed tab in the rail until the 2 s poll.
+        // Best-effort plus a warn; only the target's own `view.close()` above
+        // keeps its `?`. `reveal_at` still never shows after a failed position.
+        //
+        // Not unit-testable: `reveal_at` is native (`set_position`/`show`), so
+        // this invariant lives in the comment, per Decision 6's own fallback.
         if placement.show {
             if let Some(view) = webview_for(app, &id) {
-                reveal_at(&view, placement.bounds)?;
+                if let Err(e) = reveal_at(&view, placement.bounds) {
+                    eprintln!("[browser] tab {id} was promoted but could not be revealed: {e}");
+                }
             }
         }
     }
