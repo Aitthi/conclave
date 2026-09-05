@@ -42,6 +42,13 @@ const BROWSER_LABEL: &str = "agent-browser";
 /// surfaces a clear failure instead.
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long `click`/`type` wait for their selector to appear before giving up,
+/// and how often they re-check. An SPA that has not mounted the node yet used to
+/// answer "no element matched selector" instantly, which reads to an agent as
+/// "click is broken" — waiting is what a human does without thinking.
+const DEFAULT_SELECTOR_TIMEOUT_MS: u64 = 5_000;
+const SELECTOR_POLL: Duration = Duration::from_millis(100);
+
 /// Snapshot body-text cap (plan §Runtime Notes): default and hard maximum. The
 /// cap keeps a large page from flooding an agent's context window.
 const DEFAULT_MAX_TEXT: usize = 12_000;
@@ -51,6 +58,14 @@ const HARD_MAX_TEXT: usize = 50_000;
 /// rectangle — keeps the native overlay from flashing over the app chrome until
 /// the first `set_bounds` positions it.
 const OFFSCREEN: f64 = -10_000.0;
+
+/// Where a concealed tab is parked. Far enough outside the window that it can
+/// never be seen, while still being a SHOWN webview — see [`conceal`].
+const PARK: f64 = -20_000.0;
+/// Size a parked tab is given when no region rect has ever been reported. A
+/// degenerate 1x1 would give a page nothing to lay out; this is an ordinary
+/// viewport so background work behaves the way it will once revealed.
+const PARK_FALLBACK: LogicalSize<f64> = LogicalSize::new(DEFAULT_CAPTURE_W, DEFAULT_CAPTURE_H);
 
 /// Round-trip budget for a `takeSnapshot` capture (renders + PNG encode).
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -84,6 +99,15 @@ pub struct BrowserActionResult {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Tag name of the element that was actually hit, for the agent's log — a
+    /// selector matching the wrong node is the other half of "click does not
+    /// work". Absent on a miss, and omitted from JSON when absent, so the
+    /// frontend's `BrowserActionResult` mirror keeps deserializing unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// First 80 characters of the hit element's text, same purpose as `tag`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// Agent-facing DOM/text snapshot (NOT pixels — see plan non-goals).
@@ -92,6 +116,10 @@ pub struct BrowserActionResult {
 pub struct BrowserSnapshot {
     pub url: String,
     pub title: String,
+    /// `document.readyState`. An agent blaming `click` is often looking at a
+    /// page that never finished loading — say so instead of making them guess.
+    #[serde(default)]
+    pub ready_state: String,
     pub text: String,
     pub headings: Vec<String>,
     pub links: Vec<SnapshotLink>,
@@ -122,6 +150,18 @@ pub struct SnapshotInput {
 pub struct SnapshotButton {
     pub text: String,
     pub selector: String,
+}
+
+/// Result of `ping` — a cheap "is this page alive" probe an agent can run BEFORE
+/// blaming `click`. `raf_ticks_per_200ms` is 0 in a webview that is not painting,
+/// which is the honest answer to "why did nothing happen": the page's own
+/// rAF-driven work (React concurrent rendering, base-ui transitions) is frozen,
+/// not the click.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPing {
+    pub ready_state: String,
+    pub raf_ticks_per_200ms: u64,
 }
 
 /// Result of `screenshot` — the written PNG's path and the capture dimensions
@@ -229,6 +269,61 @@ fn resolve_capture_size(width: Option<f64>, height: Option<f64>) -> (f64, f64) {
     )
 }
 
+/// Resolve the caller's selector timeout: absent → [`DEFAULT_SELECTOR_TIMEOUT_MS`],
+/// `Some(0)` → a single attempt with no wait, otherwise the requested budget.
+fn resolve_selector_timeout(requested: Option<u64>) -> u64 {
+    requested.unwrap_or(DEFAULT_SELECTOR_TIMEOUT_MS)
+}
+
+/// Whether an action result is the retryable "selector matched nothing" miss, as
+/// opposed to a real in-page failure (which must surface immediately).
+fn is_selector_miss(v: &serde_json::Value) -> bool {
+    v.get("ok").and_then(|o| o.as_bool()) == Some(false)
+        && v.get("message").and_then(|m| m.as_str()) == Some(SELECTOR_MISS)
+}
+
+/// The result returned once the wait budget is spent — names the budget and the
+/// selector, so an agent can tell "wrong selector" from "page was too slow".
+fn selector_timeout_result(timeout_ms: u64, selector: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "message": format!("selector not found within {timeout_ms}ms: {selector}"),
+    })
+}
+
+/// Run `attempt` until it stops reporting a selector miss, or the budget runs
+/// out. The retry lives in RUST, not in the injected script, because
+/// `eval_with_callback` hands back the completion value of a synchronous
+/// expression — it cannot await a promise, so the JS can never poll for itself.
+///
+/// `timeout_ms == 0` means a single attempt. Any non-miss result (a hit, or a
+/// real in-page error) returns straight away.
+async fn wait_for_selector<F, Fut>(
+    timeout_ms: u64,
+    selector: &str,
+    mut attempt: F,
+) -> Result<serde_json::Value, BrowserError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, BrowserError>>,
+{
+    let first = attempt().await?;
+    if timeout_ms == 0 || !is_selector_miss(&first) {
+        return Ok(first);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Ok(selector_timeout_result(timeout_ms, selector));
+        }
+        tokio::time::sleep(SELECTOR_POLL).await;
+        let next = attempt().await?;
+        if !is_selector_miss(&next) {
+            return Ok(next);
+        }
+    }
+}
+
 /// Embed an arbitrary Rust string as a safe JS string literal. `serde_json`
 /// emits a valid double-quoted JS string (escaping quotes, backslashes,
 /// newlines, control chars), which is exactly a JSON-string-is-a-JS-string
@@ -299,6 +394,7 @@ const SNAPSHOT_JS_TEMPLATE: &str = r##"(function () {
     return {
       url: location.href,
       title: document.title || "",
+      readyState: document.readyState,
       text: bodyText,
       headings: headings,
       links: links,
@@ -310,21 +406,81 @@ const SNAPSHOT_JS_TEMPLATE: &str = r##"(function () {
   }
 })()"##;
 
-/// Click script for `selector`: `{ ok:true, url }` on a hit, or `{ ok:false,
-/// message }` when the selector matches nothing / the click throws.
+/// The message the injected `click`/`type` scripts return when `querySelector`
+/// matched nothing. It is the ONE `ok:false` the wait loop retries on — every
+/// other failure is real and returns at once — so the JS text and this constant
+/// must stay in lockstep.
+const SELECTOR_MISS: &str = "no element matched selector";
+
+/// Click script for `selector`: a REAL pointer sequence at the element's centre,
+/// not `el.click()`.
+///
+/// `el.click()` fires a lone synthetic `click`, which React/base-ui/Radix
+/// widgets ignore — they listen on `pointerdown`/`mousedown`, which is why
+/// menus, popovers and toggles could not be driven from the CLI at all and
+/// agents escaped to Chrome instead. So: scroll the element to the middle of the
+/// viewport, take its centre, and dispatch the full sequence a real mouse
+/// produces. `el.click()` remains only as a fallback if the dispatch throws (an
+/// exotic element, or a browser without `PointerEvent`).
+///
+/// `isTrusted` is still false on these events — a site that gates on it needs
+/// CDP-level input, which is out of scope (plan §Risks).
+///
+/// Returns `{ok:true, url, tag, text}` on a hit, `{ok:false, message}` when the
+/// selector matches nothing.
 fn click_js(selector: &str) -> String {
     format!(
         r#"(function () {{
   try {{
     var el = document.querySelector({sel});
-    if (!el) return {{ ok: false, message: "no element matched selector" }};
-    el.click();
-    return {{ ok: true, url: location.href }};
+    if (!el) return {{ ok: false, message: {miss} }};
+    try {{ el.scrollIntoView({{ block: "center", inline: "center" }}); }} catch (e) {{}}
+    var r = el.getBoundingClientRect();
+    var cx = r.left + r.width / 2;
+    var cy = r.top + r.height / 2;
+    function init(buttons) {{
+      return {{
+        bubbles: true, cancelable: true, composed: true, view: window, detail: 1,
+        clientX: cx, clientY: cy, screenX: cx, screenY: cy,
+        button: 0, buttons: buttons
+      }};
+    }}
+    function pointer(type, buttons) {{
+      var o = init(buttons);
+      o.pointerId = 1; o.pointerType = "mouse"; o.isPrimary = true;
+      o.width = 1; o.height = 1; o.pressure = buttons ? 0.5 : 0;
+      return new PointerEvent(type, o);
+    }}
+    function mouse(type, buttons) {{ return new MouseEvent(type, init(buttons)); }}
+    var real = false;
+    try {{
+      el.dispatchEvent(pointer("pointerover", 0));
+      el.dispatchEvent(pointer("pointerenter", 0));
+      el.dispatchEvent(mouse("mouseover", 0));
+      el.dispatchEvent(pointer("pointermove", 0));
+      el.dispatchEvent(mouse("mousemove", 0));
+      el.dispatchEvent(pointer("pointerdown", 1));
+      el.dispatchEvent(mouse("mousedown", 1));
+      if (typeof el.focus === "function") {{
+        try {{ el.focus({{ preventScroll: true }}); }} catch (e) {{ try {{ el.focus(); }} catch (e2) {{}} }}
+      }}
+      el.dispatchEvent(pointer("pointerup", 0));
+      el.dispatchEvent(mouse("mouseup", 0));
+      el.dispatchEvent(mouse("click", 0));
+      real = true;
+    }} catch (e) {{}}
+    if (!real) el.click();
+    var text = "";
+    try {{
+      text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    }} catch (e) {{}}
+    return {{ ok: true, url: location.href, tag: el.tagName.toLowerCase(), text: text }};
   }} catch (e) {{
     return {{ ok: false, message: String(e && e.message ? e.message : e) }};
   }}
 }})()"#,
-        sel = js_literal(selector)
+        sel = js_literal(selector),
+        miss = js_literal(SELECTOR_MISS)
     )
 }
 
@@ -335,7 +491,7 @@ fn type_js(selector: &str, text: &str) -> String {
         r#"(function () {{
   try {{
     var el = document.querySelector({sel});
-    if (!el) return {{ ok: false, message: "no element matched selector" }};
+    if (!el) return {{ ok: false, message: {miss} }};
     el.focus();
     if ("value" in el) {{
       el.value = {txt};
@@ -350,7 +506,8 @@ fn type_js(selector: &str, text: &str) -> String {
   }}
 }})()"#,
         sel = js_literal(selector),
-        txt = js_literal(text)
+        txt = js_literal(text),
+        miss = js_literal(SELECTOR_MISS)
     )
 }
 
@@ -549,12 +706,14 @@ pub fn navigate(
                 )
                 .map_err(|e| BrowserError::Webview(e.to_string()))?;
             // `add_child` already placed it, so showing here cannot flash the
-            // page at the offscreen default. Anything not showable stays hidden
-            // until `set_active`/`set_visible` reveals it.
+            // page at the offscreen default. Anything not showable is CONCEALED
+            // (parked offscreen, still ticking) until `set_active`/`set_visible`
+            // reveals it.
             let _ = if placement.show {
                 view.show()
+                    .map_err(|e| BrowserError::Webview(e.to_string()))
             } else {
-                view.hide()
+                conceal(&view, placement.bounds)
             };
         }
     }
@@ -576,6 +735,39 @@ fn apply_bounds(view: &Webview, bounds: Bounds) -> Result<(), BrowserError> {
     view.set_size(size)
         .map_err(|e| BrowserError::Webview(e.to_string()))?;
     Ok(())
+}
+
+/// Conceal `view` — the counterpart to [`reveal_at`], and the ONE place that
+/// decides what "hidden" means natively.
+///
+/// EXPERIMENT (plan Decision 4): instead of `view.hide()`, park the webview
+/// offscreen but SHOWN. A hidden WebKit webview stops ticking —
+/// `requestAnimationFrame` never fires (Dew measured `rafTicks=0` after 1.5 s on
+/// task roster-row-supervisor-trash) — so a background agent's page freezes:
+/// React concurrent rendering, base-ui transitions and any rAF-driven work stop
+/// dead, and every one of those reads to an agent as "click did nothing". An
+/// agent's tab is almost never the active one, so this is the common case, not
+/// the edge case. A parked webview stays in-window, so WebKit keeps scheduling
+/// frames for it.
+///
+/// It cannot paint over the app chrome at `PARK`: Decision 7's guarantee (no
+/// webview visible while the Browser view is unmounted) is preserved by
+/// position, not by the hidden flag.
+///
+/// If the measured gate (rAF ticks from a background tab) shows parking does NOT
+/// keep frames alive on this macOS/WebKit, the documented fallback is to make
+/// this function `view.hide()` again — nothing else changes.
+fn conceal(view: &Webview, bounds: Option<Bounds>) -> Result<(), BrowserError> {
+    let size = bounds
+        .map(|b| LogicalSize::new(b.width.max(0.0), b.height.max(0.0)))
+        .filter(|s: &LogicalSize<f64>| s.width > 0.0 && s.height > 0.0)
+        .unwrap_or(PARK_FALLBACK);
+    view.set_position(LogicalPosition::new(PARK, PARK))
+        .map_err(|e| BrowserError::Webview(e.to_string()))?;
+    view.set_size(size)
+        .map_err(|e| BrowserError::Webview(e.to_string()))?;
+    view.show()
+        .map_err(|e| BrowserError::Webview(e.to_string()))
 }
 
 /// Reveal `view` at `bounds`: position FIRST, then show — and never show when
@@ -611,7 +803,7 @@ pub fn set_active(app: &AppHandle, tab_id: &str) -> Result<BrowserState, Browser
     }
     for id in &activation.hide {
         if let Some(view) = webview_for(app, id) {
-            let _ = view.hide();
+            let _ = conceal(&view, activation.incoming.bounds);
         }
     }
     if activation.incoming.show {
@@ -659,8 +851,7 @@ pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), BrowserError> {
             if placement.show {
                 reveal_at(&view, placement.bounds)?;
             } else {
-                view.hide()
-                    .map_err(|e| BrowserError::Webview(e.to_string()))?;
+                conceal(&view, placement.bounds)?;
             }
         }
     }
@@ -670,9 +861,10 @@ pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), BrowserError> {
 /// Close ONE tab: destroy its native webview (if any) and drop it from the
 /// registry, which reselects the first remaining tab as active. Reveals that new
 /// active tab — while the Browser view is on screen — so the overlay never goes
-/// blank while a tab remains. A failed reveal is REPORTED, not swallowed: the
-/// tab is already gone, so returning Ok would hand the caller a tab list that
-/// does not describe what the human sees. Returns the updated tab list.
+/// blank while a tab remains. That reveal is BEST-EFFORT (Decision 6): this call
+/// reports whether the CLOSE succeeded, and a tab that closed cleanly must not
+/// report failure because the tab behind it could not be shown. Returns the
+/// updated tab list.
 pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
     if let Some(view) = webview_for(app, tab_id) {
         view.close()
@@ -686,9 +878,22 @@ pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserE
         // Same reveal rule as `set_active`: reposition first (the promoted tab
         // has been hidden, so its frame may predate the current window size),
         // and reveal only while the Browser view is on screen.
+        //
+        // INVARIANT (Decision 6): this call REPORTS THE CLOSE, not the
+        // promotion. The tab is already destroyed and dropped from the registry
+        // by the time we get here, so a failed reveal must NOT become an `Err` —
+        // the frontend would show "Couldn't close the tab" (false) and skip
+        // `applyState`, leaving the closed tab in the rail until the 2 s poll.
+        // Best-effort plus a warn; only the target's own `view.close()` above
+        // keeps its `?`. `reveal_at` still never shows after a failed position.
+        //
+        // Not unit-testable: `reveal_at` is native (`set_position`/`show`), so
+        // this invariant lives in the comment, per Decision 6's own fallback.
         if placement.show {
             if let Some(view) = webview_for(app, &id) {
-                reveal_at(&view, placement.bounds)?;
+                if let Err(e) = reveal_at(&view, placement.bounds) {
+                    eprintln!("[browser] tab {id} was promoted but could not be revealed: {e}");
+                }
             }
         }
     }
@@ -737,6 +942,56 @@ fn reject_page_error(v: &serde_json::Value) -> Result<(), BrowserError> {
     Ok(())
 }
 
+/// Window over which [`ping`] counts animation frames. Short enough to stay a
+/// cheap probe, long enough that a painting webview (~60 fps) clears 10 ticks by
+/// a wide margin while a frozen one stays at exactly 0.
+const PING_WINDOW: Duration = Duration::from_millis(200);
+
+/// Arm a frame counter on `window`, replacing any previous one. Split from
+/// [`PING_READ_JS`] because `eval_with_callback` returns the completion value of
+/// a SYNCHRONOUS expression: counting frames needs two round trips with real
+/// time between them, which only Rust can arrange.
+const PING_ARM_JS: &str = r#"(function () {
+  try {
+    window.__conclavePingTicks = 0;
+    var step = function () {
+      window.__conclavePingTicks++;
+      window.__conclavePingRaf = requestAnimationFrame(step);
+    };
+    if (window.__conclavePingRaf) cancelAnimationFrame(window.__conclavePingRaf);
+    window.__conclavePingRaf = requestAnimationFrame(step);
+    return { ok: true };
+  } catch (e) {
+    return { __error: String(e && e.message ? e.message : e) };
+  }
+})()"#;
+
+/// Read the frame count back, stop the counter, and report `readyState`.
+const PING_READ_JS: &str = r#"(function () {
+  try {
+    if (window.__conclavePingRaf) cancelAnimationFrame(window.__conclavePingRaf);
+    window.__conclavePingRaf = null;
+    var n = window.__conclavePingTicks || 0;
+    window.__conclavePingTicks = 0;
+    return { readyState: document.readyState, rafTicksPer200ms: n };
+  } catch (e) {
+    return { __error: String(e && e.message ? e.message : e) };
+  }
+})()"#;
+
+/// Probe tab `tab_id`: is the document loaded, and are animation frames actually
+/// running? Two evals [`PING_WINDOW`] apart — arm a counter, wait, read it back.
+pub async fn ping(app: &AppHandle, tab_id: &str) -> Result<BrowserPing, BrowserError> {
+    let view = require_webview_for(app, tab_id)?;
+    let armed = eval_value(&view, PING_ARM_JS.to_string()).await?;
+    reject_page_error(&armed)?;
+    tokio::time::sleep(PING_WINDOW).await;
+    let value = eval_value(&view, PING_READ_JS.to_string()).await?;
+    reject_page_error(&value)?;
+    serde_json::from_value(value)
+        .map_err(|e| BrowserError::Webview(format!("ping result shape mismatch: {e}")))
+}
+
 /// DOM/text snapshot of tab `tab_id`'s current page (capped body text).
 pub async fn snapshot(
     app: &AppHandle,
@@ -751,29 +1006,39 @@ pub async fn snapshot(
 }
 
 /// Click the element matching `selector` in tab `tab_id` (selector as emitted
-/// by `snapshot`).
+/// by `snapshot`), waiting up to `timeout_ms` for it to appear.
 pub async fn click(
     app: &AppHandle,
     tab_id: &str,
     selector: &str,
+    timeout_ms: Option<u64>,
 ) -> Result<BrowserActionResult, BrowserError> {
     let view = require_webview_for(app, tab_id)?;
-    let value = eval_value(&view, click_js(selector)).await?;
+    let js = click_js(selector);
+    let value = wait_for_selector(resolve_selector_timeout(timeout_ms), selector, || {
+        eval_value(&view, js.clone())
+    })
+    .await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("click result shape mismatch: {e}")))
 }
 
 /// Focus and fill the input-like element matching `selector` in tab `tab_id`
-/// with `text`.
+/// with `text`, waiting up to `timeout_ms` for the element to appear.
 pub async fn type_text(
     app: &AppHandle,
     tab_id: &str,
     selector: &str,
     text: &str,
+    timeout_ms: Option<u64>,
 ) -> Result<BrowserActionResult, BrowserError> {
     let view = require_webview_for(app, tab_id)?;
-    let value = eval_value(&view, type_js(selector, text)).await?;
+    let js = type_js(selector, text);
+    let value = wait_for_selector(resolve_selector_timeout(timeout_ms), selector, || {
+        eval_value(&view, js.clone())
+    })
+    .await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
         .map_err(|e| BrowserError::Webview(format!("type result shape mismatch: {e}")))
@@ -1154,6 +1419,167 @@ mod tests {
             js.contains("__error"),
             "multi-statement eval must not throw past the callback"
         );
+    }
+
+    // ── click reliability (task browser-click-reliability) ───────────────────
+
+    /// D1: the whole point of the rewrite — a real pointer sequence, in order,
+    /// with `click` LAST. Widgets that ignored `el.click()` listen on
+    /// `pointerdown`/`mousedown`, so the order is the contract, not a detail.
+    #[test]
+    fn click_js_dispatches_pointer_sequence_before_click() {
+        let js = click_js("#go");
+        let order = [
+            "pointerover",
+            "pointerenter",
+            "mouseover",
+            "pointermove",
+            "mousemove",
+            "pointerdown",
+            "mousedown",
+            "pointerup",
+            "mouseup",
+        ];
+        let mut at = 0usize;
+        for name in order {
+            let found = js[at..]
+                .find(&format!("\"{name}\""))
+                .unwrap_or_else(|| panic!("{name} missing from click_js, or out of order"));
+            at += found;
+        }
+        let click_at = js[at..]
+            .find("mouse(\"click\"")
+            .expect("the click event itself must come last");
+        assert!(click_at > 0, "click must follow the pointer/mouse sequence");
+        assert!(
+            js.contains("buttons: buttons") && js.contains("pointerdown\", 1"),
+            "pointerdown carries buttons:1"
+        );
+        assert!(js.contains("if (!real) el.click();"), "fallback retained");
+    }
+
+    /// D1: an element below the fold has a centre outside the viewport, so the
+    /// synthetic coordinates would land on whatever is scrolled into that spot.
+    #[test]
+    fn click_js_scrolls_into_view() {
+        let js = click_js("#go");
+        let scroll = js
+            .find("scrollIntoView")
+            .expect("click_js must scroll the element into view");
+        let rect = js
+            .find("getBoundingClientRect")
+            .expect("click_js must measure the element");
+        assert!(
+            scroll < rect,
+            "scroll BEFORE measuring, or the centre is computed from a stale rect"
+        );
+    }
+
+    /// D1: the hit element is reported back so an agent can tell "clicked the
+    /// wrong node" from "clicked nothing".
+    #[test]
+    fn click_js_reports_the_hit_element() {
+        let js = click_js("#go");
+        assert!(js.contains("tag: el.tagName.toLowerCase()"));
+        assert!(js.contains("slice(0, 80)"), "text is capped at 80 chars");
+    }
+
+    /// D2: both scripts must emit the EXACT miss marker the wait loop retries
+    /// on — if these drift, waiting silently stops working.
+    #[test]
+    fn click_and_type_report_the_retryable_miss_marker() {
+        assert!(click_js("#a").contains(SELECTOR_MISS));
+        assert!(type_js("#a", "x").contains(SELECTOR_MISS));
+        assert!(is_selector_miss(&serde_json::json!({
+            "ok": false, "message": SELECTOR_MISS
+        })));
+        // A real in-page failure must NOT be retried.
+        assert!(!is_selector_miss(&serde_json::json!({
+            "ok": false, "message": "Permission denied"
+        })));
+        assert!(!is_selector_miss(&serde_json::json!({ "ok": true })));
+    }
+
+    /// D2: the budget runs out and the caller is told what was waited for and
+    /// for how long — "no element matched selector" alone cannot distinguish a
+    /// wrong selector from a slow page.
+    #[tokio::test]
+    async fn wait_for_selector_times_out_with_message() {
+        let miss = serde_json::json!({ "ok": false, "message": SELECTOR_MISS });
+        let calls = std::cell::Cell::new(0u32);
+        let out = wait_for_selector(250, "#never", || {
+            calls.set(calls.get() + 1);
+            let miss = miss.clone();
+            async move { Ok(miss) }
+        })
+        .await
+        .expect("a timeout is a result, not an error");
+
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["message"], "selector not found within 250ms: #never");
+        assert!(calls.get() > 1, "it must actually retry, not answer once");
+    }
+
+    /// D2: a hit on a later attempt returns that hit — the whole reason to wait.
+    #[tokio::test]
+    async fn wait_for_selector_returns_a_late_hit() {
+        let calls = std::cell::Cell::new(0u32);
+        let out = wait_for_selector(2_000, "#slow", || {
+            calls.set(calls.get() + 1);
+            let n = calls.get();
+            async move {
+                Ok(if n < 3 {
+                    serde_json::json!({ "ok": false, "message": SELECTOR_MISS })
+                } else {
+                    serde_json::json!({ "ok": true, "url": "https://x/" })
+                })
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out["ok"], true);
+        assert_eq!(calls.get(), 3);
+    }
+
+    /// D2: `--timeout-ms 0` means "ask once" — no wait, and the raw miss comes
+    /// straight back rather than the timeout wording.
+    #[tokio::test]
+    async fn wait_for_selector_zero_timeout_is_a_single_attempt() {
+        let calls = std::cell::Cell::new(0u32);
+        let out = wait_for_selector(0, "#x", || {
+            calls.set(calls.get() + 1);
+            async move { Ok(serde_json::json!({ "ok": false, "message": SELECTOR_MISS })) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(out["message"], SELECTOR_MISS);
+    }
+
+    #[test]
+    fn resolve_selector_timeout_defaults_and_honours_zero() {
+        assert_eq!(resolve_selector_timeout(None), DEFAULT_SELECTOR_TIMEOUT_MS);
+        assert_eq!(resolve_selector_timeout(Some(0)), 0);
+        assert_eq!(resolve_selector_timeout(Some(750)), 750);
+    }
+
+    /// D5: `ping` is two round trips because a synchronous eval cannot count
+    /// frames; the read must also stop the counter it armed.
+    #[test]
+    fn ping_scripts_arm_and_read_a_frame_counter() {
+        assert!(PING_ARM_JS.contains("requestAnimationFrame"));
+        assert!(PING_READ_JS.contains("cancelAnimationFrame"));
+        assert!(PING_READ_JS.contains("rafTicksPer200ms"));
+        assert!(PING_READ_JS.contains("document.readyState"));
+    }
+
+    /// D5: an agent asking "is this page alive" must be able to read the answer.
+    #[test]
+    fn ping_result_deserializes_from_the_read_script_shape() {
+        let v = serde_json::json!({ "readyState": "complete", "rafTicksPer200ms": 12 });
+        let p: BrowserPing = serde_json::from_value(v).unwrap();
+        assert_eq!(p.ready_state, "complete");
+        assert_eq!(p.raf_ticks_per_200ms, 12);
     }
 
     #[test]

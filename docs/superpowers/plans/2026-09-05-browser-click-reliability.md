@@ -47,4 +47,79 @@ Agents abandon the in-app browser and open the human's Google Chrome (via the cl
 
 ## Outcome
 
-_(implementer fills)_
+Implemented by Tiësto on `lane/browser-click-reliability`, base main `daa9dcc`.
+
+**Commits:** `daecd77` — D1-D5 (they share `click_js`, the action result shape,
+and the conceal/reveal pair; splitting them would produce commits that do not
+build). `03ab5fa` — D6, which READY-1 wrongly claimed was in `daecd77`.
+
+**Correction (Armin's finding, Detoro confirmed).** D6 was not in the lane at
+READY-1. Its patch ran with the shell still in the MAIN checkout, so it edited
+that working tree rather than this worktree, and the grep used to verify it ran
+in the same wrong place — so it read as landed. The stray edit has been reverted
+and the main checkout is clean; D6 is now in `03ab5fa`. Guard recorded in
+workspace memory: `cd <lane worktree> &&` in the same command as any patch
+script, and check `git diff --stat` in the lane for every decision claimed
+before committing.
+
+**Superseded:** `daecd77` — all six decisions in one change (they share `click_js`,
+the action result shape, and the conceal/reveal pair; splitting them would have
+produced commits that do not build).
+
+**Gates**
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `cargo test -p conclave --lib browser` @ `03ab5fa` | exit 0 — 69 passed |
+| 2 | `cargo test -p conclave --lib` @ `03ab5fa` | exit 0 — 1045 passed, 11 ignored |
+| 2 | `rustfmt --check` on all five boundary files @ `03ab5fa` | exit 0 |
+| 2 | `cargo clippy -p conclave --all-targets` @ `03ab5fa` | exit 0 — same 2 pre-existing warnings |
+| 1 | `cargo test -p conclave --lib browser` @ `daecd77` | exit 0 — 69 passed |
+| 1 | `cargo test --bin conclave-cli` @ `daecd77` | exit 0 — 169 passed |
+| 2 | `cargo test -p conclave --lib` @ `daecd77` | exit 0 — 1045 passed, 11 ignored |
+| 2 | `rustfmt --check` on all five boundary files @ `daecd77` | exit 0 |
+| 2 | `cargo clippy -p conclave --all-targets` @ `daecd77` | exit 0 — 2 warnings, both pre-existing (`instance.rs:2083`, `pty.rs:230`), zero in the boundary files |
+| 3 | Live click/popover + exit-code gate | **BLOCKED on rebuild+relaunch** |
+| 4 | Background-tab rAF measurement (Decision 4) | **BLOCKED on rebuild+relaunch** |
+| 5 | Human acceptance | pending |
+
+Tests named by gate 1 all exist: `click_js_dispatches_pointer_sequence_before_click`,
+`click_js_scrolls_into_view`, `wait_for_selector_times_out_with_message` (pure
+retry helper driven by a fake evaluator, no webview). Added beyond the named set:
+`click_js_reports_the_hit_element`, `click_and_type_report_the_retryable_miss_marker`,
+`wait_for_selector_returns_a_late_hit`, `wait_for_selector_zero_timeout_is_a_single_attempt`,
+`resolve_selector_timeout_defaults_and_honours_zero`, `ping_scripts_arm_and_read_a_frame_counter`,
+`ping_result_deserializes_from_the_read_script_shape`, `browser_click_and_type_accept_timeout_ms`,
+`browser_timeout_ms_rejects_a_non_integer`, `browser_ping_maps_with_caller_id_only`,
+`browser_click_and_type_exit_non_zero_on_ok_false`, `other_browser_verbs_keep_their_exit_code`.
+
+**Why gates 3 and 4 cannot be run by the implementer.** `conclave browser` drives
+the RUNNING app over `conclave.sock`, and the running app is the pre-`daecd77`
+build — so a live click gate today would exercise the old `el.click()` and the
+old router, which has no `browser.ping` arm. `pnpm tauri dev` cannot take
+`conclave.sock` (its janitor prunes the live db), so a second instance is not a
+substitute. Both gates need a rebuild + relaunch first; Decision 4's outcome —
+including a `task challenge` with the measurement if parking does not keep rAF
+alive — is therefore still open, exactly as the plan anticipated.
+
+**Notes on the build**
+
+- **Decision 4 is isolated in one function.** `conceal(view, bounds)` is the only
+  place that decides what "hidden" means natively. The documented fallback
+  (`view.hide()`) is a one-function change, and Decision 7 of `browser-first-paint`
+  still holds either way: a parked webview is at `(-20000, -20000)`, so "nothing
+  paints over the app chrome while the Browser view is unmounted" is now enforced
+  by POSITION rather than by the hidden flag. The registry decision functions
+  from that lane are untouched, per this plan's §Risks.
+- **Decision 5's two halves.** The plan's sentence starts by adding `readyState`
+  and `rafAlive` to `snapshot`, then rules that the rAF half is impossible
+  synchronously and must be a separate `browser ping` verb. Read as: `snapshot`
+  gains `readyState` (cheap, synchronous), and `ping` carries both. That is what
+  shipped.
+- **`BrowserActionResult` gained `tag` and `text`** as `Option` with
+  `skip_serializing_if`, so `src/ipc/types.ts`'s mirror keeps deserializing
+  unchanged — the frontend reads only `ok`/`url`/`message`. The TS mirror is
+  outside this lane's boundary and was deliberately not edited.
+- **`isTrusted` is still false** on the synthetic events (plan §Risks). A site
+  gating on it needs CDP-level input, which stays out of scope.
+
