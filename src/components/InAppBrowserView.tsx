@@ -426,6 +426,15 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
             </p>
           ) : (
             <>
+              {error && (
+                <p
+                  role="alert"
+                  className="mx-2 mt-2 rounded-md bg-danger/[0.08] px-2 py-1.5 text-[11px] leading-relaxed text-danger"
+                >
+                  {error}
+                </p>
+              )}
+
               {humanTabs.length > 0 && (
                 <>
                   <SectionLabel>You</SectionLabel>
