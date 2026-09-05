@@ -17,6 +17,7 @@ let view;
 let full = false;
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index];
+  if (arg === "--") continue;
   if (arg === "--full") {
     full = true;
     continue;
