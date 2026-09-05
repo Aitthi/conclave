@@ -110,10 +110,15 @@ export function Terminal({ sessionId }: TerminalProps) {
    * → terminalProcessManager.ts:651-665), one ordered channel for keystrokes,
    * replies and pasted text alike. The chain never rejects — a failed send is
    * swallowed, exactly as before, so one dead invoke cannot wedge the rest.
+   *
+   * `paste: true` delivers the text as ONE bracketed paste (macOS hands PTY
+   * input to the TUI in 1022-byte reads, and Claude Code keeps only the last
+   * un-bracketed burst chunk). Only composed TEXT may ask for it — keystrokes
+   * and terminal replies stay byte-exact raw.
    */
-  const sendStdin = (text: string) => {
+  const sendStdin = (text: string, opts?: { paste?: boolean }) => {
     stdinChainRef.current = stdinChainRef.current
-      .then(() => ipc.message.send({ sessionId, text }))
+      .then(() => ipc.message.send({ sessionId, text, paste: opts?.paste }))
       .then(
         () => {},
         () => {
@@ -124,11 +129,13 @@ export function Terminal({ sessionId }: TerminalProps) {
       );
   };
 
-  // Drag a file onto the terminal → type its shell-quoted path into the PTY at
-  // the cursor (no submit), exactly like dropping a file into a real terminal.
-  // Written straight to stdin via message.send; the running TUI echoes it.
+  // Drag a file onto the terminal → insert its shell-quoted path into the PTY
+  // at the cursor (no submit), exactly like dropping a file into a real
+  // terminal. Several long paths exceed one 1022-byte PTY read, so the insert
+  // travels as ONE bracketed paste: the TUI inserts it verbatim, trailing
+  // space included, and never sees a truncated burst.
   const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
-    sendStdin(paths.map(shellQuotePath).join(" ") + " ");
+    sendStdin(paths.map(shellQuotePath).join(" ") + " ", { paste: true });
   });
 
   useEffect(() => {
