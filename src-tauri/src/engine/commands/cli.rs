@@ -865,6 +865,21 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
 /// verbs → router commands + payloads. `argv[0]` is `"browser"`, `argv[1]` the
 /// verb, `argv[2..]` the verb's own args — the exact positional shape the human
 /// types, since the caller id (if any) was removed upstream.
+/// Parse `--timeout-ms N` for `click`/`type`: absent → `None` (the runtime's
+/// default applies), `0` → a single attempt with no wait. A non-integer is
+/// rejected rather than silently ignored — a swallowed flag would look like it
+/// worked while changing nothing.
+fn parse_timeout_ms(raw: Option<String>, verb: &str) -> Result<Option<u64>, AppError> {
+    raw.map(|v| {
+        v.parse::<u64>().map_err(|_| {
+            AppError::Invalid(format!(
+                "cli: browser {verb}: --timeout-ms expects a non-negative integer"
+            ))
+        })
+    })
+    .transpose()
+}
+
 fn map_browser_verb(argv: &[String]) -> Result<(&'static str, Value), AppError> {
     match argv.get(1).map(String::as_str) {
         Some("open") => {
@@ -902,22 +917,36 @@ fn map_browser_verb(argv: &[String]) -> Result<(&'static str, Value), AppError> 
             Ok(("browser.snapshot", params))
         }
         Some("click") => {
-            if argv.len() != 3 {
-                return Err(AppError::Invalid("cli: browser click <selector>".into()));
-            }
-            Ok(("browser.click", json!({ "selector": argv[2] })))
-        }
-        Some("type") => {
-            let selector = argv.get(2).ok_or_else(|| {
-                AppError::Invalid("cli: browser type <selector> <text...>".into())
-            })?;
-            if argv.len() < 4 {
+            let (timeout, rest) = take_flag(argv.get(2..).unwrap_or(&[]), "--timeout-ms");
+            if rest.len() != 1 {
                 return Err(AppError::Invalid(
-                    "cli: browser type <selector> <text...>".into(),
+                    "cli: browser click [--timeout-ms N] <selector>".into(),
                 ));
             }
-            let text = argv[3..].join(" ");
-            Ok(("browser.type", json!({ "selector": selector, "text": text })))
+            let mut params = json!({ "selector": rest[0] });
+            if let Some(ms) = parse_timeout_ms(timeout, "click")? {
+                params["timeoutMs"] = json!(ms);
+            }
+            Ok(("browser.click", params))
+        }
+        Some("type") => {
+            let (timeout, rest) = take_flag(argv.get(2..).unwrap_or(&[]), "--timeout-ms");
+            if rest.len() < 2 {
+                return Err(AppError::Invalid(
+                    "cli: browser type [--timeout-ms N] <selector> <text...>".into(),
+                ));
+            }
+            let mut params = json!({ "selector": rest[0], "text": rest[1..].join(" ") });
+            if let Some(ms) = parse_timeout_ms(timeout, "type")? {
+                params["timeoutMs"] = json!(ms);
+            }
+            Ok(("browser.type", params))
+        }
+        Some("ping") => {
+            if argv.len() != 2 {
+                return Err(AppError::Invalid("cli: browser ping".into()));
+            }
+            Ok(("browser.ping", Value::Null))
         }
         Some("eval") => {
             if argv.len() < 3 {
@@ -3462,6 +3491,82 @@ mod tests {
             json!({ "selector": "#q", "text": "hello world", "callerId": "agentA" })
         );
         assert!(is_invalid(&["browser", "type", "agentA", "#q"]));
+    }
+
+    /// D2: `--timeout-ms` is order-independent (it goes through `take_flag`)
+    /// and must survive alongside the positional caller id and a text payload.
+    #[test]
+    fn browser_click_and_type_accept_timeout_ms() {
+        assert_eq!(
+            ok_params(&[
+                "browser",
+                "click",
+                "agentA",
+                "--timeout-ms",
+                "250",
+                "#submit"
+            ]),
+            json!({ "selector": "#submit", "timeoutMs": 250, "callerId": "agentA" })
+        );
+        // Flag after the selector works too.
+        assert_eq!(
+            ok_params(&["browser", "click", "agentA", "#submit", "--timeout-ms", "0"]),
+            json!({ "selector": "#submit", "timeoutMs": 0, "callerId": "agentA" })
+        );
+        // Absent → no key at all, so the runtime default applies.
+        assert_eq!(
+            ok_params(&["browser", "click", "agentA", "#submit"]),
+            json!({ "selector": "#submit", "callerId": "agentA" })
+        );
+        assert_eq!(
+            ok_params(&[
+                "browser",
+                "type",
+                "agentA",
+                "--timeout-ms",
+                "900",
+                "#q",
+                "hi",
+                "there"
+            ]),
+            json!({
+                "selector": "#q", "text": "hi there", "timeoutMs": 900, "callerId": "agentA"
+            })
+        );
+    }
+
+    /// A flag that cannot be parsed must FAIL, never be silently dropped — a
+    /// swallowed timeout would look like it applied while changing nothing.
+    #[test]
+    fn browser_timeout_ms_rejects_a_non_integer() {
+        assert!(is_invalid(&[
+            "browser",
+            "click",
+            "agentA",
+            "--timeout-ms",
+            "soon",
+            "#s"
+        ]));
+        assert!(is_invalid(&[
+            "browser",
+            "type",
+            "agentA",
+            "--timeout-ms",
+            "-1",
+            "#s",
+            "x"
+        ]));
+    }
+
+    /// D5: `ping` takes nothing but the caller id.
+    #[test]
+    fn browser_ping_maps_with_caller_id_only() {
+        assert_eq!(ok_method(&["browser", "ping", "agentA"]), "browser.ping");
+        assert_eq!(
+            ok_params(&["browser", "ping", "agentA"]),
+            json!({ "callerId": "agentA" })
+        );
+        assert!(is_invalid(&["browser", "ping", "agentA", "extra"]));
     }
 
     #[test]

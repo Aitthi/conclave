@@ -65,6 +65,10 @@ struct SnapshotReq {
 #[serde(rename_all = "camelCase")]
 struct SelectorReq {
     selector: String,
+    /// How long to wait for `selector` to appear, in ms. Absent → the runtime's
+    /// 5000 ms default; `0` → a single attempt with no wait.
+    #[serde(default)]
+    timeout_ms: Option<u64>,
     #[serde(default)]
     caller_id: Option<String>,
 }
@@ -74,6 +78,17 @@ struct SelectorReq {
 struct TypeReq {
     selector: String,
     text: String,
+    /// Same contract as [`SelectorReq::timeout_ms`].
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    caller_id: Option<String>,
+}
+
+/// `browser.ping` takes nothing but the caller's identity — which tab to probe.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PingReq {
     #[serde(default)]
     caller_id: Option<String>,
 }
@@ -191,12 +206,15 @@ async fn agent_tab(
     state: &AppState,
     caller_id: Option<&str>,
 ) -> Result<(String, BrowserOwner), AppError> {
-    let caller_id = caller_id.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
-        AppError::Invalid(
+    let caller_id = caller_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::Invalid(
             "browser: caller identity missing — this verb is only available inside a spawned agent"
                 .into(),
         )
-    })?;
+        })?;
     let name = resolve_agent_name(state, caller_id).await;
     Ok(resolve_owner(caller_id, &name))
 }
@@ -218,9 +236,16 @@ pub async fn goto(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req =
         serde_json::from_value::<GotoReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
-    if req.caller_id.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
+    if req
+        .caller_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
         let (tab_id, owner) = agent_tab(state, req.caller_id.as_deref()).await?;
-        return to_value(browser::navigate(app, &tab_id, owner, &req.url, None).map_err(to_app_err)?);
+        return to_value(
+            browser::navigate(app, &tab_id, owner, &req.url, None).map_err(to_app_err)?,
+        );
     }
     match req.tab_id.as_deref() {
         Some(tab_id) => to_value(
@@ -249,13 +274,28 @@ pub async fn snapshot(state: &AppState, payload: Value) -> Result<Value, AppErro
     )
 }
 
+/// `browser.ping` — "is this page alive": `readyState` plus a 200 ms animation
+/// frame count. An agent that gets `rafTicksPer200ms: 0` is looking at a webview
+/// that is not painting, which is the real reason a click "did nothing"; the
+/// agent can say so instead of escaping to Chrome. Payload is caller-id only.
+pub async fn ping(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req = if payload.is_null() {
+        PingReq::default()
+    } else {
+        serde_json::from_value::<PingReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?
+    };
+    let app = app_handle(state)?;
+    let (tab_id, _owner) = agent_tab(state, req.caller_id.as_deref()).await?;
+    to_value(browser::ping(app, &tab_id).await.map_err(to_app_err)?)
+}
+
 pub async fn click(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let req = serde_json::from_value::<SelectorReq>(payload)
         .map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
     let (tab_id, _owner) = agent_tab(state, req.caller_id.as_deref()).await?;
     to_value(
-        browser::click(app, &tab_id, &req.selector)
+        browser::click(app, &tab_id, &req.selector, req.timeout_ms)
             .await
             .map_err(to_app_err)?,
     )
@@ -267,7 +307,7 @@ pub async fn type_text(state: &AppState, payload: Value) -> Result<Value, AppErr
     let app = app_handle(state)?;
     let (tab_id, _owner) = agent_tab(state, req.caller_id.as_deref()).await?;
     to_value(
-        browser::type_text(app, &tab_id, &req.selector, &req.text)
+        browser::type_text(app, &tab_id, &req.selector, &req.text, req.timeout_ms)
             .await
             .map_err(to_app_err)?,
     )
@@ -318,7 +358,12 @@ pub async fn close(state: &AppState, payload: Value) -> Result<Value, AppError> 
     let app = app_handle(state)?;
     // Caller id wins (an agent closes its OWN tab); else the human closes the
     // named tab.
-    if let Some(caller_id) = req.caller_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(caller_id) = req
+        .caller_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return to_value(browser::close_tab(app, caller_id).map_err(to_app_err)?);
     }
     match req.tab_id.as_deref() {
@@ -345,8 +390,8 @@ pub async fn new_tab(_state: &AppState, _payload: Value) -> Result<Value, AppErr
 }
 
 pub async fn set_active(state: &AppState, payload: Value) -> Result<Value, AppError> {
-    let req =
-        serde_json::from_value::<TabIdReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let req = serde_json::from_value::<TabIdReq>(payload)
+        .map_err(|e| AppError::Invalid(e.to_string()))?;
     let app = app_handle(state)?;
     to_value(browser::set_active(app, &req.tab_id).map_err(to_app_err)?)
 }
@@ -462,7 +507,10 @@ mod tests {
     async fn status_returns_the_tab_list_shape() {
         let state = AppState::for_tests().await;
         let v = status(&state, Value::Null).await.unwrap();
-        assert!(v.get("tabs").is_some(), "status must carry a tabs array: {v}");
+        assert!(
+            v.get("tabs").is_some(),
+            "status must carry a tabs array: {v}"
+        );
         assert!(v["tabs"].is_array());
     }
 }

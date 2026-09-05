@@ -127,7 +127,9 @@ Subcommands:
   design review <workspaceId> [--json]  (deterministic design QA; gate with the plain form — --json is for data retrieval, it always exits 0)
   browser open|goto <url>              (in-app browser; missing scheme → https://)
   browser status | snapshot [--max-text N] | close   (status/snapshot print JSON)
-  browser click|type <selector> [text...] | eval <js...>   (selectors come from snapshot; eval is local-only)
+  browser ping                         (readyState + rAF ticks: is the page actually alive?)
+  browser click|type [--timeout-ms N] <selector> [text...] | eval <js...>   (selectors come from snapshot; eval is local-only)
+                                       (click/type wait 5s for the selector, --timeout-ms 0 = no wait, and EXIT 1 when the action reports ok:false)
   browser screenshot [path] [--width N] [--height N]   (path defaults to ./browser-screenshot.png, resolved to an absolute path in this shell's cwd)
   code stats|files|tree|symbols|find <args>   survey a codebase (tree-sitter)
   code callers|callees|refs|impact <name>     semantic cross-references
@@ -3059,6 +3061,24 @@ enum OutMode {
 
 /// Select the renderer from the expanded wire argv. Self-keyed task commands
 /// have an actor id inserted at argv[2], but their verb remains at argv[1].
+/// Whether this invocation is a `browser click`/`type` whose result reported
+/// `ok: false` — the one case where a successful JSON-RPC round trip must still
+/// exit non-zero.
+///
+/// A miss used to print `{"ok":false}` and exit 0, so `conclave browser click X
+/// > /dev/null` under `set -e` silently swallowed a click that hit nothing
+/// (Dew, task roster-row-supervisor-trash). The verb sits at `argv[1]` both
+/// before and after the caller-id splice at `argv[2]`, so this reads the same
+/// either side of `expand_self_args`.
+fn browser_action_failed(argv: &[String], result: &Value) -> bool {
+    let is_action = argv.first().map(String::as_str) == Some("browser")
+        && matches!(
+            argv.get(1).map(String::as_str),
+            Some("click") | Some("type")
+        );
+    is_action && result.get("ok").and_then(Value::as_bool) == Some(false)
+}
+
 fn select_out_mode(argv: &[String], gate_exit_code: Option<i32>) -> OutMode {
     let is_snapshot = argv.first().map(String::as_str) == Some("snapshot");
     let sub = argv.get(1).map(String::as_str);
@@ -4162,6 +4182,15 @@ async fn main() -> ExitCode {
         if let Some(code) = gate_exit_code {
             return ExitCode::from(code.rem_euclid(256) as u8);
         }
+        // A click/type that matched nothing is a FAILURE, even though the round
+        // trip succeeded — the JSON above still printed, and the reason also
+        // goes to stderr so `set -e` scripts and agents both see it.
+        if browser_action_failed(&argv, result) {
+            if let Some(message) = result.get("message").and_then(Value::as_str) {
+                eprintln!("conclave: {message}");
+            }
+            return ExitCode::FAILURE;
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -4173,9 +4202,9 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_self_args, inject_code_path, parse_min_plan_header, plan_check_files_and_total,
-        read_checkout_file, render_plan_check_result, sha256_hex, validate_slug, GUARD_HOOK,
-        GUARD_MARKER,
+        browser_action_failed, expand_self_args, inject_code_path, parse_min_plan_header,
+        plan_check_files_and_total, read_checkout_file, render_plan_check_result, sha256_hex,
+        validate_slug, GUARD_HOOK, GUARD_MARKER,
     };
     use std::path::{Path, PathBuf};
 
@@ -5737,6 +5766,37 @@ mod tests {
     // is injected POSITIONALLY at argv[2] (right after the verb). `screenshot`
     // ALSO resolves its path client-side, on the ORIGINAL argv BEFORE the id
     // shifts positions, so the resolved path ends up at argv[3].
+
+    /// D3: a click/type that matched nothing must EXIT 1. It used to print
+    /// `{"ok":false}` and exit 0, so a gate piping it to /dev/null under
+    /// `set -e` sailed past a click that hit nothing.
+    #[test]
+    fn browser_click_and_type_exit_non_zero_on_ok_false() {
+        let miss = serde_json::json!({ "ok": false, "message": "no element matched selector" });
+        let hit = serde_json::json!({ "ok": true, "url": "https://x/" });
+
+        for verb in ["click", "type"] {
+            let argv = v(&["browser", verb, "agentX", "#nope"]);
+            assert!(browser_action_failed(&argv, &miss), "{verb} miss must fail");
+            assert!(!browser_action_failed(&argv, &hit), "{verb} hit must pass");
+        }
+    }
+
+    /// Only click/type map `ok` to the exit code — the other browser verbs are
+    /// unchanged, and a bare `ok:false` elsewhere must not start failing.
+    #[test]
+    fn other_browser_verbs_keep_their_exit_code() {
+        let miss = serde_json::json!({ "ok": false });
+        for verb in [
+            "open", "goto", "status", "snapshot", "eval", "close", "ping",
+        ] {
+            assert!(
+                !browser_action_failed(&v(&["browser", verb, "agentX"]), &miss),
+                "browser {verb} must not gain an exit-code mapping"
+            );
+        }
+        assert!(!browser_action_failed(&v(&["task", "list", "ws"]), &miss));
+    }
 
     #[test]
     fn expand_browser_verb_injects_caller_id_at_argv2() {

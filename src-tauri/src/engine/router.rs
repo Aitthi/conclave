@@ -140,6 +140,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
         "browser.click" => browser::click(state, payload).await,
         "browser.type" => browser::type_text(state, payload).await,
         "browser.eval" => browser::eval(state, payload).await,
+        "browser.ping" => browser::ping(state, payload).await,
         "browser.close" => browser::close(state, payload).await,
         "browser.setBounds" => browser::set_bounds(state, payload).await,
         "browser.setVisible" => browser::set_visible(state, payload).await,
