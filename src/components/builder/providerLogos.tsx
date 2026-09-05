@@ -16,6 +16,7 @@
 // embedded.
 
 import { Terminal } from "lucide-react";
+import type { CliKind } from "./RuntimeSection";
 
 export type ProviderKind =
   "claude-code" | "codex" | "antigravity" | "opencode" | "muse-spark";
@@ -70,8 +71,12 @@ export function ProviderMark({
 }
 
 /** Kinds the backend can launch today — the ONLY ones the picker renders.
- *  opencode and muse-spark join this list when the CliKind union carries them. */
-export const RUNTIME_TILES: ProviderKind[] = [
+ *  `Extract` makes the union itself the gate: opencode and muse-spark cannot be
+ *  listed here until `CliKind` carries them, so the picker can never offer a
+ *  runtime the launcher cannot start. Type-only import, so no runtime cycle. */
+export type RuntimeTileKind = Extract<ProviderKind, CliKind>;
+
+export const RUNTIME_TILES: RuntimeTileKind[] = [
   "claude-code",
   "codex",
   "antigravity",

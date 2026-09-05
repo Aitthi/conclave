@@ -203,14 +203,14 @@ export function RuntimeSection({
         className="grid grid-cols-3 gap-2"
       >
         {RUNTIME_TILES.map((kind) => {
-          const active = cliKind === (kind as CliKind);
+          const active = cliKind === kind;
           return (
             <button
               key={kind}
               type="button"
               role="radio"
               aria-checked={active}
-              onClick={() => selectCliKind(kind as CliKind)}
+              onClick={() => selectCliKind(kind)}
               className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left transition-colors ring-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 active
                   ? "ring-accent/40 bg-accent/[0.06]"
@@ -299,338 +299,370 @@ export function RuntimeSection({
         </div>
       )}
 
-      <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
-        {/* Model — field + quick-presets together so picking a preset
-            visibly fills the same field. */}
-        <div className="px-3 py-2">
-          <div className="flex items-center justify-between gap-3">
-            <label
-              htmlFor="cli-model"
-              className="text-[12.5px] text-text-secondary shrink-0"
-            >
-              Model
-            </label>
-            {isAntigravity ? (
-              // Antigravity's models are discovered from the user's own
-              // authenticated CLI, so there is nothing to type and no
-              // list to hardcode — same native select as Execution mode.
-              // Fixed width, not min-width: a native select sizes
-              // itself to its WIDEST option, so one long model id would
-              // otherwise stretch this control across the row. 240px is
-              // the smallest width that shows "Auto (authenticated
-              // default)" (158px of text) whole; longer labels clip, and
-              // the exact id stays reachable through the option title
-              // and the hint line below.
-              <div className="relative w-[240px] shrink-0">
-                <select
-                  id="cli-model"
-                  value={model}
-                  disabled={modelCatalog.state === "loading"}
-                  onChange={(event) => setModel(event.target.value)}
-                  title={model || "Auto (authenticated default)"}
-                  className="h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:text-text-muted"
-                >
-                  <option value="">Auto (authenticated default)</option>
-                  {savedModelUnlisted && (
-                    <option value={model} title={model}>
-                      {modelCatalog.state === "ready"
-                        ? `${model} (unavailable)`
-                        : model}
-                    </option>
-                  )}
-                  {catalogModels.map((entry) => (
-                    <option key={entry.id} value={entry.id} title={entry.id}>
-                      {entry.label}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2 top-2 h-3 w-3 text-text-muted" />
-              </div>
-            ) : (
-              <input
-                id="cli-model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder={isCodex ? "gpt-5.5" : "claude-opus-4-8"}
-                className="min-w-0 flex-1 bg-transparent text-right font-mono text-[12.5px] outline-none placeholder:text-text-tertiary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-accent"
-              />
-            )}
+      {/* Model / API — unreachable for every runtime the picker can select
+          (D5), and kept only so a legacy definition whose cliKind is not a
+          first-class harness still renders a model field instead of nothing.
+          Restored from d90b779:1240-1265 (Mellow's F1). */}
+      {!showCliConfig && (
+        <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-[12.5px] text-text-secondary">Provider</span>
+            {/* TODO(M5): real provider picker wired to provider.upsert */}
+            <span className="text-[12.5px] text-text-tertiary">
+              Configure in Settings
+            </span>
           </div>
-          {isAntigravity ? (
-            <div className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
-              {modelCatalog.state === "loading" ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <RefreshCw className="h-3 w-3 animate-spin motion-reduce:animate-none" />
-                  Loading your authenticated models…
-                </span>
-              ) : modelCatalog.state === "error" ? (
-                <span className="inline-flex flex-wrap items-center gap-1.5 text-warning">
-                  Couldn’t load your Antigravity models.
-                  <button
-                    type="button"
-                    onClick={() => void loadAntigravityModels()}
-                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-semibold hover:bg-warning/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning"
-                  >
-                    <RefreshCw className="h-3 w-3" /> Retry
-                  </button>
-                </span>
-              ) : savedModelUnlisted ? (
-                <span className="text-warning">
-                  <span className="font-mono">{model}</span> isn’t in your
-                  authenticated models. It is kept until you pick another.
-                </span>
-              ) : model ? (
-                <>
-                  Launches as <span className="font-mono">{model}</span>.
-                </>
-              ) : (
-                "Auto lets Antigravity choose from your authenticated models."
-              )}
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {modelPresets.map((m) => (
-                <button
-                  key={m}
-                  onClick={() => selectModelPreset(m)}
-                  className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
-                    model === m
-                      ? "ring-accent/40 bg-accent/[0.08] text-accent"
-                      : "ring-overlay/[0.08] text-text-secondary hover:bg-overlay/[0.03]"
-                  }`}
-                >
-                  {m.replace("claude-", "")}
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-[12.5px] text-text-secondary">Model</span>
+            <input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="e.g. claude-opus-4-8"
+              className="text-[12.5px] text-right bg-transparent outline-none w-44 placeholder:text-text-quaternary"
+            />
+          </div>
         </div>
-
-        {showCliConfig && (
-          <div className="px-3 py-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-[12.5px] text-text-secondary">Effort</span>
-              <div
-                role="radiogroup"
-                aria-label="Effort"
-                className="flex rounded-lg bg-overlay/[0.04] p-0.5"
-              >
-                {(
-                  [
-                    { value: undefined, label: "Auto" },
-                    { value: "low", label: "low" },
-                    { value: "medium", label: "medium" },
-                    { value: "high", label: "high" },
-                  ] as { value: CliEffort; label: string }[]
-                ).map(({ value, label }) => (
-                  <button
-                    key={label}
-                    type="button"
-                    role="radio"
-                    aria-checked={effort === value}
-                    onClick={() => setEffort(value)}
-                    className={`rounded-[7px] px-2.5 py-1 text-[11.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                      effort === value
-                        ? "bg-surface font-semibold text-text-primary shadow-sm"
-                        : "text-text-secondary hover:text-text-primary"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <p className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
-              Auto uses the provider default and omits the effort override.
-            </p>
-          </div>
-        )}
-
-        {/* Permission mode */}
-        {isAntigravity ? (
+      )}
+      {showCliConfig && (
+        <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
+          {/* Model — field + quick-presets together so picking a preset
+              visibly fills the same field. */}
           <div className="px-3 py-2">
             <div className="flex items-center justify-between gap-3">
               <label
-                htmlFor="antigravity-execution-mode"
-                className="shrink-0 text-[12.5px] text-text-secondary"
+                htmlFor="cli-model"
+                className="text-[12.5px] text-text-secondary shrink-0"
               >
-                Execution mode
+                Model
               </label>
-              <div className="relative min-w-[190px]">
-                <select
-                  id="antigravity-execution-mode"
-                  value={permissionMode === "auto" ? "default" : permissionMode}
-                  onChange={(event) => {
-                    setPermissionMode(event.target.value as PermissionMode);
-                    setPermissionModeDirty(true);
-                  }}
-                  className={`h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-                    permissionMode === "bypassPermissions"
-                      ? "text-danger"
-                      : "text-text-primary"
-                  }`}
-                >
-                  <option value="default">Default</option>
-                  <option value="acceptEdits">Accept edits</option>
-                  <option value="plan">Plan</option>
-                  <option value="bypassPermissions">Bypass permissions</option>
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2 top-2 h-3 w-3 text-text-muted" />
-              </div>
+              {isAntigravity ? (
+                // Antigravity's models are discovered from the user's own
+                // authenticated CLI, so there is nothing to type and no
+                // list to hardcode — same native select as Execution mode.
+                // Fixed width, not min-width: a native select sizes
+                // itself to its WIDEST option, so one long model id would
+                // otherwise stretch this control across the row. 240px is
+                // the smallest width that shows "Auto (authenticated
+                // default)" (158px of text) whole; longer labels clip, and
+                // the exact id stays reachable through the option title
+                // and the hint line below.
+                <div className="relative w-[240px] shrink-0">
+                  <select
+                    id="cli-model"
+                    value={model}
+                    disabled={modelCatalog.state === "loading"}
+                    onChange={(event) => setModel(event.target.value)}
+                    title={model || "Auto (authenticated default)"}
+                    className="h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:text-text-muted"
+                  >
+                    <option value="">Auto (authenticated default)</option>
+                    {savedModelUnlisted && (
+                      <option value={model} title={model}>
+                        {modelCatalog.state === "ready"
+                          ? `${model} (unavailable)`
+                          : model}
+                      </option>
+                    )}
+                    {catalogModels.map((entry) => (
+                      <option key={entry.id} value={entry.id} title={entry.id}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-2 top-2 h-3 w-3 text-text-muted" />
+                </div>
+              ) : (
+                <input
+                  id="cli-model"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder={isCodex ? "gpt-5.5" : "claude-opus-4-8"}
+                  className="min-w-0 flex-1 bg-transparent text-right font-mono text-[12.5px] outline-none placeholder:text-text-tertiary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-accent"
+                />
+              )}
             </div>
-            <p
-              className={`mt-1.5 text-[10px] leading-relaxed ${
-                permissionMode === "bypassPermissions"
-                  ? "text-danger"
-                  : "text-text-tertiary"
-              }`}
-            >
-              {
-                ANTIGRAVITY_MODE_HELP[
-                  permissionMode === "auto" ? "default" : permissionMode
-                ]
-              }
-            </p>
-            {permissionMode === "bypassPermissions" && (
-              <div className="mt-2 flex items-start gap-2 rounded-lg bg-danger/[0.09] px-2.5 py-2 text-[10.5px] leading-relaxed text-danger">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>
-                  <strong>Use only in workspaces you trust.</strong> This
-                  disables Antigravity permission checks.
-                </span>
+            {isAntigravity ? (
+              <div className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
+                {modelCatalog.state === "loading" ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <RefreshCw className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+                    Loading your authenticated models…
+                  </span>
+                ) : modelCatalog.state === "error" ? (
+                  <span className="inline-flex flex-wrap items-center gap-1.5 text-warning">
+                    Couldn’t load your Antigravity models.
+                    <button
+                      type="button"
+                      onClick={() => void loadAntigravityModels()}
+                      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-semibold hover:bg-warning/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning"
+                    >
+                      <RefreshCw className="h-3 w-3" /> Retry
+                    </button>
+                  </span>
+                ) : savedModelUnlisted ? (
+                  <span className="text-warning">
+                    <span className="font-mono">{model}</span> isn’t in your
+                    authenticated models. It is kept until you pick another.
+                  </span>
+                ) : model ? (
+                  <>
+                    Launches as <span className="font-mono">{model}</span>.
+                  </>
+                ) : (
+                  "Auto lets Antigravity choose from your authenticated models."
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {modelPresets.map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => selectModelPreset(m)}
+                    className={`text-[11px] font-mono px-2 py-0.5 rounded-md ring-1 transition-colors ${
+                      model === m
+                        ? "ring-accent/40 bg-accent/[0.08] text-accent"
+                        : "ring-overlay/[0.08] text-text-secondary hover:bg-overlay/[0.03]"
+                    }`}
+                  >
+                    {m.replace("claude-", "")}
+                  </button>
+                ))}
               </div>
             )}
           </div>
-        ) : (
-          <div className="px-3 py-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[12.5px] text-text-secondary">
-                Permission mode
-              </span>
-              <div
-                role="radiogroup"
-                aria-label="Permission mode"
-                className="flex rounded-lg bg-overlay/[0.04] p-0.5"
-              >
-                {(
-                  [
-                    { value: "auto", label: "Auto" },
-                    { value: "bypassPermissions", label: "Bypass" },
-                  ] as { value: PermissionMode; label: string }[]
-                ).map(({ value, label }) => (
-                  <button
-                    key={value}
-                    role="radio"
-                    aria-checked={permissionMode === value}
-                    onClick={() => {
-                      setPermissionMode(value);
+
+          {showCliConfig && (
+            <div className="px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[12.5px] text-text-secondary">
+                  Effort
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="Effort"
+                  className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+                >
+                  {(
+                    [
+                      { value: undefined, label: "Auto" },
+                      { value: "low", label: "low" },
+                      { value: "medium", label: "medium" },
+                      { value: "high", label: "high" },
+                    ] as { value: CliEffort; label: string }[]
+                  ).map(({ value, label }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      role="radio"
+                      aria-checked={effort === value}
+                      onClick={() => setEffort(value)}
+                      className={`rounded-[7px] px-2.5 py-1 text-[11.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                        effort === value
+                          ? "bg-surface font-semibold text-text-primary shadow-sm"
+                          : "text-text-secondary hover:text-text-primary"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="mt-1.5 text-[10px] leading-relaxed text-text-tertiary">
+                Auto uses the provider default and omits the effort override.
+              </p>
+            </div>
+          )}
+
+          {/* Permission mode */}
+          {isAntigravity ? (
+            <div className="px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <label
+                  htmlFor="antigravity-execution-mode"
+                  className="shrink-0 text-[12.5px] text-text-secondary"
+                >
+                  Execution mode
+                </label>
+                <div className="relative min-w-[190px]">
+                  <select
+                    id="antigravity-execution-mode"
+                    value={
+                      permissionMode === "auto" ? "default" : permissionMode
+                    }
+                    onChange={(event) => {
+                      setPermissionMode(event.target.value as PermissionMode);
                       setPermissionModeDirty(true);
                     }}
-                    className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
-                      permissionMode === value
-                        ? "bg-surface shadow-sm font-semibold"
-                        : "text-text-secondary"
+                    className={`h-7 w-full appearance-none rounded-lg bg-overlay/[0.04] pl-2.5 pr-7 text-[11.5px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                      permissionMode === "bypassPermissions"
+                        ? "text-danger"
+                        : "text-text-primary"
                     }`}
-                    title={
-                      isCodex
-                        ? value === "auto"
-                          ? "codex --ask-for-approval never"
-                          : "codex --yolo"
-                        : `claude --permission-mode ${value}`
-                    }
                   >
-                    {label}
-                  </button>
-                ))}
+                    <option value="default">Default</option>
+                    <option value="acceptEdits">Accept edits</option>
+                    <option value="plan">Plan</option>
+                    <option value="bypassPermissions">
+                      Bypass permissions
+                    </option>
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-2 top-2 h-3 w-3 text-text-muted" />
+                </div>
               </div>
-            </div>
-            {permissionMode === "bypassPermissions" && (
-              <p className="text-[10.5px] text-warning mt-1.5">
-                Skips every permission prompt — use only in workspaces you
-                trust.
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* Context window — Claude's [1m] suffix remains a segmented
-            choice; Codex uses a numeric model_context_window override. */}
-        {isClaudeCode && (
-          <div className="px-3 py-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[12.5px] text-text-secondary">
-                Context window
-              </span>
-              <div
-                role="radiogroup"
-                aria-label="Context window"
-                className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+              <p
+                className={`mt-1.5 text-[10px] leading-relaxed ${
+                  permissionMode === "bypassPermissions"
+                    ? "text-danger"
+                    : "text-text-tertiary"
+                }`}
               >
-                {(
-                  [
-                    { value: "200k", label: "200K" },
-                    { value: "1m", label: "1M" },
-                  ] as { value: ClaudeContextWindow; label: string }[]
-                ).map(({ value, label }) => (
-                  <button
-                    key={value}
-                    role="radio"
-                    aria-checked={contextWindow === value}
-                    onClick={() => setContextWindow(value)}
-                    className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
-                      contextWindow === value
-                        ? "bg-surface shadow-sm font-semibold"
-                        : "text-text-secondary"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {contextWindow === "1m" && (
-              <p className="text-[10.5px] text-text-tertiary mt-1.5">
-                Launches as{" "}
-                <span className="font-mono">{model || "model"}[1m]</span>.
+                {
+                  ANTIGRAVITY_MODE_HELP[
+                    permissionMode === "auto" ? "default" : permissionMode
+                  ]
+                }
               </p>
-            )}
-          </div>
-        )}
-
-        {isCodex && (
-          <div className="px-3 py-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[12.5px] text-text-secondary">
-                Context window
-              </span>
-              <span className="text-[12px] text-text-tertiary">Auto</span>
+              {permissionMode === "bypassPermissions" && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg bg-danger/[0.09] px-2.5 py-2 text-[10.5px] leading-relaxed text-danger">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    <strong>Use only in workspaces you trust.</strong> This
+                    disables Antigravity permission checks.
+                  </span>
+                </div>
+              )}
             </div>
-            <p className="text-[10.5px] text-text-tertiary mt-1.5">
-              Derived from the model — no manual override.
-            </p>
-          </div>
-        )}
-
-        {/* Token filter (rtk) — Claude Code + Codex; absent/null = ON. */}
-        {(isClaudeCode || isCodex) && (
-          <div className="px-3 py-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[12.5px] text-text-secondary">
-                Token filter (rtk)
-              </span>
-              <Toggle
-                on={rtkEnabled}
-                onChange={setRtkEnabled}
-                label="Token filter (rtk)"
-              />
+          ) : (
+            <div className="px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[12.5px] text-text-secondary">
+                  Permission mode
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="Permission mode"
+                  className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+                >
+                  {(
+                    [
+                      { value: "auto", label: "Auto" },
+                      { value: "bypassPermissions", label: "Bypass" },
+                    ] as { value: PermissionMode; label: string }[]
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      role="radio"
+                      aria-checked={permissionMode === value}
+                      onClick={() => {
+                        setPermissionMode(value);
+                        setPermissionModeDirty(true);
+                      }}
+                      className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                        permissionMode === value
+                          ? "bg-surface shadow-sm font-semibold"
+                          : "text-text-secondary"
+                      }`}
+                      title={
+                        isCodex
+                          ? value === "auto"
+                            ? "codex --ask-for-approval never"
+                            : "codex --yolo"
+                          : `claude --permission-mode ${value}`
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {permissionMode === "bypassPermissions" && (
+                <p className="text-[10.5px] text-warning mt-1.5">
+                  Skips every permission prompt — use only in workspaces you
+                  trust.
+                </p>
+              )}
             </div>
-            <p className="text-[10.5px] text-text-tertiary mt-1.5">
-              Rewrites shell commands through rtk to compress output and save
-              tokens.
-            </p>
-          </div>
-        )}
-      </div>
+          )}
+
+          {/* Context window — Claude's [1m] suffix remains a segmented
+              choice; Codex uses a numeric model_context_window override. */}
+          {isClaudeCode && (
+            <div className="px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[12.5px] text-text-secondary">
+                  Context window
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="Context window"
+                  className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+                >
+                  {(
+                    [
+                      { value: "200k", label: "200K" },
+                      { value: "1m", label: "1M" },
+                    ] as { value: ClaudeContextWindow; label: string }[]
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      role="radio"
+                      aria-checked={contextWindow === value}
+                      onClick={() => setContextWindow(value)}
+                      className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                        contextWindow === value
+                          ? "bg-surface shadow-sm font-semibold"
+                          : "text-text-secondary"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {contextWindow === "1m" && (
+                <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                  Launches as{" "}
+                  <span className="font-mono">{model || "model"}[1m]</span>.
+                </p>
+              )}
+            </div>
+          )}
+
+          {isCodex && (
+            <div className="px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[12.5px] text-text-secondary">
+                  Context window
+                </span>
+                <span className="text-[12px] text-text-tertiary">Auto</span>
+              </div>
+              <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                Derived from the model — no manual override.
+              </p>
+            </div>
+          )}
+
+          {/* Token filter (rtk) — Claude Code + Codex; absent/null = ON. */}
+          {(isClaudeCode || isCodex) && (
+            <div className="px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[12.5px] text-text-secondary">
+                  Token filter (rtk)
+                </span>
+                <Toggle
+                  on={rtkEnabled}
+                  onChange={setRtkEnabled}
+                  label="Token filter (rtk)"
+                />
+              </div>
+              <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                Rewrites shell commands through rtk to compress output and save
+                tokens.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       {isAntigravity && (
         <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
@@ -639,77 +671,81 @@ export function RuntimeSection({
         </p>
       )}
 
-      {/* Advanced (D6) — collapsed unless the definition already uses it. */}
-      <div className="mt-2.5">
-        <button
-          type="button"
-          aria-expanded={advancedOpen}
-          aria-controls="builder-advanced"
-          onClick={() => setAdvancedOpen((open) => !open)}
-          className="flex w-full items-center gap-1.5 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-overlay/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          <ChevronRight
-            className={`h-3.5 w-3.5 text-text-tertiary transition-transform ${advancedOpen ? "rotate-90" : ""}`}
-          />
-          <span className="text-[12px] font-semibold">Advanced</span>
-          <span className="text-[11px] text-text-tertiary">
-            {isClaudeCode ? "Custom args, custom environment" : "Custom args"}
-          </span>
-        </button>
-
-        {advancedOpen && (
-          <div
-            id="builder-advanced"
-            className="mt-2 rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]"
+      {/* Advanced (D6) — collapsed unless the definition already uses it.
+          Gated with the card: handleSave drops customArgs/customEnv unless
+          showCliConfig, so an editable control here would be a dead write. */}
+      {showCliConfig && (
+        <div className="mt-2.5">
+          <button
+            type="button"
+            aria-expanded={advancedOpen}
+            aria-controls="builder-advanced"
+            onClick={() => setAdvancedOpen((open) => !open)}
+            className="flex w-full items-center gap-1.5 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-overlay/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
-            {/* Custom args */}
-            <div className="flex items-center justify-between px-3 py-2.5 gap-3">
-              <span className="text-[12.5px] text-text-secondary shrink-0">
-                Custom args
-              </span>
-              <input
-                value={customArgs}
-                onChange={(e) => setCustomArgs(e.target.value)}
-                placeholder="e.g. --verbose --mcp-config ./mcp.json"
-                className="text-[12px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-text-quaternary"
-              />
-            </div>
-            {/* Custom env (opt-in) — Claude Code only. Codex is configured
-                via its own config.toml / -c flags, not ANTHROPIC_* env. */}
-            {isClaudeCode && (
-              <div className="px-3 py-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[12.5px] text-text-secondary">
-                    Custom environment
-                  </span>
-                  <Toggle
-                    on={useCustomEnv}
-                    onChange={setUseCustomEnv}
-                    label="Use custom environment"
-                  />
-                </div>
-                {useCustomEnv && (
-                  <>
-                    <textarea
-                      value={envText}
-                      onChange={(e) => setEnvText(e.target.value)}
-                      spellCheck={false}
-                      rows={8}
-                      className="mt-2 w-full rounded-lg ring-1 ring-overlay/[0.1] bg-fill-softer focus:ring-accent/50 outline-none px-2.5 py-2 text-[11.5px] font-mono leading-relaxed resize-y"
-                    />
-                    <p className="text-[10.5px] text-text-tertiary mt-1.5">
-                      Secrets (AUTH_TOKEN / API_KEY / …) are stored in the macOS
-                      Keychain, never in the database. Leave a value as{" "}
-                      <span className="font-mono">{SECRET_PLACEHOLDER}</span> to
-                      keep the stored secret.
-                    </p>
-                  </>
-                )}
+            <ChevronRight
+              className={`h-3.5 w-3.5 text-text-tertiary transition-transform ${advancedOpen ? "rotate-90" : ""}`}
+            />
+            <span className="text-[12px] font-semibold">Advanced</span>
+            <span className="text-[11px] text-text-tertiary">
+              {isClaudeCode ? "Custom args, custom environment" : "Custom args"}
+            </span>
+          </button>
+
+          {advancedOpen && (
+            <div
+              id="builder-advanced"
+              className="mt-2 rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]"
+            >
+              {/* Custom args */}
+              <div className="flex items-center justify-between px-3 py-2.5 gap-3">
+                <span className="text-[12.5px] text-text-secondary shrink-0">
+                  Custom args
+                </span>
+                <input
+                  value={customArgs}
+                  onChange={(e) => setCustomArgs(e.target.value)}
+                  placeholder="e.g. --verbose --mcp-config ./mcp.json"
+                  className="text-[12px] font-mono text-right bg-transparent outline-none flex-1 placeholder:text-text-quaternary"
+                />
               </div>
-            )}
-          </div>
-        )}
-      </div>
+              {/* Custom env (opt-in) — Claude Code only. Codex is configured
+                via its own config.toml / -c flags, not ANTHROPIC_* env. */}
+              {isClaudeCode && (
+                <div className="px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[12.5px] text-text-secondary">
+                      Custom environment
+                    </span>
+                    <Toggle
+                      on={useCustomEnv}
+                      onChange={setUseCustomEnv}
+                      label="Use custom environment"
+                    />
+                  </div>
+                  {useCustomEnv && (
+                    <>
+                      <textarea
+                        value={envText}
+                        onChange={(e) => setEnvText(e.target.value)}
+                        spellCheck={false}
+                        rows={8}
+                        className="mt-2 w-full rounded-lg ring-1 ring-overlay/[0.1] bg-fill-softer focus:ring-accent/50 outline-none px-2.5 py-2 text-[11.5px] font-mono leading-relaxed resize-y"
+                      />
+                      <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                        Secrets (AUTH_TOKEN / API_KEY / …) are stored in the
+                        macOS Keychain, never in the database. Leave a value as{" "}
+                        <span className="font-mono">{SECRET_PLACEHOLDER}</span>{" "}
+                        to keep the stored secret.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </Section>
   );
 }
