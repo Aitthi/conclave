@@ -17,6 +17,7 @@ import {
   MoreHorizontal,
   Play,
   Square,
+  Trash2,
 } from "lucide-react";
 import { ipc, useEvent, EVENT_NAMES } from "../ipc";
 import type {
@@ -28,8 +29,9 @@ import type {
 } from "../ipc";
 import type { RosterChangedEvent } from "../ipc/events";
 import { computeSkillsStale } from "../lib/skills";
-import { type PositionPerson, PositionLine, ReportsTo } from "./Position";
+import { type PositionPerson, ReportsTo, TrackIcon } from "./Position";
 import { SupervisorPicker, type SupervisorCandidate } from "./SupervisorPicker";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { descendantsOf } from "../lib/positions";
 import { providerChip } from "../lib/providerLabel";
 
@@ -198,17 +200,6 @@ function AgentRow({
     if (focusLifecycleAction && !lifecycleBusy) lifecycleButtonRef.current?.focus();
   }, [focusLifecycleAction, lifecycleBusy]);
 
-  useEffect(() => {
-    if (!moreOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setMoreOpen(false);
-      moreButtonRef.current?.focus();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [moreOpen]);
-
   return (
     <div
       role="button"
@@ -229,24 +220,12 @@ function AgentRow({
       <div className="flex w-full items-center gap-2">
         <AgentAvatar entry={entry} size="sm" />
         <div className="min-w-0 flex-1 leading-tight">
-          {/* Row 1: Agent name, Supervisor, Provider/model chip, Status indicator */}
+          {/* Row 1: Agent name, Provider/model chip, Status indicator */}
           <div className="flex min-w-0 items-center justify-between gap-1.5">
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="shrink-0 text-[12px] font-semibold text-text-primary">
                 {entry.name}
               </span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEditSupervisor();
-                }}
-                onKeyDown={(e) => e.stopPropagation()}
-                className="shrink-0 rounded hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-                aria-label={`Change supervisor for ${entry.name}`}
-              >
-                <ReportsTo supervisor={entry.supervisor} />
-              </button>
               {chip && (
                 <span
                   className="min-w-0 truncate text-[9.5px] font-medium tracking-tight text-text-tertiary"
@@ -275,16 +254,47 @@ function AgentRow({
             </div>
           </div>
 
-          {/* Row 2: Level, Track/Role, Stopped badge, Lifecycle button, More button */}
+          {/* Row 2: Supervisor, Track/Role, Stopped badge, Lifecycle button, More button */}
           <div className="mt-0.5 flex min-w-0 items-center justify-between gap-1 text-[10px]">
             <div className="flex min-w-0 flex-1 items-center gap-1">
-              <PositionLine
-                levelId={entry.level}
-                track={entry.meta}
-                compact
-                trackTitle={entry.roleDescription}
-                className="min-w-0 flex-1"
-              />
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditSupervisor();
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                className="shrink-0 rounded hover:bg-overlay/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+                aria-label={`Change supervisor for ${entry.name}`}
+              >
+                <ReportsTo supervisor={entry.supervisor} />
+              </button>
+              {entry.meta && (
+                <>
+                  <span
+                    className="shrink-0"
+                    style={{ color: "var(--color-text-tertiary)", fontSize: "0.6rem" }}
+                  >
+                    ·
+                  </span>
+                  <span className="flex min-w-0 flex-1 items-center gap-1">
+                    <span className="shrink-0" style={{ color: "var(--color-text-tertiary)" }}>
+                      <TrackIcon track={entry.meta} size={11} className="shrink-0" />
+                    </span>
+                    <span
+                      className="min-w-0 flex-1 truncate"
+                      title={entry.roleDescription}
+                      style={{
+                        fontSize: "0.66rem",
+                        color: "var(--color-text-secondary)",
+                        lineHeight: 1,
+                      }}
+                    >
+                      {entry.meta}
+                    </span>
+                  </span>
+                </>
+              )}
               {entry.availability === "stopped" && !lifecycleAvailable && (
                 <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-overlay/[0.06] px-1 py-0.5 text-[9px] font-semibold text-text-secondary">
                   <CirclePause className="h-2 w-2" />
@@ -329,43 +339,42 @@ function AgentRow({
                 </button>
               )}
 
-              <button
-                ref={moreButtonRef}
-                type="button"
-                aria-label={`More actions for ${entry.name}`}
-                aria-expanded={moreOpen}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMoreOpen((open) => !open);
-                }}
-                onKeyDown={(e) => e.stopPropagation()}
-                className="grid h-5 w-5 shrink-0 place-items-center rounded text-text-muted transition-colors hover:bg-overlay/[0.06] hover:text-text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-              >
-                <MoreHorizontal className="h-3 w-3" />
-              </button>
+              <Popover open={moreOpen} onOpenChange={setMoreOpen}>
+                <PopoverTrigger
+                  ref={moreButtonRef}
+                  aria-label={`More actions for ${entry.name}`}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-text-muted transition-colors hover:bg-overlay/[0.06] hover:text-text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                >
+                  <MoreHorizontal className="h-3 w-3" />
+                </PopoverTrigger>
+                {/* w-auto p-1 overrides the primitive's w-72 p-3 — one icon-only
+                    action, no text label (Detoro ruling 2026-09-05). */}
+                <PopoverContent side="bottom" align="end" sideOffset={4} className="w-auto p-1">
+                  <button
+                    type="button"
+                    aria-label="Remove agent"
+                    title="Remove agent"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setMoreOpen(false);
+                      // Focus returns to the ⋯ trigger, not this button: the
+                      // popup unmounts with the popover.
+                      onRequestRemove(moreButtonRef.current ?? event.currentTarget);
+                    }}
+                    className="grid h-6 w-6 place-items-center rounded text-danger transition-colors hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-danger"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </PopoverContent>
+              </Popover>
             </div>
           </div>
 
           <WorkLine working={entry.availability === "active" && entry.working} />
         </div>
       </div>
-
-      {moreOpen && (
-        <div className="mt-1 flex justify-end border-t border-overlay/[0.06] pt-1">
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setMoreOpen(false);
-              onRequestRemove(moreButtonRef.current ?? event.currentTarget);
-            }}
-            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold text-danger hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-danger"
-          >
-            <X className="h-2.5 w-2.5" />
-            Remove agent
-          </button>
-        </div>
-      )}
 
       {entry.skillsStale && entry.availability === "active" && (
         <div className="mt-0.5 text-[9px] font-semibold text-warning">Restart to apply skills</div>
