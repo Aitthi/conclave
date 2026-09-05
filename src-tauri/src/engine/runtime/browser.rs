@@ -578,14 +578,32 @@ fn apply_bounds(view: &Webview, bounds: Bounds) -> Result<(), BrowserError> {
     Ok(())
 }
 
+/// Reveal `view` at `bounds`: position FIRST, then show — and never show when
+/// the positioning failed. A webview shown after a failed `set_position`/
+/// `set_size` paints at whatever frame it happened to be holding: the offscreen
+/// default for a fresh one, a pre-resize rect for a hidden one. Every reveal
+/// path funnels through here and propagates the failure, so a caller can never
+/// mistake a half-applied reveal for a good one (Armin, review of a679e3f).
+fn reveal_at(view: &Webview, bounds: Option<Bounds>) -> Result<(), BrowserError> {
+    if let Some(bounds) = bounds {
+        apply_bounds(view, bounds)?;
+    }
+    view.show()
+        .map_err(|e| BrowserError::Webview(e.to_string()))
+}
+
 /// Make `tab_id` the visible tab. Hides every OTHER live webview FIRST, then
-/// shows this one — the hide-before-show order is load-bearing (invariant #4:
+/// reveals this one — the hide-before-show order is load-bearing (invariant #4:
 /// otherwise the outgoing page flashes over the incoming one during a switch).
-/// Repositions the incoming webview to the last reported rect before showing it,
-/// so the invariant holds no matter who called (the CLI's `set_active` reports
-/// no rect of its own). A no-op-safe switch to a tab whose webview does not exist
-/// yet (a new human tab before its first navigation). Returns the updated tab
-/// list.
+/// The reveal repositions to the last reported rect first, so the invariant holds
+/// no matter who called (`browser.setActive` over the engine socket reports no
+/// rect of its own).
+///
+/// While the Browser view is UNMOUNTED this is registry-only: the active pointer
+/// moves and no webview is touched, because showing one would paint it over the
+/// app chrome (Decision 7). A no-op-safe switch to a tab whose webview does not
+/// exist yet (a new human tab before its first navigation). Returns the updated
+/// tab list.
 pub fn set_active(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
     let activation = with_registry(|r| r.activate(tab_id));
     if !activation.known {
@@ -596,12 +614,10 @@ pub fn set_active(app: &AppHandle, tab_id: &str) -> Result<BrowserState, Browser
             let _ = view.hide();
         }
     }
-    if let Some(view) = webview_for(app, tab_id) {
-        if let Some(bounds) = activation.bounds {
-            apply_bounds(&view, bounds)?;
+    if activation.incoming.show {
+        if let Some(view) = webview_for(app, tab_id) {
+            reveal_at(&view, activation.incoming.bounds)?;
         }
-        view.show()
-            .map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
     Ok(state())
 }
@@ -634,16 +650,14 @@ pub fn set_bounds(app: &AppHandle, bounds: Bounds) -> Result<(), BrowserError> {
 pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), BrowserError> {
     let target = with_registry(|r| {
         r.set_overlay_visible(visible);
-        r.active_reveal()
+        r.active_placement()
     });
-    if let Some((id, last_bounds)) = target {
+    // `placement.show` mirrors the flag just recorded, so this IS the caller's
+    // `visible` — reading it from the registry keeps one source of truth.
+    if let Some((id, placement)) = target {
         if let Some(view) = webview_for(app, &id) {
-            if visible {
-                if let Some(bounds) = last_bounds {
-                    apply_bounds(&view, bounds)?;
-                }
-                view.show()
-                    .map_err(|e| BrowserError::Webview(e.to_string()))?;
+            if placement.show {
+                reveal_at(&view, placement.bounds)?;
             } else {
                 view.hide()
                     .map_err(|e| BrowserError::Webview(e.to_string()))?;
@@ -654,26 +668,28 @@ pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), BrowserError> {
 }
 
 /// Close ONE tab: destroy its native webview (if any) and drop it from the
-/// registry, which reselects the first remaining tab as active. Shows the new
-/// active tab so the overlay never goes blank while a tab remains. Returns the
-/// updated tab list.
+/// registry, which reselects the first remaining tab as active. Reveals that new
+/// active tab — while the Browser view is on screen — so the overlay never goes
+/// blank while a tab remains. A failed reveal is REPORTED, not swallowed: the
+/// tab is already gone, so returning Ok would hand the caller a tab list that
+/// does not describe what the human sees. Returns the updated tab list.
 pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserError> {
     if let Some(view) = webview_for(app, tab_id) {
         view.close()
             .map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
-    let new_active = with_registry(|r| {
+    let promoted = with_registry(|r| {
         r.close(tab_id);
-        r.active_reveal()
+        r.active_placement()
     });
-    if let Some((id, last_bounds)) = new_active {
-        if let Some(view) = webview_for(app, &id) {
-            // Same reveal rule as `set_active`: the tab being promoted has been
-            // hidden, so its frame may predate the current window size.
-            if let Some(bounds) = last_bounds {
-                let _ = apply_bounds(&view, bounds);
+    if let Some((id, placement)) = promoted {
+        // Same reveal rule as `set_active`: reposition first (the promoted tab
+        // has been hidden, so its frame may predate the current window size),
+        // and reveal only while the Browser view is on screen.
+        if placement.show {
+            if let Some(view) = webview_for(app, &id) {
+                reveal_at(&view, placement.bounds)?;
             }
-            let _ = view.show();
         }
     }
     Ok(state())
