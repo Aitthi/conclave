@@ -167,6 +167,17 @@ export function Terminal({ sessionId }: TerminalProps) {
       // bleeds into the next cell and the bleed survives as a stray fragment —
       // the orange leftovers seen after a resize.
       rescaleOverlappingGlyphs: true,
+      // Answer the window-ops queries a real emulator answers
+      // (vscode:…/xterm/xtermTerminal.ts:280-284 enables exactly these three).
+      // A TUI that wants its pixel geometry asks CSI 14 t / 16 t / 18 t; with
+      // these off xterm stays silent and the child is left guessing — or
+      // waiting. Only the read-only "report" ops are enabled: nothing here lets
+      // a child move or resize our window.
+      windowOptions: {
+        getWinSizePixels: true,
+        getCellSizePixels: true,
+        getWinSizeChars: true,
+      },
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -257,6 +268,23 @@ export function Terminal({ sessionId }: TerminalProps) {
     };
     tryFit();
 
+    // The pane's pixel size, as VS Code reports it: xterm's own CANVAS
+    // dimensions, not the container's bounding box
+    // (vscode:…/browser/terminalInstance.ts:2095-2104 reads
+    // `rawXterm.dimensions?.css.canvas` and rounds). The container is the wrong
+    // source — its width includes the sub-cell remainder the grid does not
+    // cover, so a child dividing pixel_width by cols would derive a cell width
+    // that is slightly too large. Undefined before the first render, in which
+    // case we send nothing and the PTY keeps reporting 0.
+    const pixelDims = (): { pixelWidth?: number; pixelHeight?: number } => {
+      const canvas = term.dimensions?.css.canvas;
+      if (!canvas) return {};
+      return {
+        pixelWidth: Math.round(canvas.width),
+        pixelHeight: Math.round(canvas.height),
+      };
+    };
+
     // If we could NOT size yet (hidden container), hold live output instead of
     // writing it into the 80x24 default — mirror of VS Code's `_initialDataEvents`
     // queue (vscode:…/browser/terminalInstance.ts:1586), which buffers everything
@@ -342,7 +370,9 @@ export function Terminal({ sessionId }: TerminalProps) {
       // rows) from the fit above, so one PTY push completes the pair and its
       // genuine size change raises SIGWINCH on its own.
       if (!isFirst || rows <= 1) {
-        void ipc.session.resize({ sessionId, cols, rows }).catch(() => {});
+        void ipc.session
+          .resize({ sessionId, cols, rows, ...pixelDims() })
+          .catch(() => {});
         return;
       }
       // Mount: jiggle so the child repaints even if the persistent PTY already
@@ -360,11 +390,13 @@ export function Terminal({ sessionId }: TerminalProps) {
       // parsed it into a `rows` grid, desyncing its relative-move cursor model
       // (audit §3 H1, rows 9/10). So each leg resizes xterm first, then the PTY.
       term.resize(cols, rows - 1);
-      void ipc.session.resize({ sessionId, cols, rows: rows - 1 }).catch(() => {});
+      void ipc.session
+        .resize({ sessionId, cols, rows: rows - 1, ...pixelDims() })
+        .catch(() => {});
       clearTimeout(jiggleTimer);
       jiggleTimer = setTimeout(() => {
         term.resize(cols, rows);
-        void ipc.session.resize({ sessionId, cols, rows }).catch(() => {
+        void ipc.session.resize({ sessionId, cols, rows, ...pixelDims() }).catch(() => {
           // Session not running yet / no PTY — harmless.
         });
       }, 60);
