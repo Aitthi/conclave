@@ -2574,6 +2574,68 @@ mod tests {
         assert_eq!(i64_at(&by_model, "/summary/activityCount"), 0);
     }
 
+    // ── Archive lifecycle ────────────────────────────────────────────────
+
+    /// Archived history stays in the default Overview, labelled archived;
+    /// archive and restore change no totals and no coverage.
+    #[tokio::test]
+    async fn archive_and_restore_never_move_usage_history() {
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "Old", "/tmp/old", None)
+            .await
+            .unwrap()
+            .id;
+        let agent = fixture_agent(
+            &state,
+            &ws,
+            "Dew",
+            Some("claude-opus-5"),
+            Some("claude-code"),
+        )
+        .await;
+        let mut e = ev("hist", Utc::now() - Duration::hours(3));
+        e.workspace_id = Some(ws.clone());
+        e.workspace_agent_id = Some(agent.clone());
+        e.input_tokens = Some(10);
+        e.output_tokens = Some(5);
+        insert_event(&state.db, &e).await.unwrap();
+        let before = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+
+        workspace::set_archived(&state.db, &ws, Some("2026-09-05T00:00:00Z"))
+            .await
+            .unwrap();
+        let archived = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(
+            archived["summary"], before["summary"],
+            "archiving moves no history"
+        );
+        let row = row_by(&archived, "byWorkspace", "id", &ws);
+        assert_eq!(row.get("archived").unwrap().as_bool(), Some(true));
+        assert_eq!(row.get("activityCount").unwrap().as_i64(), Some(1));
+        assert_eq!(
+            row_by(&archived, "contexts", "workspaceAgentId", &agent)
+                .get("archived")
+                .unwrap()
+                .as_bool(),
+            Some(true),
+            "the gauge stays visible and labelled"
+        );
+
+        workspace::set_archived(&state.db, &ws, None).await.unwrap();
+        let restored = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(
+            restored["summary"], before["summary"],
+            "restore is invariant"
+        );
+        assert_eq!(
+            row_by(&restored, "byWorkspace", "id", &ws)
+                .get("archived")
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+    }
+
     // ── Backlog ──────────────────────────────────────────────────────────
 
     #[tokio::test]

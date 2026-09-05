@@ -1538,6 +1538,26 @@ mod tests {
         assert_eq!(state.model_for("T19").as_deref(), Some("m"));
     }
 
+    /// Completed inner responses stay valid even when the outer turn is later
+    /// aborted: the records are what the source completed, the abort is not
+    /// a retraction.
+    #[test]
+    fn codex_completed_records_survive_an_aborted_outer_turn() {
+        let mut lines = codex_fixture();
+        lines.push(codex_line(json!({
+            "type": "event_msg",
+            "payload": {"type": "turn_aborted", "turn_id": "T2", "reason": "interrupted"}
+        })));
+        let mut state = CodexParserState::default();
+        let scan = scan_codex_lines(&lines, &[], &mut state);
+        assert_eq!(
+            scan.events.len(),
+            2,
+            "RESP-1 and RESP-2 remain completed responses"
+        );
+        assert!(scan.diagnostics.is_empty());
+    }
+
     #[test]
     fn codex_record_without_identity_is_a_diagnostic() {
         let mut record = codex_usage_record("RESP-1", "T1", 1, 5);
