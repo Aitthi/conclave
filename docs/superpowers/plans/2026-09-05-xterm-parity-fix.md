@@ -233,6 +233,26 @@ reason: every commit in this lane builds and tests green on its own.
   now that the TS side is a single ordered channel. Remaining exposure: a terminal write racing
   a NON-terminal stdin source, e.g. `message.inject`.
 
+### Cross-check against lane R3's H1 replay (merged from main at `078c3b1`)
+
+R3's findings were recorded on `@xterm/headless 6.1.0-beta.287`; F2 bumped it to
+`.302`, so their cells were re-run on the new build to confirm the bump does not
+invalidate them. It does not — the numbers reproduce exactly:
+
+| Cell | Invocation (on `rec-a.jsonl`) | R3 @ .287 | Here @ .302 |
+|---|---|---|---|
+| I (control) | `--start-size 153x55` | cursor absoluteRow 8, 55 rows | identical |
+| H (repro) | `--start-size 80x24 --resize-at-ms 2000` | absoluteRow 20, 57 rows, buffer offset | identical |
+
+Note what this does and does not prove. Cell H is the *harness* simulating the
+pre-F5 mount window; it holds the mismatch itself, so it will keep reproducing
+regardless of what the app does. It is evidence for the MECHANISM F5 removes
+(bytes written into a wrong-size grid damage the buffer and leave the cursor 12
+rows low), not a regression test on this lane's code — the app-side proof is that
+the window no longer exists, which only the live GUI probe below can show. R3's own
+verdict stands: this supports H1's general desynchronization mechanism without
+establishing that the 200 ms window caused the reported screenshot.
+
 ### GUI probe for the human (gate 5 — the only place the defect ever appeared)
 
 Needs a rebuilt + relaunched app: a `pnpm tauri dev` instance cannot take `conclave.sock` and
