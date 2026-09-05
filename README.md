@@ -10,6 +10,10 @@
   and keep tasks, blackboard, memory and messages visible so a lead can decide.
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/workspace.png" alt="Conclave workspace: agent roster, a live agent terminal, and the workspace chat" width="900" />
+</p>
+
 ## Requirements
 
 | | Notes |
