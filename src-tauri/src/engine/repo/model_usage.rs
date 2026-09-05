@@ -380,8 +380,11 @@ impl NewUsageEvent {
 
     /// Reject implausible counters as UNKNOWN rather than storing a number no
     /// aggregate can add safely. Each counter is judged on its own (a bad
-    /// output leaves a good input known → `partial`), and the diagnostic is set
-    /// only when the collector left none, so its own code is never overwritten.
+    /// output leaves a good input known → `partial`). When a counter is
+    /// dropped the rejection code REPLACES any diagnostic the collector set:
+    /// the aggregate identifies damaged observations by this one code, so a
+    /// collector's own note must not hide a rejection from it (review of
+    /// 8770c7cf).
     fn normalized(&self) -> NewUsageEvent {
         fn bounded(value: Option<i64>, dropped: &mut bool) -> Option<i64> {
             match value {
@@ -408,7 +411,7 @@ impl NewUsageEvent {
                 dropped = true;
             }
         }
-        if dropped && event.diagnostic_code.is_none() {
+        if dropped {
             event.diagnostic_code = Some(COUNTER_OUT_OF_RANGE.to_owned());
         }
         event
@@ -1770,12 +1773,14 @@ mod tests {
     }
 
     /// Rejected counters and conflicts are counted so the reader can cap the
-    /// group's coverage; an ordinary unknown-usage row is neither.
+    /// group's coverage; an ordinary unknown-usage row is neither. A rejection
+    /// is counted even when the collector had stamped its own diagnostic.
     #[tokio::test]
     async fn damaged_observations_are_counted_separately_from_ordinary_unknowns() {
         let pool = connect_in_memory().await;
         let mut rejected = event("rejected", "2026-09-05T10:00:00Z");
         rejected.input_tokens = Some(-5);
+        rejected.diagnostic_code = Some("collector_note".into());
         insert_event(&pool, &rejected).await.unwrap();
         insert_event(&pool, &event("conflicted", "2026-09-05T10:00:00Z"))
             .await
@@ -1800,5 +1805,16 @@ mod tests {
             "the rejected row's good output stays known"
         );
         assert!(!total.measured_overflow);
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT diagnostic_code FROM model_usage_event WHERE event_key = 'rejected'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some(COUNTER_OUT_OF_RANGE),
+            "the rejection code takes precedence over the collector's note"
+        );
     }
 }

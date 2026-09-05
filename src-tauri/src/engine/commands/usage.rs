@@ -1826,17 +1826,23 @@ mod tests {
         assert_eq!(out.pointer("/summary/coverage").unwrap(), "complete");
         assert_eq!(out.pointer("/coverage/state").unwrap(), "complete");
 
-        // A rejected counter: the observation was damaged.
+        // A rejected counter: the observation was damaged — even when the
+        // collector had stamped its own diagnostic on the row.
         let mut rejected = ev("rejected", at);
         rejected.input_tokens = Some(-1);
         rejected.output_tokens = Some(10);
+        rejected.diagnostic_code = Some("collector_note".into());
         insert_event(&state.db, &rejected).await.unwrap();
         let out = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
         assert_eq!(out.pointer("/summary/coverage").unwrap(), "partial");
         assert_eq!(out.pointer("/coverage/state").unwrap(), "partial");
+        let damaged_date = at.format("%Y-%m-%d").to_string();
         assert_eq!(
-            rows(&out, "daily").last().unwrap().get("coverage").unwrap(),
-            "partial"
+            row_by(&out, "daily", "date", &damaged_date)
+                .get("coverage")
+                .unwrap(),
+            "partial",
+            "the day holding the damaged row is capped"
         );
         assert_eq!(rows(&out, "byModel")[0].get("coverage").unwrap(), "partial");
         assert_eq!(
@@ -1844,9 +1850,9 @@ mod tests {
             10,
             "the finite known component is preserved"
         );
-        // Yesterday held no damaged row and stays complete.
-        let daily = rows(&out, "daily");
-        assert_eq!(daily[daily.len() - 2].get("coverage").unwrap(), "complete");
+        // A day that held no damaged row keeps its proof: the oldest bucket is
+        // 29 days before `at`, so it can never be the damaged date.
+        assert_eq!(rows(&out, "daily")[0].get("coverage").unwrap(), "complete");
     }
 
     #[tokio::test]
