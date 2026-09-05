@@ -544,3 +544,128 @@ export interface DraftResponse {
   notes: string;
   drafter: DrafterInfo;
 }
+
+// ---------------------------------------------------------------------------
+// AI usage Overview (usage.overview)
+//
+// Frozen wire contract — docs/plans/2026-09-05-usage-engine.md. These mirror
+// the serialized Rust in src-tauri/src/engine/commands/usage.rs exactly; the
+// engine is the authority and the frontend consumes them read-only.
+// ---------------------------------------------------------------------------
+
+export type UsageOverviewRequest = {
+  days: 30 | 90;
+  /** Required IANA zone (e.g. "Europe/Berlin"); an unknown zone is rejected. */
+  timeZone: string;
+  /** A real workspace id, or the wire-only "__unscoped__". */
+  workspaceId?: string;
+  /** A real workspace-agent id, or the wire-only "__unassigned__". */
+  workspaceAgentId?: string;
+  modelKey?: string;
+};
+
+/** How much of the window was actually OBSERVED — never how much was used. */
+export type UsageCoverageState = "complete" | "partial" | "none";
+
+/** "reported" = the source saw this model serve the response; "selected" =
+ *  only the requested model is known. Never present one as the other. */
+export type UsageModelBasis = "reported" | "selected" | "unknown";
+
+export interface UsageTotals {
+  /** Model responses plus successful draft invocations — not user turns. */
+  activityCount: number;
+  responseCount: number;
+  invocationCount: number;
+  /** Sum of fully known input+output. `null` means unknown: it is 0 only when
+   *  measured events summed to 0, or the window was verifiably complete and
+   *  empty. Never presented as total account consumption. */
+  measuredTokens: number | null;
+  measuredEventCount: number;
+  unknownUsageCount: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  coverage: UsageCoverageState;
+}
+
+export interface UsageDay extends UsageTotals {
+  /** YYYY-MM-DD in the requested zone. */
+  date: string;
+  startUtc: string;
+  /** Next local midnight, capped at `generatedAt` for today. */
+  endUtc: string;
+  inProgress: boolean;
+}
+
+export interface UsageModelOption {
+  /** Opaque stable encoding of provider + name + basis. */
+  key: string;
+  name: string;
+  provider: string | null;
+  basis: UsageModelBasis;
+}
+
+export interface UsageWorkspaceOption {
+  id: string;
+  name: string;
+  archived: boolean;
+}
+
+export interface UsageAgentOption {
+  id: string;
+  name: string;
+  workspaceId: string | null;
+}
+
+export type UsageModelRow = UsageTotals & UsageModelOption;
+export type UsageAgentRow = UsageTotals & UsageAgentOption;
+export type UsageWorkspaceRow = UsageTotals & UsageWorkspaceOption;
+
+/** The latest context gauge for one agent — a level, never a period total, and
+ *  never summed across agents. */
+export interface UsageContext {
+  workspaceAgentId: string;
+  agentName: string;
+  workspaceId: string;
+  workspaceName: string;
+  archived: boolean;
+  modelKey: string;
+  tokens: number | null;
+  capacity: number | null;
+  source: string | null;
+  observedAt: string | null;
+}
+
+export interface UsageRange {
+  days: 30 | 90;
+  timeZone: string;
+  startDate: string;
+  endDate: string;
+  startUtc: string;
+  endUtc: string;
+}
+
+export interface UsageCoverageInfo {
+  state: UsageCoverageState;
+  collectingSince: string | null;
+  lastVerifiedAt: string | null;
+  pendingImport: boolean;
+  /** Source kinds a collector met and could not import in this scope. */
+  unsupportedSources: string[];
+}
+
+export interface UsageOverview {
+  generatedAt: string;
+  range: UsageRange;
+  summary: UsageTotals;
+  /** Exactly `range.days` ascending rows; empty buckets carry no fabricated
+   *  events, and an unobserved bucket is `coverage: "none"`, not 0. */
+  daily: UsageDay[];
+  models: UsageModelOption[];
+  agents: UsageAgentOption[];
+  workspaces: UsageWorkspaceOption[];
+  byModel: UsageModelRow[];
+  byAgent: UsageAgentRow[];
+  byWorkspace: UsageWorkspaceRow[];
+  contexts: UsageContext[];
+  coverage: UsageCoverageInfo;
+}
