@@ -12,7 +12,8 @@ function usage(message) {
   if (message) console.error(message);
   console.error(
     "usage: node scripts/xterm-replay.mjs <rec.jsonl> " +
-      "[--convert-eol true|false] [--unicode 6|11] [--dump-every-key]",
+      "[--convert-eol true|false] [--unicode 6|11] [--dump-every-key] " +
+      "[--start-size CxR] [--resize-at-ms N]",
   );
   process.exit(1);
 }
@@ -25,6 +26,25 @@ function parseBoolean(value, flag) {
 }
 
 
+function parseSize(value, flag) {
+  const match = /^(\d+)[xX](\d+)$/.exec(value ?? "");
+  if (!match) usage(`${flag} must be CxR, for example 80x24`);
+  const cols = Number(match[1]);
+  const rows = Number(match[2]);
+  if (cols < 2 || rows < 1) usage(`${flag} must be at least 2x1`);
+  return { cols, rows };
+}
+
+
+function parseMilliseconds(value, flag) {
+  const milliseconds = Number(value);
+  if (!Number.isInteger(milliseconds) || milliseconds < 0) {
+    usage(`${flag} must be a non-negative integer`);
+  }
+  return milliseconds;
+}
+
+
 function parseArgs(argv) {
   if (argv.length === 0 || argv[0].startsWith("--")) usage();
   const options = {
@@ -32,6 +52,8 @@ function parseArgs(argv) {
     convertEol: true,
     unicode: "11",
     dumpEveryKey: false,
+    startSize: null,
+    resizeAtMs: null,
   };
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -44,9 +66,16 @@ function parseArgs(argv) {
       if (options.unicode !== "6" && options.unicode !== "11") {
         usage("--unicode must be 6 or 11");
       }
+    } else if (arg === "--start-size") {
+      options.startSize = parseSize(argv[++index], arg);
+    } else if (arg === "--resize-at-ms") {
+      options.resizeAtMs = parseMilliseconds(argv[++index], arg);
     } else {
       usage(`unknown argument: ${arg}`);
     }
+  }
+  if (options.resizeAtMs !== null && options.startSize === null) {
+    usage("--resize-at-ms requires --start-size");
   }
   return options;
 }
@@ -130,9 +159,12 @@ async function main() {
     .sort((left, right) => left.t_ms - right.t_ms || left.sequence - right.sequence);
 
   const initialResize = records.find((record) => record.kind === "resize");
+  if (options.resizeAtMs !== null && initialResize === undefined) {
+    throw new Error("--resize-at-ms requires a resize record to supply the real size");
+  }
   const term = new Terminal({
-    cols: initialResize?.cols ?? 80,
-    rows: initialResize?.rows ?? 24,
+    cols: options.startSize?.cols ?? initialResize?.cols ?? 80,
+    rows: options.startSize?.rows ?? initialResize?.rows ?? 24,
     convertEol: options.convertEol,
     scrollback: 12000,
     allowProposedApi: true,
@@ -145,7 +177,16 @@ async function main() {
   let pendingKey = null;
   let exercisedFrames = 0;
   const frameViolations = [];
+  let injectedResize = false;
   for (const record of records) {
+    if (
+      options.resizeAtMs !== null &&
+      !injectedResize &&
+      record.t_ms >= options.resizeAtMs
+    ) {
+      term.resize(initialResize.cols, initialResize.rows);
+      injectedResize = true;
+    }
     if (record.kind === "key") {
       if (pendingKey !== null) {
         const label = `after key ${JSON.stringify(pendingKey)}`;
@@ -158,12 +199,18 @@ async function main() {
       }
       pendingKey = decode(record).toString("utf8");
     } else if (record.kind === "resize") {
-      term.resize(record.cols, record.rows);
+      const isInitialResize = record.sequence === initialResize?.sequence;
+      if (options.startSize === null || !isInitialResize) {
+        term.resize(record.cols, record.rows);
+      }
     } else if (record.kind === "out") {
       await write(term, decode(record));
     } else {
       throw new Error(`unknown record kind: ${record.kind}`);
     }
+  }
+  if (options.resizeAtMs !== null && !injectedResize) {
+    term.resize(initialResize.cols, initialResize.rows);
   }
   if (pendingKey !== null) {
     const label = `after key ${JSON.stringify(pendingKey)}`;
@@ -177,7 +224,11 @@ async function main() {
 
   dumpScreen(
     term,
-    `final convertEol=${options.convertEol} unicode=${options.unicode}`,
+    `final convertEol=${options.convertEol} unicode=${options.unicode}` +
+      (options.startSize === null
+        ? ""
+        : ` startSize=${options.startSize.cols}x${options.startSize.rows}`) +
+      (options.resizeAtMs === null ? "" : ` resizeAtMs=${options.resizeAtMs}`),
   );
   if (frameViolations.length > 0) {
     console.error("LAYOUT INVARIANT VIOLATION:");

@@ -150,3 +150,64 @@ browser renderer with GPU enabled while also preserving the exact chunks deliver
 by `session:output`. A clean delivered-byte log plus corrupted pixels would isolate
 the renderer; a divergent delivered-byte log would isolate the Rust/Tauri live data
 path.
+
+## H1 replay (R3)
+
+`scripts/xterm-replay.mjs` now accepts `--start-size CxR` to seed the headless
+terminal at a size other than the recording's first resize, and
+`--resize-at-ms N` to inject that recorded real size immediately before the first
+event at or after time N. The original first resize event is skipped in this mode;
+later recorded resizes still replay normally. `--start-size` alone supports a
+same-size control. No new Claude sessions were run.
+
+| Cell | Recording / simulated geometry | Exit | Result |
+|---|---|---:|---|
+| G | rec-A; 80×24 → 153×55 at 200 ms | 0 | PASS; final dump is byte-identical to A after normalizing the header |
+| H | rec-A; 80×24 → 153×55 at 2000 ms | 0 | Autocomplete invariant PASS, but the retained normal buffer is visibly corrupted and offset |
+| I | rec-A; start and remain 153×55 | 0 | PASS; byte-identical to A after normalizing the header |
+| J | rec-E; 80×24 → 60×30 at 200 ms | 0 | PASS; byte-identical to E after normalizing the header |
+
+G and J do not actually write any bytes into the wrong-size grid: rec-A's first
+output is at 265 ms and rec-E's is at 255 ms, after their injected 200 ms resize.
+Their exact equality to A/E is therefore a timing control, not evidence that a
+200 ms window containing output is safe.
+
+H holds the mismatch through the initial paint. Its autocomplete rows after `/s`
+remain correctly indented (`  /status`, `  /skills`, `  /subtask`,
+`  /statusline`), so the layout heuristic correctly exits 0. However, these final
+buffer rows differ from A and are visibly wrong:
+
+```text
+   7 | Quick safety check: Is this a project you created or one you trust? (Like yourown
+   8 |      code,                                                                           well-known
+   9 |             open                                                                            source
+  10 |                    p
+  17 |⚠ 1rMCPfservereneeds authentication · run /mcp
+```
+
+H also leaves the cursor at absolute row 20 instead of A's row 8 and grows the
+normal buffer to 57 lines instead of 55. Thus exit 0 here means only "an
+autocomplete block was observed and its rows passed"; it is not a whole-screen
+equality result.
+
+A supplemental replay at 465 ms (200 ms after rec-A's first output) also exits 0
+and keeps the autocomplete clean, but leaves extra startup rows and moves the final
+cursor/input from row 8 to row 14. This confirms that the outcome is sensitive to
+whether output actually crosses the size boundary.
+
+### H1 verdict
+
+The size gap alone is sufficient to corrupt or offset the headless buffer when it
+overlaps Claude's initial paint (H, with the 465 ms replay as a shorter positive
+case). It does **not** reproduce the screenshot's selective column-0 autocomplete
+rows in G or H. Therefore R3 supports H1's general cursor/grid-desynchronization
+mechanism, but does not establish that the application's nominal 200 ms mount delay
+caused the reported screenshot.
+
+These replays resize only xterm. The recorded child was 153×55 (or 60×30) for its
+entire run and never received the simulated resize/SIGWINCH. A live Claude Code
+process normally responds to SIGWINCH with a full repaint, which could heal the
+stale rows or produce a different transition. R3 can prove that feeding relative
+patch bytes into a mismatched grid damages the headless buffer; it cannot predict
+the post-SIGWINCH live result or distinguish that mechanism from browser-renderer
+stale pixels in the original screenshot.
