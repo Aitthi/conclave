@@ -266,10 +266,13 @@ try {
       { timeout: 5000 },
     ).catch(() => {});
     await shoot("synced");
+    // CONTENT included deliberately: asserting only name/description let a sync
+    // that never applied the body pass (Armin, R5 coverage clarification).
     check("R4 successful sync applies name/description/content",
           await page.evaluate(() =>
             document.querySelector("input[placeholder='e.g. Code Reviewer']").value === "Reviewed" &&
-            document.querySelector("input[placeholder='Shown in the Skill Library list']").value === "from the agent"));
+            document.querySelector("input[placeholder='Shown in the Skill Library list']").value === "from the agent" &&
+            document.querySelector(".cm-content").innerText.replace(/\u00a0/g, " ").trim() === "# body"));
 
     // a failing sync must preserve the last good values AND say so
     await page.evaluate(() => globalThis.skillAssistProbe.fail("sync", true));
@@ -391,6 +394,150 @@ try {
         afterClose.some((c) => c.cmd === "skill.stopDraftSession"),
         JSON.stringify(afterClose.map((c) => c.cmd)));
   await page.evaluate(() => globalThis.skillAssistProbe.setStartDelay(0));
+
+  // ── R5 (Armin finding 49e88209): same-session sync ORDERING ───────────
+  // R4's guard only compares workspaceAgentId, so two reads inside ONE session
+  // both pass it. An older idle sync resolving after Stop's final sync
+  // overwrites the final content — and the stop then deletes the scratch dir,
+  // so what the user keeps is the STALE read. Response order is controlled
+  // here; nothing about it is timing-luck.
+  const contentValue = () =>
+    page.evaluate(() => document.querySelector(".cm-content").innerText.replace(/\u00a0/g, " ").trim());
+
+  // The leak test above closed the editor; reopen a fresh one.
+  const openNewEditor = async () => {
+    if (await page.evaluate(() => document.querySelector("input[placeholder='e.g. Code Reviewer']") !== null)) return;
+    await page.waitForFunction(
+      () => [...document.querySelectorAll("button")].some((b) => b.textContent.trim() === "New skill"),
+      { timeout: 5000 },
+    );
+    await clickText("button", "New skill");
+    await page.waitForSelector("input[placeholder='e.g. Code Reviewer']", { timeout: 5000 });
+  };
+  await page.evaluate(() => globalThis.skillAssistProbe.resetSyncs());
+  await openNewEditor();
+  await startSession();
+  await page.evaluate(() => {
+    globalThis.skillAssistProbe.setSyncMode("manual");
+    globalThis.skillAssistProbe.setDraftFile({ name: "OLD", description: "old desc", content: "# OLD BODY" });
+  });
+  await reset();
+  // S1: a background idle sync captures the OLD file and is held open.
+  await page.evaluate(() => globalThis.skillAssistProbe.emitStatus("idle"));
+  await page.waitForFunction(() => globalThis.skillAssistProbe.pendingSyncIds().length === 1, { timeout: 5000 });
+  const [s1] = await page.evaluate(() => globalThis.skillAssistProbe.pendingSyncIds());
+
+  // The agent then writes the FINAL file, and the user hits Stop.
+  await page.evaluate(() => {
+    globalThis.skillAssistProbe.setDraftFile({ name: "FINAL", description: "final desc", content: "# FINAL BODY" });
+    globalThis.skillAssistProbe.fail("stop", true);   // stop pending/failing while S1 is still open
+  });
+  await page.evaluate(() => document.querySelector("[aria-label='Stop agent']").click());
+  await page.waitForFunction(() => globalThis.skillAssistProbe.pendingSyncIds().length === 2, { timeout: 5000 });
+  const ids = await page.evaluate(() => globalThis.skillAssistProbe.pendingSyncIds());
+  const s2 = ids.find((i) => i !== s1);
+
+  // A Stop attempt OWNS its final sync: no new read may be started under it.
+  await page.evaluate(() => globalThis.skillAssistProbe.emitStatus("idle"));
+  await new Promise((r) => setTimeout(r, 200));
+  check("R5 Stop suppresses new syncs while its final read is in flight",
+        (await page.evaluate(() => globalThis.skillAssistProbe.pendingSyncIds().length)) === 2,
+        `pending=${JSON.stringify(await page.evaluate(() => globalThis.skillAssistProbe.pendingSyncIds()))}`);
+
+  // S2 (Stop's final read) resolves FIRST, then the older S1 resolves.
+  await page.evaluate((id) => globalThis.skillAssistProbe.resolveSync(id), s2);
+  await new Promise((r) => setTimeout(r, 250));
+  await page.evaluate((id) => globalThis.skillAssistProbe.resolveSync(id), s1);
+  await new Promise((r) => setTimeout(r, 350));
+
+  check("R5 a stale in-session sync does not overwrite the final name",
+        (await nameValue()) === "FINAL", `name=${await nameValue()}`);
+  check("R5 a stale in-session sync does not overwrite the final description",
+        (await page.evaluate(() =>
+          document.querySelector("input[placeholder='Shown in the Skill Library list']").value)) === "final desc");
+  check("R5 a stale in-session sync does not overwrite the final CONTENT",
+        (await contentValue()) === "# FINAL BODY", `content=${JSON.stringify(await contentValue())}`);
+
+  // A stale FAILURE after a newer success must not raise an error either.
+  await page.evaluate(() => globalThis.skillAssistProbe.setSyncMode("manual"));
+  await reset();
+  await page.evaluate(() => document.querySelector('[aria-label="Sync now"]').click());
+  await page.waitForFunction(() => globalThis.skillAssistProbe.pendingSyncIds().length === 1, { timeout: 5000 });
+  const [sOld] = await page.evaluate(() => globalThis.skillAssistProbe.pendingSyncIds());
+  // The newer read must come from the BACKGROUND idle path: handleSyncNow has a
+  // `syncing` guard, so a second button click while the first is in flight is
+  // ignored and there would be no newer success to be stale against.
+  await page.evaluate(() => globalThis.skillAssistProbe.setSyncMode("immediate"));
+  await page.evaluate(() => globalThis.skillAssistProbe.emitStatus("idle")); // newer, succeeds now
+  await new Promise((r) => setTimeout(r, 250));
+  await page.evaluate((id) => globalThis.skillAssistProbe.rejectSync(id, "stale read failed"), sOld);
+  await new Promise((r) => setTimeout(r, 300));
+  check("R5 a stale sync FAILURE after a newer success shows no error",
+        await page.evaluate(() => !/Couldn't read the agent's file/i.test(document.body.innerText)));
+  check("R5 the newer success still stands after the stale failure",
+        (await nameValue()) === "FINAL" && (await contentValue()) === "# FINAL BODY");
+
+  // Retry the stop successfully: it must unlock and keep the final values.
+  await page.evaluate(() => globalThis.skillAssistProbe.fail("stop", false));
+  await page.evaluate(() => document.querySelector("[aria-label='Stop agent']").click());
+  await page.waitForFunction(
+    () => document.querySelector("input[placeholder='e.g. Code Reviewer']").disabled === false,
+    { timeout: 5000 },
+  ).catch(() => {});
+  check("R5 a successful retry unlocks the editor", (await locked()) === false);
+  check("R5 the final values survive the stop", (await nameValue()) === "FINAL" && (await contentValue()) === "# FINAL BODY");
+
+  // ── Save -> close -> reopen: what the user actually keeps ──────────────
+  await reset();
+  await clickText("button", "Save skill");
+  // Wait for the EDITOR to close, not for "New skill" to exist: that button is
+  // in the Library BEHIND this overlay, so waiting on it returns instantly and
+  // the assertions below then read state before the save has resolved.
+  await page.waitForFunction(
+    () => document.querySelector("input[placeholder='e.g. Code Reviewer']") === null,
+    { timeout: 5000 },
+  );
+  const saved = (await probe()).filter((c) => c.cmd === "skill.save");
+  check("R5 Save persists the FINAL content", saved.length === 1 && saved[0].name === "FINAL",
+        JSON.stringify(saved));
+  // Reopen it from the library and read the fields back.
+  await page.evaluate(() => {
+    const edit = [...document.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Edit").pop();
+    edit.click();
+  });
+  await page.waitForSelector("input[placeholder='e.g. Code Reviewer']", { timeout: 5000 });
+  await new Promise((r) => setTimeout(r, 200));
+  check("R5 reopened skill has the final name", (await nameValue()) === "FINAL", `name=${await nameValue()}`);
+  check("R5 reopened skill has the final description",
+        (await page.evaluate(() =>
+          document.querySelector("input[placeholder='Shown in the Skill Library list']").value)) === "final desc");
+  check("R5 reopened skill has the final CONTENT", (await contentValue()) === "# FINAL BODY",
+        `content=${JSON.stringify(await contentValue())}`);
+  await shoot("saved-reopened");
+
+  // ── a sync completing after unmount must not apply ─────────────────────
+  await page.evaluate(() => globalThis.skillAssistProbe.resetSyncs());
+  await openNewEditor();
+  await startSession();
+  await page.evaluate(() => {
+    globalThis.skillAssistProbe.setSyncMode("manual");
+    globalThis.skillAssistProbe.setDraftFile({ name: "AFTER-UNMOUNT", description: "x", content: "# nope" });
+  });
+  await page.evaluate(() => document.querySelector('[aria-label="Sync now"]').click());
+  await page.waitForFunction(() => globalThis.skillAssistProbe.pendingSyncIds().length === 1, { timeout: 5000 });
+  const [sGhost] = await page.evaluate(() => globalThis.skillAssistProbe.pendingSyncIds());
+  await clickText("button", "Cancel");                       // close the editor
+  await new Promise((r) => setTimeout(r, 200));
+  const ghostErrors = [];
+  page.on("pageerror", (e) => ghostErrors.push(e.message));
+  await page.evaluate((id) => globalThis.skillAssistProbe.resolveSync(id), sGhost);
+  await new Promise((r) => setTimeout(r, 300));
+  check("R5 a sync completing after unmount applies nothing and throws nothing",
+        ghostErrors.length === 0 &&
+        (await page.evaluate(() =>
+          document.querySelector("input[placeholder='e.g. Code Reviewer']") === null)),
+        ghostErrors.join(" | "));
+  await page.evaluate(() => globalThis.skillAssistProbe.resetSyncs());
 
   check("no console errors or [fixture] misses", consoleErrors.length === 0,
         consoleErrors.slice(0, 3).join(" | "));

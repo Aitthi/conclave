@@ -89,12 +89,42 @@ export function SkillAssistPanel({
     setOfferForceStop(false);
     setSyncError(null);
     setStopError(null);
+    // A different session's reads can never apply to this one.
+    invalidatePendingSyncs();
+    stopOwnsSyncRef.current = false;
   }, [draft?.workspaceAgentId]);
   const mountedRef = useRef(true);
+
+  /**
+   * Sync-response ordering (R5, Armin finding 49e88209).
+   *
+   * Identity alone is not enough: two reads inside ONE session both carry the
+   * same workspaceAgentId, so an older background read resolving after Stop's
+   * final read used to overwrite it — and the stop then deletes the scratch
+   * dir, so the stale content is what the user keeps.
+   *
+   * `syncGen` numbers every request; `appliedGen` is the newest one whose
+   * response was accepted. A response may apply only if it is still the
+   * current session's, we are still mounted, and its generation is newer than
+   * anything already applied. Setting `appliedGen = syncGen` invalidates every
+   * read currently in flight, which is what a successful stop, an unmount and
+   * a session replacement each do.
+   */
+  const syncGenRef = useRef(0);
+  const appliedGenRef = useRef(0);
+  /** A Stop attempt owns its final read: no manual or background sync may be
+   *  started under it, or a newer idle read could supersede the final one and
+   *  let the delete proceed with an unapplied result. */
+  const stopOwnsSyncRef = useRef(false);
+  const invalidatePendingSyncs = () => {
+    appliedGenRef.current = syncGenRef.current;
+  };
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      invalidatePendingSyncs();
     };
   }, []);
 
@@ -267,25 +297,37 @@ export function SkillAssistPanel({
    * scratch dir and an unread edit would be gone for good.
    */
   const runSync = useCallback(
-    async (throwOnFailure: boolean) => {
+    async (throwOnFailure: boolean, forStop = false) => {
       const active = draftRef.current;
       if (!active) return;
-      // Pin the id ACROSS the await: a stale result from a previous session
-      // must never overwrite a newer draft's fields.
+      // A Stop attempt owns the final read (R5).
+      if (stopOwnsSyncRef.current && !forStop) return;
+      // Pin identity AND generation across the await.
       const workspaceAgentId = active.workspaceAgentId;
+      const sessionId = active.sessionId;
+      const gen = ++syncGenRef.current;
+      // Guards `onSynced` itself, not merely the setStates around it: applying
+      // a stale read to the parent editor is the whole defect.
+      const isCurrent = () =>
+        mountedRef.current &&
+        draftRef.current?.workspaceAgentId === workspaceAgentId &&
+        draftRef.current?.sessionId === sessionId &&
+        gen > appliedGenRef.current;
       try {
         const v = await ipc.skill.syncDraft({ workspaceAgentId });
-        if (draftRef.current?.workspaceAgentId !== workspaceAgentId) return;
-        if (mountedRef.current) {
-          setSyncError(null);
-          setOfferForceStop(false);
-        }
+        if (!isCurrent()) return;
+        appliedGenRef.current = gen;
+        setSyncError(null);
+        setOfferForceStop(false);
         onSynced(v);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         // The editor's fields are deliberately left untouched — a failed sync
         // must not destroy the last successfully synced state (design spec).
-        if (draftRef.current?.workspaceAgentId === workspaceAgentId && mountedRef.current) {
+        // A STALE failure says nothing about the current state, so it must not
+        // raise an error over a newer success either.
+        if (isCurrent()) {
+          appliedGenRef.current = gen;
           setSyncError(`Couldn't read the agent's file — ${msg}. Your last synced values are unchanged.`);
         }
         if (throwOnFailure) throw e;
@@ -317,10 +359,11 @@ export function SkillAssistPanel({
     const workspaceAgentId = active.workspaceAgentId;
     setStopping(true);
     setStopError(null);
+    stopOwnsSyncRef.current = true;
     try {
       if (!force) {
         try {
-          await runSync(true);
+          await runSync(true, true);
         } catch {
           if (mountedRef.current) setOfferForceStop(true);
           return; // draft kept, editor stays locked, error is on screen
@@ -328,6 +371,8 @@ export function SkillAssistPanel({
       }
       await ipc.skill.stopDraftSession({ workspaceAgentId });
       if (draftRef.current?.workspaceAgentId !== workspaceAgentId) return;
+      // The scratch dir is gone: anything still in flight can only be stale.
+      invalidatePendingSyncs();
       if (mountedRef.current) {
         setOfferForceStop(false);
         setSyncError(null);
@@ -338,6 +383,7 @@ export function SkillAssistPanel({
       const msg = e instanceof Error ? e.message : String(e);
       if (mountedRef.current) setStopError(`Couldn't stop the agent — ${msg}. The draft is kept; try again.`);
     } finally {
+      stopOwnsSyncRef.current = false;
       if (mountedRef.current) setStopping(false);
     }
   }

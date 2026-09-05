@@ -102,6 +102,20 @@ let skillDraft = {
   startDelayMs: 0,
 };
 
+// Manual sync mode: skill.syncDraft returns a promise the harness resolves by
+// hand, so a regression can control RESPONSE ORDER — an older in-flight read
+// resolving after a newer one is exactly Armin's finding 49e88209.
+type PendingSync = {
+  id: number;
+  resolve: (v: { name: string; description?: string; content: string }) => void;
+  reject: (e: Error) => void;
+  /** The file as it was AT CALL TIME, so an older read carries older content. */
+  captured: { name: string; description?: string; content: string };
+};
+let syncMode: "immediate" | "manual" = "immediate";
+let syncSeq = 0;
+let pendingSyncs: PendingSync[] = [];
+
 type ProbeCall = Record<string, unknown> & { cmd: string };
 const probe = {
   calls: [] as ProbeCall[],
@@ -110,12 +124,36 @@ const probe = {
   reset() {
     probe.calls = [];
   },
+  resetSyncs() {
+    pendingSyncs = [];
+    syncMode = "immediate";
+  },
   /** Stand in for the agent rewriting SKILL.md, so a sync has something new. */
   setDraftFile(file: { name: string; description?: string; content: string }) {
     skillDraft = { ...skillDraft, file };
   },
   setStartDelay(ms: number) {
     skillDraft = { ...skillDraft, startDelayMs: ms };
+  },
+  /** "manual" holds every syncDraft open until resolveSync/rejectSync. */
+  setSyncMode(mode: "immediate" | "manual") {
+    syncMode = mode;
+  },
+  pendingSyncIds() {
+    return pendingSyncs.map((p) => p.id);
+  },
+  /** Resolve one held read with the content captured when it was ISSUED. */
+  resolveSync(id: number) {
+    const i = pendingSyncs.findIndex((p) => p.id === id);
+    if (i < 0) throw new Error(`[fixture] no pending sync ${id}`);
+    const [p2] = pendingSyncs.splice(i, 1);
+    p2.resolve(p2.captured);
+  },
+  rejectSync(id: number, message = "fixture: stale read failed") {
+    const i = pendingSyncs.findIndex((p) => p.id === id);
+    if (i < 0) throw new Error(`[fixture] no pending sync ${id}`);
+    const [p2] = pendingSyncs.splice(i, 1);
+    p2.reject(new Error(message));
   },
   fail(which: "start" | "sync" | "stop", on: boolean) {
     if (which === "start") skillDraft = { ...skillDraft, startShouldFail: on };
@@ -284,9 +322,15 @@ export const handlers: FixtureHandlers = {
     return result;
   },
   "skill.syncDraft": () => {
-    probe.calls.push({ cmd: "skill.syncDraft" });
+    syncSeq += 1;
+    const id = syncSeq;
+    probe.calls.push({ cmd: "skill.syncDraft", syncId: id });
     if (skillDraft.syncShouldFail) throw new Error("fixture: SKILL.md is mid-write");
-    return skillDraft.file;
+    if (syncMode === "immediate") return skillDraft.file;
+    const captured = { ...skillDraft.file };
+    return new Promise<typeof captured>((resolve, reject) => {
+      pendingSyncs.push({ id, resolve, reject, captured });
+    });
   },
   "skill.stopDraftSession": () => {
     probe.calls.push({ cmd: "skill.stopDraftSession" });
