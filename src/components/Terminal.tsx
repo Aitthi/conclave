@@ -83,7 +83,16 @@ export function Terminal({ sessionId }: TerminalProps) {
     const isRemount = getTermTabMode() === "remount";
 
     const term = new XtermTerminal({
-      convertEol: true,
+      // NO `convertEol`. VS Code does not set it either
+      // (vscode:src/vs/workbench/contrib/terminal/browser/xterm/xtermTerminal.ts:241-285)
+      // and on our PTY it can only ever be a no-op or a hazard: the master keeps
+      // `opost onlcr` on for the whole child lifetime (verified with
+      // `stty -a -f /dev/ttysN` on a live Conclave-spawned `claude`, audit §0 F1),
+      // so every `\n` the child writes already reaches xterm as `\r\n`.
+      // `convertEol` only forces `x = 0` on an LF that was NOT preceded by a CR
+      // (@xterm/xterm InputHandler.ts, `lineFeed`), which never happens here —
+      // except for a child that deliberately disables ONLCR, where it would
+      // silently rewrite that child's intended cursor column.
       fontSize: 12,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       theme: { background: "#1e1e1e", foreground: "#e5e5e5" },
