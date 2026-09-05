@@ -2,11 +2,13 @@
 //! compilation, per-language dispatch, and match-to-edit materialisation
 //! so the command handler can focus on file IO + the JSON envelope.
 
+use crate::lang::Language as CgLang;
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::replacer::{Replacer, TemplateFix};
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, Visitor};
-use ast_grep_language::{C, Cpp, Go, Java, JavaScript, Kotlin, Python, Rust, Swift, Tsx, TypeScript};
-use crate::lang::Language as CgLang;
+use ast_grep_language::{
+    Cpp, Go, Java, JavaScript, Kotlin, Python, Rust, Swift, Tsx, TypeScript, C,
+};
 
 use crate::edit::error::AstEditError;
 

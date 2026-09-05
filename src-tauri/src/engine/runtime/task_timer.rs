@@ -857,10 +857,9 @@ mod tests {
 
         // Past the override — fires, and the rendered minute is the real one.
         tick(&state, last + Duration::minutes(21), &mut ticker).await;
-        let inbox =
-            crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
-                .await
-                .expect("list failed");
+        let inbox = crate::engine::commands::message::list(&state, json!({ "instanceId": owner }))
+            .await
+            .expect("list failed");
         let arr = inbox.as_array().unwrap();
         assert_eq!(arr.len(), 1, "must fire once past the override");
         assert_eq!(

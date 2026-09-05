@@ -225,7 +225,13 @@ pub fn find(idx: &Index, name: &str, exact: bool, limit: usize) -> Result<(Value
     let mut hits: Vec<&Definition> = idx
         .definitions
         .iter()
-        .filter(|d| if exact { d.name == name } else { d.name.contains(name) })
+        .filter(|d| {
+            if exact {
+                d.name == name
+            } else {
+                d.name.contains(name)
+            }
+        })
         .collect();
     hits.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
 

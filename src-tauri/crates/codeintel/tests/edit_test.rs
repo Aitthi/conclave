@@ -555,14 +555,8 @@ fn drift_between_index_and_apply_emits_hash_mismatch() {
 fn rewrite_rust_two_matches_dry_run_default() {
     let tmp = copy_fixture("rewrite_rust");
 
-    let (data, written) = edit::rewrite(
-        tmp.path(),
-        "println!($A)",
-        "eprintln!($A)",
-        false,
-        None,
-    )
-    .unwrap();
+    let (data, written) =
+        edit::rewrite(tmp.path(), "println!($A)", "eprintln!($A)", false, None).unwrap();
 
     assert_eq!(data["subcommand"], "rewrite");
     assert_eq!(data["dry_run"], true);
@@ -695,14 +689,8 @@ fn rewrite_javascript_matches() {
 fn rewrite_python_matches() {
     let tmp = copy_fixture("rewrite_python");
 
-    let (data, _written) = edit::rewrite(
-        tmp.path(),
-        "print($A)",
-        "logging.info($A)",
-        false,
-        None,
-    )
-    .unwrap();
+    let (data, _written) =
+        edit::rewrite(tmp.path(), "print($A)", "logging.info($A)", false, None).unwrap();
 
     let applied = data["applied"].as_array().expect("applied array");
     assert_eq!(applied.len(), 1);
@@ -784,14 +772,8 @@ fn rewrite_multimatch_metavar_preserves_argument_list() {
 fn rewrite_no_match_reports_empty_applied() {
     let tmp = copy_fixture("rewrite_no_match");
 
-    let (data, written) = edit::rewrite(
-        tmp.path(),
-        "println!($A)",
-        "eprintln!($A)",
-        false,
-        None,
-    )
-    .unwrap();
+    let (data, written) =
+        edit::rewrite(tmp.path(), "println!($A)", "eprintln!($A)", false, None).unwrap();
 
     assert_eq!(data["subcommand"], "rewrite");
     assert_eq!(data["dry_run"], true);
@@ -835,14 +817,8 @@ fn rewrite_lang_filter_unset_walks_all_languages() {
 fn rewrite_lang_rust_skips_non_rust_files_entirely() {
     let tmp = copy_fixture("rewrite_lang_filter");
 
-    let (data, _written) = edit::rewrite(
-        tmp.path(),
-        "doit()",
-        "done()",
-        false,
-        Some("rust"),
-    )
-    .unwrap();
+    let (data, _written) =
+        edit::rewrite(tmp.path(), "doit()", "done()", false, Some("rust")).unwrap();
 
     assert!(
         data["errors"].as_array().unwrap().is_empty(),
@@ -869,14 +845,8 @@ fn rewrite_lang_rust_skips_non_rust_files_entirely() {
 fn rewrite_pattern_compile_failure_reports_error_kind() {
     let tmp = copy_fixture("rewrite_rust");
 
-    let (data, written) = edit::rewrite(
-        tmp.path(),
-        "(((",
-        "eprintln!($A)",
-        false,
-        Some("rust"),
-    )
-    .unwrap();
+    let (data, written) =
+        edit::rewrite(tmp.path(), "(((", "eprintln!($A)", false, Some("rust")).unwrap();
 
     // Former exit code 2 (pattern-compile) is now fully represented in the
     // payload; the call still returns Ok.
@@ -904,14 +874,8 @@ fn rewrite_apply_writes_changes_to_disk() {
     let before = fs::read_to_string(&target).unwrap();
     assert!(before.contains("println!"));
 
-    let (data, written) = edit::rewrite(
-        tmp.path(),
-        "println!($A)",
-        "eprintln!($A)",
-        true,
-        None,
-    )
-    .unwrap();
+    let (data, written) =
+        edit::rewrite(tmp.path(), "println!($A)", "eprintln!($A)", true, None).unwrap();
 
     assert_eq!(data["dry_run"], false);
     assert!(

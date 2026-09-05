@@ -244,8 +244,7 @@ pub fn rename(
         Some(d) => vec![d],
         None => defs.clone(),
     };
-    let mut defs_by_file: std::collections::BTreeMap<String, Vec<&Definition>> =
-        Default::default();
+    let mut defs_by_file: std::collections::BTreeMap<String, Vec<&Definition>> = Default::default();
     for d in defs_to_edit {
         defs_by_file.entry(d.file.clone()).or_default().push(d);
     }

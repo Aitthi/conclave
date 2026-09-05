@@ -14,7 +14,10 @@ fn definitions_carry_end_line_and_signature() {
     let def = idx.definitions.iter().find(|d| d.name == "greet").unwrap();
     assert_eq!(def.line, 1);
     assert_eq!(def.end_line, 3);
-    assert_eq!(def.signature.as_deref(), Some("pub fn greet(name: &str) -> String {"));
+    assert_eq!(
+        def.signature.as_deref(),
+        Some("pub fn greet(name: &str) -> String {")
+    );
 }
 
 #[test]
@@ -34,7 +37,11 @@ fn unparseable_file_lands_in_warnings() {
     fs::write(dir.path().join("bad.rs"), [0xFF, 0xFE, 0x00, 0xD8]).unwrap(); // invalid UTF-8
     let idx = build_index(dir.path()).unwrap();
     assert!(idx.definitions.iter().any(|d| d.name == "a"));
-    assert!(idx.warnings.iter().any(|w| w.contains("bad.rs")), "warnings: {:?}", idx.warnings);
+    assert!(
+        idx.warnings.iter().any(|w| w.contains("bad.rs")),
+        "warnings: {:?}",
+        idx.warnings
+    );
 }
 
 #[test]
@@ -63,8 +70,14 @@ fn assemble_index_orders_definitions_by_path_components_not_bytes() {
 
     let idx = build_index(dir.path()).unwrap();
     let names: Vec<&str> = idx.definitions.iter().map(|d| d.name.as_str()).collect();
-    let x_pos = names.iter().position(|n| *n == "x_marker").expect("x_marker present");
-    let y_pos = names.iter().position(|n| *n == "y_marker").expect("y_marker present");
+    let x_pos = names
+        .iter()
+        .position(|n| *n == "x_marker")
+        .expect("x_marker present");
+    let y_pos = names
+        .iter()
+        .position(|n| *n == "y_marker")
+        .expect("y_marker present");
     assert!(
         y_pos < x_pos,
         "expected y_marker (a/y.rs) before x_marker (a-b/x.rs), got order {:?}",
@@ -92,8 +105,14 @@ fn cache_assembled_index_orders_definitions_by_path_components_not_bytes() {
     let idx = cache.get_index(dir.path()).unwrap();
 
     let names: Vec<&str> = idx.definitions.iter().map(|d| d.name.as_str()).collect();
-    let x_pos = names.iter().position(|n| *n == "x_marker").expect("x_marker present");
-    let y_pos = names.iter().position(|n| *n == "y_marker").expect("y_marker present");
+    let x_pos = names
+        .iter()
+        .position(|n| *n == "x_marker")
+        .expect("x_marker present");
+    let y_pos = names
+        .iter()
+        .position(|n| *n == "y_marker")
+        .expect("y_marker present");
     assert!(
         y_pos < x_pos,
         "expected y_marker (a/y.rs) before x_marker (a-b/x.rs), got order {:?}",
