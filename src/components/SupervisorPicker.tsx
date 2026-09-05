@@ -308,38 +308,29 @@ export function SupervisorPicker({
         {error && <div className="px-4 pt-2 text-[11px] text-danger shrink-0">{error}</div>}
 
         <div className="flex items-center gap-2 px-4 h-14 shrink-0 border-t border-overlay/[0.06]">
-          {/* Add-flow footer is Skip + Add agent ONLY (canon @3fd0f6e, Arta
-              design pass) — a Cancel ghost button next to Skip would be a
-              misclick trap (same style, opposite effects: Cancel drops the
-              whole add, Skip completes it with no supervisor). The X and
-              back arrow already cover "abort" for that variant. Edit keeps
-              Cancel + Confirm — there's no Skip to collide with there. */}
-          {variant === "edit" && (
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={submitting}
-              className="text-[12.5px] font-medium text-text-secondary px-3 py-1.5 rounded-lg hover:bg-overlay/[0.05] disabled:opacity-50"
-            >
-              Cancel
-            </button>
-          )}
-          {/* Remove supervisor — edit variant, current != null only (Arta
-              proto @d2ac161, amends @3fd0f6e). One-click onPick(null), the
-              edit-mode twin of add-flow Skip. Ban+rose (mapped to
-              --color-danger per LaneBoard.tsx precedent) disambiguates it
-              from the adjacent Cancel — disambiguation, not distance. */}
+          {/* Remove supervisor is an independent leading action in edit mode.
+              Keep it physically and semantically separate from the trailing
+              Cancel + Confirm form group: one click still calls onPick(null),
+              but the danger label, glyph, and hover surface make that effect
+              explicit without turning it into a filled destructive primary. */}
           {variant === "edit" && current != null && (
             <button
               type="button"
               onClick={() => onPick(null)}
               disabled={submitting}
-              className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-text-secondary px-3 py-1.5 rounded-lg hover:bg-overlay/[0.05] disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 text-[12.5px] font-medium hover:bg-danger/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-danger/40 disabled:opacity-50"
+              style={{
+                color:
+                  "color-mix(in srgb, var(--color-danger) 80%, var(--color-text-primary))",
+              }}
             >
-              <Ban className="w-3 h-3" style={{ color: "var(--color-danger)" }} />
+              <Ban className="w-3 h-3" />
               Remove supervisor
             </button>
           )}
+          {/* Add-flow footer remains Skip + Add agent ONLY (canon @3fd0f6e,
+              Arta design pass). The X and back arrow cover aborting the add;
+              Skip completes it immediately with no supervisor. */}
           {variant === "add" && (
             // Human-ruled (2d03b21a, proto @3fd0f6e): Skip adds with no
             // supervisor REGARDLESS of the current row selection — a bypass
@@ -348,31 +339,43 @@ export function SupervisorPicker({
               type="button"
               onClick={() => onPick(null)}
               disabled={submitting}
-              className="text-[12.5px] font-medium text-text-secondary px-3 py-1.5 rounded-lg hover:bg-overlay/[0.05] disabled:opacity-50"
+              className="inline-flex h-8 items-center whitespace-nowrap rounded-lg px-3 text-[12.5px] font-medium text-text-secondary hover:bg-overlay/[0.05] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40 disabled:opacity-50"
             >
               Skip
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              if (draft !== undefined) onPick(draft);
-            }}
-            disabled={submitting || nothingPicked}
-            className="ml-auto inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-white bg-accent px-3.5 py-1.5 rounded-lg hover:brightness-105 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {variant === "add" ? (
-              <>
-                <UserPlus className="w-[13px] h-[13px]" />
-                {submitting ? "Adding…" : "Add agent"}
-              </>
-            ) : (
-              <>
-                <Check className="w-[13px] h-[13px]" />
-                {submitting ? "Saving…" : "Confirm"}
-              </>
+          <div className="ml-auto flex items-center gap-2">
+            {variant === "edit" && (
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={submitting}
+                className="inline-flex h-8 items-center whitespace-nowrap rounded-lg px-3 text-[12.5px] font-medium text-text-secondary hover:bg-overlay/[0.05] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/40 disabled:opacity-50"
+              >
+                Cancel
+              </button>
             )}
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (draft !== undefined) onPick(draft);
+              }}
+              disabled={submitting || nothingPicked}
+              className="inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-3.5 text-[12.5px] font-semibold text-white hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {variant === "add" ? (
+                <>
+                  <UserPlus className="w-[13px] h-[13px]" />
+                  {submitting ? "Adding…" : "Add agent"}
+                </>
+              ) : (
+                <>
+                  <Check className="w-[13px] h-[13px]" />
+                  {submitting ? "Saving…" : "Confirm"}
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>
