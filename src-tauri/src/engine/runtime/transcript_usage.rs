@@ -53,7 +53,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::transcript_context::{claude_project_dir, collect_jsonl_files, parse_ts};
+use super::transcript_context::{
+    claude_project_dir, claude_value_declared_owners, codex_value_declared_owners,
+    collect_jsonl_files, parse_ts,
+};
 use super::usage::{
     checked_sum, counter_tracked, MeasuredUsage, COLLECTOR_VERSION, SOURCE_CLAUDE_TRANSCRIPT,
     SOURCE_CODEX_TRANSCRIPT,
@@ -225,10 +228,17 @@ pub fn read_batch(
         }
 
         pending.buffer.extend_from_slice(data);
-        // Drain every complete line.
+        // Drain every complete line. The cap binds a COMPLETE record too: a
+        // record whose newline arrives while the buffer holds exactly the cap
+        // is one byte over, and is consumed without being yielded (review
+        // a12f77f2 C2 residual: 4194305 bytes must never be accepted).
         while let Some(nl) = pending.buffer.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = pending.buffer.drain(..=nl).collect();
             batch.next_offset += line.len() as u64;
+            if line.len() - 1 > max_record_bytes {
+                batch.skipped_oversized = true;
+                continue;
+            }
             let text = String::from_utf8_lossy(&line[..line.len() - 1]);
             batch.lines.push(text.trim_end_matches('\r').to_owned());
         }
@@ -313,7 +323,8 @@ impl ImportedEvent {
 #[derive(Debug, Default, PartialEq)]
 pub struct Scan {
     pub events: Vec<ImportedEvent>,
-    /// Which agent ids declared ownership in these lines (owner markers).
+    /// Every agent id that structurally declared ownership in these lines
+    /// (owner markers), registered or not, distinct, in order of appearance.
     pub owners_declared: Vec<String>,
     /// The cwd the source itself stated (Codex `session_meta` / `turn_context`).
     pub declared_cwd: Option<String>,
@@ -327,6 +338,14 @@ pub struct Scan {
 }
 
 impl Scan {
+    fn declare_owners(&mut self, owners: Vec<String>) {
+        for owner in owners {
+            if !self.owners_declared.contains(&owner) {
+                self.owners_declared.push(owner);
+            }
+        }
+    }
+
     fn note(&mut self, diagnostic: Diagnostic) {
         *self.diagnostics.entry(diagnostic).or_insert(0) += 1;
     }
@@ -354,7 +373,7 @@ impl Scan {
 /// `ON CONFLICT DO NOTHING` collapses the group; a later row that disagrees is
 /// caught by [`apply_scan`] against the stored identity. `tool_use` IS a
 /// completed response; a null `stop_reason` is an in-flight row and is skipped.
-pub fn scan_claude_lines(lines: &[String], candidate_owners: &[String]) -> Scan {
+pub fn scan_claude_lines(lines: &[String]) -> Scan {
     let mut scan = Scan::default();
     for line in lines {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -363,11 +382,7 @@ pub fn scan_claude_lines(lines: &[String], candidate_owners: &[String]) -> Scan 
             }
             continue;
         };
-        for owner in candidate_owners {
-            if super::transcript_context::claude_value_declares_owner(&value, owner) {
-                scan.owners_declared.push(owner.clone());
-            }
-        }
+        scan.declare_owners(claude_value_declared_owners(&value));
         if let Some(cwd) = value["cwd"].as_str() {
             scan.declared_cwd.get_or_insert_with(|| cwd.to_owned());
         }
@@ -468,7 +483,18 @@ pub struct FileParserState {
     /// restart resumes the skip from the cursor instead of re-reading.
     #[serde(default)]
     pub skipping_scanned: Option<u64>,
+    /// Every distinct agent id this file has structurally declared as its
+    /// owner, in order, capped at [`OWNERS_DECLARED_CAP`]. Persisted so an
+    /// ownership conflict — a second, possibly unregistered owner — stays a
+    /// conflict across batches and restarts instead of being forgotten once
+    /// the marker's batch is behind the cursor (review a12f77f2 C3).
+    #[serde(default)]
+    pub owners_declared: Vec<String>,
 }
+
+/// Distinct declared owners remembered per file. Two already prove a
+/// conflict; the cap only bounds the cursor row.
+pub const OWNERS_DECLARED_CAP: usize = 8;
 
 impl FileParserState {
     pub fn to_json(&self) -> String {
@@ -525,11 +551,7 @@ impl CodexParserState {
 /// `turn_context` feed the cwd and the turn → model join; `event_msg`
 /// `token_count`, cumulative counters and a `compacted` record's embedded copy
 /// are deliberately ignored (evidence: compaction is a double-counting trap).
-pub fn scan_codex_lines(
-    lines: &[String],
-    candidate_owners: &[String],
-    state: &mut CodexParserState,
-) -> Scan {
+pub fn scan_codex_lines(lines: &[String], state: &mut CodexParserState) -> Scan {
     let mut scan = Scan::default();
     for line in lines {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -538,11 +560,7 @@ pub fn scan_codex_lines(
             }
             continue;
         };
-        for owner in candidate_owners {
-            if super::transcript_context::codex_value_declares_owner(&value, owner) {
-                scan.owners_declared.push(owner.clone());
-            }
-        }
+        scan.declare_owners(codex_value_declared_owners(&value));
         let payload = &value["payload"];
         if let Some(at) = value["timestamp"].as_str().and_then(parse_ts) {
             // Canonical strings order like the instants they encode.
@@ -714,7 +732,10 @@ pub async fn apply_scan(
     let mut tx = pool.begin().await?;
     for event in scan.events {
         let key = event.event_key.clone();
-        let row = event.into_row(attribution, recorded_at);
+        // Compare what the store WOULD hold: the same normalization the
+        // insert applies, so a rejected counter (None + diagnostic) is
+        // distinguishable from an absent one (None, no diagnostic).
+        let row = event.into_row(attribution, recorded_at).normalized();
         if model_usage::insert_event(&mut *tx, &row).await? {
             applied.inserted += 1;
             continue;
@@ -731,12 +752,19 @@ pub async fn apply_scan(
                 && stored.input_tokens == row.input_tokens
                 && stored.output_tokens == row.output_tokens
                 && stored.cache_read_input_tokens == row.cache_read_input_tokens
-                && stored.cache_write_input_tokens == row.cache_write_input_tokens;
+                && stored.cache_write_input_tokens == row.cache_write_input_tokens
+                && stored.diagnostic_code == row.diagnostic_code;
             if agrees {
                 model_usage::advance_occurred_at(&mut *tx, &key, row.occurred_at).await?;
             } else {
-                model_usage::mark_conflict(&mut *tx, &key, Diagnostic::ClaudeConflict.code())
-                    .await?;
+                // A replay that carries a rejection names the damage; any
+                // other disagreement is the group disagreeing with itself.
+                let code = row
+                    .diagnostic_code
+                    .as_deref()
+                    .filter(|c| stored.diagnostic_code.as_deref() != Some(c))
+                    .unwrap_or_else(|| Diagnostic::ClaudeConflict.code());
+                model_usage::mark_conflict(&mut *tx, &key, code).await?;
                 applied.conflicts += 1;
             }
         }
@@ -903,6 +931,10 @@ struct FileOutcome {
     bytes_read: usize,
     applied: Applied,
     backlog: bool,
+    /// The batch raised a diagnostic or a conflict: the file was read, but
+    /// what it holds is not trusted evidence, so its scope's live window is
+    /// not extended by this tick (review a12f77f2 C5).
+    damaged: bool,
     /// The verified scope this file belongs to, if attribution succeeded.
     scope: Option<Scope>,
 }
@@ -1000,6 +1032,8 @@ impl ImportWorker {
                     report.conflicts += outcome.applied.conflicts;
                     if outcome.backlog {
                         report.backlog = true;
+                    }
+                    if outcome.backlog || outcome.damaged {
                         if let Some(scope) = outcome.scope {
                             disturbed.insert(scope);
                         }
@@ -1153,35 +1187,6 @@ impl ImportWorker {
                 buffer: pending.buffer,
             }
         };
-        if offset + pending.scanned() >= length_now {
-            return Ok(Ok(None)); // nothing new
-        }
-
-        let candidate_agents: Vec<String> = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state
-                .workspaces
-                .iter()
-                .flat_map(|w| w.agents.get(source.cli_kind()).cloned().unwrap_or_default())
-                .collect()
-        };
-        let path = candidate.path.clone();
-        let mut codex_state = file_state.codex.clone();
-        let max_record = self.config.max_record_bytes;
-        let read = tokio::task::spawn_blocking(
-            move || -> std::io::Result<(Batch, Scan, CodexParserState, PendingRecord)> {
-                let batch = read_batch(&path, offset, max_bytes, max_record, &mut pending)?;
-                let scan = match source {
-                    Source::Claude => scan_claude_lines(&batch.lines, &candidate_agents),
-                    Source::Codex => {
-                        scan_codex_lines(&batch.lines, &candidate_agents, &mut codex_state)
-                    }
-                };
-                Ok((batch, scan, codex_state, pending))
-            },
-        )
-        .await
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
         let known_scope = existing.as_ref().and_then(|c| {
             Some((
                 c.workspace_id.clone()?,
@@ -1189,6 +1194,45 @@ impl ImportWorker {
                 source,
             ))
         });
+        if offset + pending.scanned() >= length_now {
+            // Nothing new. A verified file sitting at its end is exactly
+            // what a live complete window is made of: zero bytes read, no
+            // backlog, no damage — its scope stays proven (review a12f77f2
+            // C5 residual: an idle verified scope must not lose its window).
+            let Some(scope) = known_scope else {
+                return Ok(Ok(None));
+            };
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .scope_files
+                .entry(scope.clone())
+                .or_default()
+                .insert(candidate.path.clone());
+            return Ok(Ok(Some(FileOutcome {
+                bytes_read: 0,
+                applied: Applied::default(),
+                backlog: false,
+                damaged: false,
+                scope: Some(scope),
+            })));
+        }
+
+        let path = candidate.path.clone();
+        let mut codex_state = file_state.codex.clone();
+        let max_record = self.config.max_record_bytes;
+        let read = tokio::task::spawn_blocking(
+            move || -> std::io::Result<(Batch, Scan, CodexParserState, PendingRecord)> {
+                let batch = read_batch(&path, offset, max_bytes, max_record, &mut pending)?;
+                let scan = match source {
+                    Source::Claude => scan_claude_lines(&batch.lines),
+                    Source::Codex => scan_codex_lines(&batch.lines, &mut codex_state),
+                };
+                Ok((batch, scan, codex_state, pending))
+            },
+        )
+        .await
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
         let (batch, mut scan, codex_state, pending) = match read {
             Ok(v) => v,
             Err(e) => {
@@ -1232,6 +1276,12 @@ impl ImportWorker {
             .declared_cwd
             .clone()
             .or_else(|| existing.as_ref().and_then(|c| c.verified_cwd.clone()));
+        let mut owners_declared = file_state.owners_declared.clone();
+        for declared in &scan.owners_declared {
+            if !owners_declared.contains(declared) && owners_declared.len() < OWNERS_DECLARED_CAP {
+                owners_declared.push(declared.clone());
+            }
+        }
         let (workspace_id, owner, ownership_conflict, verified) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let workspace = declared_cwd.as_deref().and_then(|cwd| {
@@ -1246,10 +1296,13 @@ impl ImportWorker {
             // batches. Verification is re-evaluated every batch from the
             // persisted knowledge.
             let prior_owner = existing.as_ref().and_then(|c| c.verified_owner.clone());
-            let owner = prior_owner.or_else(|| scan.owners_declared.first().cloned());
+            let owner = prior_owner.or_else(|| owners_declared.first().cloned());
+            // Every owner the file EVER declared counts — persisted on the
+            // cursor — so a later marker from another agent, registered or
+            // not, is a conflict for the rest of the file's life.
             let conflict = owner
                 .as_ref()
-                .is_some_and(|o| scan.owners_declared.iter().any(|d| d != o));
+                .is_some_and(|o| owners_declared.iter().any(|d| d != o));
             let verified = match (&workspace, &owner) {
                 (Some(ws), Some(owner)) => {
                     !conflict
@@ -1275,11 +1328,19 @@ impl ImportWorker {
         let fully_consumed = !backlog && pending.buffer.is_empty();
         if workspace_id.is_none() && fully_consumed {
             // Read to the end and no row ever named a workspace folder: not
-            // ours. Remember the length; re-examine only if it grows.
+            // ours. Remember the length; re-examine only if it grows. The
+            // bytes it took to find that out were real IO and are charged to
+            // the tick like any other visit (review a12f77f2 C2 residual).
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.not_ours.insert(candidate.path.clone(), length_now);
             state.pending.remove(&candidate.path);
-            return Ok(Ok(None));
+            return Ok(Ok(Some(FileOutcome {
+                bytes_read,
+                applied: Applied::default(),
+                backlog: false,
+                damaged: false,
+                scope: None,
+            })));
         }
         // A cwd may still be ahead (a marker-only head under a tight budget):
         // keep consuming with an unattributed cursor. If a workspace appears
@@ -1330,6 +1391,7 @@ impl ImportWorker {
                 FileParserState {
                     codex: codex_state.clone(),
                     skipping_scanned: pending.skipping_scanned,
+                    owners_declared: owners_declared.clone(),
                 }
                 .to_json(),
             ),
@@ -1349,6 +1411,7 @@ impl ImportWorker {
                 bytes_read,
                 applied: Applied::default(),
                 backlog: true,
+                damaged: false,
                 scope: owner.clone().map(|o| (workspace_id, o, source)),
             })));
         }
@@ -1365,6 +1428,7 @@ impl ImportWorker {
                 bytes_read,
                 applied,
                 backlog,
+                damaged: false,
                 scope: None,
             })));
         }
@@ -1447,7 +1511,9 @@ impl ImportWorker {
             workspace_agent_id: scope_agent.clone(),
             session_id,
         };
+        let damaged = !diagnostics.is_empty();
         let applied = apply_scan(&self.db, scan, &attribution, &cursor, &coverage).await?;
+        let damaged = damaged || applied.conflicts > 0;
 
         let scope = scope_agent.map(|agent| (workspace_id, agent, source));
         if let Some(scope) = &scope {
@@ -1462,6 +1528,7 @@ impl ImportWorker {
             bytes_read,
             applied,
             backlog,
+            damaged,
             scope,
         })))
     }
@@ -1633,7 +1700,7 @@ mod tests {
             claude_row("R1", 2, "claude-fable-5-1", 433),
             claude_row("R2", 0, "claude-fable-5-1", 10),
         ];
-        let scan = scan_claude_lines(&lines, &["agent-1".into(), "agent-2".into()]);
+        let scan = scan_claude_lines(&lines);
         assert_eq!(scan.owners_declared, vec!["agent-1".to_string()]);
         assert_eq!(scan.source_session_id.as_deref(), Some("S1"));
         // Four rows, but the three R1 rows share ONE key: the store collapses them.
@@ -1686,7 +1753,7 @@ mod tests {
             "not json at all".to_string(),
             json!({"type": "user", "message": {"content": "hi"}}).to_string(),
         ];
-        let scan = scan_claude_lines(&lines, &[]);
+        let scan = scan_claude_lines(&lines);
         assert_eq!(scan.events.len(), 1, "only R4 is a complete response");
         let r4 = &scan.events[0];
         assert_eq!(
@@ -1714,7 +1781,7 @@ mod tests {
             {"type": "message", "model": "claude-opus-5"},
             {"type": "message", "model": "claude-sonnet-5"}
         ]);
-        let scan = scan_claude_lines(&[row.to_string()], &[]);
+        let scan = scan_claude_lines(&[row.to_string()]);
         assert_eq!(scan.events[0].served_model, None);
         assert_eq!(scan.events[0].usage.output_tokens, Some(5), "counted once");
     }
@@ -1778,7 +1845,7 @@ mod tests {
     #[test]
     fn codex_imports_only_top_level_usage_records_joined_to_their_turn_model() {
         let mut state = CodexParserState::default();
-        let scan = scan_codex_lines(&codex_fixture(), &["agent-c".into()], &mut state);
+        let scan = scan_codex_lines(&codex_fixture(), &mut state);
         assert_eq!(scan.owners_declared, vec!["agent-c".to_string()]);
         assert_eq!(scan.declared_cwd.as_deref(), Some("/Users/x/proj"));
         assert_eq!(scan.source_session_id.as_deref(), Some("SESS"));
@@ -1822,15 +1889,16 @@ mod tests {
     fn codex_turn_join_survives_a_batch_boundary_through_parser_state() {
         let lines = codex_fixture();
         let mut state = CodexParserState::default();
-        let _ = scan_codex_lines(&lines[..3], &[], &mut state);
+        let _ = scan_codex_lines(&lines[..3], &mut state);
         let wrapped = FileParserState {
             codex: state.clone(),
             skipping_scanned: None,
+            owners_declared: Vec::new(),
         };
         let restored = FileParserState::from_json(Some(&wrapped.to_json())).codex;
         assert_eq!(restored, state);
         let mut restored = restored;
-        let scan = scan_codex_lines(&lines[3..5], &[], &mut restored);
+        let scan = scan_codex_lines(&lines[3..5], &mut restored);
         assert_eq!(scan.events.len(), 1);
         assert_eq!(
             scan.events[0].requested_model.as_deref(),
@@ -1864,7 +1932,7 @@ mod tests {
             "payload": {"type": "turn_aborted", "turn_id": "T2", "reason": "interrupted"}
         })));
         let mut state = CodexParserState::default();
-        let scan = scan_codex_lines(&lines, &[], &mut state);
+        let scan = scan_codex_lines(&lines, &mut state);
         assert_eq!(
             scan.events.len(),
             2,
@@ -1881,7 +1949,7 @@ mod tests {
             .unwrap()
             .remove("response_id");
         let mut state = CodexParserState::default();
-        let scan = scan_codex_lines(&[record.to_string()], &[], &mut state);
+        let scan = scan_codex_lines(&[record.to_string()], &mut state);
         assert!(scan.events.is_empty());
         assert_eq!(
             scan.diagnostics.get(&Diagnostic::CodexRecordIncomplete),
@@ -2001,6 +2069,56 @@ mod tests {
     /// A record over the cap is skipped a bounded slice per batch, the cursor
     /// jumps past it once its newline is found, and the line after it is not
     /// lost. The skip resumes from persisted state without the buffer.
+    /// The record cap binds complete records too: a record one byte over the
+    /// cap whose newline lands after the buffer has filled to exactly the cap
+    /// is consumed but never yielded; a record of exactly the cap is accepted
+    /// (review a12f77f2 C2 residual, Aoki reproduction with 4194305 bytes).
+    #[test]
+    fn read_batch_rejects_a_complete_record_one_byte_over_the_cap() {
+        let cap = 4_000;
+        let over = format!("{}\n", "x".repeat(cap + 1));
+        let exact = format!("{}\n", "y".repeat(cap));
+        let path = temp_file(
+            "cap-edge",
+            format!("{over}{exact}{{\"tail\":1}}\n").as_bytes(),
+        );
+        let (lines, offset, reads, skipped) = read_all(&path, 1_000, cap);
+        assert!(skipped, "the cap+1 record is oversized");
+        assert_eq!(lines.len(), 2, "cap+1 never yielded: {}", lines.len());
+        assert_eq!(lines[0].len(), cap, "exactly the cap is accepted");
+        assert_eq!(lines[1], "{\"tail\":1}");
+        assert!(lines.iter().all(|l| l.len() <= cap));
+        assert_eq!(offset as usize, over.len() + exact.len() + 11);
+        assert!(reads.iter().all(|r| *r <= 1_000), "{reads:?}");
+    }
+
+    /// The same edge at the production bounds: 4194305 bytes read across 17
+    /// batches of 256 KiB is never accepted as a record.
+    #[test]
+    fn read_batch_at_production_bounds_never_accepts_cap_plus_one() {
+        let mut bytes = vec![b'x'; MAX_RECORD_BYTES + 1];
+        bytes.push(b'\n');
+        let path = temp_file("cap-production", &bytes);
+        let (lines, offset, reads, skipped) = read_all(&path, BATCH_BYTES, MAX_RECORD_BYTES);
+        assert!(skipped);
+        assert!(
+            lines.is_empty(),
+            "accepted {} bytes over the cap",
+            lines.iter().map(String::len).sum::<usize>()
+        );
+        assert_eq!(
+            offset as usize,
+            MAX_RECORD_BYTES + 2,
+            "consumed past the record"
+        );
+        assert_eq!(
+            reads.iter().sum::<usize>(),
+            MAX_RECORD_BYTES + 2,
+            "every byte counted"
+        );
+        assert!(reads.iter().all(|r| *r <= BATCH_BYTES));
+    }
+
     #[test]
     fn read_batch_skips_oversized_records_a_bounded_slice_at_a_time() {
         let huge = format!("{{\"pad\":\"{}\"}}\n", "y".repeat(10_000));
@@ -2102,7 +2220,7 @@ mod tests {
         ];
         let first = apply_scan(
             &pool,
-            scan_claude_lines(&lines, &[]),
+            scan_claude_lines(&lines),
             &attribution(),
             &cursor_for("fp", 100, 100),
             &[],
@@ -2120,7 +2238,7 @@ mod tests {
 
         let again = apply_scan(
             &pool,
-            scan_claude_lines(&lines, &[]),
+            scan_claude_lines(&lines),
             &attribution(),
             &cursor_for("fp", 100, 100),
             &[],
@@ -2154,7 +2272,7 @@ mod tests {
         let pool = connect_in_memory().await;
         apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2167,7 +2285,7 @@ mod tests {
         shuffled["message"]["usage"]["cache_read_input_tokens"] = json!(26444);
         let applied = apply_scan(
             &pool,
-            scan_claude_lines(&[shuffled.to_string()], &[]),
+            scan_claude_lines(&[shuffled.to_string()]),
             &attribution(),
             &cursor_for("fp", 2, 2),
             &[],
@@ -2190,7 +2308,7 @@ mod tests {
         // Once in conflict, an agreeing replay does not silently clear it.
         let again = apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 2, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 2, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 3, 3),
             &[],
@@ -2207,7 +2325,7 @@ mod tests {
         let pool = connect_in_memory().await;
         apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2237,7 +2355,7 @@ mod tests {
         let pool = connect_in_memory().await;
         apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2249,7 +2367,7 @@ mod tests {
         shifted["message"]["usage"]["cache_creation_input_tokens"] = json!(27983);
         let applied = apply_scan(
             &pool,
-            scan_claude_lines(&[shifted.to_string()], &[]),
+            scan_claude_lines(&[shifted.to_string()]),
             &attribution(),
             &cursor_for("fp", 2, 2),
             &[],
@@ -2270,7 +2388,7 @@ mod tests {
         let pool = connect_in_memory().await;
         apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2282,7 +2400,7 @@ mod tests {
             .collect();
         apply_scan(
             &pool,
-            scan_claude_lines(&intervening, &[]),
+            scan_claude_lines(&intervening),
             &attribution(),
             &cursor_for("fp", 2, 2),
             &[],
@@ -2294,7 +2412,7 @@ mod tests {
         later["message"]["stop_reason"] = json!("end_turn");
         let applied = apply_scan(
             &pool,
-            scan_claude_lines(&[later.to_string()], &[]),
+            scan_claude_lines(&[later.to_string()]),
             &attribution(),
             &cursor_for("fp", 3, 3),
             &[],
@@ -2339,7 +2457,7 @@ mod tests {
         .unwrap();
         let applied = apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 1, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 1, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2349,7 +2467,7 @@ mod tests {
         assert_eq!(applied.conflicts, 1, "NULL evidence cannot agree");
         let again = apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 2, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 2, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 2, 2),
             &[],
@@ -2402,7 +2520,7 @@ mod tests {
         let pool = connect_in_memory().await;
         apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2413,7 +2531,7 @@ mod tests {
         for block in 1..=3 {
             apply_scan(
                 &pool,
-                scan_claude_lines(&[claude_row("R1", block, "m", 433)], &[]),
+                scan_claude_lines(&[claude_row("R1", block, "m", 433)]),
                 &attribution(),
                 &cursor_for("fp", 1 + i64::from(block), 1 + i64::from(block)),
                 &[],
@@ -2445,7 +2563,7 @@ mod tests {
         oversized["message"]["stop_reason"] = json!("x".repeat(MAX_STOP_REASON_CHARS + 1));
         let mut bounded: Value = serde_json::from_str(&claude_row("R2", 0, "m", 1)).unwrap();
         bounded["message"]["stop_reason"] = json!("y".repeat(MAX_STOP_REASON_CHARS));
-        let scan = scan_claude_lines(&[oversized.to_string(), bounded.to_string()], &[]);
+        let scan = scan_claude_lines(&[oversized.to_string(), bounded.to_string()]);
         assert_eq!(scan.events.len(), 1);
         assert_eq!(
             scan.events[0].stop_reason.as_deref(),
@@ -2468,7 +2586,7 @@ mod tests {
         last["timestamp"] = json!("2026-09-06T00:00:00.100Z");
         apply_scan(
             &pool,
-            scan_claude_lines(&[first.to_string()], &[]),
+            scan_claude_lines(&[first.to_string()]),
             &attribution(),
             &cursor_for("fp", 1, 1),
             &[],
@@ -2477,7 +2595,7 @@ mod tests {
         .unwrap();
         let applied = apply_scan(
             &pool,
-            scan_claude_lines(&[last.to_string()], &[]),
+            scan_claude_lines(&[last.to_string()]),
             &attribution(),
             &cursor_for("fp", 2, 2),
             &[],
@@ -2507,7 +2625,7 @@ mod tests {
         // Replaying the EARLIER block afterwards never moves it back.
         apply_scan(
             &pool,
-            scan_claude_lines(&[first.to_string()], &[]),
+            scan_claude_lines(&[first.to_string()]),
             &attribution(),
             &cursor_for("fp", 3, 3),
             &[],
@@ -2542,7 +2660,7 @@ mod tests {
         bad_cursor.byte_offset = -1; // violates CHECK (byte_offset >= 0)
         let result = apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 1)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 1)]),
             &attribution(),
             &bad_cursor,
             &coverage,
@@ -2563,7 +2681,7 @@ mod tests {
         // The good path writes all three, and the interval has a visible width.
         apply_scan(
             &pool,
-            scan_claude_lines(&[claude_row("R1", 0, "m", 1)], &[]),
+            scan_claude_lines(&[claude_row("R1", 0, "m", 1)]),
             &attribution(),
             &cursor_for("fp", 10, 10),
             &coverage,
@@ -2944,6 +3062,42 @@ mod tests {
         assert_eq!(worker.run_tick().await.unwrap().files_read, 0);
     }
 
+    /// Reading a file to its end only to learn it is not ours is real IO: the
+    /// tick report and budget charge it like any other visit, and the file
+    /// is not re-read until it grows (review a12f77f2 C2 residual).
+    #[tokio::test]
+    async fn worker_charges_the_bytes_spent_on_an_unowned_file() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("unowned-io");
+        let folder = sandbox.workspace_folder("proj");
+        let _ = workspace_with_agent(&pool, &folder, "codex").await;
+        let foreign = sandbox.write_codex(
+            "foreign.jsonl",
+            &[
+                codex_line(json!({"type": "session_meta", "payload": {"id": "OTHER", "cwd": "/somewhere/else"}})),
+                codex_line(codex_usage_record("RESP-X", "T9", 1, 5)),
+            ],
+        );
+        let size = std::fs::metadata(&foreign).unwrap().len() as usize;
+
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let report = worker.run_tick().await.unwrap();
+        assert_eq!(report.files_read, 1, "the visit is reported");
+        assert_eq!(
+            report.bytes_read, size,
+            "every byte of the unowned file is charged"
+        );
+        assert_eq!(report.inserted, 0);
+        assert!(stored(&pool).await.is_empty(), "nothing attributed");
+
+        let again = worker.run_tick().await.unwrap();
+        assert_eq!(
+            (again.files_read, again.bytes_read),
+            (0, 0),
+            "not re-read until it grows"
+        );
+    }
+
     /// A file that shrinks is rescanned from zero without inflation.
     #[tokio::test]
     async fn worker_rescans_a_shrunk_file_without_double_counting() {
@@ -3176,6 +3330,357 @@ mod tests {
         assert!(
             c3[1].0 > c1[0].1,
             "the second window starts after the first ended"
+        );
+    }
+    // Aoki SPEC acceptance gates: require the corrected behavior, never the bug.
+    #[tokio::test]
+    async fn spec_review_unowned_actual_byte_accounting() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("review-unowned");
+        let folder = sandbox.workspace_folder("proj");
+        workspace_with_agent(&pool, &folder, "codex").await;
+        let rows = vec!["{}".to_owned(); 250];
+        sandbox.write_codex("a.jsonl", &rows);
+        sandbox.write_codex("b.jsonl", &rows);
+        let mut config = sandbox.config.clone();
+        config.batch_bytes = 1_000;
+        config.tick_budget_bytes = 1_000;
+        let worker = ImportWorker::new(pool.clone(), config);
+        let report = worker.run_tick().await.unwrap();
+        // Independently reconstruct consumed bytes: completely rejected files,
+        // complete lines in unfinished cursors, and buffered partial tails.
+        let cursor_bytes: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(byte_offset), 0) FROM model_usage_cursor")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let state = worker.state.lock().unwrap();
+        let decided_bytes: u64 = state.not_ours.values().sum();
+        let buffered_bytes: u64 = state.pending.values().map(|p| p.buffer.len() as u64).sum();
+        let consumed = decided_bytes + cursor_bytes as u64 + buffered_bytes;
+        assert!(
+            consumed <= 1_000,
+            "actual disk bytes exceeded tick budget: {consumed}; {report:?}"
+        );
+        assert_eq!(
+            report.bytes_read as u64, consumed,
+            "report must include rejected-file IO"
+        );
+        assert_eq!(
+            report.bytes_read, 1_000,
+            "nonempty queue must make bounded progress"
+        );
+        assert_eq!(
+            report.files_read, 2,
+            "the remainder must reach the second file"
+        );
+        assert!(report.backlog, "500 source bytes must remain pending");
+        assert_eq!(
+            state.not_ours.len(),
+            1,
+            "budget cannot fully consume both 750-byte files"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_review_idle_verified_coverage() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("review-idle");
+        let folder = sandbox.workspace_folder("proj");
+        let (_ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[
+                claude_owner_marker(&agent),
+                claude_row_at(&folder, "R1", 0, "m", 1),
+            ],
+        );
+        // Zero lag isolates continuity without a wall-clock sleep.
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let first = worker.run_tick().await.unwrap();
+        assert_eq!(
+            first.inserted, 1,
+            "fixture must establish genuine owned activity"
+        );
+        assert_eq!(
+            first.live_scopes, 1,
+            "fixture must open a verified observation window"
+        );
+        let window = worker.state.lock().unwrap().verified_since.clone();
+        assert_eq!(window.len(), 1);
+        let second = worker.run_tick().await.unwrap();
+        assert_eq!(second.bytes_read, 0, "unchanged EOF must not be reread");
+        assert_eq!(
+            second.inserted, 0,
+            "idle verification cannot duplicate activity"
+        );
+        assert!(!second.backlog);
+        assert_eq!(
+            second.live_scopes, 1,
+            "verified unchanged EOF still proves observation"
+        );
+        assert_eq!(
+            worker.state.lock().unwrap().verified_since,
+            window,
+            "an idle tick must preserve the original continuous observation window"
+        );
+        let complete = coverage(&pool)
+            .await
+            .into_iter()
+            .filter(|c| c.state == "complete")
+            .count();
+        assert_eq!(
+            complete, 1,
+            "idle verification must extend, not split, the interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_review_foreign_later_owner() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("review-owner");
+        let folder = sandbox.workspace_folder("proj");
+        let (_ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        let path = sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[
+                claude_owner_marker(&agent),
+                claude_row_at(&folder, "R1", 0, "m", 1),
+            ],
+        );
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        assert_eq!(worker.run_tick().await.unwrap().inserted, 1);
+        let original = stored(&pool).await;
+        assert_eq!(original.len(), 1);
+        assert_eq!(
+            original[0].workspace_agent_id.as_deref(),
+            Some(agent.as_str())
+        );
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{}", claude_owner_marker("unregistered-owner")).unwrap();
+            writeln!(file, "{}", claude_row_at(&folder, "FOREIGN", 0, "m", 1)).unwrap();
+        }
+        let conflict = worker.run_tick().await.unwrap();
+        assert_eq!(
+            conflict.inserted, 0,
+            "unknown structural owner cannot inherit the previous agent"
+        );
+        let after = stored(&pool).await;
+        assert_eq!(
+            after.len(),
+            1,
+            "conflicted source must not create unassigned or misattributed activity"
+        );
+        assert_eq!(after[0].event_key, original[0].event_key);
+        assert_eq!(after[0].workspace_agent_id, original[0].workspace_agent_id);
+        assert!(
+            coverage(&pool)
+                .await
+                .iter()
+                .any(|c| c.diagnostic_code.as_deref() == Some("ownership_conflict")),
+            "ownership refusal must leave durable partial-coverage evidence"
+        );
+        drop(worker);
+        // A restart and a later marker-free append cannot clear the conflict.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{}", claude_row_at(&folder, "AFTER", 0, "m", 1)).unwrap();
+        }
+        let restarted = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        for _ in 0..3 {
+            assert_eq!(
+                restarted.run_tick().await.unwrap().inserted,
+                0,
+                "durable ownership conflict must survive restart/rescan"
+            );
+        }
+        let final_rows = stored(&pool).await;
+        assert_eq!(final_rows.len(), 1);
+        assert_eq!(final_rows[0].event_key, original[0].event_key);
+        assert_eq!(
+            final_rows[0].workspace_agent_id,
+            original[0].workspace_agent_id
+        );
+        assert!(coverage(&pool)
+            .await
+            .iter()
+            .any(|c| c.diagnostic_code.as_deref() == Some("ownership_conflict")));
+    }
+
+    #[test]
+    fn spec_review_oversized_record_newline_crossing_batch() {
+        // Exactly 4MiB+1 payload bytes; the newline arrives in read 17.
+        let mut input = vec![b'x'; MAX_RECORD_BYTES + 1];
+        input.extend_from_slice(b"\n{}\n");
+        let path = temp_file("review-overcap-newline", &input);
+        let (lines, offset, reads, skipped) = read_all(&path, BATCH_BYTES, MAX_RECORD_BYTES);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            reads.len(),
+            17,
+            "exercise the cap-crossing newline batch exactly"
+        );
+        assert!(reads.iter().all(|n| *n <= BATCH_BYTES));
+        assert_eq!(
+            reads.iter().sum::<usize>(),
+            input.len(),
+            "actual IO must count every byte once"
+        );
+        assert_eq!(
+            offset as usize,
+            input.len(),
+            "skip and following line must make complete progress"
+        );
+        assert!(
+            skipped,
+            "over-cap record must emit the oversized diagnostic"
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the following valid line may reach the parser"
+        );
+        assert_eq!(
+            lines[0], "{}",
+            "newline recovery must preserve the next record"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_review_malformed_record_closes_verified_window() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("review-malformed-coverage");
+        let folder = sandbox.workspace_folder("proj");
+        let (_ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        let path = sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[
+                claude_owner_marker(&agent),
+                claude_row_at(&folder, "R1", 0, "m", 1),
+            ],
+        );
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let first = worker.run_tick().await.unwrap();
+        assert_eq!(
+            first.inserted, 1,
+            "fixture must import real owner-verified activity"
+        );
+        assert_eq!(
+            first.live_scopes, 1,
+            "fixture must establish complete live proof"
+        );
+        assert_eq!(worker.state.lock().unwrap().verified_since.len(), 1);
+        let complete_before: Vec<_> = coverage(&pool)
+            .await
+            .into_iter()
+            .filter(|c| c.state == "complete")
+            .map(|c| (c.interval_start, c.interval_end))
+            .collect();
+        assert_eq!(complete_before.len(), 1);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{{not-json}}").unwrap();
+        }
+        let disturbed = worker.run_tick().await.unwrap();
+        assert_eq!(
+            disturbed.bytes_read,
+            b"{not-json}\n".len(),
+            "test must actually visit and consume the malformed record"
+        );
+        assert_eq!(
+            disturbed.inserted, 0,
+            "malformed data cannot manufacture activity"
+        );
+        let after = coverage(&pool).await;
+        assert!(
+            after.iter().any(|c| c.state == "partial"
+                && c.diagnostic_code.as_deref() == Some("unparsable_record")),
+            "diagnostic must persist as partial-coverage evidence"
+        );
+        assert_eq!(
+            disturbed.live_scopes, 0,
+            "a consumed but malformed record does not prove complete source observation"
+        );
+        assert!(
+            worker.state.lock().unwrap().verified_since.is_empty(),
+            "parser failure must close the continuous verified window"
+        );
+        let complete_after: Vec<_> = after
+            .into_iter()
+            .filter(|c| c.state == "complete")
+            .map(|c| (c.interval_start, c.interval_end))
+            .collect();
+        assert_eq!(
+            complete_after, complete_before,
+            "the disturbed tick must not extend complete coverage across its parser failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_acceptance_c7_invalid_replay_preserves_damage() {
+        let pool = connect_in_memory().await;
+        let mut row: Value = serde_json::from_str(&claude_row("R-review", 0, "m", 5)).unwrap();
+        row["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_tokens");
+        apply_scan(
+            &pool,
+            scan_claude_lines(&[row.to_string()]),
+            &attribution(),
+            &cursor_for("review-fp", 1, 1),
+            &[],
+        )
+        .await
+        .unwrap();
+        row["message"]["usage"]["output_tokens"] = json!(-1);
+        let scan = scan_claude_lines(&[row.to_string()]);
+        println!(
+            "REVIEW_C7_REPLAY scan_diagnostics={:?}; parsed_invalid_counters={}",
+            scan.diagnostics, scan.events[0].usage.invalid_counters
+        );
+        assert_eq!(scan.events[0].usage.invalid_counters, 1);
+        let applied = apply_scan(
+            &pool,
+            scan,
+            &attribution(),
+            &cursor_for("review-fp", 2, 2),
+            &[],
+        )
+        .await
+        .unwrap();
+        let stored: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT validity, diagnostic_code, output_tokens FROM model_usage_event",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let aggregate = total(&pool).await;
+        println!(
+            "REVIEW_C7_REPLAY stored={stored:?}; conflicts={}; rejected_counter_count={}",
+            applied.conflicts, aggregate.rejected_counter_count
+        );
+        assert!(
+            stored.0 == "conflict"
+                || stored.1.as_deref() == Some(model_usage::COUNTER_OUT_OF_RANGE),
+            "invalid replay must durably preserve rejection evidence or mark the event conflicting"
+        );
+        assert!(
+            aggregate.rejected_counter_count > 0 || aggregate.conflict_count > 0,
+            "coverage aggregation must see replay damage and cap otherwise-complete coverage"
         );
     }
 }

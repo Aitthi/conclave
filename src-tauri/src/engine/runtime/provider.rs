@@ -399,11 +399,14 @@ impl SseAccumulator for AnthropicAcc {
                 None
             }
             "message_delta" => {
-                // Cumulative for the whole message; the last one wins.
-                if let Some(output) =
-                    counter_tracked(&v["usage"]["output_tokens"], &mut self.invalid)
-                {
-                    self.output = Some(output);
+                // Cumulative for the whole message; the last SUPPLIED value
+                // wins — including an invalid one, which makes the output
+                // unknown rather than leaving an earlier interim number in
+                // place (review 229a4753 C7). An absent counter changes
+                // nothing.
+                let output = &v["usage"]["output_tokens"];
+                if !output.is_null() {
+                    self.output = counter_tracked(output, &mut self.invalid);
                 }
                 None
             }
@@ -641,34 +644,69 @@ fn openai_request_body(base_url: &str, model: &str, messages: &[ChatMessage]) ->
 ///
 /// A dropped receiver stops the stream early; the text so far comes back but
 /// the completion is marked NOT completed — nobody saw the terminal marker.
+/// Receiver loss is observed everywhere the call can sit: while waiting for
+/// bytes (a stream the provider keeps open must not hold the call hostage),
+/// at terminal acceptance, and on the trailing line (review 229a4753 C8).
 async fn consume_sse<A: SseAccumulator>(
     resp: reqwest::Response,
     tx: &mpsc::Sender<String>,
-    mut acc: A,
+    acc: A,
 ) -> Result<ProviderCompletion, ProviderError> {
+    consume_sse_stream(resp.bytes_stream(), tx, acc).await
+}
+
+/// [`consume_sse`] over any byte stream, so the receiver-loss paths can be
+/// exercised without a live HTTP response.
+async fn consume_sse_stream<A, S, B, E>(
+    stream: S,
+    tx: &mpsc::Sender<String>,
+    mut acc: A,
+) -> Result<ProviderCompletion, ProviderError>
+where
+    A: SseAccumulator,
+    S: futures_util::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
     use futures_util::StreamExt;
 
-    let mut stream = resp.bytes_stream();
+    let mut stream = std::pin::pin!(stream);
     let mut buf: Vec<u8> = Vec::new();
     let mut text = String::new();
 
-    while let Some(chunk) = stream.next().await {
+    let abandoned = |acc: &A, text: String| {
+        let mut completion = acc.finish(text);
+        completion.completed = false; // receiver gone → not completed
+        completion
+    };
+
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = tx.closed() => return Ok(abandoned(&acc, text)),
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let bytes = chunk.map_err(|e| ProviderError::Stream(e.to_string()))?;
-        buf.extend_from_slice(&bytes);
+        buf.extend_from_slice(bytes.as_ref());
 
         for line in drain_lines(&mut buf) {
             if let Some(delta) = ingest_line(&mut acc, &line) {
                 text.push_str(&delta);
                 if tx.send(delta).await.is_err() {
-                    let mut completion = acc.finish(text);
-                    completion.completed = false; // receiver gone → not completed
-                    return Ok(completion);
+                    return Ok(abandoned(&acc, text));
                 }
             }
             if acc.is_terminal() {
                 // The response is complete: stop reading. Whatever the
                 // transport does after this point cannot take it back or
-                // hold it hostage.
+                // hold it hostage — but a receiver that left before the
+                // marker never saw the completion.
+                if tx.is_closed() {
+                    return Ok(abandoned(&acc, text));
+                }
                 return Ok(acc.finish(text));
             }
         }
@@ -678,7 +716,12 @@ async fn consume_sse<A: SseAccumulator>(
     let tail = String::from_utf8_lossy(&buf);
     if let Some(delta) = ingest_line(&mut acc, tail.trim_end_matches(['\r', '\n'])) {
         text.push_str(&delta);
-        let _ = tx.send(delta).await;
+        if tx.send(delta).await.is_err() {
+            return Ok(abandoned(&acc, text));
+        }
+    }
+    if tx.is_closed() {
+        return Ok(abandoned(&acc, text));
     }
 
     Ok(acc.finish(text))
@@ -1102,5 +1145,120 @@ mod tests {
             got.push(d);
         }
         assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn review_acceptance_c7_final_invalid_output_is_unknown() {
+        let lines = [
+            r#"data: {"type":"message_start","message":{"id":"m","model":"m","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5}}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":-1}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        let completion = run_lines(AnthropicAcc::default(), &lines);
+        println!(
+            "REVIEW_C7_SSE completed={}; output_tokens={:?}; invalid_counters={}",
+            completion.completed, completion.usage.output_tokens, completion.usage.invalid_counters
+        );
+        assert!(completion.completed);
+        assert_eq!(
+            completion.usage.output_tokens, None,
+            "a rejected final cumulative counter cannot retain an earlier measurement"
+        );
+        assert_eq!(completion.usage.invalid_counters, 1);
+    }
+
+    // ── Receiver loss (review 229a4753 C8) ───────────────────────────────
+
+    /// A byte stream that yields `chunks` and then stays open forever — a
+    /// provider that never closes the connection.
+    fn open_ended(chunks: Vec<&str>) -> impl futures_util::Stream<Item = Result<Vec<u8>, String>> {
+        use futures_util::StreamExt;
+        futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok::<Vec<u8>, String>(c.as_bytes().to_vec()))
+                .collect::<Vec<_>>(),
+        )
+        .chain(futures_util::stream::pending())
+    }
+
+    /// The receiver leaves after the last text delta while the provider
+    /// keeps the stream open without a terminal marker: the call must return
+    /// NOT completed instead of waiting forever.
+    #[tokio::test]
+    async fn receiver_loss_while_waiting_for_bytes_ends_the_call_uncompleted() {
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let stream = open_ended(vec![
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        ]);
+        let call = consume_sse_stream(stream, &tx, AnthropicAcc::default());
+        tokio::pin!(call);
+        // Let the stream deliver its text, then abandon the call.
+        let got = tokio::select! {
+            biased;
+            _ = call.as_mut() => panic!("must not finish with the stream open and the receiver alive"),
+            got = rx.recv() => got,
+        };
+        assert_eq!(got.as_deref(), Some("hi"));
+        drop(rx);
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), call)
+            .await
+            .expect("receiver loss must be observed while waiting for bytes")
+            .unwrap();
+        assert!(!completion.completed, "nobody saw a terminal marker");
+        assert_eq!(completion.text, "hi");
+    }
+
+    /// The receiver leaves after the last text and BEFORE the terminal
+    /// marker arrives: the marker cannot make the call completed.
+    #[tokio::test]
+    async fn receiver_loss_before_the_terminal_marker_is_not_a_completion() {
+        let (tx, rx) = mpsc::channel::<String>(8);
+        let stream = open_ended(vec![
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        drop(rx); // gone before a single byte is read
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            consume_sse_stream(stream, &tx, AnthropicAcc::default()),
+        )
+        .await
+        .expect("returns promptly")
+        .unwrap();
+        assert!(!completion.completed);
+
+        // And with the receiver alive the same stream completes normally.
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let stream = open_ended(vec![
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            consume_sse_stream(stream, &tx, AnthropicAcc::default()),
+        )
+        .await
+        .expect("terminal marker ends the read even though the stream stays open")
+        .unwrap();
+        assert!(completion.completed);
+        assert_eq!(completion.response_id.as_deref(), Some("m"));
+    }
+
+    /// A stream that ends without a newline after its last line: the tail
+    /// is flushed, and a receiver that left is still not a completion.
+    #[tokio::test]
+    async fn receiver_loss_on_the_tail_path_is_not_a_completion() {
+        let (tx, rx) = mpsc::channel::<String>(8);
+        let stream = futures_util::stream::iter(vec![Ok::<Vec<u8>, String>(
+            b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\ndata: {\"type\":\"message_stop\"}".to_vec(),
+        )]);
+        drop(rx);
+        let completion = consume_sse_stream(stream, &tx, AnthropicAcc::default())
+            .await
+            .unwrap();
+        assert!(!completion.completed);
     }
 }

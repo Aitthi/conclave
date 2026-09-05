@@ -716,6 +716,67 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
     text.contains(&needle)
 }
 
+/// The agent id a marker sentence declares, whoever it names: the token after
+/// `own agent id is`, lower-cased like the ids it is compared with. `None`
+/// when the sentence is absent or names nothing.
+fn declared_agent_id(text: &str) -> Option<String> {
+    const PHRASE: &str = "own agent id is ";
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find(PHRASE)? + PHRASE.len();
+    let id: String = lower[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Every agent id a Claude SessionStart hook attachment structurally
+/// declares — registered with the workspace or not. Attribution needs the
+/// UNKNOWN owner as much as the known one (usage review a12f77f2 C3): a
+/// marker naming an agent the workspace cannot place is an ownership
+/// conflict, never silence. Same structure gate as
+/// [`claude_value_declares_owner`].
+pub(crate) fn claude_value_declared_owners(value: &Value) -> Vec<String> {
+    if value.get("type").and_then(Value::as_str) != Some("attachment") {
+        return Vec::new();
+    }
+    let Some(attachment) = value.get("attachment") else {
+        return Vec::new();
+    };
+    if !is_session_start_hook(attachment) {
+        return Vec::new();
+    }
+    session_start_hook_texts(attachment)
+        .iter()
+        .filter_map(|text| declared_agent_id(text))
+        .collect()
+}
+
+/// Every agent id a Codex developer message structurally declares; see
+/// [`claude_value_declared_owners`].
+pub(crate) fn codex_value_declared_owners(value: &Value) -> Vec<String> {
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return Vec::new();
+    }
+    let Some(payload) = value.get("payload") else {
+        return Vec::new();
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("developer")
+    {
+        return Vec::new();
+    }
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("input_text"))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter_map(declared_agent_id)
+        .collect()
+}
+
 /// Ownership is bound to the ONE channel Conclave actually writes the marker
 /// on: the SessionStart hook (`runtime::sandbox_config::owner_marker_command`),
 /// which claude-code records as an `attachment` line on every session start —

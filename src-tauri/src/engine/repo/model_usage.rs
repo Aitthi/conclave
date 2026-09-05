@@ -404,7 +404,7 @@ impl NewUsageEvent {
     /// the aggregate identifies damaged observations by this one code, so a
     /// collector's own note must not hide a rejection from it (review of
     /// 8770c7cf).
-    fn normalized(&self) -> NewUsageEvent {
+    pub(crate) fn normalized(&self) -> NewUsageEvent {
         fn bounded(value: Option<i64>, dropped: &mut bool) -> Option<i64> {
             match value {
                 Some(v) if !(0..=MAX_TOKEN_COUNTER).contains(&v) => {
@@ -524,6 +524,11 @@ pub struct StoredIdentity {
     pub output_tokens: Option<i64>,
     pub cache_read_input_tokens: Option<i64>,
     pub cache_write_input_tokens: Option<i64>,
+    /// The stored rejection, if any. Part of the identity: a replayed block
+    /// whose counters were REJECTED normalizes to the same `None` as a block
+    /// that never carried them, and only the diagnostic tells the two apart
+    /// (review 229a4753 C7).
+    pub diagnostic_code: Option<String>,
     pub validity: String,
 }
 
@@ -538,7 +543,8 @@ where
     sqlx::query_as(
         "SELECT source_response_id, served_model, stop_reason,
                 source_uncached_input_tokens, input_tokens, output_tokens,
-                cache_read_input_tokens, cache_write_input_tokens, validity
+                cache_read_input_tokens, cache_write_input_tokens,
+                diagnostic_code, validity
            FROM model_usage_event WHERE event_key = ?1",
     )
     .bind(event_key)

@@ -179,6 +179,15 @@ impl PendingGaps {
 /// The process-wide ledger shared by every in-process collector.
 static PENDING_GAPS: std::sync::Mutex<PendingGaps> = std::sync::Mutex::new(PendingGaps::new());
 
+/// Serializes snapshot → persist → remember/forget across concurrent
+/// collector writes. Without it two writes can both snapshot an empty ledger
+/// before touching the store, the first fail, and the second commit a
+/// complete span over the lost instant while its gap is still memory-only
+/// (review 229a4753 C5). Held across the write, so a failure is on the
+/// ledger before the next snapshot is taken. In-process collectors write a
+/// few rows a minute; serializing them costs nothing measurable.
+static COLLECTOR_WRITE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn with_ledger<T>(
     ledger: &std::sync::Mutex<PendingGaps>,
     f: impl FnOnce(&mut PendingGaps) -> T,
@@ -215,6 +224,7 @@ pub(crate) async fn record_collected_event_with(
     event: &CollectedEvent<'_>,
     ledger: &std::sync::Mutex<PendingGaps>,
 ) -> Result<(), sqlx::Error> {
+    let _serialized = COLLECTOR_WRITE_GATE.lock().await;
     let pending = with_ledger(ledger, |l| l.snapshot());
     let result = persist_collected_event(db, event, &pending).await;
     match &result {
@@ -3108,5 +3118,38 @@ mod tests {
             .map(|m| m.get("key").unwrap().as_str().unwrap())
             .collect();
         assert_eq!(keys.iter().filter(|k| **k == "unknown::").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn review_acceptance_c5_concurrent_failure_preserves_gap_truth() {
+        let state = AppState::for_tests().await;
+        let pool = &state.db;
+        crate::engine::runtime::usage::mark_collectors_online();
+        let online = collectors_online_since().unwrap();
+        let lost_at = online + Duration::seconds(1);
+        sqlx::query("CREATE TRIGGER review_fail_event BEFORE INSERT ON model_usage_event WHEN NEW.event_key LIKE '%op-lost' BEGIN SELECT RAISE(ABORT, 'review injected failure'); END")
+            .execute(pool).await.unwrap();
+        let held = pool.acquire().await.unwrap();
+        let ledger = std::sync::Mutex::new(PendingGaps::new());
+        let usage = MeasuredUsage::default();
+        let a_event = collected(&usage, "op-lost", lost_at);
+        let b_event = collected(&usage, "op-ok", lost_at + Duration::seconds(1));
+        let a = record_collected_event_with(pool, &a_event, &ledger);
+        let b = record_collected_event_with(pool, &b_event, &ledger);
+        tokio::pin!(a, b);
+        assert!(futures_util::poll!(a.as_mut()).is_pending());
+        assert!(futures_util::poll!(b.as_mut()).is_pending());
+        drop(held);
+        let failure = a.await.unwrap_err();
+        b.await.unwrap();
+        let pending = with_ledger(&ledger, |l| l.len());
+        let persisted_gaps = gap_rows(pool).await.len();
+        let complete_over_loss: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_coverage WHERE state='complete' AND interval_start <= ?1 AND interval_end > ?1")
+            .bind(ts(lost_at)).fetch_one(pool).await.unwrap();
+        println!("REVIEW_C5 error={failure}; pending_gaps={pending}; persisted_partial_gaps={persisted_gaps}; complete_spans_covering_lost_event={complete_over_loss}");
+        assert!(
+            complete_over_loss == 0 || persisted_gaps > 0,
+            "complete coverage must not cover a lost event while its gap remains memory-only"
+        );
     }
 }
