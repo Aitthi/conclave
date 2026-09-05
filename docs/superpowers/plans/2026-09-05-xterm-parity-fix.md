@@ -151,3 +151,13 @@ UI Pixel Gate because `src/` UI files change; PTY panes render empty in fixture 
   Claude Code env allowlist by faking a known name.
 - Codex/other CLIs in the same PTY code path get the same env; `TERM_PROGRAM` is
   informational for them. If a CLI misbehaves with it set, file a challenge with the bytes.
+
+## Amendment 2026-09-05 (ruling 602f6ff7, found by Tiësto)
+
+F8's resize seam is DEFINED in `src-tauri/src/engine/runtime/mod.rs` (`LiveHandle.resize`
+closure type L110, no-op constructors L149/L187, `Runtime::resize` L453), not in the files the
+boundary listed. Ruled: boundary widened by exactly that file for the mechanical widening
+(closure `Fn(u16,u16,u16,u16)`, no-op constructors take four ignored args, `Runtime::resize`
+gains `pixel_width/pixel_height`). Landed as its own scoped commit (`git commit --
+src-tauri/src/engine/runtime/mod.rs`). Lead defect: the importer was pinned instead of the
+defining file — see memory `lead-boundary-defining-file-not-importer`.
