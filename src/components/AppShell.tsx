@@ -598,9 +598,7 @@ export function AppShell() {
       ?? null
     : null;
   const editWorkspace = editWorkspaceId
-    ? editWorkspacePendingRef.current
-      ? editWorkspaceSnapshot ?? currentEditWorkspace
-      : currentEditWorkspace
+    ? currentEditWorkspace ?? editWorkspaceSnapshot
     : null;
 
   async function handleStartWorkspace() {
