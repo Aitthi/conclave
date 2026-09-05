@@ -69,16 +69,11 @@ const MAX_CAPTURE_PX: f64 = 10_000.0;
 // The action/snapshot/shot result types below stay here (they belong to the
 // page tools, not the tab registry).
 
-/// Viewport rectangle (logical pixels) the Browser tab reserves for the native
-/// webview overlay. Mirrored by `BrowserBounds` in `src/ipc/types.ts`.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Bounds {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
+/// The viewport rectangle the Browser tab reserves for the native overlay. It
+/// is DEFINED in `browser_tabs` (the registry stores the last reported rect and
+/// decides where a created-or-revealed webview lands) and re-exported here so
+/// `commands::browser` keeps importing it from `runtime::browser` unchanged.
+pub use super::browser_tabs::Bounds;
 
 /// Result of an in-page action (`click`/`type`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
