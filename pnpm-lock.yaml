@@ -72,6 +72,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.6.0
         version: 4.7.0(vite@7.3.6(jiti@2.7.0)(lightningcss@1.32.0))
+      '@xterm/headless':
+        specifier: 6.1.0-beta.287
+        version: 6.1.0-beta.287
       puppeteer-core:
         specifier: ^25.3.0
         version: 25.3.0
@@ -826,6 +829,9 @@ packages:
     resolution: {integrity: sha512-Nvk9Jic7OCXtL1lS1/Ryurkpd2VElO7PCBOf+DEB3ODs9yU+F31sJwQD+LIdZ6GAJ+Atp7LuWHjSNhRv/xSY0w==}
     peerDependencies:
       '@xterm/xterm': ^6.1.0-beta.287
+
+  '@xterm/headless@6.1.0-beta.287':
+    resolution: {integrity: sha512-3Jjh1uM9r+euj8Qosm/9SuZIVIZKMMus/Ekk9Spav842WVoFH3F1APTeHl3VynHNi1uHdEbb6QrnHzKA/iJlBQ==}
 
   '@xterm/xterm@6.1.0-beta.287':
     resolution: {integrity: sha512-3aOHVlxlRVb3tOHI4b/z2O/OsRnqpW5u0qq8OqpqbwLVTbUhThmQ7mBKaehGdbsmcCCBTP1cBwhG0qcvuOjowA==}
@@ -1905,6 +1911,8 @@ snapshots:
   '@xterm/addon-webgl@0.20.0-beta.286(@xterm/xterm@6.1.0-beta.287)':
     dependencies:
       '@xterm/xterm': 6.1.0-beta.287
+
+  '@xterm/headless@6.1.0-beta.287': {}
 
   '@xterm/xterm@6.1.0-beta.287': {}
 
