@@ -82,6 +82,13 @@ CREATE TABLE model_usage_coverage (
     interval_end       TEXT NOT NULL,
     state              TEXT NOT NULL CHECK (state IN ('complete', 'partial')),
     collector_version  TEXT NOT NULL,
+    -- Why an interval is only PARTIAL, when the collector knows. The reserved
+    -- code 'unsupported_source' is what makes `usage.overview`'s
+    -- `coverage.unsupportedSources` a derived fact instead of a hardcoded
+    -- empty list: a collector that meets a source shape it cannot import
+    -- records the interval it looked at as partial with this code, and the
+    -- query reports that source_kind as unsupported for the scope.
+    diagnostic_code    TEXT,
     last_verified_at   TEXT NOT NULL,
     CHECK (interval_end >= interval_start)
 );

@@ -34,6 +34,8 @@
 //!   value onto the bind list, so no scope value ever reaches the SQL text.
 //! * `GroupColumn::sql` is an enum method returning one of two literals, which
 //!   is why grouping takes an enum instead of a column name.
+//! * The hidden-workspace exclusion list interpolates `"?"` repeated N times —
+//!   again punctuation only; every id is pushed onto the bind list.
 //! * The bucket `VALUES` list is `"(?, ?, ?)"` repeated `buckets.len()` times —
 //!   placeholder punctuation only; the keys and boundaries are all bound.
 //!
@@ -43,10 +45,70 @@
 use serde::Serialize;
 use sqlx::{AssertSqlSafe, Row, SqlitePool};
 
+// ── Canonical timestamps ─────────────────────────────────────────────────────
+
+/// Format every timestamp this feature stores or compares.
+///
+/// Aggregation compares `occurred_at` LEXICOGRAPHICALLY against bucket bounds
+/// (SQLite has no date type), so lexicographic order must equal chronological
+/// order. That holds only when every value shares one UTC format with a FIXED
+/// fraction width: `2026-09-05T04:12:00.500Z` sorts BEFORE `2026-09-05T04:12:00Z`
+/// because `'.' < 'Z'`, so mixed precision would silently mis-bucket events.
+///
+/// Every collector normalizes its source timestamp through this function before
+/// writing `model_usage_event.occurred_at` / `recorded_at`, coverage interval
+/// bounds and cursor timestamps; `commands::usage` builds its bucket bounds the
+/// same way.
+pub fn canonical_ts(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+// ── Scope helpers ────────────────────────────────────────────────────────────
+
+/// Ids of HIDDEN internal workspaces (the skill-draft scratch workspaces).
+///
+/// Lives here rather than in `repo::workspace` because it exists only to feed
+/// [`UsageScope::exclude_workspace_ids`] — usage is the one reader that needs
+/// the hidden set, and `repo/workspace.rs` is outside this feature's boundary.
+pub async fn hidden_workspace_ids(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar("SELECT id FROM workspace WHERE hidden = 1")
+        .fetch_all(pool)
+        .await
+}
+
+/// The scope of one importer cursor that still has unread bytes.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct PendingCursorScope {
+    pub source_kind: String,
+    pub workspace_id: Option<String>,
+    pub workspace_agent_id: Option<String>,
+}
+
+/// Every importer cursor with backlog (`byte_offset < observed_length`).
+///
+/// This is the only honest, already-persisted signal that a collector has work
+/// left: the cursor is written in the SAME transaction as the events it
+/// produced, so it survives restart and needs no live worker to answer.
+/// `usage.overview` filters these by scope and reports `coverage.pendingImport`.
+pub async fn pending_cursor_scopes(pool: &SqlitePool) -> sqlx::Result<Vec<PendingCursorScope>> {
+    sqlx::query_as(
+        "SELECT source_kind, workspace_id, workspace_agent_id
+           FROM model_usage_cursor
+          WHERE byte_offset < observed_length",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 // ── Event insertion ──────────────────────────────────────────────────────────
 
 /// One event to persist. Constructed by the collectors; every optional field is
 /// `None` when the source did not prove it.
+// Constructed by the collectors landing next in this lane (transcript,
+// direct-provider and one-shot importers) and by the aggregation tests; the
+// write side is deliberately merged before its callers so the read side could
+// be reviewed against real stored data.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewUsageEvent {
     pub id: String,
@@ -75,6 +137,7 @@ pub struct NewUsageEvent {
     pub diagnostic_code: Option<String>,
 }
 
+#[allow(dead_code)]
 impl NewUsageEvent {
     /// Derive the stored completeness from what was actually observed. This is
     /// the single place the rule lives so a collector cannot disagree with the
@@ -93,6 +156,7 @@ impl NewUsageEvent {
 /// Returns `true` when a new row landed. `ON CONFLICT DO NOTHING` is what makes
 /// restart, duplicate source rows and a re-scanned file a no-op rather than
 /// inflation — the caller does not need to pre-check existence.
+#[allow(dead_code)] // see NewUsageEvent
 pub async fn insert_event<'e, E>(executor: E, event: &NewUsageEvent) -> sqlx::Result<bool>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -145,6 +209,7 @@ where
 /// Mark an already-stored event as conflicting. It remains one activity; only
 /// its measured token contribution is withdrawn (contract: a conflict "never
 /// creates a second activity").
+#[allow(dead_code)] // see NewUsageEvent
 pub async fn mark_conflict<'e, E>(
     executor: E,
     event_key: &str,
@@ -169,6 +234,14 @@ where
 
 /// One observed interval for a (scope, source) pair. The ABSENCE of intervals
 /// is what `none` coverage means — a gap is never stored as a row.
+///
+/// # Scope columns are a WIDTH, not a bucket
+///
+/// `NULL` in `workspace_id` / `workspace_agent_id` means UNRESTRICTED on that
+/// dimension ("this collector observed everything"), NOT "the unscoped
+/// events". A row therefore PROVES a query's scope only when it is at least as
+/// wide as that scope; a narrower row is compatible evidence that something was
+/// observed, which is exactly `partial`. `commands::usage` owns that comparison.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageIntervalRow {
@@ -180,10 +253,20 @@ pub struct CoverageIntervalRow {
     pub interval_end: String,
     pub state: String,
     pub collector_version: String,
+    /// Why the interval is only partial, when the collector knows. The reserved
+    /// value [`UNSUPPORTED_SOURCE`] is what lets `usage.overview` DERIVE
+    /// `coverage.unsupportedSources` instead of hardcoding an empty list.
+    pub diagnostic_code: Option<String>,
     pub last_verified_at: String,
 }
 
+/// Reserved [`CoverageIntervalRow::diagnostic_code`]: the collector looked at
+/// this source and could not import its shape. The interval is real evidence
+/// (we know we looked) but never complete.
+pub const UNSUPPORTED_SOURCE: &str = "unsupported_source";
+
 /// Record an observed interval.
+#[allow(dead_code)] // see NewUsageEvent
 pub async fn insert_coverage<'e, E>(executor: E, row: &CoverageIntervalRow) -> sqlx::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -191,8 +274,9 @@ where
     sqlx::query(
         "INSERT INTO model_usage_coverage (
             id, workspace_id, workspace_agent_id, source_kind,
-            interval_start, interval_end, state, collector_version, last_verified_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            interval_start, interval_end, state, collector_version,
+            diagnostic_code, last_verified_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(&row.id)
     .bind(&row.workspace_id)
@@ -202,6 +286,7 @@ where
     .bind(&row.interval_end)
     .bind(&row.state)
     .bind(&row.collector_version)
+    .bind(&row.diagnostic_code)
     .bind(&row.last_verified_at)
     .execute(executor)
     .await?;
@@ -219,7 +304,8 @@ pub async fn coverage_overlapping(
 ) -> sqlx::Result<Vec<CoverageIntervalRow>> {
     sqlx::query_as(
         "SELECT id, workspace_id, workspace_agent_id, source_kind,
-                interval_start, interval_end, state, collector_version, last_verified_at
+                interval_start, interval_end, state, collector_version,
+                diagnostic_code, last_verified_at
            FROM model_usage_coverage
           WHERE interval_start < ?2 AND interval_end > ?1
           ORDER BY interval_start ASC, id ASC",
@@ -247,6 +333,12 @@ pub struct UsageScope {
     /// the name is matched against, so a Selected row can never be silently
     /// served by a Reported one.
     pub model: Option<ModelKeyFilter>,
+    /// Workspaces whose events are outside the normal aggregate — in practice
+    /// the HIDDEN scratch workspaces backing skill-draft sessions, which the
+    /// contract keeps out of ordinary usage scope. Unscoped (NULL-workspace)
+    /// events are never excluded by this list; they are legitimate Library
+    /// draft activity.
+    pub exclude_workspace_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -286,6 +378,17 @@ fn scope_predicate(scope: &UsageScope) -> (String, Vec<Option<String>>) {
     } else if let Some(agent) = &scope.workspace_agent_id {
         sql.push_str(" AND e.workspace_agent_id = ?");
         binds.push(Some(agent.clone()));
+    }
+    if !scope.exclude_workspace_ids.is_empty() {
+        // Placeholder punctuation only — every id is bound (see the module's
+        // `AssertSqlSafe` audit). `IS NULL OR NOT IN` keeps unscoped events in.
+        let holes = vec!["?"; scope.exclude_workspace_ids.len()].join(", ");
+        sql.push_str(&format!(
+            " AND (e.workspace_id IS NULL OR e.workspace_id NOT IN ({holes}))"
+        ));
+        for id in &scope.exclude_workspace_ids {
+            binds.push(Some(id.clone()));
+        }
     }
     if let Some(model) = &scope.model {
         match model.basis.as_str() {
@@ -857,6 +960,7 @@ mod tests {
             interval_end: end.into(),
             state: "complete".into(),
             collector_version: "v1".into(),
+            diagnostic_code: None,
             last_verified_at: "2026-09-30T00:00:00Z".into(),
         };
         insert_coverage(
