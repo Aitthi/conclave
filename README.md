@@ -25,6 +25,7 @@ Prebuilt macOS builds are published on the GitHub Releases page:
 **[Download the latest release](https://github.com/Aitthi/conclave/releases)**
 
 Download the `.dmg` for Apple Silicon, open it, and drag Conclave into `Applications`.
+The app is signed with a Developer ID and notarized by Apple, so it opens without Gatekeeper warnings.
 
 ## Requirements
 
@@ -52,3 +53,7 @@ pnpm tauri build   # produces the .app bundle
 - Agent instructions and UI pixel gate: `CLAUDE.md`
 - Design specs and plans: `docs/superpowers/`
 - Brand assets: `docs/brand/README.md`
+
+## License
+
+[MIT](LICENSE)
