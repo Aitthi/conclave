@@ -2,7 +2,7 @@
 
 owner: 30fa04f4-e047-4241-a9ed-f452529952be (Detoro, Lead) · authority: in-loop
 implementer: Tiësto (e60b9644), AFTER `browser-first-paint` merges (same boundary file) · reviewer: Armin (be81029a) · escalation: Detoro via `task challenge`
-base: main after the `browser-first-paint` merge · boundary: `src-tauri/src/engine/runtime/browser.rs`, `src-tauri/src/engine/commands/cli.rs`, `src-tauri/src/bin/conclave-cli.rs`
+base: main after the `browser-first-paint` merge · boundary: `src-tauri/src/engine/runtime/browser.rs`, `src-tauri/src/engine/commands/cli.rs`, `src-tauri/src/bin/conclave-cli.rs`, plus (ruling 3136cc7d, 2026-09-05, credit Tiësto) `src-tauri/src/engine/commands/browser.rs` and `src-tauri/src/engine/router.rs` — the payload seam and the verb registration that Decisions 2 and 5 need
 
 ## Request (human, 2026-09-05)
 
