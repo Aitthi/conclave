@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" color="#16324F">
+  <title id="title">Conclave monochrome mark</title>
+  <desc id="desc">Three rounded seats form an open C around one shared space.</desc>
+  <g fill="currentColor">
+    <rect x="128" y="64" width="320" height="112" rx="32"/>
+    <rect x="64" y="192" width="112" height="128" rx="32"/>
+    <rect x="128" y="336" width="320" height="112" rx="32"/>
+  </g>
+</svg>

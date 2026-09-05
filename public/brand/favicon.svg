@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Conclave">
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#102A43"/>
+  <rect x="18" y="14" width="31" height="10" rx="3" fill="#F2F7F9"/>
+  <rect x="13" y="26" width="10" height="12" rx="3" fill="#F2F7F9"/>
+  <rect x="18" y="40" width="31" height="10" rx="3" fill="#EE9C3A"/>
+</svg>

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Conclave identity preview</title>
+  <desc id="desc">Primary mark, wordmark, app icon, light and dark uses, and small-size tests.</desc>
+  <rect width="1600" height="1000" fill="#EAF0F3"/>
+
+  <text x="80" y="82" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="18" font-weight="700" letter-spacing="3">CONCLAVE IDENTITY</text>
+  <text x="80" y="119" fill="#16324F" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="20">Distinct participants. One shared space.</text>
+
+  <rect x="80" y="156" width="900" height="674" rx="32" fill="#FFFFFF" stroke="#D7E1E7" stroke-width="2"/>
+  <g transform="translate(160 242) scale(.82)">
+    <rect x="128" y="64" width="320" height="112" rx="32" fill="#16324F"/>
+    <rect x="64" y="192" width="112" height="128" rx="32" fill="#16324F"/>
+    <rect x="128" y="336" width="320" height="112" rx="32" fill="#EE9C3A"/>
+  </g>
+  <text x="540" y="433" fill="#16324F" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="96" font-weight="700">Conclave</text>
+  <text x="544" y="478" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="22">Multi-agent work, made accountable.</text>
+  <rect x="160" y="643" width="740" height="2" fill="#D7E1E7"/>
+  <text x="160" y="696" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="2">SMALL-SIZE TEST</text>
+  <g transform="translate(160 725)">
+    <rect width="64" height="64" rx="14" fill="#102A43"/>
+    <rect x="18" y="14" width="31" height="10" rx="3" fill="#F2F7F9"/>
+    <rect x="13" y="26" width="10" height="12" rx="3" fill="#F2F7F9"/>
+    <rect x="18" y="40" width="31" height="10" rx="3" fill="#EE9C3A"/>
+  </g>
+  <text x="160" y="812" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="15">64 px</text>
+  <g transform="translate(302 741) scale(.5)">
+    <rect width="64" height="64" rx="14" fill="#102A43"/>
+    <rect x="18" y="14" width="31" height="10" rx="3" fill="#F2F7F9"/>
+    <rect x="13" y="26" width="10" height="12" rx="3" fill="#F2F7F9"/>
+    <rect x="18" y="40" width="31" height="10" rx="3" fill="#EE9C3A"/>
+  </g>
+  <text x="296" y="812" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="15">32 px</text>
+  <g transform="translate(433 749) scale(.25)">
+    <rect width="64" height="64" rx="14" fill="#102A43"/>
+    <rect x="18" y="14" width="31" height="10" rx="3" fill="#F2F7F9"/>
+    <rect x="13" y="26" width="10" height="12" rx="3" fill="#F2F7F9"/>
+    <rect x="18" y="40" width="31" height="10" rx="3" fill="#EE9C3A"/>
+  </g>
+  <text x="422" y="812" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="15">16 px</text>
+  <text x="560" y="758" fill="#16324F" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="18" font-weight="600">Open at every size.</text>
+  <text x="560" y="789" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="15">Shared room remains visible; amber stays distinct.</text>
+
+  <rect x="1020" y="156" width="500" height="444" rx="32" fill="#DCE6EB"/>
+  <g transform="translate(1094 187) scale(.344)">
+    <path fill="#102A43" d="M304 64h416c140 0 240 100 240 240v416c0 140-100 240-240 240H304C164 960 64 860 64 720V304C64 164 164 64 304 64Z"/>
+    <g transform="translate(128 128) scale(1.5)">
+      <rect x="128" y="64" width="320" height="112" rx="32" fill="#F2F7F9"/>
+      <rect x="64" y="192" width="112" height="128" rx="32" fill="#F2F7F9"/>
+      <rect x="128" y="336" width="320" height="112" rx="32" fill="#EE9C3A"/>
+    </g>
+  </g>
+  <text x="1092" y="558" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="2">DESKTOP TILE</text>
+
+  <rect x="1020" y="638" width="238" height="192" rx="24" fill="#FFFFFF" stroke="#D7E1E7" stroke-width="2"/>
+  <g transform="translate(1050 665) scale(.27)">
+    <rect x="128" y="64" width="320" height="112" rx="32" fill="#16324F"/>
+    <rect x="64" y="192" width="112" height="128" rx="32" fill="#16324F"/>
+    <rect x="128" y="336" width="320" height="112" rx="32" fill="#EE9C3A"/>
+  </g>
+  <text x="1050" y="806" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="15">Light surface</text>
+
+  <rect x="1282" y="638" width="238" height="192" rx="24" fill="#102A43"/>
+  <g transform="translate(1312 665) scale(.27)">
+    <rect x="128" y="64" width="320" height="112" rx="32" fill="#F2F7F9"/>
+    <rect x="64" y="192" width="112" height="128" rx="32" fill="#F2F7F9"/>
+    <rect x="128" y="336" width="320" height="112" rx="32" fill="#EE9C3A"/>
+  </g>
+  <text x="1312" y="806" fill="#B9C8D1" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="15">Dark surface</text>
+
+  <text x="80" y="926" fill="#16324F" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="700">OPEN ASSEMBLY / 2026</text>
+  <text x="1520" y="926" text-anchor="end" fill="#62788C" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif" font-size="16">Ink #102A43 · Council #16324F · Signal #EE9C3A</text>
+</svg>
