@@ -1,5 +1,5 @@
 import type { FixtureHandlers } from "../backend";
-import type { BrowserTab, Session, Workspace, WorkspaceAgent } from "../../ipc/types";
+import type { BrowserTab, Message, Session, Skill, Workspace, WorkspaceAgent } from "../../ipc/types";
 import { emitFixtureEvent } from "../events";
 import {
   workspaces,
@@ -83,6 +83,96 @@ function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
 // missing-handler error. Mutations that only fire on user interaction are
 // intentionally absent — reaching one in a screenshot is a real bug worth the
 // loud failure.
+// ── Skill-assist harness seam (task skill-assist-repair) ───────────────────
+// Mutable module state, like tabsState above. `skillsState` makes skill.save
+// durable within a page load so the harness can save then reopen the library.
+const DRAFT_WA_ID = "fx-skill-draft-wa";
+const DRAFT_SESSION_ID = "fx-skill-draft-session";
+
+let skillsState: typeof skills = [...skills];
+let skillDraft = {
+  started: false,
+  startedWith: null as null | { name: string; description?: string; content: string; agentDefId: string },
+  file: { name: "", content: "" } as { name: string; description?: string; content: string },
+  startShouldFail: false,
+  syncShouldFail: false,
+  stopShouldFail: false,
+  // Holds startDraftSession open so the harness can close the editor while the
+  // call is still in flight (R4's leaked-session case).
+  startDelayMs: 0,
+};
+
+// Manual sync mode: skill.syncDraft returns a promise the harness resolves by
+// hand, so a regression can control RESPONSE ORDER — an older in-flight read
+// resolving after a newer one is exactly Armin's finding 49e88209.
+type PendingSync = {
+  id: number;
+  resolve: (v: { name: string; description?: string; content: string }) => void;
+  reject: (e: Error) => void;
+  /** The file as it was AT CALL TIME, so an older read carries older content. */
+  captured: { name: string; description?: string; content: string };
+};
+let syncMode: "immediate" | "manual" = "immediate";
+let syncSeq = 0;
+let pendingSyncs: PendingSync[] = [];
+
+type ProbeCall = Record<string, unknown> & { cmd: string };
+const probe = {
+  calls: [] as ProbeCall[],
+  sessionId: DRAFT_SESSION_ID,
+  workspaceAgentId: DRAFT_WA_ID,
+  reset() {
+    probe.calls = [];
+  },
+  resetSyncs() {
+    pendingSyncs = [];
+    syncMode = "immediate";
+  },
+  /** Stand in for the agent rewriting SKILL.md, so a sync has something new. */
+  setDraftFile(file: { name: string; description?: string; content: string }) {
+    skillDraft = { ...skillDraft, file };
+  },
+  setStartDelay(ms: number) {
+    skillDraft = { ...skillDraft, startDelayMs: ms };
+  },
+  /** "manual" holds every syncDraft open until resolveSync/rejectSync. */
+  setSyncMode(mode: "immediate" | "manual") {
+    syncMode = mode;
+  },
+  pendingSyncIds() {
+    return pendingSyncs.map((p) => p.id);
+  },
+  /** Resolve one held read with the content captured when it was ISSUED. */
+  resolveSync(id: number) {
+    const i = pendingSyncs.findIndex((p) => p.id === id);
+    if (i < 0) throw new Error(`[fixture] no pending sync ${id}`);
+    const [p2] = pendingSyncs.splice(i, 1);
+    p2.resolve(p2.captured);
+  },
+  rejectSync(id: number, message = "fixture: stale read failed") {
+    const i = pendingSyncs.findIndex((p) => p.id === id);
+    if (i < 0) throw new Error(`[fixture] no pending sync ${id}`);
+    const [p2] = pendingSyncs.splice(i, 1);
+    p2.reject(new Error(message));
+  },
+  fail(which: "start" | "sync" | "stop", on: boolean) {
+    if (which === "start") skillDraft = { ...skillDraft, startShouldFail: on };
+    if (which === "sync") skillDraft = { ...skillDraft, syncShouldFail: on };
+    if (which === "stop") skillDraft = { ...skillDraft, stopShouldFail: on };
+  },
+  emitOutput(chunk: string) {
+    emitFixtureEvent("session:output", { sessionId: DRAFT_SESSION_ID, chunk });
+  },
+  emitStatus(status: string) {
+    emitFixtureEvent("session:status", { sessionId: DRAFT_SESSION_ID, status });
+  },
+};
+
+// DEV-only test seam: scripts/skill-assist-repro.mjs drives the real components
+// and reads this back. `fixtureScenario()` already gates every handler here to
+// DEV + ?fixture=, and nothing imports this module in a production build.
+(globalThis as unknown as { skillAssistProbe?: typeof probe }).skillAssistProbe = probe;
+
 export const handlers: FixtureHandlers = {
   "workspace.list": () => [workspaceState],
   "workspace.use": () => undefined,
@@ -206,9 +296,79 @@ export const handlers: FixtureHandlers = {
     mode === "agent"
       ? { ...draftTeam, agents: [draftTeam.agents[1]], positions: [] }
       : draftTeam,
-  "skill.list": () => skills,
+  "skill.list": () => skillsState,
+  // ── Skill-editor agent-assist (task skill-assist-repair) ────────────────
+  // These back scripts/skill-assist-repro.mjs, which drives the REAL
+  // SkillEditor/SkillAssistPanel through this seam. Every call is recorded on
+  // `skillAssistProbe` so the harness can assert on what the components
+  // actually sent (a PTY resize with positive dims, a paste followed by a
+  // standalone CR) rather than on rendered text. Fixed literals only.
+  "skill.startDraftSession": ({ name, description, content, agentDefId }) => {
+    skillDraft = {
+      ...skillDraft,
+      started: true,
+      startedWith: { name, description, content, agentDefId },
+      // The scratch file starts as whatever the editor handed over — the same
+      // thing repo::skill::write_draft does.
+      file: { name, description, content },
+    };
+    probe.calls.push({ cmd: "skill.startDraftSession", agentDefId });
+    if (skillDraft.startShouldFail) throw new Error("fixture: startDraftSession failed");
+    const result = { workspaceAgentId: DRAFT_WA_ID, sessionId: DRAFT_SESSION_ID };
+    if (skillDraft.startDelayMs > 0) {
+      const ms = skillDraft.startDelayMs;
+      return new Promise<typeof result>((resolve) => setTimeout(() => resolve(result), ms));
+    }
+    return result;
+  },
+  "skill.syncDraft": () => {
+    syncSeq += 1;
+    const id = syncSeq;
+    probe.calls.push({ cmd: "skill.syncDraft", syncId: id });
+    if (skillDraft.syncShouldFail) throw new Error("fixture: SKILL.md is mid-write");
+    if (syncMode === "immediate") return skillDraft.file;
+    const captured = { ...skillDraft.file };
+    return new Promise<typeof captured>((resolve, reject) => {
+      pendingSyncs.push({ id, resolve, reject, captured });
+    });
+  },
+  "skill.stopDraftSession": () => {
+    probe.calls.push({ cmd: "skill.stopDraftSession" });
+    if (skillDraft.stopShouldFail) throw new Error("fixture: stop failed");
+    skillDraft = { ...skillDraft, started: false };
+    return undefined;
+  },
+  "skill.save": ({ id, name, description, content }) => {
+    probe.calls.push({ cmd: "skill.save", name });
+    const saved: Skill = {
+      id: id ?? "fx-skill-saved",
+      name,
+      description,
+      content,
+      kind: "custom",
+      mandatory: true,
+    };
+    // Persist so the harness can reopen the library and see the saved skill.
+    skillsState = skillsState.some((k) => k.id === saved.id)
+      ? skillsState.map((k) => (k.id === saved.id ? saved : k))
+      : [...skillsState, saved];
+    return saved;
+  },
+  "message.send": ({ sessionId, text, paste }) => {
+    probe.calls.push({ cmd: "message.send", sessionId, text, paste: paste === true });
+    return {
+      id: `fx-msg-${probe.calls.length}`,
+      sessionId,
+      role: "user",
+      text,
+      createdAt: "2026-09-05T04:00:00.000Z",
+    } as Message;
+  },
   "provider.list": () => providers,
-  "session.resize": () => undefined,
+  "session.resize": ({ sessionId, cols, rows, pixelWidth, pixelHeight }) => {
+    probe.calls.push({ cmd: "session.resize", sessionId, cols, rows, pixelWidth, pixelHeight });
+    return undefined;
+  },
   // In-app browser: status drives the side rail; the live page renders in a
   // native webview overlay. Fixed literals only — fixture mode never touches
   // Tauri. One human tab (active) + two agent tabs, one of them `ended` —

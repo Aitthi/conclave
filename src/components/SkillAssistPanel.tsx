@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Play, Square } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUp, Play, RefreshCw, Square } from "lucide-react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -23,6 +23,11 @@ export interface SkillAssistPanelProps {
   onSynced: (v: { name: string; description?: string; content: string }) => void;
   onStopped: () => void;
 }
+
+/** Gap between the pasted body and the standalone submit CR. Mirrors
+ *  StdinBar.tsx: a CR arriving in the same burst as the text is read as part of
+ *  the paste and inserted literally instead of submitting. */
+const SUBMIT_CR_DELAY_MS = 40;
 
 // Matches Terminal.tsx's dark palette so the assist panel's CLI output looks
 // identical to the app's main terminal pane, not a different shade of dark.
@@ -60,9 +65,93 @@ export function SkillAssistPanel({
   const [draftText, setDraftText] = useState("");
   const [sending, setSending] = useState(false);
   const [running, setRunning] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
+  // Revealed only after a sync failure blocks Stop, so the user can end the
+  // session knowingly rather than being wedged (challenge on this task).
+  const [offerForceStop, setOfferForceStop] = useState(false);
 
   const termContainerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
+
+  // Live view of the current draft for callbacks that outlive a render, and a
+  // mounted flag so a start that resolves after unmount can still be cleaned up.
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+  // The fallback belongs to ONE session's failure; a new session starts clean
+  // (R4 amendment: "Clear the fallback when sync succeeds or the active
+  // session changes"). Clearing on success lives in runSync.
+  useEffect(() => {
+    setOfferForceStop(false);
+    setSyncError(null);
+    setStopError(null);
+    // A different session's reads can never apply to this one.
+    invalidatePendingSyncs();
+    stopOwnsSyncRef.current = false;
+  }, [draft?.workspaceAgentId]);
+  const mountedRef = useRef(true);
+
+  /**
+   * Sync-response ordering (R5, Armin finding 49e88209).
+   *
+   * Identity alone is not enough: two reads inside ONE session both carry the
+   * same workspaceAgentId, so an older background read resolving after Stop's
+   * final read used to overwrite it — and the stop then deletes the scratch
+   * dir, so the stale content is what the user keeps.
+   *
+   * `syncGen` numbers every request; `appliedGen` is the newest one whose
+   * response was accepted. A response may apply only if it is still the
+   * current session's, we are still mounted, and its generation is newer than
+   * anything already applied. Setting `appliedGen = syncGen` invalidates every
+   * read currently in flight, which is what a successful stop, an unmount and
+   * a session replacement each do.
+   */
+  const syncGenRef = useRef(0);
+  const appliedGenRef = useRef(0);
+  /** A Stop attempt owns its final read: no manual or background sync may be
+   *  started under it, or a newer idle read could supersede the final one and
+   *  let the delete proceed with an unapplied result. */
+  const stopOwnsSyncRef = useRef(false);
+  const invalidatePendingSyncs = () => {
+    appliedGenRef.current = syncGenRef.current;
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      invalidatePendingSyncs();
+    };
+  }, []);
+
+  /**
+   * Write to the draft session's PTY stdin preserving EMISSION ORDER, the way
+   * Terminal.tsx does. `ipc.message.send` resolves a session from the DB before
+   * it reaches the PTY, so two sends fired back-to-back can land in either
+   * order — and xterm answers a terminal-query burst as several `onData` calls
+   * in ONE parse pass. Reordering those replies makes Claude Code conclude a
+   * reply never came. One promise chain keeps them ordered; the chain never
+   * rejects, so a single dead invoke cannot wedge the rest.
+   */
+  const stdinChainRef = useRef<Promise<void>>(Promise.resolve());
+  const sendStdin = useCallback((sessionId: string, text: string) => {
+    stdinChainRef.current = stdinChainRef.current
+      .then(() => ipc.message.send({ sessionId, text }))
+      .then(
+        () => {},
+        (e) => {
+          // Surfaced, not swallowed: if keystrokes are not reaching the agent
+          // the user is answering a prompt into the void and must be told.
+          if (mountedRef.current) {
+            setError(`Keystroke not delivered: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        },
+      );
+  }, []);
 
   useEffect(() => {
     ipc.agentDef
@@ -86,9 +175,15 @@ export function SkillAssistPanel({
   // scrollback, matching a fresh terminal.
   useEffect(() => {
     if (!draft || !termContainerRef.current) return;
+    const sessionId = draft.sessionId;
     const term = new XTerm({
       convertEol: true,
-      disableStdin: true,
+      // R1: the CLI's own prompts (Claude Code's trust check, later permission
+      // questions) are answered with arrows + Enter. With stdin disabled the
+      // app made that normal step impossible and the session sat blocked
+      // forever — the failure in the human's screenshot. Nothing is trusted on
+      // the user's behalf; they answer the real prompt themselves.
+      disableStdin: false,
       fontSize: 11.5,
       lineHeight: 1.5,
       fontFamily: '"SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace',
@@ -97,27 +192,59 @@ export function SkillAssistPanel({
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
-    term.open(termContainerRef.current);
-    try {
-      fitAddon.fit();
-    } catch {
-      // Container not laid out yet on the very first paint — the
-      // ResizeObserver below re-fits once it is.
-    }
-    termRef.current = term;
-    setRunning(true);
+    const el = termContainerRef.current;
+    term.open(el);
 
-    const resizeObserver = new ResizeObserver(() => {
+    // The pane's pixel size as xterm measures its own canvas — the container is
+    // the wrong source, its width includes the sub-cell remainder the grid does
+    // not cover. Matches Terminal.tsx.
+    const pixelDims = (): { pixelWidth?: number; pixelHeight?: number } => {
+      const canvas = term.dimensions?.css.canvas;
+      if (!canvas) return {};
+      return { pixelWidth: Math.round(canvas.width), pixelHeight: Math.round(canvas.height) };
+    };
+
+    // R2: fitting xterm alone left the PTY at its spawn 80x24 while this pane
+    // is ~48 columns. Claude Code positions each word at an absolute column for
+    // the width it believes it has, so everything past the pane's width piled
+    // up at the right edge — the scrambled text in the screenshot. Both sides
+    // must move together.
+    let lastCols = 0;
+    let lastRows = 0;
+    const applyResize = () => {
+      // A hidden or detached pane has no used layout; fitting it would push a
+      // bogus tiny grid to a live PTY and permanently rewrap the transcript.
+      if (el.getBoundingClientRect().width === 0) return;
       try {
         fitAddon.fit();
       } catch {
-        // Ignore transient fits during unmount/resize races.
+        return; // detached mid-teardown
       }
-    });
-    resizeObserver.observe(termContainerRef.current);
+      const { cols, rows } = term;
+      if (cols <= 0 || rows <= 0) return; // never send degenerate dimensions
+      if (cols === lastCols && rows === lastRows) return;
+      lastCols = cols;
+      lastRows = rows;
+      void ipc.session.resize({ sessionId, cols, rows, ...pixelDims() }).catch((e) => {
+        if (mountedRef.current) {
+          setError(`Terminal resize failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      });
+    };
+    applyResize();
+    termRef.current = term;
+    setRunning(true);
+
+    const resizeObserver = new ResizeObserver(applyResize);
+    resizeObserver.observe(el);
+
+    // Forward every keystroke and every terminal-query reply xterm generates,
+    // raw and in order, through the single ordered channel.
+    const dataSub = term.onData((data) => sendStdin(sessionId, data));
 
     return () => {
       resizeObserver.disconnect();
+      dataSub.dispose();
       term.dispose();
       termRef.current = null;
     };
@@ -132,11 +259,11 @@ export function SkillAssistPanel({
   useSessionStatus(draft?.sessionId ?? "", (e) => {
     if (!draft) return;
     setRunning(e.status !== "idle");
-    if (e.status === "idle") void handleSync();
+    if (e.status === "idle") void runSync(false);
   });
 
   async function handleStart() {
-    if (!agentDefId) return;
+    if (!agentDefId || starting) return;
     setStarting(true);
     setError(null);
     try {
@@ -146,48 +273,143 @@ export function SkillAssistPanel({
         content,
         agentDefId,
       });
+      // The editor can be closed while this await is in flight. Nobody would
+      // ever learn this session's id, so it would leak as a hidden workspace
+      // plus a live agent process — stop what we just started instead.
+      if (!mountedRef.current) {
+        void ipc.skill.stopDraftSession({ workspaceAgentId: res.workspaceAgentId }).catch(() => {});
+        return;
+      }
       onStarted(res);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setStarting(false);
+      if (mountedRef.current) setStarting(false);
     }
   }
 
-  async function handleStop() {
-    if (!draft) return;
-    await ipc.skill.stopDraftSession({ workspaceAgentId: draft.workspaceAgentId }).catch(() => {});
-    onStopped();
+  /**
+   * Pull the agent's current SKILL.md into the editor.
+   *
+   * `throwOnFailure` separates the two callers: the idle-transition and the
+   * manual button treat a failure as "nothing new to show" (the file is
+   * probably mid-write), while Stop must know, because stopping deletes the
+   * scratch dir and an unread edit would be gone for good.
+   */
+  const runSync = useCallback(
+    async (throwOnFailure: boolean, forStop = false) => {
+      const active = draftRef.current;
+      if (!active) return;
+      // A Stop attempt owns the final read (R5).
+      if (stopOwnsSyncRef.current && !forStop) return;
+      // Pin identity AND generation across the await.
+      const workspaceAgentId = active.workspaceAgentId;
+      const sessionId = active.sessionId;
+      const gen = ++syncGenRef.current;
+      // Guards `onSynced` itself, not merely the setStates around it: applying
+      // a stale read to the parent editor is the whole defect.
+      const isCurrent = () =>
+        mountedRef.current &&
+        draftRef.current?.workspaceAgentId === workspaceAgentId &&
+        draftRef.current?.sessionId === sessionId &&
+        gen > appliedGenRef.current;
+      try {
+        const v = await ipc.skill.syncDraft({ workspaceAgentId });
+        if (!isCurrent()) return;
+        appliedGenRef.current = gen;
+        setSyncError(null);
+        setOfferForceStop(false);
+        onSynced(v);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // The editor's fields are deliberately left untouched — a failed sync
+        // must not destroy the last successfully synced state (design spec).
+        // A STALE failure says nothing about the current state, so it must not
+        // raise an error over a newer success either.
+        if (isCurrent()) {
+          appliedGenRef.current = gen;
+          setSyncError(`Couldn't read the agent's file — ${msg}. Your last synced values are unchanged.`);
+        }
+        if (throwOnFailure) throw e;
+      }
+    },
+    [onSynced],
+  );
+
+  async function handleSyncNow() {
+    if (!draftRef.current || syncing) return;
+    setSyncing(true);
+    try {
+      await runSync(false);
+    } finally {
+      if (mountedRef.current) setSyncing(false);
+    }
   }
 
-  async function handleSync() {
-    if (!draft) return;
+  /**
+   * Stop the session. Syncs FIRST: `stopDraftSession` deletes the scratch dir,
+   * so an unsynced edit is unrecoverable after it. A failed sync therefore
+   * blocks the stop and offers `force` as an explicit second choice rather than
+   * discarding the newest file silently — or wedging the session forever when
+   * SKILL.md is missing or unparsable and sync can never succeed.
+   */
+  async function handleStop(force = false) {
+    const active = draftRef.current;
+    if (!active || stopping) return;
+    const workspaceAgentId = active.workspaceAgentId;
+    setStopping(true);
+    setStopError(null);
+    stopOwnsSyncRef.current = true;
     try {
-      const v = await ipc.skill.syncDraft({ workspaceAgentId: draft.workspaceAgentId });
-      onSynced(v);
-    } catch {
-      // Leave the editor's current fields untouched — a failed sync must not
-      // destroy the last successfully synced state (see design spec).
+      if (!force) {
+        try {
+          await runSync(true, true);
+        } catch {
+          if (mountedRef.current) setOfferForceStop(true);
+          return; // draft kept, editor stays locked, error is on screen
+        }
+      }
+      await ipc.skill.stopDraftSession({ workspaceAgentId });
+      if (draftRef.current?.workspaceAgentId !== workspaceAgentId) return;
+      // The scratch dir is gone: anything still in flight can only be stale.
+      invalidatePendingSyncs();
+      if (mountedRef.current) {
+        setOfferForceStop(false);
+        setSyncError(null);
+      }
+      // Unlock ONLY after the stop actually succeeded.
+      onStopped();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (mountedRef.current) setStopError(`Couldn't stop the agent — ${msg}. The draft is kept; try again.`);
+    } finally {
+      stopOwnsSyncRef.current = false;
+      if (mountedRef.current) setStopping(false);
     }
   }
 
   async function handleSend() {
-    if (!draft || draftText.trim().length === 0) return;
+    const active = draftRef.current;
+    if (!active || sending || draftText.trim().length === 0) return;
+    const text = draftText;
+    const sessionId = active.sessionId;
     setSending(true);
+    setError(null);
     try {
-      // `paste: true`: a draft longer than the PTY's ~1 KB read chunk must
-      // travel as ONE bracketed paste (see StdinBar) — this session is always
-      // a PTY CLI (skill_draft.rs accepts Claude Code, Codex, and Antigravity).
-      await ipc.message.send({
-        sessionId: draft.sessionId,
-        text: draftText,
-        paste: true,
-      });
-      setDraftText("");
+      // Two steps, exactly as StdinBar does it. `paste: true` keeps text longer
+      // than the PTY's ~1 KB read chunk in ONE bracketed paste; the CR then
+      // arrives on its own a beat later, because a CR inside the same burst is
+      // read as part of the paste and inserted literally instead of submitting.
+      await ipc.message.send({ sessionId, text, paste: true });
+      await new Promise((r) => setTimeout(r, SUBMIT_CR_DELAY_MS));
+      await ipc.message.send({ sessionId, text: "\r" });
+      // Cleared only once BOTH landed — otherwise a failed submit would lose
+      // the user's text with nothing sent.
+      if (mountedRef.current) setDraftText("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setSending(false);
+      if (mountedRef.current) setSending(false);
     }
   }
 
@@ -210,14 +432,26 @@ export function SkillAssistPanel({
           )}
         </div>
         {draft && (
-          <button
-            onClick={() => void handleStop()}
-            title="Stop agent"
-            aria-label="Stop agent"
-            className="w-7 h-7 grid place-items-center rounded-md text-danger hover:bg-danger/[0.12]"
-          >
-            <Square className="w-3.5 h-3.5" />
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => void handleSyncNow()}
+              disabled={syncing}
+              title="Sync now — pull the agent's edits into the editor"
+              aria-label="Sync now"
+              className="w-7 h-7 grid place-items-center rounded-md text-text-secondary hover:bg-overlay/[0.06] disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5${syncing ? " animate-spin motion-reduce:animate-none" : ""}`} />
+            </button>
+            <button
+              onClick={() => void handleStop()}
+              disabled={stopping}
+              title="Stop agent"
+              aria-label="Stop agent"
+              className="w-7 h-7 grid place-items-center rounded-md text-danger hover:bg-danger/[0.12] disabled:opacity-50"
+            >
+              <Square className="w-3.5 h-3.5" />
+            </button>
+          </div>
         )}
       </div>
 
@@ -252,6 +486,33 @@ export function SkillAssistPanel({
       ) : (
         <>
           <div ref={termContainerRef} className="flex-1 min-h-0 overflow-hidden" />
+          {/* R1: the terminal is a real one. Say so — the CLI's trust and
+              permission prompts are answered right here, with the keyboard. */}
+          <div className="px-2.5 py-1 text-[10.5px] leading-snug text-text-tertiary border-t border-overlay/[0.06] shrink-0">
+            Click the terminal and type to answer the agent's prompts — arrows and Enter work.
+          </div>
+          {(syncError || stopError) && (
+            <div className="px-2.5 pb-1.5 space-y-1 shrink-0">
+              {syncError && <p className="text-[11px] text-danger leading-snug">{syncError}</p>}
+              {stopError && <p className="text-[11px] text-danger leading-snug">{stopError}</p>}
+              {offerForceStop && (
+                <div className="rounded-lg bg-overlay/[0.05] p-2 space-y-1.5">
+                  <p className="text-[10.5px] leading-snug text-text-secondary">
+                    The latest draft could not be read. Stopping without syncing keeps the version
+                    shown in the editor and discards unsynced draft changes. Retry Sync remains
+                    available.
+                  </p>
+                  <button
+                    onClick={() => void handleStop(true)}
+                    disabled={stopping}
+                    className="w-full rounded-md bg-danger/[0.12] text-danger text-[11px] font-semibold py-1.5 hover:bg-danger/[0.18] disabled:opacity-50"
+                  >
+                    Stop without syncing
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <div className="border-t border-overlay/[0.06] p-2 shrink-0">
             <div className="rounded-2xl ring-1 ring-overlay/[0.10] bg-fill-softer px-3 pt-2 pb-1.5 focus-within:ring-accent/50">
               <div className="flex items-end gap-1.5">
