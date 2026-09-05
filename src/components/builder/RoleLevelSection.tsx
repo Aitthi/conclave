@@ -9,7 +9,15 @@
 // The inline custom-role editor is moved verbatim from Builder.tsx.
 
 import type { Dispatch, SetStateAction } from "react";
-import { Compass, Hammer, Microscope, PenTool, Plus, ShieldCheck, UserPen } from "lucide-react";
+import {
+  Compass,
+  Hammer,
+  Microscope,
+  PenTool,
+  Plus,
+  ShieldCheck,
+  UserPen,
+} from "lucide-react";
 import type { AgentDefinition, Role, Skill } from "../../ipc";
 import { LEVELS } from "../../lib/positions";
 import { Section } from "./Section";
@@ -22,7 +30,10 @@ import { Section } from "./Section";
  * (user-created) roles have no designed look, so they fall back to a neutral
  * icon; their own `description` stands in for the tagline.
  */
-const BUILTIN_ROLE_LOOKS: Record<string, { Icon: typeof Compass; tagline: string }> = {
+const BUILTIN_ROLE_LOOKS: Record<
+  string,
+  { Icon: typeof Compass; tagline: string }
+> = {
   lead: { Icon: Compass, tagline: "Settles & delegates work" },
   reviewer: { Icon: ShieldCheck, tagline: "Grills work with evidence" },
   implementer: { Icon: Hammer, tagline: "Builds the recorded plan" },
@@ -30,8 +41,13 @@ const BUILTIN_ROLE_LOOKS: Record<string, { Icon: typeof Compass; tagline: string
   researcher: { Icon: Microscope, tagline: "Investigates open questions" },
 };
 
-export function roleLook(role: Role): { Icon: typeof Compass; tagline: string } {
-  return BUILTIN_ROLE_LOOKS[role.id] ?? { Icon: UserPen, tagline: "Custom role" };
+export function roleLook(role: Role): {
+  Icon: typeof Compass;
+  tagline: string;
+} {
+  return (
+    BUILTIN_ROLE_LOOKS[role.id] ?? { Icon: UserPen, tagline: "Custom role" }
+  );
 }
 
 /** Canon rule 13 shows ONE descriptive line under the role row. A builtin has a
@@ -90,10 +106,14 @@ export function RoleLevelSection({
   setDefaultLevel,
 }: RoleLevelSectionProps) {
   // Unranked plus the live rungs, in rung order (never hardcode the names).
-  const levelOptions: { id: AgentDefinition["defaultLevel"]; name: string }[] = [
-    { id: null, name: "Unranked" },
-    ...LEVELS.map((l) => ({ id: l.id as AgentDefinition["defaultLevel"], name: l.name })),
-  ];
+  const levelOptions: { id: AgentDefinition["defaultLevel"]; name: string }[] =
+    [
+      { id: null, name: "Unranked" },
+      ...LEVELS.map((l) => ({
+        id: l.id as AgentDefinition["defaultLevel"],
+        name: l.name,
+      })),
+    ];
 
   return (
     <Section
@@ -120,7 +140,9 @@ export function RoleLevelSection({
             onClick={openCustomRole}
             aria-pressed={customRoleOpen}
             className={`inline-flex items-center gap-1 transition-colors ${
-              customRoleOpen ? "text-accent" : "text-text-tertiary hover:text-text-secondary"
+              customRoleOpen
+                ? "text-accent"
+                : "text-text-tertiary hover:text-text-secondary"
             }`}
           >
             <Plus className="w-3 h-3" />
@@ -131,7 +153,11 @@ export function RoleLevelSection({
     >
       {/* Role row — one line of compact cards (D3). Custom roles beyond the
           builtins wrap to a second row of the same grid. */}
-      <div role="radiogroup" aria-label="Role" className="grid grid-cols-4 gap-2">
+      <div
+        role="radiogroup"
+        aria-label="Role"
+        className="grid grid-cols-4 gap-2"
+      >
         {orderedRoles.map((r) => {
           const { Icon } = roleLook(r);
           const active = roleId === r.id && !customRoleOpen;
@@ -153,7 +179,9 @@ export function RoleLevelSection({
                   active ? "text-accent" : "text-text-secondary"
                 }`}
               />
-              <div className="text-[12.5px] font-semibold leading-tight">{r.name}</div>
+              <div className="text-[12.5px] font-semibold leading-tight">
+                {r.name}
+              </div>
             </button>
           );
         })}
@@ -179,7 +207,9 @@ export function RoleLevelSection({
                 </span>
               ))
             ) : (
-              <span className="text-[11px] text-text-tertiary italic">mandatory skills only</span>
+              <span className="text-[11px] text-text-tertiary italic">
+                mandatory skills only
+              </span>
             )}
             {mandatorySkillNames.length > 0 && (
               <span className="text-[10.5px] text-text-tertiary">
@@ -194,76 +224,85 @@ export function RoleLevelSection({
       {!customRoleOpen && !selectedRole && (
         <p className="mt-2.5 text-[11.5px] leading-relaxed text-text-tertiary">
           No role: the agent runs with only the mandatory
-          {mandatorySkillNames.length > 0 ? ` ${mandatorySkillNames.join(" and ")} ` : " "}
+          {mandatorySkillNames.length > 0
+            ? ` ${mandatorySkillNames.join(" and ")} `
+            : " "}
           skills, and no job description in its preamble.
         </p>
       )}
 
       {/* Inline custom-role editor — moved verbatim. */}
       {customRoleOpen && (
-      <div className="mt-2 rounded-xl ring-1 ring-overlay/[0.08] bg-surface p-3 space-y-2">
-        <input
-          value={customRoleName}
-          onChange={(e) => setCustomRoleName(e.target.value)}
-          placeholder="Role name"
-          className="w-full text-[12.5px] font-semibold bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
-        />
-        <textarea
-          value={customRoleDesc}
-          onChange={(e) => setCustomRoleDesc(e.target.value)}
-          placeholder="One-paragraph job description (baked into the agent's preamble)"
-          rows={3}
-          className="w-full text-[12px] text-text-secondary bg-transparent outline-none ring-1 ring-overlay/[0.08] rounded-lg px-2 py-1.5 resize-none focus:ring-accent"
-        />
-        {allSkills.filter((s) => (s.kind === "builtin" && !s.mandatory) || s.kind === "custom").length > 0 && (
-          <div>
-            <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1">
-              Default skills
+        <div className="mt-2 rounded-xl ring-1 ring-overlay/[0.08] bg-surface p-3 space-y-2">
+          <input
+            value={customRoleName}
+            onChange={(e) => setCustomRoleName(e.target.value)}
+            placeholder="Role name"
+            className="w-full text-[12.5px] font-semibold bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
+          />
+          <textarea
+            value={customRoleDesc}
+            onChange={(e) => setCustomRoleDesc(e.target.value)}
+            placeholder="One-paragraph job description (baked into the agent's preamble)"
+            rows={3}
+            className="w-full text-[12px] text-text-secondary bg-transparent outline-none ring-1 ring-overlay/[0.08] rounded-lg px-2 py-1.5 resize-none focus:ring-accent"
+          />
+          {allSkills.filter(
+            (s) =>
+              (s.kind === "builtin" && !s.mandatory) || s.kind === "custom",
+          ).length > 0 && (
+            <div>
+              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1">
+                Default skills
+              </div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {allSkills
+                  .filter(
+                    (s) =>
+                      (s.kind === "builtin" && !s.mandatory) ||
+                      s.kind === "custom",
+                  )
+                  .map((s) => {
+                    const checked = customRoleSkillIds.includes(s.id);
+                    return (
+                      <label
+                        key={s.id}
+                        className="flex items-center gap-2 text-[12px] text-text-secondary cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) =>
+                            setCustomRoleSkillIds((prev) =>
+                              e.target.checked
+                                ? [...prev, s.id]
+                                : prev.filter((id) => id !== s.id),
+                            )
+                          }
+                        />
+                        {s.name}
+                      </label>
+                    );
+                  })}
+              </div>
             </div>
-            <div className="space-y-1 max-h-32 overflow-y-auto">
-              {allSkills
-                .filter((s) => (s.kind === "builtin" && !s.mandatory) || s.kind === "custom")
-                .map((s) => {
-                  const checked = customRoleSkillIds.includes(s.id);
-                  return (
-                    <label
-                      key={s.id}
-                      className="flex items-center gap-2 text-[12px] text-text-secondary cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) =>
-                          setCustomRoleSkillIds((prev) =>
-                            e.target.checked
-                              ? [...prev, s.id]
-                              : prev.filter((id) => id !== s.id),
-                          )
-                        }
-                      />
-                      {s.name}
-                    </label>
-                  );
-                })}
-            </div>
+          )}
+          <div className="flex items-center justify-end gap-2 pt-0.5">
+            <button
+              onClick={cancelCustomRole}
+              className="text-[12px] font-medium text-text-secondary px-3 py-1 rounded-lg hover:bg-overlay/[0.05]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreateCustomRole}
+              disabled={savingRole}
+              className="text-[12px] font-semibold text-white bg-accent px-3 py-1 rounded-lg hover:brightness-105 disabled:opacity-60"
+            >
+              {savingRole ? "Creating…" : "Create role"}
+            </button>
           </div>
-        )}
-        <div className="flex items-center justify-end gap-2 pt-0.5">
-          <button
-            onClick={cancelCustomRole}
-            className="text-[12px] font-medium text-text-secondary px-3 py-1 rounded-lg hover:bg-overlay/[0.05]"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleCreateCustomRole}
-            disabled={savingRole}
-            className="text-[12px] font-semibold text-white bg-accent px-3 py-1 rounded-lg hover:brightness-105 disabled:opacity-60"
-          >
-            {savingRole ? "Creating…" : "Create role"}
-          </button>
         </div>
-      </div>
       )}
 
       {/* Level — the Position System SEED (D1/D3): remembered on the definition

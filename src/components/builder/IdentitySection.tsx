@@ -67,7 +67,10 @@ export function IdentitySection({
           {showColors && (
             <>
               {/* Click-away backdrop. */}
-              <div className="fixed inset-0 z-10" onClick={() => setShowColors(false)} />
+              <div
+                className="fixed inset-0 z-10"
+                onClick={() => setShowColors(false)}
+              />
               <div className="absolute z-20 top-full left-0 mt-1.5 flex items-center gap-1.5 bg-surface rounded-xl ring-1 ring-overlay/[0.1] shadow-lg p-2">
                 {COLOR_SWATCHES.map((swatch) => (
                   <button
@@ -77,7 +80,9 @@ export function IdentitySection({
                       setShowColors(false);
                     }}
                     className={`w-[18px] h-[18px] rounded-full transition-all ${
-                      color === swatch ? "ring-2 ring-offset-1" : "hover:scale-110"
+                      color === swatch
+                        ? "ring-2 ring-offset-1"
+                        : "hover:scale-110"
                     }`}
                     style={
                       {

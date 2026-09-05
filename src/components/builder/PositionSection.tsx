@@ -55,9 +55,7 @@ export function PositionSection({
                       const next = positionRoster.find(
                         (agent) => agent.id === supervisorDraft,
                       );
-                      return next
-                        ? { name: next.name ?? next.id }
-                        : null;
+                      return next ? { name: next.name ?? next.id } : null;
                     })()
                   : null
               }
@@ -97,7 +95,9 @@ export function PositionSection({
                       : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
                   }`}
                 >
-                  <div className="text-[11.5px] font-semibold leading-tight">{level.name}</div>
+                  <div className="text-[11.5px] font-semibold leading-tight">
+                    {level.name}
+                  </div>
                   <div className="mt-1 text-[11px] text-text-tertiary">
                     rung {level.rung}
                   </div>
@@ -123,11 +123,17 @@ export function PositionSection({
             >
               <div className="flex items-center gap-2">
                 <HumanChip />
-                <span className="text-[11px] text-text-tertiary">Top of the chain</span>
+                <span className="text-[11px] text-text-tertiary">
+                  Top of the chain
+                </span>
               </div>
             </button>
             {supervisorOptions.map((agent) => {
-              const disabled = wouldCycle(scopedAgent.id, agent.id, positionRoster);
+              const disabled = wouldCycle(
+                scopedAgent.id,
+                agent.id,
+                positionRoster,
+              );
               const active = supervisorDraft === agent.id;
               return (
                 <button

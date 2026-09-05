@@ -17,17 +17,28 @@ interface BuilderRailProps {
 /** Canon rule 5: 7px dot. Position carries a transparent one so every label
  *  stays on the same left edge — it is always valid and shows no state. */
 function Dot({ state }: { state: Readiness | "none" }) {
-  if (state === "none") return <span className="h-[7px] w-[7px] shrink-0" aria-hidden="true" />;
+  if (state === "none")
+    return <span className="h-[7px] w-[7px] shrink-0" aria-hidden="true" />;
   const look =
     state === "complete"
       ? "bg-accent"
       : state === "error"
         ? "bg-danger"
         : "bg-transparent ring-1 ring-text-tertiary/70";
-  return <span className={`h-[7px] w-[7px] shrink-0 rounded-full ${look}`} aria-hidden="true" />;
+  return (
+    <span
+      className={`h-[7px] w-[7px] shrink-0 rounded-full ${look}`}
+      aria-hidden="true"
+    />
+  );
 }
 
-export function BuilderRail({ items, readiness, activeId, onJump }: BuilderRailProps) {
+export function BuilderRail({
+  items,
+  readiness,
+  activeId,
+  onJump,
+}: BuilderRailProps) {
   return (
     <nav
       aria-label="Builder sections"
@@ -35,7 +46,8 @@ export function BuilderRail({ items, readiness, activeId, onJump }: BuilderRailP
     >
       {items.map((id) => {
         const active = id === activeId;
-        const state: Readiness | "none" = id === "position" ? "none" : readiness[id];
+        const state: Readiness | "none" =
+          id === "position" ? "none" : readiness[id];
         return (
           <button
             key={id}

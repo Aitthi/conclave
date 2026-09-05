@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc } from "../ipc";
@@ -6,9 +6,23 @@ import type { AgentDefinition, Skill, Role, WorkspaceAgent } from "../ipc";
 import { EVENT_NAMES, useEvent } from "../ipc";
 import type { RosterChangedEvent } from "../ipc/events";
 import { LEVELS, chainUp } from "../lib/positions";
-import { CLAUDE_MODELS, CODEX_MODELS, COLOR_SWATCHES } from "../lib/modelCatalogue";
+import {
+  CLAUDE_MODELS,
+  CODEX_MODELS,
+  COLOR_SWATCHES,
+} from "../lib/modelCatalogue";
 import { IdentitySection } from "./builder/IdentitySection";
+import { BuilderRail } from "./builder/BuilderRail";
 import { RoleLevelSection } from "./builder/RoleLevelSection";
+import {
+  blockerIsDanger,
+  firstBlocker,
+  readyLabel,
+  SECTION_ORDER,
+  sectionReadiness,
+} from "./builder/readiness";
+import type { ReadinessInput, SectionId } from "./builder/readiness";
+import { useScrollSpy } from "./builder/useScrollSpy";
 import { RuntimeSection, SECRET_PLACEHOLDER } from "./builder/RuntimeSection";
 import type {
   CliAvailability,
@@ -84,7 +98,9 @@ function parseEnvText(text: string): Record<string, string> | undefined {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(inner)) {
     if (typeof v !== "string") {
-      throw new Error(`Env value for "${k}" must be a string (got ${typeof v})`);
+      throw new Error(
+        `Env value for "${k}" must be a string (got ${typeof v})`,
+      );
     }
     out[k] = v;
   }
@@ -113,14 +129,16 @@ export function Builder({
   // Position System seed (D1/D3) — the level a NEW instance is created with.
   // Definition-level, all agent types, distinct from the per-workspace
   // Position section's `levelDraft` below (which edits an existing instance).
-  const [defaultLevelDraft, setDefaultLevelDraft] = useState<AgentDefinition["defaultLevel"]>(
-    initialDef?.defaultLevel ?? null,
-  );
+  const [defaultLevelDraft, setDefaultLevelDraft] = useState<
+    AgentDefinition["defaultLevel"]
+  >(initialDef?.defaultLevel ?? null);
   // D5 removed the Type picker: every agent the Builder can create is a CLI
   // agent. The value is still read by handleSave, and a legacy chat/
   // orchestrator definition keeps its own type through an edit.
   const [agentType] = useState<AgentType>(initialDef?.type ?? "cli");
-  const [cliKind, setCliKind] = useState<CliKind>(initialDef?.cliKind ?? "claude-code");
+  const [cliKind, setCliKind] = useState<CliKind>(
+    initialDef?.cliKind ?? "claude-code",
+  );
   const [color, setColor] = useState(initialDef?.color ?? COLOR_SWATCHES[0]);
   // Color picker popover (anchored to the avatar).
   const [showColors, setShowColors] = useState(false);
@@ -129,11 +147,11 @@ export function Builder({
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     initialDef?.id
       ? initialDef.cliKind === "antigravity"
-        ? initialDef.permissionMode ?? "default"
+        ? (initialDef.permissionMode ?? "default")
         : initialDef.permissionMode === "bypassPermissions"
           ? "bypassPermissions"
           : "auto"
-      : initialDef?.permissionMode ?? "bypassPermissions",
+      : (initialDef?.permissionMode ?? "bypassPermissions"),
   );
   // Distinguishes a user-picked value from the display fallback for a legacy
   // existing row whose stored permission_mode is NULL. An unrelated edit must
@@ -143,10 +161,16 @@ export function Builder({
   const [cliAvailability, setCliAvailability] = useState<CliAvailability>({
     state: initialDef?.cliKind === "antigravity" ? "checking" : "idle",
   });
-  const [modelCatalog, setModelCatalog] = useState<CliModelCatalog>({ state: "idle" });
-  const [contextWindow, setContextWindow] = useState<string>(() => initialContextWindow(initialDef));
+  const [modelCatalog, setModelCatalog] = useState<CliModelCatalog>({
+    state: "idle",
+  });
+  const [contextWindow, setContextWindow] = useState<string>(() =>
+    initialContextWindow(initialDef),
+  );
   // Token filter (rtk): absent/null on the definition means enabled (default ON).
-  const [rtkEnabled, setRtkEnabled] = useState<boolean>(initialDef?.rtkEnabled ?? true);
+  const [rtkEnabled, setRtkEnabled] = useState<boolean>(
+    initialDef?.rtkEnabled ?? true,
+  );
   const [customArgs, setCustomArgs] = useState(initialDef?.customArgs ?? "");
   // Custom env is opt-in so the starter template isn't saved by accident.
   const [useCustomEnv, setUseCustomEnv] = useState(
@@ -162,7 +186,9 @@ export function Builder({
   // annotates the FULL builtin+custom set) — harmless here since the custom
   // checklist below only ever tests membership against `kind === "custom"`
   // skills, so a builtin id in this state simply never matches any checkbox.
-  const [skillIds, setSkillIds] = useState<string[]>(initialDef?.skillIds ?? []);
+  const [skillIds, setSkillIds] = useState<string[]>(
+    initialDef?.skillIds ?? [],
+  );
   // ── Roles (ADR 0005) ─────────────────────────────────────────────────────────
   const [allRoles, setAllRoles] = useState<Role[]>([]);
   const [roleId, setRoleId] = useState<string>(initialDef?.roleId ?? "");
@@ -182,20 +208,29 @@ export function Builder({
       .list()
       .then(setAllSkills)
       .catch((err: unknown) => {
-        if (import.meta.env.DEV) console.error("Builder: skill.list failed", err);
+        if (import.meta.env.DEV)
+          console.error("Builder: skill.list failed", err);
       });
     ipc.role
       .list()
       .then(setAllRoles)
       .catch((err: unknown) => {
-        if (import.meta.env.DEV) console.error("Builder: role.list failed", err);
+        if (import.meta.env.DEV)
+          console.error("Builder: role.list failed", err);
       });
   }, []);
 
-  const positionScopeRequested = Boolean(initialDef?.id && workspaceId && workspaceAgentId);
+  const positionScopeRequested = Boolean(
+    initialDef?.id && workspaceId && workspaceAgentId,
+  );
 
   useEffect(() => {
-    if (!positionScopeRequested || !workspaceId || !workspaceAgentId || !initialDef?.id) {
+    if (
+      !positionScopeRequested ||
+      !workspaceId ||
+      !workspaceAgentId ||
+      !initialDef?.id
+    ) {
       setPositionRoster([]);
       setScopedAgent(null);
       setLevelDraft(null);
@@ -211,14 +246,17 @@ export function Builder({
         setPositionRoster(instances);
         const scoped =
           instances.find(
-            (agent) => agent.id === workspaceAgentId && agent.agentDefId === initialDef.id,
+            (agent) =>
+              agent.id === workspaceAgentId &&
+              agent.agentDefId === initialDef.id,
           ) ?? null;
         setScopedAgent(scoped);
         setLevelDraft(scoped?.level ?? null);
         setSupervisorDraft(scoped?.supervisorAgentId ?? null);
       })
       .catch((err: unknown) => {
-        if (import.meta.env.DEV) console.error("Builder: instance.list failed", err);
+        if (import.meta.env.DEV)
+          console.error("Builder: instance.list failed", err);
       });
 
     return () => {
@@ -227,14 +265,21 @@ export function Builder({
   }, [initialDef?.id, positionScopeRequested, workspaceAgentId, workspaceId]);
 
   useEvent<RosterChangedEvent>(EVENT_NAMES.rosterChanged, (payload) => {
-    if (!positionScopeRequested || !workspaceId || payload.workspaceId !== workspaceId) return;
+    if (
+      !positionScopeRequested ||
+      !workspaceId ||
+      payload.workspaceId !== workspaceId
+    )
+      return;
     ipc.instance
       .list({ workspaceId })
       .then((instances) => {
         setPositionRoster(instances);
         const scoped =
           instances.find(
-            (agent) => agent.id === workspaceAgentId && agent.agentDefId === initialDef?.id,
+            (agent) =>
+              agent.id === workspaceAgentId &&
+              agent.agentDefId === initialDef?.id,
           ) ?? null;
         setScopedAgent(scoped);
       })
@@ -253,14 +298,23 @@ export function Builder({
   // Apply role COPY semantics in the UI: remove the outgoing role's live
   // defaults, then add the incoming role's live defaults. Manual picks outside
   // those defaults survive the transition; the engine remains uninvolved.
-  function applyRoleTransition(fromId: string, toId?: string, roles = allRoles) {
+  function applyRoleTransition(
+    fromId: string,
+    toId?: string,
+    roles = allRoles,
+  ) {
     const outgoingRole = roles.find((r) => r.id === fromId);
     const incomingRole = roles.find((r) => r.id === toId);
-    const outgoingSkillIds = new Set(liveSkillIds(outgoingRole?.skillIds ?? []));
+    const outgoingSkillIds = new Set(
+      liveSkillIds(outgoingRole?.skillIds ?? []),
+    );
     const incomingSkillIds = liveSkillIds(incomingRole?.skillIds ?? []);
     setSkillIds((prev) =>
       Array.from(
-        new Set([...prev.filter((id) => !outgoingSkillIds.has(id)), ...incomingSkillIds]),
+        new Set([
+          ...prev.filter((id) => !outgoingSkillIds.has(id)),
+          ...incomingSkillIds,
+        ]),
       ),
     );
   }
@@ -304,7 +358,8 @@ export function Builder({
   const letter = name.trim().charAt(0).toUpperCase() || "?";
   const selectedRole = allRoles.find((r) => r.id === roleId);
   // Fall back to any legacy free-text label when no first-class role resolves.
-  const selectedRoleName = selectedRole?.name ?? (initialDef?.role || undefined);
+  const selectedRoleName =
+    selectedRole?.name ?? (initialDef?.role || undefined);
   // Cards are rendered builtin-first, then custom, then the dashed "Custom…"
   // create card (stable sort keeps each group's list order from role.list).
   const orderedRoles = [...allRoles].sort(
@@ -332,24 +387,29 @@ export function Builder({
     cliAvailability.state !== "available" &&
     cliAvailability.state !== "error";
   const modelPresets = isCodex ? CODEX_MODELS : CLAUDE_MODELS;
-  const catalogModels = modelCatalog.state === "ready" ? modelCatalog.models : [];
+  const catalogModels =
+    modelCatalog.state === "ready" ? modelCatalog.models : [];
   // Editing must be lossless: a saved model the catalog no longer lists keeps
   // its own selected option instead of being silently reset to Auto.
   const savedModelUnlisted =
-    isAntigravity && model !== "" && !catalogModels.some((entry) => entry.id === model);
+    isAntigravity &&
+    model !== "" &&
+    !catalogModels.some((entry) => entry.id === model);
   const positionEnabled = Boolean(
     scopedAgent && workspaceId && workspaceAgentId && initialDef?.id,
   );
   const trackLabel = selectedRoleName ?? scopedAgent?.roleName ?? "No role";
   // Canon rule 11: the line under the name reads "Role · Level".
   const defaultLevelName = defaultLevelDraft
-    ? LEVELS.find((l) => l.id === defaultLevelDraft)?.name ?? "Unranked"
+    ? (LEVELS.find((l) => l.id === defaultLevelDraft)?.name ?? "Unranked")
     : "Unranked";
   const identityLine = `${selectedRoleName ?? "No role"} · ${defaultLevelName}`;
   const supervisorOptions = positionEnabled
     ? positionRoster
         .filter((agent) => agent.id !== scopedAgent!.id)
-        .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id))
+        .sort((left, right) =>
+          (left.name ?? left.id).localeCompare(right.name ?? right.id),
+        )
     : [];
   const previewRoster = positionEnabled
     ? positionRoster.map((agent) =>
@@ -362,10 +422,14 @@ export function Builder({
           : agent,
       )
     : [];
-  const previewChainIds = positionEnabled ? chainUp(scopedAgent!.id, previewRoster) : [];
-  const levelChanged = positionEnabled && (scopedAgent?.level ?? null) !== levelDraft;
+  const previewChainIds = positionEnabled
+    ? chainUp(scopedAgent!.id, previewRoster)
+    : [];
+  const levelChanged =
+    positionEnabled && (scopedAgent?.level ?? null) !== levelDraft;
   const supervisorChanged =
-    positionEnabled && (scopedAgent?.supervisorAgentId ?? null) !== supervisorDraft;
+    positionEnabled &&
+    (scopedAgent?.supervisorAgentId ?? null) !== supervisorDraft;
 
   const checkAntigravityAvailability = useCallback(async () => {
     setCliAvailability({ state: "checking" });
@@ -394,7 +458,9 @@ export function Builder({
   const loadAntigravityModels = useCallback(async () => {
     setModelCatalog({ state: "loading" });
     try {
-      const { models } = await ipc.instance.cliModels({ cliKind: "antigravity" });
+      const { models } = await ipc.instance.cliModels({
+        cliKind: "antigravity",
+      });
       setModelCatalog({ state: "ready", models });
     } catch {
       // The backend's message is raw shell/auth text — surface a fixed retryable
@@ -435,7 +501,11 @@ export function Builder({
     }
     if (next === "antigravity") setCliAvailability({ state: "checking" });
     setCliKind(next);
-    if (next === "claude-code" && contextWindow !== "1m" && contextWindow !== "200k") {
+    if (
+      next === "claude-code" &&
+      contextWindow !== "1m" &&
+      contextWindow !== "200k"
+    ) {
       setContextWindow("200k");
     }
   }
@@ -455,13 +525,17 @@ export function Builder({
     // (R2/R4 — Auto, backend derives the window from the model, any stored
     // value is ignored at launch).
     const contextWindowForSave: string | undefined = isClaudeCode
-      ? contextWindow === "1m" ? "1m" : "200k"
+      ? contextWindow === "1m"
+        ? "1m"
+        : "200k"
       : undefined;
     const permissionModeForSave: AgentDefinition["permissionMode"] =
       isEditing && !permissionModeDirty && initialDef?.cliKind === cliKind
         ? initialDef.permissionMode
         : isAntigravity
-          ? permissionMode === "auto" ? "default" : permissionMode
+          ? permissionMode === "auto"
+            ? "default"
+            : permissionMode
           : isClaudeCode || isCodex
             ? permissionMode === "bypassPermissions"
               ? "bypassPermissions"
@@ -474,7 +548,9 @@ export function Builder({
       try {
         customEnv = parseEnvText(envText);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Invalid custom environment JSON");
+        setError(
+          e instanceof Error ? e.message : "Invalid custom environment JSON",
+        );
         return;
       }
     }
@@ -514,7 +590,8 @@ export function Builder({
         contextWindow: contextWindowForSave,
         // Token filter (rtk) — claude-code + codex; the engine treats absent as ON.
         rtkEnabled: isClaudeCode || isCodex ? rtkEnabled : undefined,
-        customArgs: showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
+        customArgs:
+          showCliConfig && customArgs.trim() ? customArgs.trim() : undefined,
         customEnv,
         // Skills are cli-only in v1 — omit for other types so a chat/orchestrator
         // save never sends a stale list.
@@ -545,11 +622,25 @@ export function Builder({
     }
   }
 
+  // ── Rail, readiness and scroll-spy (D1/D2/D7) ────────────────────────────
+  const railItems: SectionId[] = positionEnabled
+    ? SECTION_ORDER
+    : SECTION_ORDER.filter((id) => id !== "position");
+  const readinessInput: ReadinessInput = {
+    name,
+    isAntigravity,
+    cliAvailabilityState: cliAvailability.state,
+    isEditing,
+  };
+  const readiness = sectionReadiness(readinessInput);
+  const blocker = firstBlocker(readinessInput);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const { activeId, jumpTo } = useScrollSpy(scrollRef, railItems);
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="w-[560px] max-h-[90vh] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]">
-
+      <div className="w-[880px] max-h-[90vh] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]">
         {/* ── Header ── */}
         <div className="h-11 flex items-center justify-between px-4 border-b border-overlay/[0.06] shrink-0">
           <div className="flex items-center gap-2">
@@ -570,143 +661,172 @@ export function Builder({
           </button>
         </div>
 
-        {/* ── Scrollable body ── */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3.5 min-h-0">
-
-          <IdentitySection
-            name={name}
-            setName={setName}
-            color={color}
-            setColor={setColor}
-            showColors={showColors}
-            setShowColors={setShowColors}
-            letter={letter}
-            identityLine={identityLine}
-            draftedBy={draftedBy}
-            touched={touched}
-            setTouched={setTouched}
+        {/* ── Body: fixed rail + scrolling content column (D1/D2) ── */}
+        <div className="flex flex-1 min-h-0">
+          <BuilderRail
+            items={railItems}
+            readiness={readiness}
+            activeId={activeId}
+            onJump={jumpTo}
           />
-
-          <RoleLevelSection
-            orderedRoles={orderedRoles}
-            selectedRole={selectedRole}
-            roleId={roleId}
-            selectRole={selectRole}
-            clearRole={() => {
-              applyRoleTransition(roleId);
-              setRoleId("");
-              setCustomRoleOpen(false);
-            }}
-            openCustomRole={() => {
-              applyRoleTransition(roleId);
-              setCustomRoleOpen(true);
-              setRoleId("");
-            }}
-            customRoleOpen={customRoleOpen}
-            customRoleName={customRoleName}
-            setCustomRoleName={setCustomRoleName}
-            customRoleDesc={customRoleDesc}
-            setCustomRoleDesc={setCustomRoleDesc}
-            customRoleSkillIds={customRoleSkillIds}
-            setCustomRoleSkillIds={setCustomRoleSkillIds}
-            cancelCustomRole={() => {
-              setCustomRoleOpen(false);
-              setCustomRoleName("");
-              setCustomRoleDesc("");
-              setCustomRoleSkillIds([]);
-            }}
-            handleCreateCustomRole={() => void handleCreateCustomRole()}
-            savingRole={savingRole}
-            allSkills={allSkills}
-            attachSkillNames={attachSkillNames}
-            mandatorySkillNames={mandatorySkillNames}
-            defaultLevel={defaultLevelDraft}
-            setDefaultLevel={setDefaultLevelDraft}
-          />
-
-          {positionEnabled && (
-            <PositionSection
-              scopedAgent={scopedAgent!}
-              positionRoster={positionRoster}
-              supervisorOptions={supervisorOptions}
-              previewRoster={previewRoster}
-              previewChainIds={previewChainIds}
-              trackLabel={trackLabel}
-              levelDraft={levelDraft}
-              setLevelDraft={setLevelDraft}
-              supervisorDraft={supervisorDraft}
-              setSupervisorDraft={setSupervisorDraft}
+          {/* `relative`: useScrollSpy.jumpTo measures offsetTop against this box. */}
+          <div
+            ref={scrollRef}
+            className="relative flex-1 min-h-0 overflow-y-auto px-6 py-5"
+          >
+            <IdentitySection
+              name={name}
+              setName={setName}
+              color={color}
+              setColor={setColor}
+              showColors={showColors}
+              setShowColors={setShowColors}
+              letter={letter}
+              identityLine={identityLine}
+              draftedBy={draftedBy}
+              touched={touched}
+              setTouched={setTouched}
             />
-          )}
 
-          <RuntimeSection
-            cliKind={cliKind}
-            selectCliKind={selectCliKind}
-            isClaudeCode={isClaudeCode}
-            isCodex={isCodex}
-            isAntigravity={isAntigravity}
-            showCliConfig={showCliConfig}
-            cliAvailability={cliAvailability}
-            checkAntigravityAvailability={() => void checkAntigravityAvailability()}
-            openAntigravityInstallGuide={() => void openAntigravityInstallGuide()}
-            modelCatalog={modelCatalog}
-            loadAntigravityModels={() => void loadAntigravityModels()}
-            catalogModels={catalogModels}
-            savedModelUnlisted={savedModelUnlisted}
-            model={model}
-            setModel={setModel}
-            modelPresets={modelPresets}
-            selectModelPreset={selectModelPreset}
-            effort={effort}
-            setEffort={setEffort}
-            permissionMode={permissionMode}
-            setPermissionMode={setPermissionMode}
-            setPermissionModeDirty={setPermissionModeDirty}
-            contextWindow={contextWindow}
-            setContextWindow={setContextWindow}
-            rtkEnabled={rtkEnabled}
-            setRtkEnabled={setRtkEnabled}
-            customArgs={customArgs}
-            setCustomArgs={setCustomArgs}
-            useCustomEnv={useCustomEnv}
-            setUseCustomEnv={setUseCustomEnv}
-            envText={envText}
-            setEnvText={setEnvText}
-            advancedInitiallyOpen={Boolean(initialDef?.customArgs) || useCustomEnv}
-          />
+            <RoleLevelSection
+              orderedRoles={orderedRoles}
+              selectedRole={selectedRole}
+              roleId={roleId}
+              selectRole={selectRole}
+              clearRole={() => {
+                applyRoleTransition(roleId);
+                setRoleId("");
+                setCustomRoleOpen(false);
+              }}
+              openCustomRole={() => {
+                applyRoleTransition(roleId);
+                setCustomRoleOpen(true);
+                setRoleId("");
+              }}
+              customRoleOpen={customRoleOpen}
+              customRoleName={customRoleName}
+              setCustomRoleName={setCustomRoleName}
+              customRoleDesc={customRoleDesc}
+              setCustomRoleDesc={setCustomRoleDesc}
+              customRoleSkillIds={customRoleSkillIds}
+              setCustomRoleSkillIds={setCustomRoleSkillIds}
+              cancelCustomRole={() => {
+                setCustomRoleOpen(false);
+                setCustomRoleName("");
+                setCustomRoleDesc("");
+                setCustomRoleSkillIds([]);
+              }}
+              handleCreateCustomRole={() => void handleCreateCustomRole()}
+              savingRole={savingRole}
+              allSkills={allSkills}
+              attachSkillNames={attachSkillNames}
+              mandatorySkillNames={mandatorySkillNames}
+              defaultLevel={defaultLevelDraft}
+              setDefaultLevel={setDefaultLevelDraft}
+            />
 
-          <SkillsSection allSkills={allSkills} skillIds={skillIds} setSkillIds={setSkillIds} />
+            <RuntimeSection
+              cliKind={cliKind}
+              selectCliKind={selectCliKind}
+              isClaudeCode={isClaudeCode}
+              isCodex={isCodex}
+              isAntigravity={isAntigravity}
+              showCliConfig={showCliConfig}
+              cliAvailability={cliAvailability}
+              checkAntigravityAvailability={() =>
+                void checkAntigravityAvailability()
+              }
+              openAntigravityInstallGuide={() =>
+                void openAntigravityInstallGuide()
+              }
+              modelCatalog={modelCatalog}
+              loadAntigravityModels={() => void loadAntigravityModels()}
+              catalogModels={catalogModels}
+              savedModelUnlisted={savedModelUnlisted}
+              model={model}
+              setModel={setModel}
+              modelPresets={modelPresets}
+              selectModelPreset={selectModelPreset}
+              effort={effort}
+              setEffort={setEffort}
+              permissionMode={permissionMode}
+              setPermissionMode={setPermissionMode}
+              setPermissionModeDirty={setPermissionModeDirty}
+              contextWindow={contextWindow}
+              setContextWindow={setContextWindow}
+              rtkEnabled={rtkEnabled}
+              setRtkEnabled={setRtkEnabled}
+              customArgs={customArgs}
+              setCustomArgs={setCustomArgs}
+              useCustomEnv={useCustomEnv}
+              setUseCustomEnv={setUseCustomEnv}
+              envText={envText}
+              setEnvText={setEnvText}
+              advancedInitiallyOpen={
+                Boolean(initialDef?.customArgs) || useCustomEnv
+              }
+            />
 
-          {/* Error */}
-          {error && (
-            <p className="text-[12px] text-danger px-1">{error}</p>
-          )}
+            <SkillsSection
+              allSkills={allSkills}
+              skillIds={skillIds}
+              setSkillIds={setSkillIds}
+            />
+
+            {positionEnabled && (
+              <PositionSection
+                scopedAgent={scopedAgent!}
+                positionRoster={positionRoster}
+                supervisorOptions={supervisorOptions}
+                previewRoster={previewRoster}
+                previewChainIds={previewChainIds}
+                trackLabel={trackLabel}
+                levelDraft={levelDraft}
+                setLevelDraft={setLevelDraft}
+                supervisorDraft={supervisorDraft}
+                setSupervisorDraft={setSupervisorDraft}
+              />
+            )}
+
+            {/* Error */}
+            {error && (
+              <p className="mt-4 px-1 text-[12px] text-danger">{error}</p>
+            )}
+          </div>
         </div>
 
         {/* ── Footer actions ── */}
-        <div className="border-t border-overlay/[0.07] px-5 py-2.5 bg-surface shrink-0 flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="text-[12.5px] font-medium text-text-secondary px-3.5 py-1.5 rounded-lg hover:bg-overlay/[0.05]"
+        <div className="border-t border-overlay/[0.07] px-5 py-2.5 bg-surface shrink-0 flex items-center justify-between gap-3">
+          <span
+            aria-live="polite"
+            className={`text-[11.5px] ${blockerIsDanger(blocker) ? "text-danger" : "text-text-tertiary"}`}
           >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || antigravitySaveBlocked}
-            className="text-[12.5px] font-semibold text-white bg-accent px-4 py-1.5 rounded-lg hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-45 flex items-center gap-1.5"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            {saving
-              ? "Saving…"
-              : cliAvailability.state === "checking" && isAntigravity
-                ? "Checking agy…"
-                : cliAvailability.state === "missing" && isAntigravity
-                  ? "Install agy to continue"
-                  : isEditing
-                    ? "Save changes"
-                    : "Create agent"}
-          </button>
+            {blocker ?? readyLabel(readinessInput)}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="text-[12.5px] font-medium text-text-secondary px-3.5 py-1.5 rounded-lg hover:bg-overlay/[0.05]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || blocker !== null || antigravitySaveBlocked}
+              className="text-[12.5px] font-semibold text-white bg-accent px-4 py-1.5 rounded-lg hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-45 flex items-center gap-1.5"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              {saving
+                ? "Saving…"
+                : cliAvailability.state === "checking" && isAntigravity
+                  ? "Checking agy…"
+                  : cliAvailability.state === "missing" && isAntigravity
+                    ? "Install agy to continue"
+                    : isEditing
+                      ? "Save changes"
+                      : "Create agent"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

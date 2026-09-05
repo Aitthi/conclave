@@ -17,7 +17,13 @@ interface SectionProps {
   children: ReactNode;
 }
 
-export function Section({ id, title, actions, first = false, children }: SectionProps) {
+export function Section({
+  id,
+  title,
+  actions,
+  first = false,
+  children,
+}: SectionProps) {
   return (
     <section
       {...{ [SECTION_ATTR]: id }}

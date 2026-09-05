@@ -13,11 +13,16 @@ interface SkillsSectionProps {
   setSkillIds: Dispatch<SetStateAction<string[]>>;
 }
 
-export function SkillsSection({ allSkills, skillIds, setSkillIds }: SkillsSectionProps) {
+export function SkillsSection({
+  allSkills,
+  skillIds,
+  setSkillIds,
+}: SkillsSectionProps) {
   return (
     <Section id="skills" title="Skills">
       <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
-        {allSkills.filter((s) => s.kind === "builtin" && s.mandatory).length > 0 && (
+        {allSkills.filter((s) => s.kind === "builtin" && s.mandatory).length >
+          0 && (
           <div className="px-3 py-2">
             <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
               System skills — always on
@@ -36,7 +41,8 @@ export function SkillsSection({ allSkills, skillIds, setSkillIds }: SkillsSectio
             </div>
           </div>
         )}
-        {allSkills.filter((s) => s.kind === "builtin" && !s.mandatory).length > 0 && (
+        {allSkills.filter((s) => s.kind === "builtin" && !s.mandatory).length >
+          0 && (
           <div className="px-3 py-2">
             <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
               System skills — optional
@@ -56,7 +62,9 @@ export function SkillsSection({ allSkills, skillIds, setSkillIds }: SkillsSectio
                         checked={checked}
                         onChange={(e) =>
                           setSkillIds((prev) =>
-                            e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
+                            e.target.checked
+                              ? [...prev, s.id]
+                              : prev.filter((id) => id !== s.id),
                           )
                         }
                       />
@@ -91,7 +99,9 @@ export function SkillsSection({ allSkills, skillIds, setSkillIds }: SkillsSectio
                         checked={checked}
                         onChange={(e) =>
                           setSkillIds((prev) =>
-                            e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
+                            e.target.checked
+                              ? [...prev, s.id]
+                              : prev.filter((id) => id !== s.id),
                           )
                         }
                       />

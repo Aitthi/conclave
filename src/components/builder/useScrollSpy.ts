@@ -74,7 +74,10 @@ export function useScrollSpy(
       const root = containerRef.current;
       const el = root?.querySelector<HTMLElement>(`[${SECTION_ATTR}="${id}"]`);
       if (!root || !el) return;
-      root.scrollTo({ top: Math.max(0, el.offsetTop - JUMP_OFFSET), behavior: "smooth" });
+      root.scrollTo({
+        top: Math.max(0, el.offsetTop - JUMP_OFFSET),
+        behavior: "smooth",
+      });
       setActiveId(id);
     },
     [containerRef],
