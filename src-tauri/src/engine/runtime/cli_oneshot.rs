@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 #[cfg(test)]
 use super::launch_common::prefix_conclave_path_with;
 use super::launch_common::{prefix_conclave_path, shell_quote};
-use super::usage::{counter, MeasuredUsage};
+use super::usage::{checked_sum, counter_tracked, MeasuredUsage};
 use crate::engine::commands::fusion::strip_code_fences;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,19 +260,21 @@ impl Oneshot {
 /// leaves it unknown, per the multi-attempt rule.
 pub fn claude_envelope_usage(envelope: &Value) -> (OneshotUsage, Option<String>, Option<String>) {
     let usage = &envelope["usage"];
-    let uncached = counter(&usage["input_tokens"]);
-    let cache_write = counter(&usage["cache_creation_input_tokens"]);
-    let cache_read = counter(&usage["cache_read_input_tokens"]);
-    let input_tokens = match (uncached, cache_write, cache_read) {
-        (Some(a), Some(b), Some(c)) => a.checked_add(b).and_then(|ab| ab.checked_add(c)),
-        _ => None,
-    };
+    let mut invalid = 0;
+    let uncached = counter_tracked(&usage["input_tokens"], &mut invalid);
+    let cache_write = counter_tracked(&usage["cache_creation_input_tokens"], &mut invalid);
+    let cache_read = counter_tracked(&usage["cache_read_input_tokens"], &mut invalid);
+    let input_tokens = checked_sum(&[uncached, cache_write, cache_read], &mut invalid);
     let normalized = OneshotUsage {
         input_tokens,
-        output_tokens: counter(&usage["output_tokens"]),
+        output_tokens: counter_tracked(&usage["output_tokens"], &mut invalid),
         cache_read_input_tokens: cache_read,
         cache_write_input_tokens: cache_write,
-        reasoning_output_tokens: counter(&usage["output_tokens_details"]["thinking_tokens"]),
+        reasoning_output_tokens: counter_tracked(
+            &usage["output_tokens_details"]["thinking_tokens"],
+            &mut invalid,
+        ),
+        invalid_counters: invalid,
     };
     let served_model = envelope["modelUsage"].as_object().and_then(|models| {
         if models.len() != 1 {
@@ -322,13 +324,26 @@ pub fn codex_turn_usage(stdout: &str) -> (OneshotUsage, Option<String>) {
         }
     }
     let usage = match completed.as_slice() {
-        [usage] if usage.is_object() => OneshotUsage {
-            input_tokens: counter(&usage["input_tokens"]),
-            output_tokens: counter(&usage["output_tokens"]),
-            cache_read_input_tokens: counter(&usage["cached_input_tokens"]),
-            cache_write_input_tokens: counter(&usage["cache_write_input_tokens"]),
-            reasoning_output_tokens: counter(&usage["reasoning_output_tokens"]),
-        },
+        [usage] if usage.is_object() => {
+            let mut invalid = 0;
+            OneshotUsage {
+                input_tokens: counter_tracked(&usage["input_tokens"], &mut invalid),
+                output_tokens: counter_tracked(&usage["output_tokens"], &mut invalid),
+                cache_read_input_tokens: counter_tracked(
+                    &usage["cached_input_tokens"],
+                    &mut invalid,
+                ),
+                cache_write_input_tokens: counter_tracked(
+                    &usage["cache_write_input_tokens"],
+                    &mut invalid,
+                ),
+                reasoning_output_tokens: counter_tracked(
+                    &usage["reasoning_output_tokens"],
+                    &mut invalid,
+                ),
+                invalid_counters: invalid,
+            }
+        }
         _ => OneshotUsage::default(),
     };
     (usage, thread_id)
@@ -614,11 +629,32 @@ mod tests {
 
         let mut negative = recorded_claude_envelope();
         negative["usage"]["output_tokens"] = json!(-1);
-        assert_eq!(claude_envelope_usage(&negative).0.output_tokens, None);
+        let (usage, _, _) = claude_envelope_usage(&negative);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(
+            usage.invalid_counters, 1,
+            "a reported nonsense value is evidence"
+        );
 
         let mut fractional = recorded_claude_envelope();
         fractional["usage"]["output_tokens"] = json!(12.5);
-        assert_eq!(claude_envelope_usage(&fractional).0.output_tokens, None);
+        assert_eq!(claude_envelope_usage(&fractional).0.invalid_counters, 1);
+        assert_eq!(
+            claude_envelope_usage(&recorded_claude_envelope())
+                .0
+                .invalid_counters,
+            0
+        );
+        let mut absent = recorded_claude_envelope();
+        absent["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_tokens");
+        assert_eq!(
+            claude_envelope_usage(&absent).0.invalid_counters,
+            0,
+            "absent is plain unknown, not invalid"
+        );
 
         let (usage, served, session) = claude_envelope_usage(&json!({"type": "result"}));
         assert_eq!(usage, OneshotUsage::default());

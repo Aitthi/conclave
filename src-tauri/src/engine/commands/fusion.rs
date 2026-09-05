@@ -95,6 +95,8 @@ impl ModelCaller {
         model: &str,
         prompt: &str,
     ) -> Result<ProviderCompletion, String> {
+        // (The caller minted this call's operation id BEFORE invoking us; see
+        // `FusionCall::operation_id`.)
         match self {
             ModelCaller::Live => {
                 let p = crate::engine::runtime::provider::Provider::from_config(provider_id)
@@ -143,6 +145,9 @@ struct RunScope {
 
 /// One provider call of a run, as the usage collector sees it.
 struct FusionCall<'a> {
+    /// Minted BEFORE the provider was called, so the identity exists whether
+    /// or not the call completes and a replay reuses it (review C8).
+    operation_id: &'a str,
     run_id: &'a str,
     /// `panel` / `judge` / `synthesize`.
     stage: &'a str,
@@ -169,11 +174,10 @@ async fn record_fusion_call(db: &SqlitePool, scope: &RunScope, call: &FusionCall
     if !call.completion.completed {
         return;
     }
-    let operation_id = uuid::Uuid::new_v4().to_string();
     let attribution = format!("{}:{}:{}", call.run_id, call.stage, call.ordinal);
     let event = CollectedEvent {
         source_kind: SOURCE_FUSION,
-        operation_id: &operation_id,
+        operation_id: call.operation_id,
         event_kind: "response",
         workspace_id: Some(&scope.workspace_id),
         workspace_agent_id: Some(call.instance_id),
@@ -379,10 +383,11 @@ async fn run_pipeline(
     // 6. Panel fan-out (concurrent). The futures borrow `caller` / `prompt`
     //    immutably (`&self`) — safe to run in parallel.
     let calls = panel.iter().map(|m| async move {
+        let operation_id = uuid::Uuid::new_v4().to_string();
         let res = caller
             .call(m.provider_id.as_deref(), &m.model, prompt)
             .await;
-        (m, res, chrono::Utc::now())
+        (m, res, chrono::Utc::now(), operation_id)
     });
     let results = futures_util::future::join_all(calls).await;
 
@@ -392,12 +397,13 @@ async fn run_pipeline(
     // as an orphan with NULL judge/synthesis. The successful answer is still fed
     // to the judge even if its row failed to persist.
     let mut answers: Vec<(String, String)> = Vec::new();
-    for (ordinal, (member, res, completed_at)) in results.into_iter().enumerate() {
+    for (ordinal, (member, res, completed_at, operation_id)) in results.into_iter().enumerate() {
         if let Ok(completion) = &res {
             record_fusion_call(
                 db,
                 scope,
                 &FusionCall {
+                    operation_id: &operation_id,
                     run_id: &run_id,
                     stage: "panel",
                     ordinal,
@@ -437,6 +443,7 @@ async fn run_pipeline(
 
     // 7. Judge: analyze the successful answers into structured JSON.
     let judge_prompt = build_judge_prompt(prompt, &answers);
+    let judge_operation = uuid::Uuid::new_v4().to_string();
     let judge_call = caller
         .call(judge_ref.0.as_deref(), &judge_ref.1, &judge_prompt)
         .await;
@@ -445,6 +452,7 @@ async fn run_pipeline(
             db,
             scope,
             &FusionCall {
+                operation_id: &judge_operation,
                 run_id: &run_id,
                 stage: "judge",
                 ordinal: 0,
@@ -469,6 +477,7 @@ async fn run_pipeline(
 
     // 8. Synthesize: one final answer from the panel + judge analysis.
     let synth_prompt = build_synthesis_prompt(prompt, &answers, &analysis_str);
+    let synth_operation = uuid::Uuid::new_v4().to_string();
     let synth_call = caller
         .call(judge_ref.0.as_deref(), &judge_ref.1, &synth_prompt)
         .await;
@@ -477,6 +486,7 @@ async fn run_pipeline(
             db,
             scope,
             &FusionCall {
+                operation_id: &synth_operation,
                 run_id: &run_id,
                 stage: "synthesize",
                 ordinal: 0,

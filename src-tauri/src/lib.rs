@@ -95,18 +95,20 @@ pub fn run() {
         .menu(menu::build)
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .manage(std::sync::Arc::new(AppState::new()))
-        // The in-process usage collectors (draft, chat, fusion) observe every
-        // call this process makes; stamping the instant they came online is
-        // what lets them claim honest coverage from here on.
-        .setup(|_app| {
-            engine::runtime::usage::mark_collectors_online();
-            Ok(())
-        })
+        // ONE setup closure: Tauri's Builder::setup REPLACES a previously
+        // registered callback rather than chaining it, so every startup step
+        // lives in this single body (review a12f77f2 C1).
         .setup(|app| {
             // Wire the AppHandle into AppState so that bus::emit helpers and
             // state.emit(...) can push events to the UI from any async context.
             let state = app.state::<std::sync::Arc<AppState>>();
             state.set_app(app.handle().clone());
+
+            // The in-process usage collectors (draft, chat, fusion) observe
+            // every call this process makes; stamping the instant they came
+            // online is what lets them claim honest coverage from here on.
+            // Production only — the test AppState never reaches this closure.
+            engine::runtime::usage::mark_collectors_online();
 
             // Spawn the Unix-Domain-Socket server (unix only): a second
             // front-door onto the same command router the GUI uses. Cloning the

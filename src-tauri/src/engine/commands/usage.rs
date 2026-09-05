@@ -127,7 +127,10 @@ pub(crate) async fn record_collected_event(
         cache_write_input_tokens: event.usage.cache_write_input_tokens,
         reasoning_output_tokens: event.usage.reasoning_output_tokens,
         validity: "valid".to_owned(),
-        diagnostic_code: None,
+        // A source that reported nonsense counters leaves its mark here;
+        // insert_event's own range check stamps the same code for values that
+        // parsed but exceed the ceiling.
+        diagnostic_code: event.usage.diagnostic_code().map(str::to_owned),
     };
     let mut tx = db.begin().await?;
     model_usage::insert_event(&mut *tx, &row).await?;

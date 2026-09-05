@@ -57,13 +57,60 @@ pub struct MeasuredUsage {
     pub cache_read_input_tokens: Option<i64>,
     pub cache_write_input_tokens: Option<i64>,
     pub reasoning_output_tokens: Option<i64>,
+    /// How many counters the source DID report but in a shape that cannot be
+    /// a measurement (negative, fractional, non-numeric, or an overflowing
+    /// sum). Distinct from a counter the source never reported: absent stays
+    /// plain unknown, invalid is evidence of a damaged observation and is
+    /// stamped on the event as `counter_out_of_range` (review a12f77f2 C7).
+    pub invalid_counters: u32,
+}
+
+impl MeasuredUsage {
+    /// Diagnostic to stamp on the event, if any counter was invalid.
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        (self.invalid_counters > 0)
+            .then_some(crate::engine::repo::model_usage::COUNTER_OUT_OF_RANGE)
+    }
 }
 
 /// A non-negative integer counter, or `None` for anything else (absent,
 /// negative, fractional, a string). Strictness is the point: a value this
-/// function cannot vouch for is unknown, not zero.
+/// function cannot vouch for is unknown, not zero. Prefer
+/// [`counter_tracked`] wherever the distinction between absent and invalid
+/// must survive.
 pub fn counter(value: &serde_json::Value) -> Option<i64> {
     value.as_i64().filter(|n| *n >= 0)
+}
+
+/// [`counter`] that also COUNTS an invalid value: present but not a
+/// non-negative integer bumps `invalid`; an absent (`null`/missing) value does
+/// not.
+pub fn counter_tracked(value: &serde_json::Value, invalid: &mut u32) -> Option<i64> {
+    if value.is_null() {
+        return None;
+    }
+    let parsed = counter(value);
+    if parsed.is_none() {
+        *invalid += 1;
+    }
+    parsed
+}
+
+/// Checked sum of counters that are all present; an overflow is an invalid
+/// counter, a missing component is plain unknown.
+pub fn checked_sum(parts: &[Option<i64>], invalid: &mut u32) -> Option<i64> {
+    let mut total: i64 = 0;
+    for part in parts {
+        let Some(value) = part else { return None };
+        match total.checked_add(*value) {
+            Some(t) => total = t,
+            None => {
+                *invalid += 1;
+                return None;
+            }
+        }
+    }
+    Some(total)
 }
 
 // ── Provider identity ────────────────────────────────────────────────────────
@@ -118,6 +165,36 @@ mod tests {
         assert_eq!(counter(&json!(12.5)), None);
         assert_eq!(counter(&json!("42")), None);
         assert_eq!(counter(&json!(null)), None);
+    }
+
+    #[test]
+    fn tracked_counters_separate_absent_from_invalid() {
+        use serde_json::json;
+        let mut invalid = 0;
+        assert_eq!(counter_tracked(&json!(7), &mut invalid), Some(7));
+        assert_eq!(counter_tracked(&json!(null), &mut invalid), None);
+        assert_eq!(counter_tracked(&json!({})["missing"], &mut invalid), None);
+        assert_eq!(invalid, 0, "absent is not invalid");
+        assert_eq!(counter_tracked(&json!(-3), &mut invalid), None);
+        assert_eq!(counter_tracked(&json!(1.5), &mut invalid), None);
+        assert_eq!(counter_tracked(&json!("9"), &mut invalid), None);
+        assert_eq!(invalid, 3);
+
+        let mut invalid = 0;
+        assert_eq!(
+            checked_sum(&[Some(1), Some(2), Some(3)], &mut invalid),
+            Some(6)
+        );
+        assert_eq!(checked_sum(&[Some(1), None, Some(3)], &mut invalid), None);
+        assert_eq!(invalid, 0, "a missing component is unknown, not invalid");
+        assert_eq!(checked_sum(&[Some(i64::MAX), Some(1)], &mut invalid), None);
+        assert_eq!(invalid, 1, "an overflowing sum is invalid");
+        let damaged = MeasuredUsage {
+            invalid_counters: 1,
+            ..MeasuredUsage::default()
+        };
+        assert_eq!(damaged.diagnostic_code(), Some("counter_out_of_range"));
+        assert_eq!(MeasuredUsage::default().diagnostic_code(), None);
     }
 
     #[test]

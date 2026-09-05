@@ -23,7 +23,7 @@
 //! chat loop through the `#[cfg(test)] Provider::Mock` variant, which yields
 //! canned deltas without any network I/O.
 
-use super::usage::{counter, MeasuredUsage};
+use super::usage::{checked_sum, counter_tracked, MeasuredUsage};
 use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
@@ -356,6 +356,11 @@ trait SseAccumulator {
     fn ingest(&mut self, payload: &str) -> Option<String>;
     /// The `[DONE]` sentinel arrived.
     fn done(&mut self);
+    /// Has the provider's terminal marker been accepted? Once true the body
+    /// is not read further: a tail transport failure or a server that keeps
+    /// the connection open must not lose or delay a completed response
+    /// (review a12f77f2 C8).
+    fn is_terminal(&self) -> bool;
     /// The completion as seen so far, `text` being the accumulated deltas.
     fn finish(&self, text: String) -> ProviderCompletion;
 }
@@ -373,6 +378,7 @@ struct AnthropicAcc {
     cache_write: Option<i64>,
     cache_read: Option<i64>,
     output: Option<i64>,
+    invalid: u32,
     stopped: bool,
 }
 
@@ -385,14 +391,18 @@ impl SseAccumulator for AnthropicAcc {
                 self.response_id = message["id"].as_str().map(str::to_owned);
                 self.served_model = message["model"].as_str().map(str::to_owned);
                 let usage = &message["usage"];
-                self.uncached_input = counter(&usage["input_tokens"]);
-                self.cache_write = counter(&usage["cache_creation_input_tokens"]);
-                self.cache_read = counter(&usage["cache_read_input_tokens"]);
+                self.uncached_input = counter_tracked(&usage["input_tokens"], &mut self.invalid);
+                self.cache_write =
+                    counter_tracked(&usage["cache_creation_input_tokens"], &mut self.invalid);
+                self.cache_read =
+                    counter_tracked(&usage["cache_read_input_tokens"], &mut self.invalid);
                 None
             }
             "message_delta" => {
                 // Cumulative for the whole message; the last one wins.
-                if let Some(output) = counter(&v["usage"]["output_tokens"]) {
+                if let Some(output) =
+                    counter_tracked(&v["usage"]["output_tokens"], &mut self.invalid)
+                {
                     self.output = Some(output);
                 }
                 None
@@ -410,11 +420,16 @@ impl SseAccumulator for AnthropicAcc {
         // Anthropic has no `[DONE]` sentinel; only `message_stop` completes.
     }
 
+    fn is_terminal(&self) -> bool {
+        self.stopped
+    }
+
     fn finish(&self, text: String) -> ProviderCompletion {
-        let input_tokens = match (self.uncached_input, self.cache_write, self.cache_read) {
-            (Some(a), Some(b), Some(c)) => a.checked_add(b).and_then(|ab| ab.checked_add(c)),
-            _ => None,
-        };
+        let mut invalid = self.invalid;
+        let input_tokens = checked_sum(
+            &[self.uncached_input, self.cache_write, self.cache_read],
+            &mut invalid,
+        );
         ProviderCompletion {
             text,
             completed: self.stopped,
@@ -426,6 +441,7 @@ impl SseAccumulator for AnthropicAcc {
                 cache_read_input_tokens: self.cache_read,
                 cache_write_input_tokens: self.cache_write,
                 reasoning_output_tokens: None,
+                invalid_counters: invalid,
             },
         }
     }
@@ -458,14 +474,20 @@ impl SseAccumulator for OpenAiAcc {
                 .map(str::to_owned);
         }
         if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
+            let mut invalid = 0;
             self.usage = MeasuredUsage {
-                input_tokens: counter(&usage["prompt_tokens"]),
-                output_tokens: counter(&usage["completion_tokens"]),
-                cache_read_input_tokens: counter(&usage["prompt_tokens_details"]["cached_tokens"]),
-                cache_write_input_tokens: None,
-                reasoning_output_tokens: counter(
-                    &usage["completion_tokens_details"]["reasoning_tokens"],
+                input_tokens: counter_tracked(&usage["prompt_tokens"], &mut invalid),
+                output_tokens: counter_tracked(&usage["completion_tokens"], &mut invalid),
+                cache_read_input_tokens: counter_tracked(
+                    &usage["prompt_tokens_details"]["cached_tokens"],
+                    &mut invalid,
                 ),
+                cache_write_input_tokens: None,
+                reasoning_output_tokens: counter_tracked(
+                    &usage["completion_tokens_details"]["reasoning_tokens"],
+                    &mut invalid,
+                ),
+                invalid_counters: invalid,
             };
         }
         openai_text_delta(payload)
@@ -473,6 +495,10 @@ impl SseAccumulator for OpenAiAcc {
 
     fn done(&mut self) {
         self.done = true;
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.done
     }
 
     fn finish(&self, text: String) -> ProviderCompletion {
@@ -639,6 +665,12 @@ async fn consume_sse<A: SseAccumulator>(
                     return Ok(completion);
                 }
             }
+            if acc.is_terminal() {
+                // The response is complete: stop reading. Whatever the
+                // transport does after this point cannot take it back or
+                // hold it hostage.
+                return Ok(acc.finish(text));
+            }
         }
     }
 
@@ -764,8 +796,59 @@ mod tests {
             if let Some(delta) = ingest_line(&mut acc, line) {
                 text.push_str(&delta);
             }
+            if acc.is_terminal() {
+                break; // exactly what consume_sse does
+            }
         }
         acc.finish(text)
+    }
+
+    /// Once the terminal marker is accepted the rest of the body is ignored:
+    /// a garbage or error tail after `message_stop` / `[DONE]` neither
+    /// retracts the completion nor changes its numbers (review C8).
+    #[test]
+    fn a_tail_after_the_terminal_marker_cannot_touch_the_completion() {
+        let mut lines: Vec<&str> = ANTHROPIC_STREAM.to_vec();
+        lines.push(r#"data: {"type":"message_delta","usage":{"output_tokens":-999}}"#);
+        lines.push("data: this is not json");
+        let c = run_lines(AnthropicAcc::default(), &lines);
+        assert!(c.completed);
+        assert_eq!(c.usage.output_tokens, Some(15));
+        assert_eq!(c.usage.invalid_counters, 0);
+
+        let mut lines: Vec<&str> = OPENAI_STREAM.to_vec();
+        lines.push(r#"data: {"id":"x","choices":[{"delta":{"content":"LATE"}}]}"#);
+        let c = run_lines(OpenAiAcc::default(), &lines);
+        assert!(c.completed);
+        assert_eq!(c.text, "Hello", "nothing after [DONE] is text");
+    }
+
+    /// A provider that reports nonsense counters leaves evidence, a provider
+    /// that omits them does not (review C7).
+    #[test]
+    fn invalid_provider_counters_are_evidence_and_absent_ones_are_not() {
+        let lines = [
+            r#"data: {"type":"message_start","message":{"id":"m","model":"claude-opus-5","usage":{"input_tokens":-1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3.5}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        let c = run_lines(AnthropicAcc::default(), &lines);
+        assert!(c.completed);
+        assert_eq!(c.usage.input_tokens, None);
+        assert_eq!(c.usage.output_tokens, None);
+        assert_eq!(c.usage.invalid_counters, 2);
+        assert_eq!(c.usage.diagnostic_code(), Some("counter_out_of_range"));
+
+        let absent = [
+            r#"data: {"type":"message_start","message":{"id":"m","model":"claude-opus-5"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        let c = run_lines(AnthropicAcc::default(), &absent);
+        assert_eq!(
+            c.usage.invalid_counters, 0,
+            "never reported is plain unknown"
+        );
+        assert_eq!(c.usage.diagnostic_code(), None);
     }
 
     const ANTHROPIC_STREAM: &[&str] = &[

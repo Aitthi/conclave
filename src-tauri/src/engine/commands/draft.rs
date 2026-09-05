@@ -1521,6 +1521,7 @@ pub(crate) mod tests {
                 cache_read_input_tokens: Some(0),
                 cache_write_input_tokens: Some(31_061),
                 reasoning_output_tokens: Some(2_489),
+                invalid_counters: 0,
             },
             completed_at: chrono::Utc::now(),
         }

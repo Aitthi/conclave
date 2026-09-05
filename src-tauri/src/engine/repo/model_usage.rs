@@ -483,6 +483,8 @@ pub struct StoredIdentity {
     pub served_model: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
     pub validity: String,
 }
 
@@ -495,12 +497,36 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query_as(
-        "SELECT source_response_id, served_model, input_tokens, output_tokens, validity
+        "SELECT source_response_id, served_model, input_tokens, output_tokens,
+                cache_read_input_tokens, cache_write_input_tokens, validity
            FROM model_usage_event WHERE event_key = ?1",
     )
     .bind(event_key)
     .fetch_optional(executor)
     .await
+}
+
+/// Move an event's `occurred_at` FORWARD to `at` when a later agreeing source
+/// row proves the response completed later than first recorded (a Claude
+/// request group completes at its last block). Never moves it backwards.
+pub async fn advance_occurred_at<'e, E>(
+    executor: E,
+    event_key: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> sqlx::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let at = canonical_ts(at);
+    sqlx::query(
+        "UPDATE model_usage_event SET occurred_at = ?2
+          WHERE event_key = ?1 AND occurred_at < ?2",
+    )
+    .bind(event_key)
+    .bind(at)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Mark an already-stored event as conflicting. It remains one activity; only

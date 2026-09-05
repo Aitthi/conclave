@@ -1395,12 +1395,12 @@ async fn record_chat_turns(
             generation: i64::try_from(epoch).ok(),
             source_session_id: None,
             source_request_id: None,
-            source_response_id: record.completion.response_id.as_deref(),
+            source_response_id: record.response_id.as_deref(),
             occurred_at: record.completed_at,
             provider: provider_id.as_deref(),
             requested_model: Some(&record.requested_model),
-            served_model: record.completion.served_model.as_deref(),
-            usage: &record.completion.usage,
+            served_model: record.served_model.as_deref(),
+            usage: &record.usage,
         };
         if let Err(e) = super::usage::record_collected_event(&db, &event).await {
             eprintln!(
@@ -5254,7 +5254,6 @@ mod tests {
     #[tokio::test]
     async fn chat_turn_records_become_attributed_usage_events() {
         use crate::engine::runtime::chat::ChatTurnRecord;
-        use crate::engine::runtime::provider::ProviderCompletion;
         use crate::engine::runtime::usage::MeasuredUsage;
 
         let state = AppState::for_tests().await;
@@ -5284,18 +5283,15 @@ mod tests {
             requested_model: "claude-opus-5".into(),
             started_at: at,
             completed_at: at,
-            completion: ProviderCompletion {
-                text: "hello".into(),
-                completed: true,
-                response_id: Some("msg_01".into()),
-                served_model: Some("claude-opus-5".into()),
-                usage: MeasuredUsage {
-                    input_tokens: Some(1_425),
-                    output_tokens: Some(15),
-                    cache_read_input_tokens: Some(400),
-                    cache_write_input_tokens: Some(1_000),
-                    reasoning_output_tokens: None,
-                },
+            response_id: Some("msg_01".into()),
+            served_model: Some("claude-opus-5".into()),
+            usage: MeasuredUsage {
+                input_tokens: Some(1_425),
+                output_tokens: Some(15),
+                cache_read_input_tokens: Some(400),
+                cache_write_input_tokens: Some(1_000),
+                reasoning_output_tokens: None,
+                invalid_counters: 0,
             },
         })
         .unwrap();

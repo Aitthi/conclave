@@ -21,6 +21,7 @@
 //!   channels) for an immediate teardown without waiting on an in-flight stream.
 
 use super::provider::{ChatMessage, ChatRole, Provider, ProviderCompletion};
+use super::usage::MeasuredUsage;
 use super::LiveHandle;
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
@@ -29,9 +30,11 @@ use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 ///
 /// Sent only for a completion whose provider terminal marker arrived
 /// (`ProviderCompletion::completed`): a provider error, a dropped receiver or
-/// an early EOF is not completed activity and produces no record. Carries no
-/// prompt or answer text — the collector persists identity and counts only.
-#[derive(Debug, Clone, PartialEq)]
+/// an early EOF is not completed activity and produces no record. Carries NO
+/// prompt or answer text — only identity and counts, so the unbounded observer
+/// queue holds bytes of metadata, never a copy of the conversation (review
+/// a12f77f2 C8).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTurnRecord {
     /// Generated BEFORE the request went out; the collector keys the event by
     /// it, so a late provider id can never change the identity.
@@ -39,7 +42,28 @@ pub struct ChatTurnRecord {
     pub requested_model: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
-    pub completion: ProviderCompletion,
+    pub response_id: Option<String>,
+    pub served_model: Option<String>,
+    pub usage: MeasuredUsage,
+}
+
+impl ChatTurnRecord {
+    fn from_completion(
+        operation_id: String,
+        requested_model: &str,
+        started_at: DateTime<Utc>,
+        completion: &ProviderCompletion,
+    ) -> Self {
+        Self {
+            operation_id,
+            requested_model: requested_model.to_owned(),
+            started_at,
+            completed_at: Utc::now(),
+            response_id: completion.response_id.clone(),
+            served_model: completion.served_model.clone(),
+            usage: completion.usage.clone(),
+        }
+    }
 }
 
 /// Bound on buffered output chunks, mirroring [`super::pty`]. The provider
@@ -101,13 +125,12 @@ pub fn spawn_chat_observed(
                 Ok(completion) => {
                     if completion.completed {
                         if let Some(observer) = &observer {
-                            let _ = observer.send(ChatTurnRecord {
+                            let _ = observer.send(ChatTurnRecord::from_completion(
                                 operation_id,
-                                requested_model: model.clone(),
+                                &model,
                                 started_at,
-                                completed_at: Utc::now(),
-                                completion: completion.clone(),
-                            });
+                                &completion,
+                            ));
                         }
                     }
                     history.push(ChatMessage {
@@ -206,9 +229,8 @@ mod tests {
     /// terminal marker never arrived is not reported.
     #[tokio::test]
     async fn observer_receives_completed_turns_only() {
-        use crate::engine::runtime::usage::MeasuredUsage;
         let completion = ProviderCompletion {
-            text: "ok".into(),
+            text: "THE-ANSWER-TEXT".into(),
             completed: true,
             response_id: Some("msg_1".into()),
             served_model: Some("m-served".into()),
@@ -230,14 +252,20 @@ mod tests {
         assert!(rt.register("inst-1", backend.handle).is_some());
 
         rt.send_stdin("inst-1", "one").expect("send 1");
-        assert_eq!(output_rx.recv().await.as_deref(), Some("ok"));
+        assert_eq!(output_rx.recv().await.as_deref(), Some("THE-ANSWER-TEXT"));
         let first = observer_rx.recv().await.expect("first record");
         assert_eq!(first.requested_model, "m-requested");
-        assert_eq!(first.completion, completion);
+        assert_eq!(first.response_id, completion.response_id);
+        assert_eq!(first.served_model, completion.served_model);
+        assert_eq!(first.usage, completion.usage);
         assert!(first.completed_at >= first.started_at);
+        assert!(
+            !format!("{first:?}").contains("THE-ANSWER-TEXT"),
+            "the record carries no answer text: {first:?}"
+        );
 
         rt.send_stdin("inst-1", "two").expect("send 2");
-        assert_eq!(output_rx.recv().await.as_deref(), Some("ok"));
+        assert_eq!(output_rx.recv().await.as_deref(), Some("THE-ANSWER-TEXT"));
         let second = observer_rx.recv().await.expect("second record");
         assert_ne!(
             first.operation_id, second.operation_id,
@@ -260,7 +288,7 @@ mod tests {
         let rt = Runtime::new();
         assert!(rt.register("inst-2", backend.handle).is_some());
         rt.send_stdin("inst-2", "cut").expect("send");
-        assert_eq!(output_rx.recv().await.as_deref(), Some("ok"));
+        assert_eq!(output_rx.recv().await.as_deref(), Some("THE-ANSWER-TEXT"));
         drop(rt);
         assert!(
             observer_rx.recv().await.is_none(),
