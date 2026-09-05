@@ -16,7 +16,7 @@ The human's manual checklist remains the final acceptance; this gate catches bro
 `pnpm uishot <view> [--scenario default|empty] [--full]`
 
 - Renders the **real `src/` app** (not a mockup) in headless Chrome at `http://localhost:1420/?fixture=<scenario>#view=<viewId>`.
-- View ids: `home laneboard memory artifacts blackboard chat library builder browser settings`.
+- View ids: `home laneboard memory artifacts blackboard chat library builder builder-edit browser settings`.
 - Waits for the readiness sentinel `body[data-conclave-ready="1"]`, then writes `.shots/<view>-<scenario>.png` (2880x1800).
 - Exits 1 on any `pageerror` and forwards `console.error` to your terminal.
 - Then **Read the PNG file** to actually inspect the result.

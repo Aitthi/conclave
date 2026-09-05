@@ -16,6 +16,9 @@ if (!view) {
   console.error(
     "usage: pnpm uishot <viewId> [--scenario default|empty] [--full] [--out <path>] [--viewport WxH]",
   );
+  console.error(
+    "  viewIds: home laneboard memory artifacts blackboard chat library builder builder-edit browser settings",
+  );
   process.exit(2);
 }
 const opt = (name, dflt) => {
