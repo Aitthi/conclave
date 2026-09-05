@@ -1,6 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Conclave">
   <rect x="4" y="4" width="56" height="56" rx="14" fill="#102A43"/>
-  <rect x="18" y="14" width="31" height="10" rx="3" fill="#F2F7F9"/>
-  <rect x="13" y="26" width="10" height="12" rx="3" fill="#F2F7F9"/>
-  <rect x="18" y="40" width="31" height="10" rx="3" fill="#EE9C3A"/>
+  <g transform="translate(1.28 1.28) scale(.12)">
+    <path d="M149 97 223 67 322 76 403 133 336 189 292 158 247 152 198 170Z" fill="#F2F7F9"/>
+    <path d="M128 399 76 322 68 256 76 190 128 113 186 179 156 205 152 256 156 307 186 333Z" fill="#F2F7F9"/>
+    <path d="M403 379 322 436 223 445 149 415 198 342 247 360 292 354 336 323Z" fill="#E05F67"/>
+  </g>
 </svg>

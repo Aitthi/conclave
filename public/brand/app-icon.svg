@@ -3,8 +3,8 @@
   <desc id="desc">The Conclave open assembly mark on a cool ink desktop tile.</desc>
   <path fill="#102A43" d="M304 64h416c140 0 240 100 240 240v416c0 140-100 240-240 240H304C164 960 64 860 64 720V304C64 164 164 64 304 64Z"/>
   <g transform="translate(128 128) scale(1.5)">
-    <rect x="128" y="64" width="320" height="112" rx="32" fill="#F2F7F9"/>
-    <rect x="64" y="192" width="112" height="128" rx="32" fill="#F2F7F9"/>
-    <rect x="128" y="336" width="320" height="112" rx="32" fill="#EE9C3A"/>
+    <path d="M149 97 223 67 322 76 403 133 336 189 292 158 247 152 198 170Z" fill="#F2F7F9"/>
+    <path d="M128 399 76 322 68 256 76 190 128 113 186 179 156 205 152 256 156 307 186 333Z" fill="#F2F7F9"/>
+    <path d="M403 379 322 436 223 445 149 415 198 342 247 360 292 354 336 323Z" fill="#E05F67"/>
   </g>
 </svg>

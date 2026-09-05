@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" color="#16324F">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">Conclave monochrome mark</title>
-  <desc id="desc">Three rounded seats form an open C around one shared space.</desc>
-  <g fill="currentColor">
-    <rect x="128" y="64" width="320" height="112" rx="32"/>
-    <rect x="64" y="192" width="112" height="128" rx="32"/>
-    <rect x="128" y="336" width="320" height="112" rx="32"/>
+  <desc id="desc">Three faceted council tiers form an open C around one shared chamber.</desc>
+  <g fill="#16324F">
+    <path d="M149 97 223 67 322 76 403 133 336 189 292 158 247 152 198 170Z"/>
+    <path d="M128 399 76 322 68 256 76 190 128 113 186 179 156 205 152 256 156 307 186 333Z"/>
+    <path d="M403 379 322 436 223 445 149 415 198 342 247 360 292 354 336 323Z"/>
   </g>
 </svg>

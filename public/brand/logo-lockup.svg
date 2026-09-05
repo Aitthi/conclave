@@ -2,9 +2,9 @@
   <title id="title">Conclave</title>
   <desc id="desc">Conclave open assembly mark and wordmark.</desc>
   <g transform="translate(0 32) scale(.5)">
-    <rect x="128" y="64" width="320" height="112" rx="32" fill="#16324F"/>
-    <rect x="64" y="192" width="112" height="128" rx="32" fill="#16324F"/>
-    <rect x="128" y="336" width="320" height="112" rx="32" fill="#EE9C3A"/>
+    <path d="M149 97 223 67 322 76 403 133 336 189 292 158 247 152 198 170Z" fill="#16324F"/>
+    <path d="M128 399 76 322 68 256 76 190 128 113 186 179 156 205 152 256 156 307 186 333Z" fill="#16324F"/>
+    <path d="M403 379 322 436 223 445 149 415 198 342 247 360 292 354 336 323Z" fill="#E05F67"/>
   </g>
   <text x="280" y="211" fill="#16324F" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="148" font-weight="700">Conclave</text>
 </svg>
