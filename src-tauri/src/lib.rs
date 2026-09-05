@@ -126,6 +126,16 @@ pub fn run() {
             let timer_state = std::sync::Arc::clone(&state);
             tauri::async_runtime::spawn(engine::runtime::task_timer::run(timer_state));
 
+            // The ONE transcript usage importer: bounded ticks over the known
+            // workspaces' Claude/Codex transcripts. Started here only, so the
+            // test AppState never scans a real home directory.
+            let importer =
+                std::sync::Arc::new(engine::runtime::transcript_usage::ImportWorker::new(
+                    state.db.clone(),
+                    engine::runtime::transcript_usage::WorkerConfig::default_roots(),
+                ));
+            tauri::async_runtime::spawn(importer.run());
+
             // One-shot skill-sidecar GC (D1): every launch, delete
             // `<data_dir>/Conclave/skills/<uuid>.md` files whose UUID has no
             // live `workspace_agent` row. Retroactively cleans machines that

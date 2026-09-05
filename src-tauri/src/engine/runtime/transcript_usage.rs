@@ -18,8 +18,10 @@
 //!   transaction, so a crash between them is impossible and a replay from the
 //!   previous offset is a no-op through `event_key`.
 //!
-//! The worker that schedules files, verifies ownership, records coverage and
-//! runs all of this off the async runtime lives in `transcript_worker`.
+//! * [`ImportWorker`] — the ONE production worker: discovers candidate files
+//!   for known workspaces and agents, verifies ownership, runs the reads and
+//!   parses on the blocking pool, records coverage, and stays within a per-tick
+//!   byte budget. `usage.overview` may [`nudge`] it but never awaits it.
 //!
 //! # Truth rules encoded here
 //!
@@ -40,20 +42,26 @@
 //! * No transcript text is retained: parser continuation state is a bounded
 //!   `turn_id → model` map, and diagnostics are codes with counts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::transcript_context::parse_ts;
+use super::transcript_context::{claude_project_dir, collect_jsonl_files, parse_ts};
 use super::usage::{
-    counter, MeasuredUsage, COLLECTOR_VERSION, SOURCE_CLAUDE_TRANSCRIPT, SOURCE_CODEX_TRANSCRIPT,
+    collectors_online_since, counter, MeasuredUsage, COLLECTOR_VERSION, SOURCE_CLAUDE_TRANSCRIPT,
+    SOURCE_CODEX_TRANSCRIPT,
 };
-use crate::engine::repo::model_usage::{self, CursorRow, NewUsageEvent, UNSUPPORTED_SOURCE};
+use crate::engine::repo;
+use crate::engine::repo::model_usage::{
+    self, CursorRow, NewUsageEvent, ObservedInterval, UNSUPPORTED_SOURCE,
+};
 
 // ── Bounds ───────────────────────────────────────────────────────────────────
 
@@ -420,6 +428,11 @@ pub struct CodexParserState {
     /// appears.
     pub saw_token_count: bool,
     pub saw_usage_record: bool,
+    /// Span of record timestamps seen so far (any record type, canonical
+    /// strings), so an unsupported file can still be reported over the
+    /// interval it covers.
+    pub first_seen_at: Option<String>,
+    pub last_seen_at: Option<String>,
 }
 
 impl CodexParserState {
@@ -474,6 +487,18 @@ pub fn scan_codex_lines(
             }
         }
         let payload = &value["payload"];
+        if let Some(at) = value["timestamp"].as_str().and_then(parse_ts) {
+            // Canonical strings order like the instants they encode.
+            let at = model_usage::canonical_ts(at);
+            state.first_seen_at = Some(match state.first_seen_at.take() {
+                Some(t) if t <= at => t,
+                _ => at.clone(),
+            });
+            state.last_seen_at = Some(match state.last_seen_at.take() {
+                Some(t) if t >= at => t,
+                _ => at,
+            });
+        }
         match value["type"].as_str() {
             Some("session_meta") => {
                 if let Some(cwd) = payload["cwd"].as_str() {
@@ -589,6 +614,658 @@ pub async fn apply_scan(
     model_usage::upsert_cursor(&mut *tx, cursor).await?;
     tx.commit().await?;
     Ok(applied)
+}
+
+// ── The worker ───────────────────────────────────────────────────────────────
+
+/// Tick period of the production worker.
+pub const TICK: Duration = Duration::from_secs(10);
+/// How long a candidate-discovery pass stays valid.
+pub const DISCOVERY_TTL: Duration = Duration::from_secs(30);
+/// Bytes of transcript read per tick across all files.
+pub const TICK_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+/// Files are candidates only if modified within this many UTC days — 92, a
+/// buffer over the 90 local dates the Overview shows across zones and DST.
+pub const LOOKBACK_DAYS: i64 = 92;
+/// A live `complete` interval ends this far behind `now`: a file that appeared
+/// after the last discovery pass has not been read yet, so the most recent
+/// stretch is not yet proven.
+const LIVE_LAG: Duration = Duration::from_secs(40);
+
+static NUDGE: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+
+/// Ask the worker to run a tick soon. Never blocks, never waits for it, never
+/// spawns a second worker; a no-op when no worker is running (tests).
+pub fn nudge() {
+    if let Some(notify) = NUDGE.get() {
+        notify.notify_one();
+    }
+}
+
+/// Where the transcripts live.
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    pub claude_projects_root: PathBuf,
+    pub codex_sessions_root: PathBuf,
+}
+
+impl WorkerConfig {
+    pub fn default_roots() -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            claude_projects_root: home.join(".claude").join("projects"),
+            codex_sessions_root: home.join(".codex").join("sessions"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    Claude,
+    Codex,
+}
+
+impl Source {
+    fn kind(self) -> &'static str {
+        match self {
+            Source::Claude => SOURCE_CLAUDE_TRANSCRIPT,
+            Source::Codex => SOURCE_CODEX_TRANSCRIPT,
+        }
+    }
+    fn cli_kind(self) -> &'static str {
+        match self {
+            Source::Claude => "claude-code",
+            Source::Codex => "codex",
+        }
+    }
+}
+
+/// One file the worker may read. Claude files carry their workspace by
+/// construction (the project dir is derived from the workspace folder); Codex
+/// files are resolved to a workspace by the cwd their `session_meta` declares.
+#[derive(Debug, Clone)]
+struct Candidate {
+    source: Source,
+    path: PathBuf,
+    workspace_id: Option<String>,
+}
+
+/// A known workspace and its transcript-backed agents, snapshotted at
+/// discovery time.
+#[derive(Debug, Clone)]
+struct KnownWorkspace {
+    id: String,
+    folder_path: String,
+    /// `cli_kind → agent ids`.
+    agents: HashMap<&'static str, Vec<String>>,
+}
+
+#[derive(Debug, Default)]
+struct WorkerState {
+    discovered_at: Option<Instant>,
+    workspaces: Vec<KnownWorkspace>,
+    /// Rotating queue: the head is read next, then pushed to the back.
+    queue: VecDeque<Candidate>,
+    /// Codex files whose declared cwd matched no workspace, with the length
+    /// at which that was decided — re-checked only if they grow.
+    foreign: HashMap<PathBuf, u64>,
+}
+
+/// The single production importer. Construct once, `run` once.
+pub struct ImportWorker {
+    db: sqlx::SqlitePool,
+    config: WorkerConfig,
+    state: Mutex<WorkerState>,
+}
+
+/// What one tick did — for tests and for the log line.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TickReport {
+    pub files_read: usize,
+    pub bytes_read: usize,
+    pub inserted: usize,
+    pub conflicts: usize,
+    pub backlog: bool,
+}
+
+impl ImportWorker {
+    pub fn new(db: sqlx::SqlitePool, config: WorkerConfig) -> Self {
+        Self {
+            db,
+            config,
+            state: Mutex::new(WorkerState::default()),
+        }
+    }
+
+    /// Run forever: one tick every [`TICK`], or sooner when nudged. Started
+    /// exactly once from application setup; the test `AppState` never starts
+    /// it, so tests drive [`Self::run_tick`] against temp directories.
+    pub async fn run(self: Arc<Self>) {
+        let notify = NUDGE
+            .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+            .clone();
+        loop {
+            match self.run_tick().await {
+                Ok(report) if report.inserted > 0 || report.conflicts > 0 => {
+                    eprintln!(
+                        "[usage] transcript import: {} file(s), {} event(s), {} conflict(s){}",
+                        report.files_read,
+                        report.inserted,
+                        report.conflicts,
+                        if report.backlog {
+                            ", backlog remains"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("[usage] transcript import tick failed: {e}"),
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(TICK) => {}
+                _ = notify.notified() => {}
+            }
+        }
+    }
+
+    /// One bounded pass: refresh discovery when stale, then read files from
+    /// the rotating queue until the byte budget is spent, applying each batch
+    /// atomically and recording coverage.
+    pub async fn run_tick(&self) -> Result<TickReport, sqlx::Error> {
+        self.refresh_discovery().await?;
+        let mut report = TickReport::default();
+        let queue_len = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queue
+            .len();
+        let mut scopes_with_backlog: BTreeSet<(String, Source)> = BTreeSet::new();
+        for _ in 0..queue_len {
+            if report.bytes_read >= TICK_BUDGET_BYTES {
+                report.backlog = true;
+                break;
+            }
+            let candidate = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(candidate) = state.queue.pop_front() else {
+                    break;
+                };
+                state.queue.push_back(candidate.clone());
+                candidate
+            };
+            if let Some(outcome) = self.import_file(&candidate).await? {
+                report.files_read += 1;
+                report.bytes_read += outcome.bytes_read;
+                report.inserted += outcome.applied.inserted;
+                report.conflicts += outcome.applied.conflicts;
+                if outcome.backlog {
+                    report.backlog = true;
+                    if let Some(ws) = outcome.workspace_id {
+                        scopes_with_backlog.insert((ws, candidate.source));
+                    }
+                }
+            }
+        }
+        self.record_live_coverage(&scopes_with_backlog).await?;
+        Ok(report)
+    }
+
+    /// Rebuild the candidate list when the last pass is older than
+    /// [`DISCOVERY_TTL`]: known workspaces (archived included, hidden excluded)
+    /// with their transcript-backed agents, Claude project dirs derived from
+    /// the workspace folders, and the Codex date tree — all filtered to files
+    /// modified within [`LOOKBACK_DAYS`]. Filesystem work runs on the blocking
+    /// pool.
+    async fn refresh_discovery(&self) -> Result<(), sqlx::Error> {
+        let stale = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .discovered_at
+                .is_none_or(|at| at.elapsed() >= DISCOVERY_TTL)
+        };
+        if !stale {
+            return Ok(());
+        }
+        let mut workspaces = Vec::new();
+        let definitions: HashMap<String, Option<String>> = repo::agent_definition::list(&self.db)
+            .await?
+            .into_iter()
+            .map(|d| (d.id, d.cli_kind))
+            .collect();
+        let mut rows = repo::workspace::list(&self.db).await?;
+        rows.extend(repo::workspace::list_archived(&self.db).await?);
+        for row in rows {
+            let mut agents: HashMap<&'static str, Vec<String>> = HashMap::new();
+            for agent in repo::workspace_agent::list_by_workspace(&self.db, &row.id).await? {
+                let kind = match definitions
+                    .get(&agent.agent_def_id)
+                    .and_then(|k| k.as_deref())
+                {
+                    Some("claude-code") => Source::Claude.cli_kind(),
+                    Some("codex") => Source::Codex.cli_kind(),
+                    _ => continue,
+                };
+                agents.entry(kind).or_default().push(agent.id);
+            }
+            workspaces.push(KnownWorkspace {
+                id: row.id,
+                folder_path: row.folder_path,
+                agents,
+            });
+        }
+
+        let config = self.config.clone();
+        let snapshot = workspaces.clone();
+        let candidates = tokio::task::spawn_blocking(move || discover(&config, &snapshot))
+            .await
+            .unwrap_or_default();
+
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.workspaces = workspaces;
+        // Keep rotation order for files still present; append newcomers.
+        let present: BTreeSet<PathBuf> = candidates.iter().map(|c| c.path.clone()).collect();
+        state.queue.retain(|c| present.contains(&c.path));
+        let queued: BTreeSet<PathBuf> = state.queue.iter().map(|c| c.path.clone()).collect();
+        for candidate in candidates {
+            if !queued.contains(&candidate.path) {
+                state.queue.push_back(candidate);
+            }
+        }
+        state.discovered_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Read one batch of one file and apply it. `None` when the file is not
+    /// ours (a Codex session from a folder that is no workspace) or unchanged.
+    async fn import_file(&self, candidate: &Candidate) -> Result<Option<FileOutcome>, sqlx::Error> {
+        let Some(fingerprint) = fingerprint(&candidate.path) else {
+            return Ok(None); // vanished between discovery and read
+        };
+        let source_kind = candidate.source.kind();
+        let existing = model_usage::get_cursor(&self.db, source_kind, &fingerprint).await?;
+
+        // A foreign Codex file is re-examined only when it grows.
+        if candidate.source == Source::Codex {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(decided_at) = state.foreign.get(&candidate.path) {
+                if std::fs::metadata(&candidate.path)
+                    .map(|m| m.len() <= *decided_at)
+                    .unwrap_or(true)
+                {
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Where to read from: the cursor, unless the file shrank or its
+        // session identity changed — then rescan from zero (events stay; the
+        // unique key makes the rescan a reconciliation, not inflation).
+        let mut offset = existing.as_ref().map(|c| c.byte_offset as u64).unwrap_or(0);
+        let mut parser_state = existing
+            .as_ref()
+            .map(|c| CodexParserState::from_json(c.parser_state.as_deref()))
+            .unwrap_or_default();
+        let length_now = std::fs::metadata(&candidate.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if existing
+            .as_ref()
+            .is_some_and(|c| length_now < c.observed_length as u64)
+        {
+            offset = 0;
+            parser_state = CodexParserState::default();
+        }
+        if offset >= length_now {
+            return Ok(None); // nothing new
+        }
+
+        let path = candidate.path.clone();
+        let source = candidate.source;
+        let candidate_agents: Vec<String> = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match candidate.workspace_id.as_deref() {
+                Some(ws) => state
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == ws)
+                    .and_then(|w| w.agents.get(source.cli_kind()))
+                    .cloned()
+                    .unwrap_or_default(),
+                // Codex: any codex agent in any workspace may own the file; the
+                // declared cwd decides the workspace below.
+                None => state
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| w.agents.get(source.cli_kind()).cloned().unwrap_or_default())
+                    .collect(),
+            }
+        };
+        let mut parser_state_for_scan = parser_state.clone();
+        let read = tokio::task::spawn_blocking(
+            move || -> std::io::Result<(Batch, Scan, CodexParserState)> {
+                let batch = read_batch(&path, offset)?;
+                let scan = match source {
+                    Source::Claude => scan_claude_lines(&batch.lines, &candidate_agents),
+                    Source::Codex => scan_codex_lines(
+                        &batch.lines,
+                        &candidate_agents,
+                        &mut parser_state_for_scan,
+                    ),
+                };
+                Ok((batch, scan, parser_state_for_scan))
+            },
+        )
+        .await
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let (batch, mut scan, parser_state) = match read {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[usage] transcript {} unreadable: {e}",
+                    candidate.path.display()
+                );
+                return Ok(None);
+            }
+        };
+        if batch.skipped_oversized {
+            scan.note(Diagnostic::OversizedRecord);
+        }
+
+        // Workspace: Claude by construction; Codex by the declared cwd.
+        let workspace_id = match candidate.workspace_id.clone() {
+            Some(ws) => Some(ws),
+            None => {
+                let declared = scan
+                    .declared_cwd
+                    .clone()
+                    .or_else(|| existing.as_ref().and_then(|c| c.verified_cwd.clone()));
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                declared.as_deref().and_then(|cwd| {
+                    state
+                        .workspaces
+                        .iter()
+                        .find(|w| same_folder(&w.folder_path, cwd))
+                        .map(|w| w.id.clone())
+                })
+            }
+        };
+        let Some(workspace_id) = workspace_id else {
+            // Not a workspace's session: remember the length we judged it at.
+            if candidate.source == Source::Codex && scan.declared_cwd.is_some() {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .foreign
+                    .insert(candidate.path.clone(), batch.observed_length);
+            }
+            return Ok(None);
+        };
+
+        // Ownership: the first agent whose marker appears binds the file; a
+        // later different marker never reassigns — it is a conflict, and the
+        // file's coverage turns partial.
+        let mut ownership_conflict = false;
+        let owner = match existing.as_ref().and_then(|c| c.verified_owner.clone()) {
+            Some(owner) => {
+                if scan.owners_declared.iter().any(|o| o != &owner) {
+                    ownership_conflict = true;
+                }
+                Some(owner)
+            }
+            None => scan.owners_declared.first().cloned(),
+        };
+        let session_id = match &owner {
+            Some(agent) => repo::session::get_by_instance(&self.db, agent)
+                .await?
+                .map(|s| s.id),
+            None => None,
+        };
+        let attribution = Attribution {
+            workspace_id: Some(workspace_id.clone()),
+            workspace_agent_id: owner.clone(),
+            session_id,
+        };
+
+        let now = Utc::now();
+        let cursor = CursorRow {
+            id: existing
+                .as_ref()
+                .map(|c| c.id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            source_kind: source_kind.to_owned(),
+            source_session_id: scan
+                .source_session_id
+                .clone()
+                .or_else(|| existing.as_ref().map(|c| c.source_session_id.clone()))
+                .unwrap_or_default(),
+            path_fingerprint: fingerprint,
+            byte_offset: batch.next_offset as i64,
+            observed_length: batch.observed_length as i64,
+            collector_version: COLLECTOR_VERSION.to_owned(),
+            workspace_id: Some(workspace_id.clone()),
+            workspace_agent_id: owner.clone(),
+            verified_owner: owner.clone(),
+            verified_cwd: scan
+                .declared_cwd
+                .clone()
+                .or_else(|| existing.as_ref().and_then(|c| c.verified_cwd.clone())),
+            parser_state: (candidate.source == Source::Codex).then(|| parser_state.to_json()),
+            last_verified_at: model_usage::canonical_ts(now),
+        };
+        // A session identity change is a different file wearing the same
+        // fingerprint: start over rather than continue mid-stream.
+        if let Some(existing) = &existing {
+            if !existing.source_session_id.is_empty()
+                && !cursor.source_session_id.is_empty()
+                && existing.source_session_id != cursor.source_session_id
+                && offset > 0
+            {
+                let mut restart = cursor.clone();
+                restart.byte_offset = 0;
+                restart.observed_length = 0;
+                restart.parser_state = None;
+                model_usage::upsert_cursor(&self.db, &restart).await?;
+                return Ok(Some(FileOutcome {
+                    bytes_read: (batch.next_offset - offset) as usize,
+                    applied: Applied::default(),
+                    backlog: true,
+                    workspace_id: Some(workspace_id),
+                }));
+            }
+        }
+
+        let bytes_read = (batch.next_offset - offset) as usize;
+        let backlog = batch.has_backlog;
+        let first_event_at = scan.first_event_at;
+        let last_event_at = scan.last_event_at;
+        let mut diagnostics = scan.diagnostics.clone();
+        if ownership_conflict {
+            *diagnostics.entry(Diagnostic::ClaudeConflict).or_insert(0) += 1;
+        }
+        let applied = apply_scan(&self.db, scan, &attribution, &cursor).await?;
+
+        // Coverage for what this batch proved.
+        let mut conn = self.db.acquire().await?;
+        let scope_agent = owner.as_deref();
+        if let (Some(first), Some(last)) = (first_event_at, last_event_at) {
+            // Imported history is conservatively partial: rows prove the
+            // responses happened, not that nothing was missed around them.
+            model_usage::record_coverage(
+                &mut conn,
+                &ObservedInterval {
+                    workspace_id: Some(&workspace_id),
+                    workspace_agent_id: scope_agent,
+                    source_kind,
+                    start: first,
+                    end: last,
+                    state: "partial",
+                    diagnostic_code: None,
+                    collector_version: COLLECTOR_VERSION,
+                    last_verified_at: now,
+                },
+            )
+            .await?;
+        }
+        let unsupported = candidate.source == Source::Codex
+            && !backlog
+            && parser_state.saw_token_count
+            && !parser_state.saw_usage_record;
+        if unsupported {
+            diagnostics.insert(Diagnostic::CodexUnsupportedFormat, 1);
+        }
+        if let Some((diagnostic, _)) = diagnostics.iter().next() {
+            let (start, end) = match (first_event_at, last_event_at) {
+                (Some(a), Some(b)) => (a, b),
+                _ => (
+                    parser_state
+                        .first_seen_at
+                        .as_deref()
+                        .and_then(parse_ts)
+                        .unwrap_or(now),
+                    parser_state
+                        .last_seen_at
+                        .as_deref()
+                        .and_then(parse_ts)
+                        .unwrap_or(now),
+                ),
+            };
+            let code = if unsupported {
+                Diagnostic::CodexUnsupportedFormat.code()
+            } else {
+                diagnostic.code()
+            };
+            model_usage::record_coverage(
+                &mut conn,
+                &ObservedInterval {
+                    workspace_id: Some(&workspace_id),
+                    workspace_agent_id: scope_agent,
+                    source_kind,
+                    start,
+                    end: end.max(start),
+                    state: "partial",
+                    diagnostic_code: Some(code),
+                    collector_version: COLLECTOR_VERSION,
+                    last_verified_at: now,
+                },
+            )
+            .await?;
+        }
+        Ok(Some(FileOutcome {
+            bytes_read,
+            applied,
+            backlog,
+            workspace_id: Some(workspace_id),
+        }))
+    }
+
+    /// After a tick, every (workspace, agent, source) whose files are all
+    /// caught up has been watched continuously since the collectors came
+    /// online: record that as `complete` up to `now - LIVE_LAG`. Scopes with
+    /// backlog stay partial until they catch up.
+    async fn record_live_coverage(
+        &self,
+        scopes_with_backlog: &BTreeSet<(String, Source)>,
+    ) -> Result<(), sqlx::Error> {
+        let Some(online_since) = collectors_online_since() else {
+            return Ok(());
+        };
+        let now = Utc::now();
+        let end = now - chrono::Duration::from_std(LIVE_LAG).unwrap_or_default();
+        if end <= online_since {
+            return Ok(());
+        }
+        let workspaces = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .workspaces
+            .clone();
+        let mut conn = self.db.acquire().await?;
+        for workspace in &workspaces {
+            for source in [Source::Claude, Source::Codex] {
+                if scopes_with_backlog.contains(&(workspace.id.clone(), source)) {
+                    continue;
+                }
+                let Some(agents) = workspace.agents.get(source.cli_kind()) else {
+                    continue;
+                };
+                for agent in agents {
+                    model_usage::record_coverage(
+                        &mut conn,
+                        &ObservedInterval {
+                            workspace_id: Some(&workspace.id),
+                            workspace_agent_id: Some(agent),
+                            source_kind: source.kind(),
+                            start: online_since,
+                            end,
+                            state: "complete",
+                            diagnostic_code: None,
+                            collector_version: COLLECTOR_VERSION,
+                            last_verified_at: now,
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct FileOutcome {
+    bytes_read: usize,
+    applied: Applied,
+    backlog: bool,
+    workspace_id: Option<String>,
+}
+
+/// Candidate files for the known workspaces: Claude by project dir, Codex by
+/// the whole date tree (workspace resolved later from the declared cwd).
+fn discover(config: &WorkerConfig, workspaces: &[KnownWorkspace]) -> Vec<Candidate> {
+    let min_mtime = Utc::now() - chrono::Duration::days(LOOKBACK_DAYS);
+    let mut out = Vec::new();
+    let mut any_codex = false;
+    for workspace in workspaces {
+        if workspace.agents.contains_key(Source::Claude.cli_kind()) {
+            let dir = claude_project_dir(
+                &config.claude_projects_root,
+                Path::new(&workspace.folder_path),
+            );
+            for path in collect_jsonl_files(&dir, min_mtime) {
+                out.push(Candidate {
+                    source: Source::Claude,
+                    path,
+                    workspace_id: Some(workspace.id.clone()),
+                });
+            }
+        }
+        any_codex |= workspace.agents.contains_key(Source::Codex.cli_kind());
+    }
+    if any_codex {
+        for path in collect_jsonl_files(&config.codex_sessions_root, min_mtime) {
+            out.push(Candidate {
+                source: Source::Codex,
+                path,
+                workspace_id: None,
+            });
+        }
+    }
+    out
+}
+
+/// Stable identity of the file itself: device and inode, so a rotated or
+/// replaced file at the same path is a new cursor.
+fn fingerprint(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some(format!("{}:{}", meta.dev(), meta.ino()))
+}
+
+/// Compare a workspace folder with a cwd a transcript declared. Trailing
+/// slashes are noise; nothing else is normalized — a cwd must name the folder.
+fn same_folder(folder: &str, cwd: &str) -> bool {
+    folder.trim_end_matches('/') == cwd.trim_end_matches('/')
 }
 
 #[cfg(test)]
@@ -1134,5 +1811,303 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(total.activity_count, 0, "no event without its cursor");
+    }
+
+    // ── Worker ───────────────────────────────────────────────────────────
+
+    struct Sandbox {
+        root: PathBuf,
+        config: WorkerConfig,
+    }
+
+    impl Sandbox {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "conclave-usage-worker-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let config = WorkerConfig {
+                claude_projects_root: root.join("claude-projects"),
+                codex_sessions_root: root.join("codex-sessions"),
+            };
+            Self { root, config }
+        }
+
+        fn workspace_folder(&self, name: &str) -> String {
+            let folder = self.root.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            folder.to_string_lossy().into_owned()
+        }
+
+        fn write_claude(&self, folder: &str, file: &str, lines: &[String]) -> PathBuf {
+            let dir = claude_project_dir(&self.config.claude_projects_root, Path::new(folder));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(file);
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            path
+        }
+
+        fn write_codex(&self, file: &str, lines: &[String]) -> PathBuf {
+            let dir = self
+                .config
+                .codex_sessions_root
+                .join("2026")
+                .join("09")
+                .join("05");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(file);
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            path
+        }
+    }
+
+    async fn workspace_with_agent(
+        pool: &sqlx::SqlitePool,
+        folder: &str,
+        cli_kind: &str,
+    ) -> (String, String) {
+        use crate::engine::repo::agent_definition::AgentDefinitionInput;
+        let ws = repo::workspace::create(pool, "WS", folder, None)
+            .await
+            .unwrap();
+        let def = repo::agent_definition::create(
+            pool,
+            &AgentDefinitionInput {
+                name: "Agent".into(),
+                role: None,
+                agent_type: "cli".into(),
+                cli_kind: Some(cli_kind.into()),
+                color: None,
+                provider_id: None,
+                model: None,
+                harness_mode: "own".into(),
+                share_blackboard: None,
+                auto_submit_injected: None,
+                allowed_senders: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let agent = repo::workspace_agent::instantiate(pool, &ws.id, &def.id)
+            .await
+            .unwrap();
+        (ws.id, agent.id)
+    }
+
+    #[derive(sqlx::FromRow, Debug)]
+    struct StoredScope {
+        event_key: String,
+        workspace_id: Option<String>,
+        workspace_agent_id: Option<String>,
+        session_id: Option<String>,
+        generation: Option<i64>,
+    }
+
+    async fn stored(pool: &sqlx::SqlitePool) -> Vec<StoredScope> {
+        sqlx::query_as(
+            "SELECT event_key, workspace_id, workspace_agent_id, session_id, generation
+               FROM model_usage_event ORDER BY event_key",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn coverage(
+        pool: &sqlx::SqlitePool,
+    ) -> Vec<(String, Option<String>, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT source_kind, workspace_agent_id, state, diagnostic_code
+               FROM model_usage_coverage ORDER BY source_kind, state, diagnostic_code",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A Claude transcript in the workspace's project dir is attributed to the
+    /// workspace and, once its owner marker is seen, to that agent and its
+    /// session; history lands as partial coverage; a second tick is a no-op.
+    #[tokio::test]
+    async fn worker_imports_a_claude_transcript_with_ownership_and_partial_history() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("claude");
+        let folder = sandbox.workspace_folder("proj");
+        let (ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        let session = repo::session::get_by_instance(&pool, &agent)
+            .await
+            .unwrap()
+            .unwrap();
+        sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[
+                claude_owner_marker(&agent),
+                claude_row("R1", 0, "claude-opus-5", 5),
+                claude_row("R1", 1, "claude-opus-5", 5),
+                claude_row("R2", 0, "claude-opus-5", 6),
+            ],
+        );
+
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let report = worker.run_tick().await.unwrap();
+        assert_eq!(report.files_read, 1);
+        assert_eq!(report.inserted, 2);
+        assert!(!report.backlog);
+
+        let events = stored(&pool).await;
+        assert_eq!(events.len(), 2);
+        for e in &events {
+            assert_eq!(e.workspace_id.as_deref(), Some(ws.as_str()));
+            assert_eq!(e.workspace_agent_id.as_deref(), Some(agent.as_str()));
+            assert_eq!(e.session_id.as_deref(), Some(session.id.as_str()));
+            assert_eq!(e.generation, None, "history proves no launch interval");
+        }
+        let cov = coverage(&pool).await;
+        assert!(cov.iter().any(|(src, ag, state, diag)| src == "claude-code"
+            && ag.as_deref() == Some(agent.as_str())
+            && state == "partial"
+            && diag.is_none()));
+
+        // Nothing new: the second tick reads nothing and changes nothing.
+        let again = worker.run_tick().await.unwrap();
+        assert_eq!(again.files_read, 0);
+        assert_eq!(stored(&pool).await.len(), 2);
+    }
+
+    /// Codex files are resolved by the cwd their session_meta declares: a
+    /// session from a folder that is no workspace is not ours; one from the
+    /// workspace folder is imported with its turn model. An old file with
+    /// only token_count rows is reported as unsupported, not fabricated.
+    #[tokio::test]
+    async fn worker_routes_codex_files_by_declared_cwd_and_flags_old_formats() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("codex");
+        let folder = sandbox.workspace_folder("proj");
+        let (ws, agent) = workspace_with_agent(&pool, &folder, "codex").await;
+
+        let mut ours = codex_fixture();
+        // Point the fixture at the workspace folder and the real agent id.
+        ours[0] =
+            codex_line(json!({"type": "session_meta", "payload": {"id": "SESS", "cwd": folder}}));
+        ours[1] = codex_line(
+            json!({"type": "response_item", "payload": {"type": "message", "role": "developer",
+            "content": [{"type": "input_text", "text": format!("Your own agent id is {agent}.")}]}}),
+        );
+        sandbox.write_codex("ours.jsonl", &ours);
+        sandbox.write_codex(
+            "foreign.jsonl",
+            &[
+                codex_line(json!({"type": "session_meta", "payload": {"id": "OTHER", "cwd": "/somewhere/else"}})),
+                codex_line(codex_usage_record("RESP-X", "T9", 1, 5)),
+            ],
+        );
+        sandbox.write_codex(
+            "old.jsonl",
+            &[
+                codex_line(json!({"type": "session_meta", "timestamp": "2026-09-01T00:00:00.000Z", "payload": {"id": "OLD", "cwd": folder}})),
+                codex_line(json!({"type": "event_msg", "timestamp": "2026-09-01T00:01:00.000Z", "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 5}}}})),
+            ],
+        );
+
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let report = worker.run_tick().await.unwrap();
+        assert_eq!(
+            report.inserted, 2,
+            "RESP-1 and RESP-2 from our session only"
+        );
+
+        let events = stored(&pool).await;
+        assert!(events
+            .iter()
+            .all(|e| e.workspace_id.as_deref() == Some(ws.as_str())));
+        assert!(events
+            .iter()
+            .all(|e| e.workspace_agent_id.as_deref() == Some(agent.as_str())));
+        assert!(
+            !events.iter().any(|e| e.event_key.contains("RESP-X")),
+            "foreign session skipped"
+        );
+
+        let cov = coverage(&pool).await;
+        assert!(
+            cov.iter().any(|(src, _, state, diag)| src == "codex"
+                && state == "partial"
+                && diag.as_deref() == Some(UNSUPPORTED_SOURCE)),
+            "the token_count-only file is an unsupported source: {cov:?}"
+        );
+        // A foreign file is judged once and not re-read while unchanged.
+        let again = worker.run_tick().await.unwrap();
+        assert_eq!(again.files_read, 0);
+    }
+
+    /// A file that shrinks (rotation, truncation) is rescanned from zero, and
+    /// the unique key keeps the rescan from inflating anything.
+    #[tokio::test]
+    async fn worker_rescans_a_shrunk_file_without_double_counting() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("shrink");
+        let folder = sandbox.workspace_folder("proj");
+        let (_ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        let path = sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[
+                claude_owner_marker(&agent),
+                claude_row("R1", 0, "m", 5),
+                claude_row("R2", 0, "m", 6),
+                claude_row("R3", 0, "m", 7),
+            ],
+        );
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        assert_eq!(worker.run_tick().await.unwrap().inserted, 3);
+
+        // Truncate to the first two responses (same inode → same cursor).
+        std::fs::write(
+            &path,
+            [
+                claude_owner_marker(&agent),
+                claude_row("R1", 0, "m", 5),
+                claude_row("R2", 0, "m", 6),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        // Force a fresh discovery + read regardless of the TTL by clearing it.
+        worker.state.lock().unwrap().discovered_at = None;
+        let report = worker.run_tick().await.unwrap();
+        assert_eq!(report.files_read, 1, "shrink → rescan from zero");
+        assert_eq!(report.inserted, 0, "R1 and R2 are replays");
+        assert_eq!(
+            stored(&pool).await.len(),
+            3,
+            "prior events are never deleted"
+        );
+        let cursor: (i64,) = sqlx::query_as("SELECT byte_offset FROM model_usage_cursor")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cursor.0 as u64, std::fs::metadata(&path).unwrap().len());
+    }
+
+    /// Discovery is scoped: a workspace with no transcript-backed agent yields
+    /// no candidates, and nothing outside the configured roots is touched.
+    #[tokio::test]
+    async fn worker_has_no_candidates_without_transcript_agents() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("empty");
+        let folder = sandbox.workspace_folder("proj");
+        repo::workspace::create(&pool, "WS", &folder, None)
+            .await
+            .unwrap();
+        sandbox.write_claude(&folder, "S1.jsonl", &[claude_row("R1", 0, "m", 5)]);
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let report = worker.run_tick().await.unwrap();
+        assert_eq!(report, TickReport::default());
+        assert!(stored(&pool).await.is_empty());
     }
 }

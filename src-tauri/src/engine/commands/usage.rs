@@ -840,6 +840,10 @@ pub async fn overview(state: &AppState, payload: Value) -> Result<Value, AppErro
         .parse()
         .map_err(|_| AppError::Invalid(format!("unknown IANA time zone: {}", req.time_zone)))?;
 
+    // Ask the importer to catch up soon — never awaited: the answer below is
+    // what is stored NOW, with its coverage saying how much that is.
+    crate::engine::runtime::transcript_usage::nudge();
+
     let now = Utc::now();
     let buckets = build_buckets(tz, req.days, now)?;
     let range_start = buckets
