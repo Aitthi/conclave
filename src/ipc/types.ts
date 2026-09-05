@@ -279,15 +279,16 @@ export interface Tool {
 // ── Memory knowledge-graph (memory.graph) ──────────────────────────────────
 // One durable memory chunk from the workspace semantic store. Node identity is
 // the chunk UUID (never a slug). `sourceKind:"agent"` carries the authoring
-// instance id in `sourceId`; `"manual"` chunks have a null `sourceId` and render
-// in the neutral "Shared" group. Edges are derived backend-side at query time
-// (ADR 0007) — never stored.
+// instance id in `sourceId`; `"distilled"` chunks carry the proposing instance
+// id, and `"manual"` chunks have a null `sourceId` and render in the neutral
+// "Shared" group. Edges are derived backend-side at query time (ADR 0007) —
+// never stored.
 export interface MemoryGraphNode {
   /** Chunk UUID — the node's stable identity across every keyed map. */
   id: string;
   text: string;
-  sourceKind: "manual" | "agent";
-  /** Authoring instance id when `sourceKind === "agent"`, else null. */
+  sourceKind: "manual" | "agent" | "distilled";
+  /** Authoring/proposing instance id for agent or distilled chunks, else null. */
   sourceId: string | null;
   createdAt: string;
   updatedAt: string;
