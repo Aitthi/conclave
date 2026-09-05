@@ -23,9 +23,11 @@ import { ipc } from "../ipc";
 import type { AgentDefinition, Skill, Role, WorkspaceAgent } from "../ipc";
 import { EVENT_NAMES, useEvent } from "../ipc";
 import type { RosterChangedEvent } from "../ipc/events";
-import { LEVELS, chainUp, levelOf, wouldCycle } from "../lib/positions";
+import { LEVELS, chainUp } from "../lib/positions";
 import { CLAUDE_MODELS, CODEX_MODELS, COLOR_SWATCHES } from "../lib/modelCatalogue";
-import { HumanChip, PositionLine } from "./Position";
+import { IdentitySection } from "./builder/IdentitySection";
+import { PositionSection } from "./builder/PositionSection";
+import { SkillsSection } from "./builder/SkillsSection";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -421,6 +423,11 @@ export function Builder({
     scopedAgent && workspaceId && workspaceAgentId && initialDef?.id,
   );
   const trackLabel = selectedRoleName ?? scopedAgent?.roleName ?? "No role";
+  // Canon rule 11: the line under the name reads "Role · Level".
+  const defaultLevelName = defaultLevelDraft
+    ? LEVELS.find((l) => l.id === defaultLevelDraft)?.name ?? "Unranked"
+    : "Unranked";
+  const identityLine = `${selectedRoleName ?? "No role"} · ${defaultLevelName}`;
   const supervisorOptions = positionEnabled
     ? positionRoster
         .filter((agent) => agent.id !== scopedAgent!.id)
@@ -648,95 +655,19 @@ export function Builder({
         {/* ── Scrollable body ── */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3.5 min-h-0">
 
-          {/* Identity */}
-          <section>
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
-                Identity
-              </div>
-              {draftedBy && !touched && (
-                <span className="text-[11px] text-text-tertiary inline-flex items-center gap-1">
-                  <Sparkles className="w-3 h-3" />
-                  Drafted by {draftedBy}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2.5">
-              {/* Avatar doubles as the color picker — click to choose. */}
-              <div className="relative shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setShowColors((v) => !v)}
-                  className="w-10 h-10 rounded-[10px] text-white grid place-items-center text-[15px] font-bold ring-1 ring-overlay/[0.06] hover:brightness-105"
-                  style={{ backgroundColor: color }}
-                  title="Change color"
-                  aria-label="Change color"
-                >
-                  {letter}
-                </button>
-                {showColors && (
-                  <>
-                    {/* Click-away backdrop. */}
-                    <div className="fixed inset-0 z-10" onClick={() => setShowColors(false)} />
-                    <div className="absolute z-20 top-full left-0 mt-1.5 flex items-center gap-1.5 bg-surface rounded-xl ring-1 ring-overlay/[0.1] shadow-lg p-2">
-                      {COLOR_SWATCHES.map((swatch) => (
-                        <button
-                          key={swatch}
-                          onClick={() => {
-                            setColor(swatch);
-                            setShowColors(false);
-                          }}
-                          className={`w-[18px] h-[18px] rounded-full transition-all ${
-                            color === swatch ? "ring-2 ring-offset-1" : "hover:scale-110"
-                          }`}
-                          style={
-                            {
-                              backgroundColor: swatch,
-                              "--tw-ring-color": swatch,
-                            } as React.CSSProperties
-                          }
-                          aria-label={`Color ${swatch}`}
-                        />
-                      ))}
-                      {/* Custom color — opens the OS color picker. The popover
-                          stays open so the avatar preview updates live. */}
-                      <label
-                        className="w-[18px] h-[18px] rounded-full cursor-pointer ring-1 ring-overlay/15 relative overflow-hidden shrink-0"
-                        title="Custom color"
-                        style={{
-                          background:
-                            "conic-gradient(red, yellow, lime, aqua, blue, magenta, red)",
-                        }}
-                      >
-                        <input
-                          type="color"
-                          value={color}
-                          onChange={(e) => setColor(e.target.value)}
-                          className="absolute inset-0 opacity-0 cursor-pointer"
-                          aria-label="Custom color"
-                        />
-                      </label>
-                    </div>
-                  </>
-                )}
-              </div>
-              <div className="flex-1 space-y-1">
-                <input
-                  value={name}
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    setTouched(true);
-                  }}
-                  placeholder="Agent name"
-                  className="w-full text-[14px] font-semibold tracking-tight bg-transparent outline-none border-b border-overlay/10 focus:border-accent pb-0.5"
-                />
-                <div className="text-[11.5px] text-text-muted truncate">
-                  {selectedRoleName ?? "No role"}
-                </div>
-              </div>
-            </div>
-
-          </section>
+          <IdentitySection
+            name={name}
+            setName={setName}
+            color={color}
+            setColor={setColor}
+            showColors={showColors}
+            setShowColors={setShowColors}
+            letter={letter}
+            identityLine={identityLine}
+            draftedBy={draftedBy}
+            touched={touched}
+            setTouched={setTouched}
+          />
 
           {/* Level — the Position System SEED (D1/D3): remembered on the
               definition so it's restored whenever a new instance is created
@@ -988,164 +919,18 @@ export function Builder({
           </section>
 
           {positionEnabled && (
-            <section>
-              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
-                Position
-              </div>
-
-              <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface p-3 space-y-3">
-                <div>
-                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-                    Track
-                  </div>
-                  <div className="rounded-lg bg-overlay/[0.04] px-3 py-2">
-                    <PositionLine
-                      levelId={levelDraft}
-                      track={trackLabel}
-                      compact={false}
-                      supervisor={
-                        supervisorDraft
-                          ? (() => {
-                              const next = positionRoster.find(
-                                (agent) => agent.id === supervisorDraft,
-                              );
-                              return next
-                                ? { name: next.name ?? next.id }
-                                : null;
-                            })()
-                          : null
-                      }
-                      showReportsTo
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase">
-                      Level
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setLevelDraft(null)}
-                      className={`text-[11px] font-medium ${
-                        levelDraft == null
-                          ? "text-accent"
-                          : "text-text-tertiary hover:text-text-secondary"
-                      }`}
-                    >
-                      Clear to Unranked
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {LEVELS.map((level) => {
-                      const active = levelDraft === level.id;
-                      return (
-                        <button
-                          key={level.id}
-                          type="button"
-                          onClick={() => setLevelDraft(level.id)}
-                          className={`rounded-xl px-2.5 py-2 text-left transition-all ring-1 ${
-                            active
-                              ? "ring-accent/40 bg-accent/[0.06]"
-                              : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
-                          }`}
-                        >
-                          <div className="text-[11.5px] font-semibold leading-tight">{level.name}</div>
-                          <div className="mt-1 text-[11px] text-text-tertiary">
-                            rung {level.rung}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-                    Supervisor
-                  </div>
-                  <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                    <button
-                      type="button"
-                      onClick={() => setSupervisorDraft(null)}
-                      className={`w-full rounded-lg px-2.5 py-2 text-left transition-all ring-1 ${
-                        supervisorDraft == null
-                          ? "ring-accent/40 bg-accent/[0.06]"
-                          : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <HumanChip />
-                        <span className="text-[11px] text-text-tertiary">Top of the chain</span>
-                      </div>
-                    </button>
-                    {supervisorOptions.map((agent) => {
-                      const disabled = wouldCycle(scopedAgent!.id, agent.id, positionRoster);
-                      const active = supervisorDraft === agent.id;
-                      return (
-                        <button
-                          key={agent.id}
-                          type="button"
-                          onClick={() => !disabled && setSupervisorDraft(agent.id)}
-                          disabled={disabled}
-                          className={`w-full rounded-lg px-2.5 py-2 text-left transition-all ring-1 ${
-                            active
-                              ? "ring-accent/40 bg-accent/[0.06]"
-                              : "ring-overlay/[0.08] bg-surface hover:bg-overlay/[0.02]"
-                          } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
-                        >
-                          <div className="text-[12px] font-semibold leading-tight">
-                            {agent.name ?? agent.id}
-                          </div>
-                          <PositionLine
-                            levelId={agent.level}
-                            track={agent.roleName ?? "Agent"}
-                            compact
-                            className="mt-1"
-                          />
-                          {disabled && (
-                            <div className="mt-1 text-[10.5px] text-text-tertiary">
-                              Self and descendants cannot supervise this member
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-                    Escalation chain
-                  </div>
-                  <div className="rounded-lg bg-overlay/[0.04] px-3 py-2">
-                    <div className="flex items-center gap-1.5 flex-wrap text-[11.5px] text-text-secondary">
-                      {previewChainIds.map((id, index) => {
-                        const agent = previewRoster.find((item) => item.id === id);
-                        return (
-                          <span key={id} className="inline-flex items-center gap-1.5">
-                            {index > 0 && <span className="text-text-tertiary">→</span>}
-                            <span className="font-medium text-text-primary">
-                              {agent?.name ?? id}
-                            </span>
-                            <span className="text-text-tertiary">
-                              ({agent?.level ? levelOf(agent.level).short : "Unranked"})
-                            </span>
-                          </span>
-                        );
-                      })}
-                      {previewChainIds.length > 0 && (
-                        <>
-                          <span className="text-text-tertiary">→</span>
-                          <HumanChip label />
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </section>
+            <PositionSection
+              scopedAgent={scopedAgent!}
+              positionRoster={positionRoster}
+              supervisorOptions={supervisorOptions}
+              previewRoster={previewRoster}
+              previewChainIds={previewChainIds}
+              trackLabel={trackLabel}
+              levelDraft={levelDraft}
+              setLevelDraft={setLevelDraft}
+              supervisorDraft={supervisorDraft}
+              setSupervisorDraft={setSupervisorDraft}
+            />
           )}
 
           {/* Type */}
@@ -1720,101 +1505,7 @@ export function Builder({
             </section>
           )}
 
-          {/* Skills — for every first-class CLI harness. */}
-          {showCliConfig && (
-            <section>
-              <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-2">
-                Skills
-              </div>
-              <div className="rounded-xl ring-1 ring-overlay/[0.08] bg-surface divide-y divide-overlay/[0.06]">
-                {allSkills.filter((s) => s.kind === "builtin" && s.mandatory).length > 0 && (
-                  <div className="px-3 py-2">
-                    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-                      System skills — always on
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {allSkills
-                        .filter((s) => s.kind === "builtin" && s.mandatory)
-                        .map((s) => (
-                          <span
-                            key={s.id}
-                            className="text-[11px] font-medium px-2 py-0.5 rounded-md ring-1 ring-overlay/[0.08] text-text-secondary"
-                          >
-                            {s.name}
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                )}
-                {allSkills.filter((s) => s.kind === "builtin" && !s.mandatory).length > 0 && (
-                  <div className="px-3 py-2">
-                    <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-                      System skills — optional
-                    </div>
-                    <div className="space-y-1">
-                      {allSkills
-                        .filter((s) => s.kind === "builtin" && !s.mandatory)
-                        .map((s) => {
-                          const checked = skillIds.includes(s.id);
-                          return (
-                            <label
-                              key={s.id}
-                              className="flex items-center gap-2 text-[12.5px] text-text-secondary cursor-pointer"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={(e) =>
-                                  setSkillIds((prev) =>
-                                    e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
-                                  )
-                                }
-                              />
-                              {s.name}
-                            </label>
-                          );
-                        })}
-                    </div>
-                  </div>
-                )}
-                <div className="px-3 py-2">
-                  <div className="text-[10px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-                    Custom skills
-                  </div>
-                  {allSkills.filter((s) => s.kind === "custom").length === 0 ? (
-                    <p className="text-[11.5px] text-text-tertiary">
-                      No custom skills yet — create one in the Skill Library.
-                    </p>
-                  ) : (
-                    <div className="space-y-1">
-                      {allSkills
-                        .filter((s) => s.kind === "custom")
-                        .map((s) => {
-                          const checked = skillIds.includes(s.id);
-                          return (
-                            <label
-                              key={s.id}
-                              className="flex items-center gap-2 text-[12.5px] text-text-secondary cursor-pointer"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={(e) =>
-                                  setSkillIds((prev) =>
-                                    e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
-                                  )
-                                }
-                              />
-                              {s.name}
-                            </label>
-                          );
-                        })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </section>
-          )}
+          <SkillsSection allSkills={allSkills} skillIds={skillIds} setSkillIds={setSkillIds} />
 
           {/* Error */}
           {error && (
