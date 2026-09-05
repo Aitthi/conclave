@@ -24,7 +24,7 @@ Prebuilt macOS builds are published on the GitHub Releases page:
 
 **[Download the latest release](https://github.com/Aitthi/conclave/releases)**
 
-Grab the `.dmg` (or `.app.tar.gz`) for Apple Silicon, open it, and drag Conclave into `Applications`.
+Download the `.dmg` for Apple Silicon, open it, and drag Conclave into `Applications`.
 
 ## Requirements
 
