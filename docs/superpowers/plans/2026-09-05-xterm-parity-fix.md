@@ -192,6 +192,18 @@ Branch `lane/xterm-parity-fix`.
    block, which is the documented fixture-mode caveat, not a regression.
 5. rustfmt — see the note below.
 
+### Review round 1 (Mellow, ruled by Detoro)
+
+| Ask | Commit | Result |
+|---|---|---|
+| Defer size-at-spawn for the respawn 80x24 window | `711500a` | Added to Deferred below, with the fix shape and the VS Code citation so the follow-up lane does not re-derive it. |
+| Unit-test that `CLAUDE_CODE_FORCE_SYNC_OUTPUT` is set for `claude-code` and absent otherwise | `faba591` | `conclave_spawn_env` extracted from the spawn path (pure: no PTY, no DB, no Keychain); two tests — the flag for `claude-code` only, and the CONCLAVE_* identity pair for every kind. Falsified by making the flag unconditional: the suite then fails (exit 101). |
+
+Gates re-recorded at `faba591`, all exit 0: `cargo test … instance::` (67 passed),
+`cargo test … pty::` (8 passed / 2 ignored), `pnpm build`, lane-scoped rustfmt. The
+extraction is behaviour-preserving, so the frontend gates (uishot, replay) were not
+re-run — no `src/` file changed in this round.
+
 ### Boundary
 
 `src-tauri/src/engine/runtime/mod.rs` is out of the declared boundary and was ruled in by
