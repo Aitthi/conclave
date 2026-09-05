@@ -716,18 +716,27 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
     text.contains(&needle)
 }
 
-/// The agent id a marker sentence declares, whoever it names: the token after
-/// `own agent id is`, lower-cased like the ids it is compared with. `None`
-/// when the sentence is absent or names nothing.
-fn declared_agent_id(text: &str) -> Option<String> {
+/// EVERY agent id a marker text declares, whoever it names: each token after
+/// an `own agent id is`, lower-cased like the ids it is compared with. One
+/// text can carry several declarations (ruling 1db7827f); stopping at the
+/// first would let a second owner hide behind the first.
+fn declared_agent_ids(text: &str) -> Vec<String> {
     const PHRASE: &str = "own agent id is ";
     let lower = text.to_ascii_lowercase();
-    let start = lower.find(PHRASE)? + PHRASE.len();
-    let id: String = lower[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    (!id.is_empty()).then_some(id)
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(PHRASE) {
+        let start = from + found + PHRASE.len();
+        let id: String = lower[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            out.push(id);
+        }
+        from = start;
+    }
+    out
 }
 
 /// Every agent id a Claude SessionStart hook attachment structurally
@@ -748,7 +757,7 @@ pub(crate) fn claude_value_declared_owners(value: &Value) -> Vec<String> {
     }
     session_start_hook_texts(attachment)
         .iter()
-        .filter_map(|text| declared_agent_id(text))
+        .flat_map(|text| declared_agent_ids(text))
         .collect()
 }
 
@@ -773,7 +782,7 @@ pub(crate) fn codex_value_declared_owners(value: &Value) -> Vec<String> {
         .flatten()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("input_text"))
         .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .filter_map(declared_agent_id)
+        .flat_map(declared_agent_ids)
         .collect()
 }
 

@@ -1195,24 +1195,39 @@ impl ImportWorker {
             ))
         });
         if offset + pending.scanned() >= length_now {
-            // Nothing new. A verified file sitting at its end is exactly
+            // Nothing new. The continuation taken above goes back untouched:
+            // an idle visit must not lose a partial record (ruling 1db7827f).
+            let unfinished = !pending.buffer.is_empty() || pending.skipping_scanned.is_some();
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if !pending.buffer.is_empty() {
+                    state.pending.insert(
+                        candidate.path.clone(),
+                        PendingRecord {
+                            buffer: pending.buffer.clone(),
+                            skipping_scanned: None,
+                        },
+                    );
+                }
+                if let Some(scope) = &known_scope {
+                    state
+                        .scope_files
+                        .entry(scope.clone())
+                        .or_default()
+                        .insert(candidate.path.clone());
+                }
+            }
+            // A verified file sitting at a COMPLETE-record end is exactly
             // what a live complete window is made of: zero bytes read, no
             // backlog, no damage — its scope stays proven (review a12f77f2
-            // C5 residual: an idle verified scope must not lose its window).
+            // C5 residual). An unfinished tail is backlog, not proof.
             let Some(scope) = known_scope else {
                 return Ok(Ok(None));
             };
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .scope_files
-                .entry(scope.clone())
-                .or_default()
-                .insert(candidate.path.clone());
             return Ok(Ok(Some(FileOutcome {
                 bytes_read: 0,
                 applied: Applied::default(),
-                backlog: false,
+                backlog: unfinished,
                 damaged: false,
                 scope: Some(scope),
             })));
@@ -1266,7 +1281,11 @@ impl ImportWorker {
             }
         }
         let bytes_read = batch.bytes_read;
-        let backlog = batch.has_backlog;
+        // Unread bytes OR an unfinished record: a partial tail (or a skip in
+        // progress) at EOF is not a complete-record boundary, so it never
+        // proves complete observation (ruling 1db7827f).
+        let backlog =
+            batch.has_backlog || !pending.buffer.is_empty() || pending.skipping_scanned.is_some();
         let now = Utc::now();
 
         // ── Attribution (C3): the file's own declared cwd names the workspace;
@@ -3681,6 +3700,127 @@ mod tests {
         assert!(
             aggregate.rejected_counter_count > 0 || aggregate.conflict_count > 0,
             "coverage aggregation must see replay damage and cap otherwise-complete coverage"
+        );
+    }
+    #[tokio::test]
+    async fn residual_probe_multiple_owners_one_structural_text() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("residual-multi-owner");
+        let folder = sandbox.workspace_folder("proj");
+        let (_ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        let marker = claude_owner_marker(&agent).replace(
+            &format!("own agent id is {agent}"),
+            &format!("own agent id is {agent}. Your own agent id is unregistered-owner"),
+        );
+        let parsed = scan_claude_lines(&[marker.clone()]);
+        println!("MULTI_OWNER parsed={:?}", parsed.owners_declared);
+        sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[marker, claude_row_at(&folder, "FOREIGN", 0, "m", 1)],
+        );
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        let report = worker.run_tick().await.unwrap();
+        println!("MULTI_OWNER report={report:?}");
+        assert_eq!(
+            report.inserted, 0,
+            "conflicting structural owner in same text must refuse activity"
+        );
+    }
+
+    #[tokio::test]
+    async fn residual_probe_idle_incomplete_eof_not_clean() {
+        let pool = connect_in_memory().await;
+        let sandbox = Sandbox::new("residual-idle-partial");
+        let folder = sandbox.workspace_folder("proj");
+        let (_ws, agent) = workspace_with_agent(&pool, &folder, "claude-code").await;
+        let path = sandbox.write_claude(
+            &folder,
+            "S1.jsonl",
+            &[
+                claude_owner_marker(&agent),
+                claude_row_at(&folder, "R1", 0, "m", 1),
+            ],
+        );
+        let worker = ImportWorker::new(pool.clone(), sandbox.config.clone());
+        assert_eq!(worker.run_tick().await.unwrap().inserted, 1);
+        let next_row = claude_row_at(&folder, "R2", 0, "m", 1);
+        let split = next_row.len() / 2;
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            write!(file, "{}", &next_row[..split]).unwrap();
+        }
+        let read = worker.run_tick().await.unwrap();
+        let pending_before = worker
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .get(&path)
+            .unwrap()
+            .buffer
+            .clone();
+        let mut idle_reports = Vec::new();
+        for _ in 0..3 {
+            let idle = worker.run_tick().await.unwrap();
+            let pending_after = worker
+                .state
+                .lock()
+                .unwrap()
+                .pending
+                .get(&path)
+                .map(|p| p.buffer.clone());
+            idle_reports.push((idle, pending_after));
+        }
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{}", &next_row[split..]).unwrap();
+        }
+        let recovered = worker.run_tick().await.unwrap();
+        let following = worker.run_tick().await.unwrap();
+        let final_rows = stored(&pool).await;
+        println!("IDLE_PARTIAL first={read:?}; initial_pending={}; idle={:?}; recovered={recovered:?}; following={following:?}; final_rows={}", pending_before.len(), idle_reports.iter().map(|(r,p)| (r,p.as_ref().map(|b| b.len()))).collect::<Vec<_>>(), final_rows.len());
+        assert_eq!(read.bytes_read, split);
+        assert_eq!(read.inserted, 0, "partial row must not count as activity");
+        assert_eq!(
+            read.live_scopes, 0,
+            "initial partial-read tick is not complete observation"
+        );
+        assert_eq!(pending_before, next_row[..split].as_bytes());
+        for (idle, pending_after) in idle_reports {
+            assert_eq!(
+                idle.live_scopes, 0,
+                "unconsumed partial EOF is not complete observation"
+            );
+            assert_eq!(idle.bytes_read, 0, "idle continuation must not be reread");
+            assert_eq!(idle.inserted, 0);
+            assert_eq!(
+                pending_after,
+                Some(pending_before.clone()),
+                "every idle visit must retain partial continuation"
+            );
+        }
+        assert_eq!(
+            recovered.bytes_read,
+            next_row.len() - split + 1,
+            "read only new bytes through newline"
+        );
+        assert_eq!(
+            recovered.inserted, 1,
+            "completed partial response imports exactly once"
+        );
+        assert_eq!(following.inserted, 0);
+        assert_eq!(following.bytes_read, 0);
+        assert_eq!(
+            final_rows.len(),
+            2,
+            "original response plus completed appended response only"
         );
     }
 }
