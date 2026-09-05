@@ -227,7 +227,7 @@ pub fn spawn_cli(
 fn should_set_lang(lang: Option<&str>) -> bool {
     match lang {
         None => true,
-        Some(l) if l.is_empty() => true,
+        Some("") => true,
         Some(l) => {
             let euc = l
                 .split_once(".euc")

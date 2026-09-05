@@ -2094,20 +2094,17 @@ pub(super) async fn run_respawn_resume_state(
         return;
     }
 
-    if kill_first {
-        if state.runtime.unregister(&instance_id) {
-            // Mirror `stop`: persist + emit idle so the UI sees the transition.
-            let _ = repo::workspace_agent::set_status(&state.db, &instance_id, "idle").await;
-            if let Ok(Some(session)) = repo::session::get_by_instance(&state.db, &instance_id).await
-            {
-                state.emit(
-                    bus::SESSION_STATUS,
-                    bus::SessionStatus {
-                        session_id: session.id,
-                        status: "idle".into(),
-                    },
-                );
-            }
+    if kill_first && state.runtime.unregister(&instance_id) {
+        // Mirror `stop`: persist + emit idle so the UI sees the transition.
+        let _ = repo::workspace_agent::set_status(&state.db, &instance_id, "idle").await;
+        if let Ok(Some(session)) = repo::session::get_by_instance(&state.db, &instance_id).await {
+            state.emit(
+                bus::SESSION_STATUS,
+                bus::SessionStatus {
+                    session_id: session.id,
+                    status: "idle".into(),
+                },
+            );
         }
     }
 
