@@ -47,6 +47,18 @@ Each state must show the full modal (880 × ≤90vh) inside the app shell
 backdrop, plus a second artboard of the Role & Level section alone with
 `Custom…` open (inline role editor).
 
+AMENDMENT (human, 2026-09-05, after task creation): the Runtime picker is
+NOT a segmented control. It is a 3-column grid of provider tiles, each tile
+= provider logo mark (16px, monochrome `currentColor`, brand colour allowed
+as the selected accent) + name, in the style of the Untrivial-ai
+agent-orchestrator provider table. Draw the three live tiles (Claude Code,
+Codex, Antigravity) and, on a separate artboard, the same grid with five
+tiles (adding opencode and Muse Spark) so the layout is proven for the
+planned runtimes. Logos arrive from task `provider-logos`
+(`design/assets/providers/<cliKind>.svg`); until they land, use a
+monochrome placeholder glyph and say so in the CANON block. Spec D5 carries
+the ruling.
+
 Document in the CANON comment block: rail item states (complete / incomplete
 / error / active), the scroll-spy rule (item highlighted when its section's
 top crosses the upper third of the scroll container), the segmented control
