@@ -1,5 +1,5 @@
 import type { FixtureHandlers } from "../backend";
-import type { BrowserTab, Session, Workspace, WorkspaceAgent } from "../../ipc/types";
+import type { BrowserTab, Message, Session, Skill, Workspace, WorkspaceAgent } from "../../ipc/types";
 import { emitFixtureEvent } from "../events";
 import {
   workspaces,
@@ -83,6 +83,58 @@ function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
 // missing-handler error. Mutations that only fire on user interaction are
 // intentionally absent — reaching one in a screenshot is a real bug worth the
 // loud failure.
+// ── Skill-assist harness seam (task skill-assist-repair) ───────────────────
+// Mutable module state, like tabsState above. `skillsState` makes skill.save
+// durable within a page load so the harness can save then reopen the library.
+const DRAFT_WA_ID = "fx-skill-draft-wa";
+const DRAFT_SESSION_ID = "fx-skill-draft-session";
+
+let skillsState: typeof skills = [...skills];
+let skillDraft = {
+  started: false,
+  startedWith: null as null | { name: string; description?: string; content: string; agentDefId: string },
+  file: { name: "", content: "" } as { name: string; description?: string; content: string },
+  startShouldFail: false,
+  syncShouldFail: false,
+  stopShouldFail: false,
+  // Holds startDraftSession open so the harness can close the editor while the
+  // call is still in flight (R4's leaked-session case).
+  startDelayMs: 0,
+};
+
+type ProbeCall = Record<string, unknown> & { cmd: string };
+const probe = {
+  calls: [] as ProbeCall[],
+  sessionId: DRAFT_SESSION_ID,
+  workspaceAgentId: DRAFT_WA_ID,
+  reset() {
+    probe.calls = [];
+  },
+  /** Stand in for the agent rewriting SKILL.md, so a sync has something new. */
+  setDraftFile(file: { name: string; description?: string; content: string }) {
+    skillDraft = { ...skillDraft, file };
+  },
+  setStartDelay(ms: number) {
+    skillDraft = { ...skillDraft, startDelayMs: ms };
+  },
+  fail(which: "start" | "sync" | "stop", on: boolean) {
+    if (which === "start") skillDraft = { ...skillDraft, startShouldFail: on };
+    if (which === "sync") skillDraft = { ...skillDraft, syncShouldFail: on };
+    if (which === "stop") skillDraft = { ...skillDraft, stopShouldFail: on };
+  },
+  emitOutput(chunk: string) {
+    emitFixtureEvent("session:output", { sessionId: DRAFT_SESSION_ID, chunk });
+  },
+  emitStatus(status: string) {
+    emitFixtureEvent("session:status", { sessionId: DRAFT_SESSION_ID, status });
+  },
+};
+
+// DEV-only test seam: scripts/skill-assist-repro.mjs drives the real components
+// and reads this back. `fixtureScenario()` already gates every handler here to
+// DEV + ?fixture=, and nothing imports this module in a production build.
+(globalThis as unknown as { skillAssistProbe?: typeof probe }).skillAssistProbe = probe;
+
 export const handlers: FixtureHandlers = {
   "workspace.list": () => [workspaceState],
   "workspace.use": () => undefined,
@@ -206,9 +258,73 @@ export const handlers: FixtureHandlers = {
     mode === "agent"
       ? { ...draftTeam, agents: [draftTeam.agents[1]], positions: [] }
       : draftTeam,
-  "skill.list": () => skills,
+  "skill.list": () => skillsState,
+  // ── Skill-editor agent-assist (task skill-assist-repair) ────────────────
+  // These back scripts/skill-assist-repro.mjs, which drives the REAL
+  // SkillEditor/SkillAssistPanel through this seam. Every call is recorded on
+  // `skillAssistProbe` so the harness can assert on what the components
+  // actually sent (a PTY resize with positive dims, a paste followed by a
+  // standalone CR) rather than on rendered text. Fixed literals only.
+  "skill.startDraftSession": ({ name, description, content, agentDefId }) => {
+    skillDraft = {
+      ...skillDraft,
+      started: true,
+      startedWith: { name, description, content, agentDefId },
+      // The scratch file starts as whatever the editor handed over — the same
+      // thing repo::skill::write_draft does.
+      file: { name, description, content },
+    };
+    probe.calls.push({ cmd: "skill.startDraftSession", agentDefId });
+    if (skillDraft.startShouldFail) throw new Error("fixture: startDraftSession failed");
+    const result = { workspaceAgentId: DRAFT_WA_ID, sessionId: DRAFT_SESSION_ID };
+    if (skillDraft.startDelayMs > 0) {
+      const ms = skillDraft.startDelayMs;
+      return new Promise<typeof result>((resolve) => setTimeout(() => resolve(result), ms));
+    }
+    return result;
+  },
+  "skill.syncDraft": () => {
+    probe.calls.push({ cmd: "skill.syncDraft" });
+    if (skillDraft.syncShouldFail) throw new Error("fixture: SKILL.md is mid-write");
+    return skillDraft.file;
+  },
+  "skill.stopDraftSession": () => {
+    probe.calls.push({ cmd: "skill.stopDraftSession" });
+    if (skillDraft.stopShouldFail) throw new Error("fixture: stop failed");
+    skillDraft = { ...skillDraft, started: false };
+    return undefined;
+  },
+  "skill.save": ({ id, name, description, content }) => {
+    probe.calls.push({ cmd: "skill.save", name });
+    const saved: Skill = {
+      id: id ?? "fx-skill-saved",
+      name,
+      description,
+      content,
+      kind: "custom",
+      mandatory: true,
+    };
+    // Persist so the harness can reopen the library and see the saved skill.
+    skillsState = skillsState.some((k) => k.id === saved.id)
+      ? skillsState.map((k) => (k.id === saved.id ? saved : k))
+      : [...skillsState, saved];
+    return saved;
+  },
+  "message.send": ({ sessionId, text, paste }) => {
+    probe.calls.push({ cmd: "message.send", sessionId, text, paste: paste === true });
+    return {
+      id: `fx-msg-${probe.calls.length}`,
+      sessionId,
+      role: "user",
+      text,
+      createdAt: "2026-09-05T04:00:00.000Z",
+    } as Message;
+  },
   "provider.list": () => providers,
-  "session.resize": () => undefined,
+  "session.resize": ({ sessionId, cols, rows, pixelWidth, pixelHeight }) => {
+    probe.calls.push({ cmd: "session.resize", sessionId, cols, rows, pixelWidth, pixelHeight });
+    return undefined;
+  },
   // In-app browser: status drives the side rail; the live page renders in a
   // native webview overlay. Fixed literals only — fixture mode never touches
   // Tauri. One human tab (active) + two agent tabs, one of them `ended` —
