@@ -135,6 +135,7 @@ export interface RosterChangedEvent {
 export interface WorkspaceChangedEvent {
   workspaceId: string;
   runState: "started" | "stopped";
+  archivedAt?: string | null;
 }
 
 /**

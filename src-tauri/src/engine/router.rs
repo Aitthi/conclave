@@ -13,6 +13,9 @@ pub async fn dispatch(state: &AppState, cmd: &str, payload: Value) -> Result<Val
     match cmd {
         // ── workspace ──────────────────────────────────────────────────────
         "workspace.list" => workspace::list(state, payload).await,
+        "workspace.listArchived" => workspace::list_archived(state, payload).await,
+        "workspace.archive" => workspace::archive(state, payload).await,
+        "workspace.restore" => workspace::restore(state, payload).await,
         "workspace.link" => workspace::link(state, payload).await,
         "workspace.use" => workspace::use_workspace(state, payload).await,
         "workspace.update" => workspace::update(state, payload).await,

@@ -61,8 +61,11 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         // ── ws ────────────────────────────────────────────────────────────
         "ws" => match argv.get(1).map(String::as_str) {
             Some("list") => {
+                if argv.len() == 3 && argv[2] == "--archived" {
+                    return Ok(("workspace.listArchived", Value::Null));
+                }
                 if argv.len() != 2 {
-                    return Err(AppError::Invalid("cli: ws list".into()));
+                    return Err(AppError::Invalid("cli: ws list [--archived]".into()));
                 }
                 Ok(("workspace.list", Value::Null))
             }
@@ -75,7 +78,7 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 }
                 Ok(("workspace.use", json!({ "workspaceId": workspace_id })))
             }
-            Some("start") | Some("stop") => {
+            Some("start") | Some("stop") | Some("archive") | Some("restore") => {
                 let verb = argv[1].as_str();
                 let usage = format!("cli: ws {verb} <workspaceId>");
                 let workspace_id = argv
@@ -84,15 +87,16 @@ fn map_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 if argv.len() != 3 {
                     return Err(AppError::Invalid(usage));
                 }
-                let method = if verb == "start" {
-                    "workspace.start"
-                } else {
-                    "workspace.stop"
+                let method = match verb {
+                    "start" => "workspace.start",
+                    "archive" => "workspace.archive",
+                    "restore" => "workspace.restore",
+                    _ => "workspace.stop",
                 };
                 Ok((method, json!({ "workspaceId": workspace_id })))
             }
             _ => Err(AppError::Invalid(
-                "cli: ws <list|use|start|stop> — unknown ws subcommand".into(),
+                "cli: ws <list|use|start|stop|archive|restore> — unknown ws subcommand".into(),
             )),
         },
 
@@ -1619,6 +1623,25 @@ mod tests {
     fn ws_list_maps_correctly() {
         assert_eq!(ok_method(&["ws", "list"]), "workspace.list");
         assert_eq!(ok_params(&["ws", "list"]), Value::Null);
+    }
+
+    #[test]
+    fn ws_archive_contract_maps_to_shared_handlers() {
+        assert_eq!(
+            ok_method(&["ws", "list", "--archived"]),
+            "workspace.listArchived"
+        );
+        assert_eq!(ok_params(&["ws", "list", "--archived"]), Value::Null);
+        for (verb, method) in [
+            ("archive", "workspace.archive"),
+            ("restore", "workspace.restore"),
+        ] {
+            assert_eq!(ok_method(&["ws", verb, "w"]), method);
+            assert_eq!(ok_params(&["ws", verb, "w"]), json!({"workspaceId":"w"}));
+            assert!(is_invalid(&["ws", verb]));
+            assert!(is_invalid(&["ws", verb, "w", "extra"]));
+        }
+        assert!(is_invalid(&["ws", "list", "--archived", "extra"]));
     }
 
     #[test]

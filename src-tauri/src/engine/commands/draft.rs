@@ -592,9 +592,28 @@ fn validate_positions(draft: &DraftResponse, _cat: &Catalogue) -> Result<(), Str
 const DRAFT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub async fn run(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    run_with_state(state, payload, &Oneshot::Live).await
+}
+
+async fn run_with_state(
+    state: &AppState,
+    payload: Value,
+    oneshot: &Oneshot,
+) -> Result<Value, AppError> {
     let req: DraftRequest =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
-    let out = run_with(&state.db, &Oneshot::Live, req).await?;
+    let lock = req
+        .workspace_id
+        .as_ref()
+        .map(|id| state.workspace_lifecycle_lock(id));
+    let _guard = match &lock {
+        Some(lock) => Some(lock.read().await),
+        None => None,
+    };
+    if let Some(id) = &req.workspace_id {
+        super::workspace::require_active(state, id).await?;
+    }
+    let out = run_with(&state.db, oneshot, req).await?;
     serde_json::to_value(out).map_err(|e| AppError::Internal(e.to_string()))
 }
 
@@ -1206,6 +1225,43 @@ pub(crate) mod tests {
         assert_eq!(out.drafter.cli_kind, "claude-code");
         assert_eq!(out.drafter.model, "claude-sonnet-5");
         assert_eq!(out.notes, "n");
+    }
+
+    #[tokio::test]
+    async fn archive_serializes_with_production_draft_guard_and_rechecks_after_lock() {
+        let state = AppState::for_tests().await;
+        let ws = repo::workspace::create(&state.db, "Draft", "/tmp/draft", None)
+            .await
+            .unwrap();
+        let def =
+            repo::agent_definition::create(&state.db, &drafter_input("cli", Some("claude-code")))
+                .await
+                .unwrap();
+        let payload = json!({"workspaceId":ws.id,"drafterDefId":def.id,"mode":"team","brief":"Create a team"});
+        let mock = Oneshot::Mock(Ok(canned_team()));
+        // Exhaust the single test connection: the real handler acquires its
+        // lifecycle read guard, then yields during its fresh archive check.
+        let connection = state.db.acquire().await.unwrap();
+        let mut draft = Box::pin(run_with_state(&state, payload.clone(), &mock));
+        assert!(futures_util::poll!(&mut draft).is_pending());
+        let error = super::super::workspace::archive(&state, json!({"workspaceId":ws.id}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("busy"));
+        drop(connection);
+        assert!(
+            draft.await.is_ok(),
+            "stopped active workspaces can still draft"
+        );
+        let lock = state.workspace_lifecycle_lock(&ws.id);
+        let guard = lock.write().await;
+        let mut draft = Box::pin(run_with_state(&state, payload, &mock));
+        assert!(futures_util::poll!(&mut draft).is_pending());
+        repo::workspace::set_archived(&state.db, &ws.id, Some("2026-09-05T00:00:00Z"))
+            .await
+            .unwrap();
+        drop(guard);
+        assert!(draft.await.unwrap_err().to_string().contains("archived"));
     }
 
     #[tokio::test]

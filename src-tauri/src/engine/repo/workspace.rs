@@ -52,12 +52,13 @@ pub struct WorkspaceRow {
     #[serde(skip)]
     pub hidden: bool,
     pub run_state: String,
+    pub archived_at: Option<String>,
     pub created_at: String, // serializes to "createdAt"
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
 
-/// Return all non-hidden workspaces ordered by `created_at` ascending, with
+/// Return all non-hidden, unarchived workspaces ordered by `created_at` ascending, with
 /// `id` as a stable tie-breaker (two rows created in the same second would
 /// otherwise order non-deterministically). Hidden workspaces (see
 /// [`WorkspaceRow::hidden`]) are excluded.
@@ -70,6 +71,7 @@ pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
             "color",
             "hidden",
             "run_state",
+            "archived_at",
             "created_at",
         ])
         .order_by("created_at", Order::Asc)
@@ -81,7 +83,37 @@ pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
     // predicate — this table is always small (dozens of rows at most), and
     // filtering here avoids depending on chain-builder's bool-bind behavior
     // in a WHERE clause, which nothing else in this codebase exercises yet.
-    Ok(rows.into_iter().filter(|w| !w.hidden).collect())
+    Ok(rows
+        .into_iter()
+        .filter(|w| !w.hidden && w.archived_at.is_none())
+        .collect())
+}
+
+pub async fn list_archived(pool: &SqlitePool) -> sqlx::Result<Vec<WorkspaceRow>> {
+    sqlx::query_as("SELECT * FROM workspace WHERE hidden = 0 AND archived_at IS NOT NULL ORDER BY archived_at DESC, id ASC")
+        .fetch_all(pool).await
+}
+
+/// Call under the workspace lifecycle write guard after validating eligibility.
+pub async fn set_archived(
+    pool: &SqlitePool,
+    id: &str,
+    archived_at: Option<&str>,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE workspace SET archived_at = ?, run_state = 'stopped' WHERE id = ?")
+        .bind(archived_at)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if archived_at.is_some() {
+        sqlx::query("UPDATE workspace_agent SET status = 'idle' WHERE workspace_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get(pool, id).await
 }
 
 /// Fetch a single workspace by `id`, or `None` if it does not exist.
@@ -94,6 +126,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<WorkspaceRo
             "color",
             "hidden",
             "run_state",
+            "archived_at",
             "created_at",
         ])
         .where_eq("id", id)
@@ -176,6 +209,7 @@ async fn insert_row(
         color,
         hidden,
         run_state,
+        archived_at: None,
         created_at,
     })
 }
@@ -248,6 +282,49 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> sqlx::Result<bool> {
 mod tests {
     use super::*;
     use crate::engine::db::connect_in_memory;
+
+    #[tokio::test]
+    async fn archive_lists_are_disjoint_ordered_and_hidden_stays_internal() {
+        let pool = connect_in_memory().await;
+        let active = create(&pool, "Active", "/tmp/active", None).await.unwrap();
+        let older = create(&pool, "Older", "/tmp/older", None).await.unwrap();
+        let newer = create(&pool, "Newer", "/tmp/newer", None).await.unwrap();
+        let tie = create(&pool, "Tie", "/tmp/tie", None).await.unwrap();
+        let hidden = create_hidden(&pool, "Hidden", "/tmp/hidden").await.unwrap();
+        set_archived(&pool, &older.id, Some("2026-09-04T00:00:00Z"))
+            .await
+            .unwrap();
+        set_archived(&pool, &newer.id, Some("2026-09-05T00:00:00Z"))
+            .await
+            .unwrap();
+        set_archived(&pool, &tie.id, Some("2026-09-05T00:00:00Z"))
+            .await
+            .unwrap();
+        // Even malformed legacy hidden+archived rows never enter either list.
+        set_archived(&pool, &hidden.id, Some("2026-09-06T00:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(list(&pool).await.unwrap(), vec![active]);
+        let mut expected = vec![newer.id, tie.id];
+        expected.sort();
+        expected.push(older.id);
+        assert_eq!(
+            list_archived(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(get(&pool, &hidden.id).await.unwrap().unwrap().hidden);
+        assert!(get(&pool, &expected[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some());
+    }
 
     /// Create a workspace and verify every field round-trips through the DB.
     /// Tests both Some(color) and None color.

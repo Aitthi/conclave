@@ -8,6 +8,7 @@ export interface Workspace {
   folderPath: string;
   color?: string;
   runState: "started" | "stopped";
+  archivedAt?: string | null;
   createdAt: string;
 }
 

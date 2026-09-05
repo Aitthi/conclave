@@ -42,6 +42,10 @@ async fn require_delivery_eligible(
     let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, instance_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={instance_id} not found")))?;
+    super::workspace::require_not_archived(
+        &eligibility.workspace_id,
+        eligibility.archived_at.as_deref(),
+    )?;
     if eligibility.run_state != "started" {
         return Err(AppError::Invalid(format!(
             "workspace {} is stopped — start it before sending messages",

@@ -64,10 +64,12 @@ const USAGE: &str = "\
 Usage: conclave <subcommand> [args...]
 
 Subcommands:
-  ws list
+  ws list [--archived]
   ws use <workspaceId>
   ws start <workspaceId>
   ws stop <workspaceId>
+  ws archive <workspaceId>
+  ws restore <workspaceId>
   agent list <workspaceId>
   agent stop <workspaceAgentId>
   agent resume <workspaceAgentId>

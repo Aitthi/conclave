@@ -465,6 +465,22 @@ pub async fn add_to_workspace(state: &AppState, payload: Value) -> Result<Value,
         )));
     }
 
+    // Lock and validate every target before writing any membership. Sorting
+    // prevents cross-workspace additions from acquiring locks in reverse order.
+    let mut workspace_ids = req.workspace_ids.clone();
+    workspace_ids.sort_unstable();
+    workspace_ids.dedup();
+    let locks: Vec<_> = workspace_ids
+        .iter()
+        .map(|id| state.workspace_lifecycle_lock(id))
+        .collect();
+    let mut guards = Vec::new();
+    for lock in &locks {
+        guards.push(lock.read().await);
+    }
+    for id in &workspace_ids {
+        super::workspace::require_active(state, id).await?;
+    }
     let mut results: Vec<WorkspaceAgentRow> = Vec::new();
 
     for workspace_id in &req.workspace_ids {

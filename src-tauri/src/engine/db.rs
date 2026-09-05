@@ -321,6 +321,16 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     if version < 28 {
         migrate_0028(&mut connection).await?;
     }
+    if version < 29 {
+        let mut tx = connection.begin().await?;
+        sqlx::raw_sql(include_str!("migrations/0029_workspace_archive.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 29;")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -531,7 +541,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
         let workspace: (String, String) =
             sqlx::query_as("SELECT id,run_state FROM workspace WHERE id='ws'")
                 .fetch_one(&pool)
@@ -672,13 +682,19 @@ mod tests {
         .await
         .unwrap();
 
-        migrate(&pool).await.expect("0028 migration");
+        migrate(&pool).await.expect("0028 and archive migration");
+        let archived: Option<String> =
+            sqlx::query_scalar("SELECT archived_at FROM workspace WHERE id='ws'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(archived, None, "upgraded populated graph remains active");
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
         use sqlx::Row as _;
         let retained = sqlx::query(
             "SELECT id,name,role,type,cli_kind,color,provider_id,model,harness_mode,\
@@ -807,7 +823,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version_after_second_run, 28);
+        assert_eq!(version_after_second_run, 29);
     }
 
     #[tokio::test]
@@ -960,7 +976,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 28, "migrate() from v13 must reach schema v28");
+        assert_eq!(version, 29, "migrate() from v13 must reach schema v29");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -1178,7 +1194,7 @@ mod tests {
         assert_eq!(count, 31, "expected 31 tables, got {count}");
     }
 
-    /// Running migrate twice must not error and must leave user_version == 28.
+    /// Running migrate twice must not error and must leave user_version == 29.
     #[tokio::test]
     async fn migrate_is_idempotent() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -1211,7 +1227,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 28, "user_version should be 28");
+        assert_eq!(version, 29, "user_version should be 29");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -1414,7 +1430,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -1505,7 +1521,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1615,7 +1631,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
