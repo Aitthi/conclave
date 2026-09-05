@@ -79,7 +79,19 @@ pub struct SessionRow {
     pub context_tokens: Option<i64>, // → "contextTokens"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<i64>, // → "contextLimit"
-    pub started_at: String,         // → "startedAt"
+    /// Which transcript produced the stored reading (`claude-code` / `codex`),
+    /// and when that reading was OBSERVED at the source.
+    ///
+    /// Never serialized: the frontend `Session` type has no such fields and the
+    /// public payload must stay byte-compatible. `usage.overview` is the only
+    /// reader, exposing them as `UsageContext.source` / `observedAt`.
+    /// `None` means provenance was never observed — an old row is never
+    /// relabelled as newly measured.
+    #[serde(skip)]
+    pub context_source: Option<String>,
+    #[serde(skip)]
+    pub context_observed_at: Option<String>,
+    pub started_at: String, // → "startedAt"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<String>, // → "lastActiveAt"
     /// JSON array of skill ids used at the last launch — see
@@ -93,11 +105,13 @@ pub struct SessionRow {
 
 // ── Column list ──────────────────────────────────────────────────────────────
 
-const COLS: [&str; 7] = [
+const COLS: [&str; 9] = [
     "id",
     "workspace_agent_id",
     "context_tokens",
     "context_limit",
+    "context_source",
+    "context_observed_at",
     "started_at",
     "last_active_at",
     "launched_skill_ids",
@@ -153,6 +167,9 @@ pub async fn create_for_instance(
         workspace_agent_id,
         context_tokens: Some(0),
         context_limit: Some(context_limit),
+        // A fresh session has observed nothing yet.
+        context_source: None,
+        context_observed_at: None,
         started_at,
         last_active_at: None,
         launched_skill_ids: None,
@@ -221,6 +238,11 @@ pub async fn set_context_tokens(
 /// the same transcript reading as the token count. CLI transcript meters must
 /// keep these values together so later roster reads do not divide by the
 /// default session limit.
+/// Store a reading with NO source provenance (launch reset, denominator pin,
+/// tests).
+///
+/// Any provenance already on the row described the PREVIOUS reading, so it is
+/// cleared here rather than left to describe numbers it no longer belongs to.
 pub async fn set_context_reading(
     pool: &SqlitePool,
     session_id: &str,
@@ -232,6 +254,39 @@ pub async fn set_context_reading(
         .update([
             ("context_tokens", Bind::I64(tokens)),
             ("context_limit", Bind::I64(limit)),
+            ("context_source", Bind::Null),
+            ("context_observed_at", Bind::Null),
+            ("last_active_at", Bind::Text(now)),
+        ])
+        .where_eq("id", session_id)
+        .execute(pool)
+        .await
+        .map_err(cb_err)?;
+    Ok(())
+}
+
+/// Store a transcript-backed reading together with the provenance that
+/// describes it.
+///
+/// `observed_at` is the SOURCE's own observation time, never the current clock
+/// and never `last_active_at` — a metadata-only append to a closed transcript
+/// must not be able to date a reading (see the mtime incident recorded in
+/// transcript_context.rs).
+pub async fn set_context_reading_observed(
+    pool: &SqlitePool,
+    session_id: &str,
+    tokens: i64,
+    limit: i64,
+    source: &str,
+    observed_at: &str,
+) -> sqlx::Result<()> {
+    let now = Utc::now().to_rfc3339();
+    QueryBuilder::<Sqlite>::table("session")
+        .update([
+            ("context_tokens", Bind::I64(tokens)),
+            ("context_limit", Bind::I64(limit)),
+            ("context_source", Bind::Text(source.to_owned())),
+            ("context_observed_at", Bind::Text(observed_at.to_owned())),
             ("last_active_at", Bind::Text(now)),
         ])
         .where_eq("id", session_id)
@@ -249,6 +304,10 @@ pub async fn clear_context_reading(pool: &SqlitePool, session_id: &str) -> sqlx:
         .update([
             ("context_tokens", Bind::Null),
             ("context_limit", Bind::Null),
+            // Provenance describes a reading; with no reading there is nothing
+            // for it to describe.
+            ("context_source", Bind::Null),
+            ("context_observed_at", Bind::Null),
         ])
         .where_eq("id", session_id)
         .execute(pool)
@@ -564,5 +623,109 @@ mod tests {
             .expect("get failed")
             .expect("exists");
         assert_eq!(fetched.launched_skill_ids.as_deref(), Some("[]"));
+    }
+
+    /// D2: provenance is stored WITH the reading it describes, and a later
+    /// write that has no provenance must not leave the old one behind
+    /// describing numbers it no longer belongs to.
+    #[tokio::test]
+    async fn context_provenance_follows_the_reading_it_describes() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+        let session = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create_for_instance failed");
+
+        set_context_reading_observed(
+            &pool,
+            &session.id,
+            125_000,
+            200_000,
+            "claude-code",
+            "2026-09-05T10:00:00Z",
+        )
+        .await
+        .unwrap();
+        let stored = get_by_instance(&pool, &session.workspace_agent_id)
+            .await
+            .unwrap()
+            .expect("session");
+        assert_eq!(stored.context_tokens, Some(125_000));
+        assert_eq!(stored.context_source.as_deref(), Some("claude-code"));
+        assert_eq!(
+            stored.context_observed_at.as_deref(),
+            Some("2026-09-05T10:00:00Z"),
+            "the source's own observation time, not the write clock"
+        );
+
+        // A launch reset / denominator pin has observed nothing.
+        set_context_reading(&pool, &session.id, 0, 200_000)
+            .await
+            .unwrap();
+        let after_reset = get_by_instance(&pool, &session.workspace_agent_id)
+            .await
+            .unwrap()
+            .expect("session");
+        assert_eq!(after_reset.context_tokens, Some(0));
+        assert_eq!(
+            after_reset.context_source, None,
+            "stale provenance must not survive a reading it does not describe"
+        );
+        assert_eq!(after_reset.context_observed_at, None);
+
+        // Clearing the gauge clears its provenance too.
+        set_context_reading_observed(
+            &pool,
+            &session.id,
+            42,
+            200_000,
+            "codex",
+            "2026-09-05T11:00:00Z",
+        )
+        .await
+        .unwrap();
+        clear_context_reading(&pool, &session.id).await.unwrap();
+        let cleared = get_by_instance(&pool, &session.workspace_agent_id)
+            .await
+            .unwrap()
+            .expect("session");
+        assert_eq!(cleared.context_tokens, None);
+        assert_eq!(cleared.context_source, None);
+        assert_eq!(cleared.context_observed_at, None);
+    }
+
+    /// The public Session payload must stay byte-compatible: provenance is
+    /// internal and reaches the frontend only through `usage.overview`.
+    #[tokio::test]
+    async fn provenance_is_not_serialized_into_the_session_payload() {
+        let pool = connect_in_memory().await;
+        let wa_id = fixture_instance(&pool).await;
+        let session = create_for_instance(&pool, &wa_id)
+            .await
+            .expect("create_for_instance failed");
+        set_context_reading_observed(
+            &pool,
+            &session.id,
+            1,
+            2,
+            "claude-code",
+            "2026-09-05T10:00:00Z",
+        )
+        .await
+        .unwrap();
+        let stored = get_by_instance(&pool, &session.workspace_agent_id)
+            .await
+            .unwrap()
+            .expect("session");
+        let json = serde_json::to_value(&stored).expect("serialize session");
+        assert!(
+            json.get("contextSource").is_none(),
+            "contextSource must not appear in the public payload: {json}"
+        );
+        assert!(
+            json.get("contextObservedAt").is_none(),
+            "contextObservedAt must not appear in the public payload: {json}"
+        );
+        assert!(json.get("contextTokens").is_some(), "existing keys stay");
     }
 }

@@ -354,7 +354,9 @@ pub async fn aggregate_range(
            FROM model_usage_event e
           WHERE e.occurred_at >= ? AND e.occurred_at < ?{pred}"
     );
-    let mut q = sqlx::query(AssertSqlSafe(sql)).bind(start_utc).bind(end_utc);
+    let mut q = sqlx::query(AssertSqlSafe(sql))
+        .bind(start_utc)
+        .bind(end_utc);
     for b in &binds {
         q = q.bind(b.clone());
     }
@@ -425,7 +427,9 @@ pub async fn aggregate_by_column(
           WHERE e.occurred_at >= ? AND e.occurred_at < ?{pred}
           GROUP BY {col}"
     );
-    let mut q = sqlx::query(AssertSqlSafe(sql)).bind(start_utc).bind(end_utc);
+    let mut q = sqlx::query(AssertSqlSafe(sql))
+        .bind(start_utc)
+        .bind(end_utc);
     for b in &binds {
         q = q.bind(b.clone());
     }
@@ -486,7 +490,9 @@ pub async fn aggregate_by_model(
           GROUP BY e.provider, e.served_model,
                    CASE WHEN e.served_model IS NULL THEN e.requested_model END"
     );
-    let mut q = sqlx::query(AssertSqlSafe(sql)).bind(start_utc).bind(end_utc);
+    let mut q = sqlx::query(AssertSqlSafe(sql))
+        .bind(start_utc)
+        .bind(end_utc);
     for b in &binds {
         q = q.bind(b.clone());
     }
@@ -692,7 +698,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(by_ws.len(), 2, "one real workspace group plus the NULL group");
+        assert_eq!(
+            by_ws.len(),
+            2,
+            "one real workspace group plus the NULL group"
+        );
         assert!(by_ws.iter().any(|(k, _)| k.is_none()), "NULL group present");
         assert_eq!(
             by_ws.iter().map(|(_, a)| a.activity_count).sum::<i64>(),

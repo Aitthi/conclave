@@ -1548,6 +1548,8 @@ async fn forward_session_output(
         let mut meter = TranscriptMeterState {
             tokens: 0,
             limit,
+            source: None,
+            observed_at: None,
             last_poll: None,
         };
         let mut poll_timer = tokio::time::interval(TRANSCRIPT_POLL_INTERVAL);
@@ -1633,7 +1635,37 @@ async fn forward_session_output(
 struct TranscriptMeterState {
     tokens: i64,
     limit: i64,
+    /// Provenance of the last PERSISTED reading. Tracked because a newer
+    /// observation is worth storing even when the token counts are identical:
+    /// `UsageContext.observedAt` must say when the gauge was last actually
+    /// observed, not when it last changed value (ruling dfe6ce46, D2).
+    source: Option<String>,
+    observed_at: Option<String>,
     last_poll: Option<std::time::Instant>,
+}
+
+/// Decide whether a freshly polled reading is worth a database write.
+///
+/// Two independent reasons to persist (ruling dfe6ce46, D2):
+///   * the token counts or the limit moved, or
+///   * the SAME numbers were observed again at a genuinely newer moment, or
+///     from a different source.
+///
+/// The second reason is why this is not the old `tokens != tokens` check: the
+/// Overview reports when the gauge was last OBSERVED, and an idle-but-alive
+/// agent would otherwise appear to have stopped being watched. Re-polling an
+/// unchanged transcript returns the same `observed_at`, so identical
+/// observations are still suppressed and the write rate is unchanged for a
+/// genuinely idle session.
+fn reading_is_worth_persisting(
+    meter: &TranscriptMeterState,
+    reading: &crate::engine::runtime::transcript_context::TranscriptContextReading,
+    source: &str,
+) -> bool {
+    let values_changed = reading.tokens != meter.tokens || reading.limit != meter.limit;
+    let observation_changed = meter.observed_at.as_deref() != Some(reading.observed_at.as_str())
+        || meter.source.as_deref() != Some(source);
+    values_changed || observation_changed
 }
 
 /// Poll the transcript reader for the CLI transcript-backed meter and persist
@@ -1680,15 +1712,26 @@ async fn poll_transcript_context(
         return;
     };
 
-    let changed = reading.tokens != meter.tokens || reading.limit != meter.limit;
+    let source = reading.source_kind.to_string();
+    let worth_writing = reading_is_worth_persisting(meter, &reading, &source);
     meter.tokens = reading.tokens;
     meter.limit = reading.limit;
-    if !changed {
+    if !worth_writing {
         meter.last_poll = Some(std::time::Instant::now());
         return;
     }
+    meter.source = Some(source.clone());
+    meter.observed_at = Some(reading.observed_at.clone());
 
-    let _ = repo::session::set_context_reading(db, session_id, reading.tokens, reading.limit).await;
+    let _ = repo::session::set_context_reading_observed(
+        db,
+        session_id,
+        reading.tokens,
+        reading.limit,
+        &source,
+        &reading.observed_at,
+    )
+    .await;
     if let Some(app) = app {
         let _ = bus::session_context(
             app,
@@ -3330,6 +3373,54 @@ mod tests {
 
     /// The transcript meter seeds at zero, never from the session row: a CLI
     /// forwarder only ever runs for a freshly spawned child. Seeding from the
+    /// D2: the gauge reports when it was last OBSERVED, so an unchanged token
+    /// count observed at a newer moment is still worth persisting — while a
+    /// genuinely identical re-poll stays suppressed.
+    #[test]
+    fn provenance_makes_an_unchanged_reading_worth_persisting_once() {
+        use crate::engine::runtime::transcript_context::{
+            TranscriptContextReading, TranscriptSourceKind,
+        };
+
+        let reading = |tokens: i64, observed_at: &str| TranscriptContextReading {
+            tokens,
+            limit: 200_000,
+            observed_at: observed_at.to_owned(),
+            source_kind: TranscriptSourceKind::ClaudeCode,
+        };
+        let mut meter = TranscriptMeterState {
+            tokens: 0,
+            limit: 200_000,
+            source: None,
+            observed_at: None,
+            last_poll: None,
+        };
+
+        // First reading: nothing persisted yet.
+        let first = reading(1_000, "2026-09-05T10:00:00Z");
+        assert!(reading_is_worth_persisting(&meter, &first, "claude-code"));
+        meter.tokens = first.tokens;
+        meter.source = Some("claude-code".into());
+        meter.observed_at = Some(first.observed_at.clone());
+
+        // Same numbers, same observation → suppressed (an idle poll).
+        assert!(
+            !reading_is_worth_persisting(&meter, &first, "claude-code"),
+            "an identical re-poll must not write"
+        );
+
+        // Same numbers, NEWER observation → persisted. This is the case the
+        // old `tokens != tokens` check silently dropped.
+        let later = reading(1_000, "2026-09-05T10:05:00Z");
+        assert!(
+            reading_is_worth_persisting(&meter, &later, "claude-code"),
+            "a newer observation of unchanged counts must still persist"
+        );
+
+        // Same observation instant but a different source is also new.
+        assert!(reading_is_worth_persisting(&meter, &first, "codex"));
+    }
+
     /// row makes `poll_transcript_context`'s `changed` check suppress the first
     /// genuine reading whenever it happens to match the previous generation's
     /// count — swallowing both the persist and the `session:context` emit.

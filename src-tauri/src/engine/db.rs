@@ -343,9 +343,11 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     }
     if version < 31 {
         let mut tx = connection.begin().await?;
-        sqlx::raw_sql(include_str!("migrations/0031_session_context_provenance.sql"))
-            .execute(&mut *tx)
-            .await?;
+        sqlx::raw_sql(include_str!(
+            "migrations/0031_session_context_provenance.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
         sqlx::raw_sql("PRAGMA user_version = 31;")
             .execute(&mut *tx)
             .await?;
@@ -561,7 +563,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 29);
+        assert_eq!(version, 31);
         let workspace: (String, String) =
             sqlx::query_as("SELECT id,run_state FROM workspace WHERE id='ws'")
                 .fetch_one(&pool)
@@ -714,7 +716,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 29);
+        assert_eq!(version, 31);
         use sqlx::Row as _;
         let retained = sqlx::query(
             "SELECT id,name,role,type,cli_kind,color,provider_id,model,harness_mode,\
@@ -843,7 +845,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version_after_second_run, 29);
+        assert_eq!(version_after_second_run, 31);
     }
 
     #[tokio::test]
@@ -996,7 +998,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 29, "migrate() from v13 must reach schema v29");
+        assert_eq!(version, 31, "migrate() from v13 must reach schema v31");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -1211,7 +1213,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("table-count query failed");
-        assert_eq!(count, 31, "expected 31 tables, got {count}");
+        assert_eq!(count, 34, "expected 34 tables, got {count}");
     }
 
     /// Running migrate twice must not error and must leave user_version == 29.
@@ -1239,15 +1241,15 @@ mod tests {
         .await
         .expect("table-count query failed");
         assert_eq!(
-            count, 31,
-            "expected 31 tables after idempotent run, got {count}"
+            count, 34,
+            "expected 34 tables after idempotent run, got {count}"
         );
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 29, "user_version should be 29");
+        assert_eq!(version, 31, "user_version should be 31");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -1450,7 +1452,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 29);
+        assert_eq!(version, 31);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -1541,7 +1543,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 29);
+        assert_eq!(version, 31);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1651,7 +1653,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 29);
+        assert_eq!(version, 31);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
@@ -1804,7 +1806,10 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(coverage, 0, "migration must not claim coverage it never observed");
+        assert_eq!(
+            coverage, 0,
+            "migration must not claim coverage it never observed"
+        );
 
         // Populated graph survives untouched.
         let (tokens, limit): (i64, i64) =
@@ -1827,6 +1832,9 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(source, None, "legacy reading has no invented source");
-        assert_eq!(observed, None, "legacy reading has no invented observation time");
+        assert_eq!(
+            observed, None,
+            "legacy reading has no invented observation time"
+        );
     }
 }
