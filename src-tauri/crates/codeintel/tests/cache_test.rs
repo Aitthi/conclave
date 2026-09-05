@@ -17,7 +17,12 @@ fn edited_file_is_reindexed() {
     let f = dir.path().join("lib.rs");
     fs::write(&f, "fn a() {}\n").unwrap();
     let cache = CodeIntelCache::new();
-    assert!(cache.get_index(dir.path()).unwrap().definitions.iter().any(|d| d.name == "a"));
+    assert!(cache
+        .get_index(dir.path())
+        .unwrap()
+        .definitions
+        .iter()
+        .any(|d| d.name == "a"));
     fs::write(&f, "fn b() {}\n").unwrap();
     let idx = cache.get_index(dir.path()).unwrap();
     assert!(idx.definitions.iter().any(|d| d.name == "b"));
@@ -116,7 +121,10 @@ fn unreadable_but_present_file_surfaces_in_warnings_not_dropped() {
 fn lru_evicts_past_eight_roots() {
     let cache = CodeIntelCache::new();
     let dirs: Vec<_> = (0..9).map(|_| tempfile::tempdir().unwrap()).collect();
-    for d in &dirs { fs::write(d.path().join("a.rs"), "fn a() {}\n").unwrap(); cache.get_index(d.path()).unwrap(); }
+    for d in &dirs {
+        fs::write(d.path().join("a.rs"), "fn a() {}\n").unwrap();
+        cache.get_index(d.path()).unwrap();
+    }
     let first = cache.get_index(dirs[0].path()).unwrap(); // evicted → rebuilt, still correct
     assert!(first.definitions.iter().any(|d| d.name == "a"));
 }

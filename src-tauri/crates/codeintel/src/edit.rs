@@ -7,10 +7,10 @@
 //! genuinely unexpected happened (e.g. `anyhow` plumbing failures).
 pub mod apply;
 pub mod error;
-pub mod rewrite;
-pub mod serialize;
 mod rename_cmd;
+pub mod rewrite;
 mod rewrite_cmd;
+pub mod serialize;
 
 pub use rename_cmd::rename;
 pub use rewrite_cmd::rewrite;

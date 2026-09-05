@@ -1,5 +1,5 @@
-use codeintel::index::{build_index, DefKind};
 use codeintel::graph;
+use codeintel::index::{build_index, DefKind};
 use std::path::Path;
 
 fn ref_kinds(idx: &codeintel::index::Index, name: &str) -> Vec<String> {

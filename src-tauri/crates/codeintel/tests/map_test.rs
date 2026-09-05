@@ -256,7 +256,11 @@ fn find_substring_matches_across_languages() {
 fn find_exact_returns_only_exact_name() {
     let idx = build_index(fixture()).unwrap();
     let (data, _) = map::find(&idx, "greet", true, 200).unwrap();
-    assert!(data.as_array().unwrap().iter().all(|s| s["name"] == "greet"));
+    assert!(data
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["name"] == "greet"));
 }
 
 #[test]

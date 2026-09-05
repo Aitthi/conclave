@@ -171,7 +171,9 @@ mod tests {
             "called `Option::unwrap()` on a `None` value",
             "0: frame_one\n1: frame_two",
         );
-        assert!(entry.starts_with("[2026-07-11T03:00:00+00:00] panic on thread 'tokio-runtime-worker'"));
+        assert!(
+            entry.starts_with("[2026-07-11T03:00:00+00:00] panic on thread 'tokio-runtime-worker'")
+        );
         assert!(entry.contains("at src/engine/runtime/browser.rs:123:9: "));
         assert!(entry.contains("called `Option::unwrap()` on a `None` value"));
         assert!(entry.contains("backtrace:\n0: frame_one\n1: frame_two"));

@@ -387,8 +387,9 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
 pub fn write_skill_sidecar(instance_id: &str, body: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
 
-    let dir = skills_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory"))?;
+    let dir = skills_dir().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory")
+    })?;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -1250,8 +1251,11 @@ text>`. After it confirms, stop and wait for the restart."
     struct TmpDir(std::path::PathBuf);
     impl TmpDir {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("conclave-sidecar-gc-{}-{}", tag, std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "conclave-sidecar-gc-{}-{}",
+                tag,
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir); // clear crashed-run debris
             std::fs::create_dir_all(&dir).expect("create temp dir");
             TmpDir(dir)
@@ -1366,8 +1370,7 @@ text>`. After it confirms, stop and wait for the restart."
     #[test]
     fn write_then_remove_skill_sidecar_round_trips() {
         let id = format!("aaaaaaaa-aaaa-4aaa-8aaa-{:012x}", std::process::id());
-        let path = super::write_skill_sidecar(&id, "## Skill: X\n\nbody")
-            .expect("write sidecar");
+        let path = super::write_skill_sidecar(&id, "## Skill: X\n\nbody").expect("write sidecar");
         assert!(path.exists(), "sidecar written");
         super::remove_skill_sidecar(&id);
         assert!(!path.exists(), "sidecar removed");
