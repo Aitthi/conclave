@@ -1115,6 +1115,21 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             // CONCLAVE_WORKSPACE_ID saves the agent repeating its id on every call.
             extra_env.push(("CONCLAVE_WORKSPACE_ID".to_string(), ws.id.clone()));
             extra_env.push(("CONCLAVE_INSTANCE_ID".to_string(), id.clone()));
+            // Synchronized output (DECSET 2026) from frame 1 for Claude Code.
+            // It enables sync output at startup only for a TERM_PROGRAM
+            // allowlist (iTerm.app, WezTerm, vscode, ghostty, …); an unknown
+            // emulator like ours instead gets a runtime probe — XTVERSION, a
+            // DA1 barrier, then DECRQM(2026) — whose replies travel back over
+            // our per-keystroke IPC path. If DA1 overtakes XTVERSION there, the
+            // CLI records "no XTVERSION reply", skips DECRQM, and paints the
+            // WHOLE session unsynchronized, so any multi-chunk frame can be
+            // shown mid-patch (audit §3 H3, snippet S1). Forcing the flag makes
+            // the outcome independent of that race. Claude Code only: the
+            // variable is meaningless to other harnesses, and faking a known
+            // TERM_PROGRAM to reach the allowlist is explicitly not the fix.
+            if cli_kind == "claude-code" {
+                extra_env.push(("CLAUDE_CODE_FORCE_SYNC_OUTPUT".to_string(), "1".to_string()));
+            }
             extra_env.extend(agent_env_overrides(&def));
             // Launch the CLI INSIDE the user's login + interactive shell, the way
             // VS Code's integrated terminal does (it spawns the shell, not the

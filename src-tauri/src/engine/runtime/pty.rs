@@ -70,11 +70,25 @@ pub fn spawn_cli(
     // and without it a TUI such as Claude Code falls back to a degraded
     // rendering mode that doesn't repaint cleanly on resize (the source of the
     // stray cells after a window resize). Declaring the xterm-256color profile +
-    // truecolor matches what a real terminal provides; set a UTF-8 locale only
-    // when the environment lacks one so box-drawing / the mascot render right.
+    // truecolor matches what a real terminal provides; the LANG rule below keeps
+    // the child on a UTF-8 locale so box-drawing / the mascot render right.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    if std::env::var_os("LANG").is_none() {
+    // Identify the emulator, exactly as VS Code does
+    // (vscode:src/vs/workbench/contrib/terminal/common/terminalEnvironment.ts:63-70:
+    // TERM_PROGRAM + TERM_PROGRAM_VERSION + COLORTERM). We advertise our OWN
+    // name: claiming `vscode` would make Claude Code take branches keyed on
+    // behaviours we do not implement (audit S6/S9/S11). An unknown TERM_PROGRAM
+    // is the honest, VS-Code-independent path — a CLI that cares falls back to
+    // probing, which is what it should do for an emulator it has never seen.
+    cmd.env("TERM_PROGRAM", "Conclave");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    // Mirror terminalEnvironment.ts:99-108 (`shouldSetLangEnvVariable`, 'auto'):
+    // override LANG when it is missing OR names a non-UTF-8 encoding, not only
+    // when it is absent. A child that inherits e.g. `LANG=C` or `en_US.ISO8859-1`
+    // measures the box-drawing glyphs and the mascot as something other than what
+    // xterm renders, and the grid drifts from the first frame.
+    if should_set_lang(std::env::var("LANG").ok().as_deref()) {
         cmd.env("LANG", "en_US.UTF-8");
     }
     // Per-agent env overrides (custom_env + Keychain secrets). Applied AFTER the
@@ -195,6 +209,26 @@ pub fn spawn_cli(
     Ok(CliBackend { handle, output_rx })
 }
 
+/// Should we override the child's `LANG`?
+///
+/// Ported from VS Code's `shouldSetLangEnvVariable` in `'auto'` mode
+/// (`vscode:src/vs/workbench/contrib/terminal/common/terminalEnvironment.ts:99-108`):
+/// true when `LANG` is unset/empty, or when it names an encoding that is neither
+/// UTF-8 (`.UTF-8` / `.utf8`) nor an EUC variant (`.euc*`). Keeping a usable
+/// non-UTF-8 locale the user deliberately set is the reason for the EUC arm.
+fn should_set_lang(lang: Option<&str>) -> bool {
+    match lang {
+        None => true,
+        Some(l) if l.is_empty() => true,
+        Some(l) => {
+            let euc = l
+                .split_once(".euc")
+                .is_some_and(|(_, rest)| !rest.is_empty());
+            !l.ends_with(".UTF-8") && !l.ends_with(".utf8") && !euc
+        }
+    }
+}
+
 /// Decode a freshly-read byte slice into UTF-8 text, carrying any incomplete
 /// trailing multi-byte sequence in `carry` to be prepended to the next read.
 ///
@@ -278,6 +312,71 @@ mod tests {
         assert!(
             collected.contains("env-made-it"),
             "expected child to see the extra env var, got: {collected:?}"
+        );
+    }
+
+    /// The terminal-identity vars VS Code sets
+    /// (`vscode:…/common/terminalEnvironment.ts:63-70`) must reach the child.
+    /// `TERM_PROGRAM` is deliberately our own name, never `vscode` (audit
+    /// S6/S9/S11), and `TERM_PROGRAM_VERSION` is the crate version so a CLI can
+    /// tell two Conclave builds apart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_cli_advertises_terminal_identity() {
+        let mut backend = spawn_cli(
+            "s-ident",
+            "sh",
+            &[
+                "-c".into(),
+                "printf '%s|%s|%s' \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\" \"$TERM\"".into(),
+            ],
+            "/tmp",
+            &[],
+        )
+        .expect("spawn_cli failed");
+
+        let mut collected = String::new();
+        while let Some(c) = backend.output_rx.recv().await {
+            collected.push_str(&c);
+        }
+
+        let expected = format!("Conclave|{}|xterm-256color", env!("CARGO_PKG_VERSION"));
+        assert!(
+            collected.contains(&expected),
+            "expected child env to contain {expected:?}, got: {collected:?}"
+        );
+        assert!(
+            !collected.contains("vscode"),
+            "must never claim to be VS Code, got: {collected:?}"
+        );
+    }
+
+    /// VS Code's `'auto'` locale rule (`terminalEnvironment.ts:99-108`): replace
+    /// `LANG` when it is missing or non-UTF-8, keep a UTF-8 or EUC one.
+    #[test]
+    fn should_set_lang_matches_vscode_auto_rule() {
+        assert!(should_set_lang(None), "missing LANG must be set");
+        assert!(should_set_lang(Some("")), "empty LANG must be set");
+        assert!(should_set_lang(Some("C")), "C locale is not UTF-8");
+        assert!(
+            should_set_lang(Some("en_US.ISO8859-1")),
+            "an explicit non-UTF-8 encoding must be replaced"
+        );
+        assert!(
+            should_set_lang(Some("en_US")),
+            "no encoding at all is not UTF-8"
+        );
+        assert!(!should_set_lang(Some("en_US.UTF-8")), "UTF-8 is kept");
+        assert!(
+            !should_set_lang(Some("th_TH.utf8")),
+            "lowercase utf8 is kept"
+        );
+        assert!(
+            !should_set_lang(Some("ja_JP.eucJP")),
+            "EUC locales are kept, exactly as VS Code keeps them"
+        );
+        assert!(
+            should_set_lang(Some("ja_JP.euc")),
+            "bare `.euc` with no variant does not match VS Code's /\\.euc.+/"
         );
     }
 
