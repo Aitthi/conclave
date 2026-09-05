@@ -118,7 +118,6 @@ if pid == 0:
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "LANG": "en_US.UTF-8",
-            "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE": "1",
         }
     )
     env.update(dict(args.env))

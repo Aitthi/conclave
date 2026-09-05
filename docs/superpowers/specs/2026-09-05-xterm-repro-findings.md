@@ -32,6 +32,10 @@ and is evidence to keep Unicode 11 active.
   `LANG=en_US.UTF-8`; inherited `CLAUDE_CODE*` and `CLAUDECODE` variables scrubbed.
   `TERM_PROGRAM*` is also scrubbed by default and is present only when supplied
   explicitly with `--env`, making the A/C distinction independent of the parent shell.
+- Review follow-up (credit: Mellow): recordings A–E were made while the recorder
+  still re-injected `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` after that scrub.
+  `pty-record.py` no longer sets it, matching production `pty.rs`; the recordings
+  were not repeated because this transcript-persistence flag has no rendering effect.
 - Input: `/s at`, one character every 150 ms, followed by a 6-second settle.
 
 `scripts/pty-record.py` records each PTY read as base64 plus ordered key and resize
@@ -39,6 +43,8 @@ events. `scripts/xterm-replay.mjs` awaits every xterm write callback and checks 
 layout after every key-delimited frame, not only the final screen. This matters in
 Claude Code 2.1.261: the autocomplete is visible after `/` and `/s`, but closes
 after the later characters, so a final-screen-only assertion would be vacuous.
+The replay exits 0 only when it observed at least one clean autocomplete frame,
+2 for a layout violation, and 3 when no autocomplete block was detected in any frame.
 
 The replay mirrors the application options that exist in headless xterm:
 `convertEol`, `scrollback: 12000`, `allowProposedApi: true`, and Unicode 11. The

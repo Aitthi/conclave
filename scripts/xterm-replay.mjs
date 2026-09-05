@@ -87,14 +87,14 @@ function dumpScreen(term, label) {
 }
 
 
-function layoutViolations(term) {
+function inspectLayout(term) {
   const { lines } = screen(term);
   const commandWithDescription = /\/[A-Za-z][A-Za-z0-9:_-]*\s{2,}\S/;
   const commandIndexes = [];
   for (let index = 0; index < lines.length; index += 1) {
     if (commandWithDescription.test(lines[index].text)) commandIndexes.push(index);
   }
-  if (commandIndexes.length === 0) return [];
+  if (commandIndexes.length === 0) return { exercised: false, violations: [] };
 
   const first = commandIndexes[0];
   const last = commandIndexes.at(-1);
@@ -110,7 +110,7 @@ function layoutViolations(term) {
       violations.push(line);
     }
   }
-  return violations;
+  return { exercised: true, violations };
 }
 
 
@@ -143,14 +143,18 @@ async function main() {
   }
 
   let pendingKey = null;
+  let exercisedFrames = 0;
   const frameViolations = [];
   for (const record of records) {
     if (record.kind === "key") {
       if (pendingKey !== null) {
         const label = `after key ${JSON.stringify(pendingKey)}`;
         if (options.dumpEveryKey) dumpScreen(term, label);
-        const violations = layoutViolations(term);
-        if (violations.length > 0) frameViolations.push({ label, violations });
+        const inspection = inspectLayout(term);
+        if (inspection.exercised) exercisedFrames += 1;
+        if (inspection.violations.length > 0) {
+          frameViolations.push({ label, violations: inspection.violations });
+        }
       }
       pendingKey = decode(record).toString("utf8");
     } else if (record.kind === "resize") {
@@ -164,8 +168,11 @@ async function main() {
   if (pendingKey !== null) {
     const label = `after key ${JSON.stringify(pendingKey)}`;
     if (options.dumpEveryKey) dumpScreen(term, label);
-    const violations = layoutViolations(term);
-    if (violations.length > 0) frameViolations.push({ label, violations });
+    const inspection = inspectLayout(term);
+    if (inspection.exercised) exercisedFrames += 1;
+    if (inspection.violations.length > 0) {
+      frameViolations.push({ label, violations: inspection.violations });
+    }
   }
 
   dumpScreen(
@@ -182,6 +189,14 @@ async function main() {
     }
     term.dispose();
     process.exitCode = 2;
+    return;
+  }
+  if (exercisedFrames === 0) {
+    console.error(
+      "LAYOUT INVARIANT: NOT EXERCISED (no autocomplete block in any frame)",
+    );
+    term.dispose();
+    process.exitCode = 3;
     return;
   }
   console.log("LAYOUT INVARIANT: PASS");
