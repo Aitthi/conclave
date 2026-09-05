@@ -1,6 +1,6 @@
 # Persist and aggregate measured AI usage
 owner: 2004f459-52ad-445c-9c70-e605a0ffdfe3 · authority: in-loop
-Implementer: Dew (60ff2775-14a2-4db4-ab44-6df5bb13bf2a), allocated by Detoro. Aoki rules and merges. No source edits until ARCHIVE ENGINE MERGED is posted on workspace-archive-engine; start lane from main after that merge. Migration 0030 is reserved for this task.
+Implementer: Dew (60ff2775-14a2-4db4-ab44-6df5bb13bf2a), allocated by Detoro. Aoki rules and merges. No source edits until ARCHIVE ENGINE MERGED is posted on workspace-archive-engine; start lane from main after that merge. Migrations 0030 and 0031 are reserved for this task. Execution slug usage-engine-v2 replaces the unclaimed usage-engine task after preflight boundary correction b1140da9; canonical plan path is unchanged.
 
 ## Reading order and authority
 PRODUCT.md → docs/plans/2026-09-05-usage-overview-contract.md (final source ruling wins earlier prose) → docs/research/2026-09-05-usage-transcript-evidence.md → docs/research/2026-09-05-usage-contract-review.md → this plan. The original two-table logical-turn/attempt proposal is rejected. One event relation plus coverage/cursor persistence is the chosen design; small internal context/cursor metadata belongs with the cursor, not an analytics attempt platform.
@@ -11,8 +11,8 @@ Deliver durable usage collection for the supported Claude/Codex transcript shape
 Allowed source paths:
 - src-tauri/Cargo.toml and src-tauri/Cargo.lock (chrono-tz only if no existing IANA-zone facility; no unrelated dependency updates).
 - src-tauri/src/lib.rs and src-tauri/src/engine/mod.rs (minimal production worker startup/state integration).
-- src-tauri/src/engine/db.rs and migrations/0030_model_usage.sql.
-- src-tauri/src/engine/repo/mod.rs and repo/model_usage.rs.
+- src-tauri/src/engine/db.rs, migrations/0030_model_usage.sql and migrations/0031_session_context_provenance.sql.
+- src-tauri/src/engine/repo/mod.rs, repo/model_usage.rs and repo/session.rs.
 - src-tauri/src/engine/runtime/mod.rs, runtime/usage.rs, runtime/transcript_usage.rs, runtime/transcript_context.rs, runtime/provider.rs, runtime/chat.rs, runtime/cli_oneshot.rs.
 - src-tauri/src/engine/commands/mod.rs, commands/usage.rs, commands/instance.rs, commands/draft.rs, commands/fusion.rs, engine/router.rs.
 - src/ipc/types.ts and src/ipc/commands.ts.
@@ -23,7 +23,7 @@ All source paths above under src-tauri/src/engine unless fully qualified otherwi
 Implement schema/repository, truthful stored-data aggregation and the frozen IPC before collectors. Tests seed events/coverage and prove filters/timezones/unknowns; an empty production database honestly returns no coverage. Post USAGE FOUNDATION READY with a compiling, tested commit (no stub/fake-data responses). Aoki reviews and merges that ancestor commit to release frontend typing/fixtures while you continue collectors in the SAME lane. No changes to the agreed wire types after that point without an evidence-backed challenge. The task remains in progress until complete collector delivery; this milestone is not feature completion.
 
 ## Storage and event truth
-Use model_usage_event with UNIQUE versioned source event_key, local immutable id, workspace_id, optional workspace_agent_id/session_id/generation, source session/request/response identity, source_kind and version, event_kind response|invocation, occurred_at/recorded_at, provider, requested_model/served_model, nullable normalized input_tokens/output_tokens and cache/read/write/reasoning subsets, validity/completeness and bounded diagnostic code. No text bodies, raw source JSON or secrets. Integer token fields are nonnegative; use checked addition and reject overflow/invalid counters as unknown with partial coverage.
+Use model_usage_event with UNIQUE versioned source event_key, local immutable id, NULLABLE workspace_id, optional workspace_agent_id/session_id/generation, source session/request/response identity, source_kind and version, event_kind response|invocation, occurred_at/recorded_at, provider, requested_model/served_model, nullable normalized input_tokens/output_tokens and cache/read/write/reasoning subsets, validity/completeness and bounded diagnostic code. No text bodies, raw source JSON or secrets. Integer token fields are nonnegative; use checked addition and reject overflow/invalid counters as unknown with partial coverage.
 
 input_tokens includes cache; output_tokens includes reasoning. Event display total is input+output only when both known. Expose known subtotals and missing usage counts, not a fabricated account total. A conflict on the same response identity never creates another activity; exclude a conflicting event from measured aggregation until reconciled evidence agrees, and retain only bounded metadata/provenance. Preserve evidence across replay/restart. Permanent workspace Delete may cascade usage rows; Archive/Restore never does. Historical joins include archived workspaces; normal aggregate scope excludes hidden internal workspaces.
 
@@ -66,7 +66,7 @@ type UsageTotals = {
   activityCount: number;
   responseCount: number;
   invocationCount: number;
-  measuredTokens: number | null; // sum of fully known event input+output; null if no measured rows except a proven complete zero
+  measuredTokens: number | null; // measuredEventCount>0 => sum; otherwise 0 ONLY when activityCount==0 AND coverage==complete; otherwise null
   measuredEventCount: number;
   unknownUsageCount: number;
   inputTokens: number | null; // known-component subtotal; null when none known
@@ -81,7 +81,7 @@ type UsageDay = UsageTotals & {
 };
 type UsageModelOption = { key: string; name: string; provider: string | null; basis: UsageModelBasis };
 type UsageWorkspaceOption = { id: string; name: string; archived: boolean };
-type UsageAgentOption = { id: string; name: string; workspaceId: string };
+type UsageAgentOption = { id: string; name: string; workspaceId: string | null };
 type UsageModelRow = UsageTotals & UsageModelOption;
 type UsageAgentRow = UsageTotals & UsageAgentOption;
 type UsageWorkspaceRow = UsageTotals & UsageWorkspaceOption;
@@ -116,6 +116,15 @@ type UsageOverview = {
 Model key is opaque stable encoding of provider, name and basis. If served_model exists choose reported; else requested_model yields selected; else unknown key. Separate selected/reported rows even for same name; UI always labels basis. Model options include identities from recorded events and current contexts. Return all nonhidden workspace/agent options (archived included) so filters stay discoverable even with no events; derive all metrics/breakdowns from the exact filters. Mismatched agent/workspace selection returns an empty scoped result, not unrelated data. Reject invalid day count/timezone and nonexistent supplied IDs with actionable Invalid/NotFound. Unknown valid modelKey gives empty result.
 
 All daily buckets use actual IANA calendar midnights, half-open UTC ranges, trailing 30/90 dates including today. Exactly N ascending daily rows, no fabricated events. Context is latest per agent, independent of date range but identity-filtered; preserve latest timestamp/source and unknowns. Do not sum capacities. No raw event list/prompt data in IPC. Query using indexed timestamps/scope and aggregate bounded selected-range data; never return unlimited transcript rows or run filesystem scans inside the query.
+
+## Preflight correction b1140da9 — credit Dew
+D1: draft.agents from Library legitimately has no workspace (DraftRequest.workspace_id is optional). Default aggregation includes nonhidden workspace events PLUS NULL-workspace events. Reserve synthetic wire-only workspace id __unscoped__, name No workspace, archived=false, to label/filter/byWorkspace aggregate these records; no fake workspace database row and never pass this id to workspace lifecycle commands. A real workspace filter excludes unscoped events. Missing workspace-agent attribution similarly uses wire-only agent id __unassigned__, name Unassigned activity, workspaceId=null, in options/byAgent when needed; this bucket respects the selected real/unscoped workspace predicate. Agent filter __unassigned__ means workspace_agent_id IS NULL. These reserved ids bypass ordinary existence lookup only in usage.overview. Do not assign a draft to the current workspace or an arbitrary agent. Test unscoped and workspace-scoped drafts with no agent, and reconcile each grouping to the summary totals.
+
+D2: preserve genuine context provenance. Add 0031_session_context_provenance.sql with nullable context_source and context_observed_at columns, NULL for old rows. Extend repo/session.rs and instance.rs persistence to retain TranscriptContextReading.source_kind/observed_at with its matching tokens/limit. Persist a newer source observation even when token counts are unchanged (do not substitute current clock or last_active_at); suppress identical observation writes. Legacy setter/clear/reset paths must clear obsolete provenance or retain only provenance that still describes the same reading. Do not relabel old rows as newly measured. Keep existing public Session payload compatible (provenance can remain internal and be exposed only by UsageContext). Migration 0030 remains usage event/coverage/cursor schema, 0031 is provenance. No source dropping/null-only workaround for future supported observations. Both paths are added to the recreated task boundary before claim. Archive engine never touches repo/session.rs and is merged first.
+
+D3: byModel row coverage is explicitly the enclosing filtered source/scope coverage, equal to summary.coverage, NOT a per-model measurement guarantee. Retain the field for a uniform totals type; label coverage at scope level in UI. byAgent/byWorkspace may narrow to their actual observation scopes. Future true per-model coverage requires separate evidence and is outside this feature.
+
+D4: explicit measuredTokens algorithm: if measuredEventCount>0 return the checked sum of fully known event input+output (which itself may equal0); else if activityCount==0 AND coverage==complete return0; else returnnull. Complete observation with existing events whose tokens are all unknown still returnsnull and unknownUsageCount>0. Coverage proves that events were observed, not that missing usage components are zero. This is a necessary correction to the proposed complete=>0 default. Component subtotals use the same complete-empty zero exception. Tests cover measured0, complete-empty0, partial-emptynull, none-emptynull, complete-with-unknown-eventsnull and mixed known/unknown subtotals.
 
 ## Acceptance and gates
 Use sanitized deterministic fixtures and mocked provider/oneshot streams only. Tests must prove migration from schema29 preserves populated graph and starts with no invented events; unique replay/crash/cursor transaction behavior; Claude repeated blocks/conflicts; Codex compaction/model change/aborted outer turn; older unsupported formats; missing/cache/reasoning normalization and overflow; direct terminal/cancellation/UTF-8; one-shot duplicate avoidance; archive historical inclusion/restore invariance/permanent delete; filters/model basis; unknown vs complete-zero vs partial buckets; IANA DST spring/fall days; context independence; worker shared/bounded scheduling with no real home scanning. At least one regression demonstrates replay cannot double count through the production importer/repository path.
