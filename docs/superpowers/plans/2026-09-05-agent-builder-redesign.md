@@ -324,7 +324,7 @@ git commit -m "feat(builder): scroll-spy hook and Section anchor wrapper (spec D
 // src/components/builder/BuilderRail.tsx
 //
 // Left rail of the Builder (spec D1/D7). One row per section: readiness dot,
-// label, accent left bar when active. Position (edit only) never shows a dot.
+// label, accent fill tint when active. Position (edit only) never shows a dot.
 // Sizes and colours per canon design/screens/agent-builder.tsx.
 
 import type { Readiness, SectionId } from "./readiness";
@@ -362,18 +362,14 @@ export function BuilderRail({ items, readiness, activeId, onJump }: BuilderRailP
                 onClick={() => onJump(id)}
                 aria-current={active ? "location" : undefined}
                 data-readiness={id === "position" ? undefined : state}
-                className={`relative flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
                   active
-                    ? "font-semibold text-text-primary bg-overlay/[0.04]"
+                    ? "font-semibold text-accent bg-accent/[0.10]"
                     : "text-text-secondary hover:bg-overlay/[0.03]"
                 }`}
               >
-                {active && (
-                  <span
-                    aria-hidden
-                    className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-accent"
-                  />
-                )}
+                {/* Active = fill tint only. No border-left bar: that is the
+                    side-tab antipattern (Arta challenge 69718db4, slop-detect). */}
                 {id !== "position" && (
                   <span
                     aria-hidden
@@ -674,7 +670,7 @@ export const PROVIDER_LOGOS: Record<ProviderKind, { name: string; Mark: Mark }> 
 export const RUNTIME_TILES: ProviderKind[] = ["claude-code", "codex", "antigravity"];
 ```
 
-If `provider-logos` has not delivered a mark for a kind, use a 16px `lucide-react` `Terminal` icon for that entry and say so in the READY note; never draw a logo yourself.
+Delivered marks (task `provider-logos`, main commits a65f6b8 + 2060481): `claude-code.svg`, `codex.svg`, `antigravity.svg`, `opencode.svg` — all `viewBox="0 0 24 24"`, `currentColor`; render them at `width={16} height={16}` keeping the 24 viewBox. `muse-spark` has NO vector (only `muse-spark.png`, ruled by Detoro 2026-09-05): its map entry uses a 16px `lucide-react` `Terminal` icon until Meta publishes a vector; do not embed the PNG and never draw a logo yourself.
 
 - [ ] **Step 1: Runtime logo tiles + caption (replaces Type cards + CLI kind row)**
 

@@ -64,8 +64,11 @@ agent"). Baseline pixels: `.shots/builder-default.png` at commit d90b779.
 ```
 
 Rail item states: `complete` (accent dot), `incomplete` (hollow dot),
-`error` (danger dot), `active` (bold label + accent left bar, driven by
-scroll-spy). Position has no dot: it is always valid.
+`error` (danger dot), `active` (fill tint `bg-accent/[0.10]` + `text-accent`
++ `font-semibold`, NO side bar — ruled on Arta's challenge 69718db4: a
+border-left active marker is the side-tab antipattern gated by
+`design-host/review/slop-detect.mjs` and is near-invisible on dark; driven
+by scroll-spy). Position has no dot: it is always valid.
 
 ## Components
 
