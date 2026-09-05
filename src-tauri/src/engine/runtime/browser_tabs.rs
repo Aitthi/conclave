@@ -8,7 +8,7 @@
 //! (`BrowserState`/`BrowserTab`/`BrowserOwner`, camelCase) — kept byte-identical
 //! to the plan's Shared Interface Contract.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A tab's stable key: the agent id for agent tabs, `"human-<seq>"` for human
 /// tabs.
@@ -58,6 +58,43 @@ pub struct BrowserState {
     pub active_tab_id: Option<TabId>,
 }
 
+/// Viewport rectangle (logical pixels) the Browser tab reserves for the native
+/// webview overlay. Mirrored by `BrowserBounds` in `src/ipc/types.ts`.
+///
+/// It lives HERE rather than in `runtime::browser` because the registry is the
+/// single source of truth for the last rect the frontend reported, and decides
+/// where a created-or-revealed webview lands. `runtime::browser` re-exports it,
+/// so `commands::browser` keeps importing it from there unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Where a freshly created webview must be placed, and whether it may paint at
+/// once. `bounds: None` means no rect has ever been reported — the caller parks
+/// the webview offscreen until one is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub bounds: Option<Bounds>,
+    pub show: bool,
+}
+
+/// What activating a tab asks of the native pool: whether the id was known at
+/// all, which OTHER webviews to hide first, and where the incoming webview
+/// lands / whether it may paint. With the overlay off screen this is a
+/// REGISTRY-ONLY activation — `hide` is empty and `incoming.show` is false, so
+/// no webview is touched and none can paint over the app chrome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Activation {
+    pub known: bool,
+    pub hide: Vec<TabId>,
+    pub incoming: Placement,
+}
+
 /// The owner id stamped on every human tab (the frontend keys human chrome off
 /// `owner.kind == "human"`; the id is a constant, the per-tab uniqueness lives
 /// in `tab_id`).
@@ -78,6 +115,12 @@ pub struct TabRegistry {
     tabs: Vec<BrowserTab>,
     active: Option<TabId>,
     human_seq: u64,
+    /// Whether the Browser view currently wants the overlay on screen (set by
+    /// `set_visible`). A webview created while this is false stays hidden.
+    overlay_visible: bool,
+    /// The last region rect the frontend reported (set by `set_bounds`), reused
+    /// by every later create/reveal so a webview never lands offscreen.
+    last_bounds: Option<Bounds>,
 }
 
 impl TabRegistry {
@@ -192,6 +235,83 @@ impl TabRegistry {
             tab.loading = false;
             tab.title = title;
         }
+    }
+
+    /// Record whether the Browser view wants the overlay on screen.
+    pub fn set_overlay_visible(&mut self, visible: bool) {
+        self.overlay_visible = visible;
+    }
+
+    /// Record the region rect the frontend last reported.
+    pub fn set_last_bounds(&mut self, bounds: Bounds) {
+        self.last_bounds = Some(bounds);
+    }
+
+    /// Decide where a webview created for `tab_id` lands and whether it may
+    /// paint immediately.
+    ///
+    /// The caller's rect wins when it has one (it is fresher); otherwise the
+    /// last rect the frontend reported, so a webview created between a mount and
+    /// the next `set_bounds` still lands over the reserved region instead of
+    /// offscreen. It paints only when it IS the active tab AND the overlay is on
+    /// screen — the invariant is that exactly one tab is ever visible, and never
+    /// while the Browser view is unmounted.
+    pub fn placement_for_create(&self, tab_id: &str, requested: Option<Bounds>) -> Placement {
+        Placement {
+            bounds: requested.or(self.last_bounds),
+            show: self.overlay_visible && self.active.as_deref() == Some(tab_id),
+        }
+    }
+
+    /// Make `tab_id` active and report what the native pool must do about it:
+    /// which other webviews to hide first, and where the incoming one lands /
+    /// whether it may paint. An unknown id changes nothing.
+    ///
+    /// While the overlay is OFF SCREEN this is registry-only — the active
+    /// pointer moves and no webview is touched. Nothing is visible to hide (only
+    /// a reveal ever shows one, and every reveal is gated on the same flag), and
+    /// showing the incoming tab would paint it over the app chrome: the human
+    /// hit exactly that on 2026-09-05 via an agent's `conclave browser close`.
+    pub fn activate(&mut self, tab_id: &str) -> Activation {
+        let known = self.set_active(tab_id);
+        let reveal = known && self.overlay_visible;
+        let hide = if reveal {
+            self.tabs
+                .iter()
+                .filter(|t| t.tab_id != tab_id)
+                .map(|t| t.tab_id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Activation {
+            known,
+            hide,
+            incoming: Placement {
+                bounds: self.last_bounds,
+                show: reveal,
+            },
+        }
+    }
+
+    /// The active tab paired with where it lands and whether it may paint — the
+    /// reveal every caller performs after promoting a tab (`close`) or putting
+    /// the overlay back on screen (`set_visible(true)`). A hidden webview keeps
+    /// whatever frame it last had, so a reveal always repositions first.
+    ///
+    /// `show` is the overlay flag, so `set_visible` reads its own decision back
+    /// out (it records the flag first), while `close_tab`'s promotion stays
+    /// hidden whenever the Browser view is unmounted.
+    pub fn active_placement(&self) -> Option<(TabId, Placement)> {
+        self.active.clone().map(|id| {
+            (
+                id,
+                Placement {
+                    bounds: self.last_bounds,
+                    show: self.overlay_visible,
+                },
+            )
+        })
     }
 
     /// A read-only snapshot of every tab plus the active pointer.
@@ -320,6 +440,260 @@ mod tests {
         let tab = r.state().tabs.into_iter().next().unwrap();
         assert!(!tab.loading);
         assert_eq!(tab.title.as_deref(), Some("Title"));
+    }
+
+    // ── First-paint placement (task browser-first-paint) ─────────────────────
+    //
+    // The human's bug: the FIRST page opened in the in-app browser stays blank
+    // until they switch tabs and back. The registry owns the decision the
+    // native pool acts on — these tests pin it without a live webview.
+
+    fn rect() -> Bounds {
+        Bounds {
+            x: 240.0,
+            y: 64.0,
+            width: 1200.0,
+            height: 800.0,
+        }
+    }
+
+    /// The human flow: New tab → (mounted Browser view has already reported
+    /// visibility + a rect) → type a URL → Enter. The webview is created for the
+    /// ACTIVE tab while the overlay is on screen, so it must be shown right
+    /// away, at the last reported rect — not hidden offscreen awaiting a tab
+    /// switch.
+    #[test]
+    fn navigate_create_shows_when_active_and_overlay_visible() {
+        let mut r = TabRegistry::new();
+        r.set_overlay_visible(true);
+        r.set_last_bounds(rect());
+        let t1 = r.new_human_tab();
+
+        let p = r.placement_for_create(&t1, None);
+        assert_eq!(
+            p,
+            Placement {
+                bounds: Some(rect()),
+                show: true,
+            },
+            "the active tab's first webview must paint immediately at the reported rect"
+        );
+    }
+
+    /// The agent-on-empty-rail flow: `browser.open` from an agent makes the
+    /// first-ever tab active while the Browser view is mounted — same verdict.
+    #[test]
+    fn navigate_create_shows_first_agent_tab_on_an_empty_rail() {
+        let mut r = TabRegistry::new();
+        r.set_overlay_visible(true);
+        r.set_last_bounds(rect());
+        let owner = BrowserOwner {
+            kind: OwnerKind::Agent,
+            id: "agentA".into(),
+            label: "G".into(),
+        };
+        r.upsert("agentA".into(), owner, Some("https://a".into()));
+
+        let p = r.placement_for_create("agentA", None);
+        assert!(p.show, "the first-ever agent tab is active and must paint");
+        assert_eq!(p.bounds, Some(rect()));
+    }
+
+    /// A background agent opening a SECOND tab must never paint over the tab the
+    /// human is on — but it still lands at the reported rect so a later reveal
+    /// is a bare `show()`.
+    #[test]
+    fn navigate_create_hides_when_inactive() {
+        let mut r = TabRegistry::new();
+        r.set_overlay_visible(true);
+        r.set_last_bounds(rect());
+        let owner = BrowserOwner {
+            kind: OwnerKind::Agent,
+            id: "agentA".into(),
+            label: "G".into(),
+        };
+        r.upsert("agentA".into(), owner.clone(), None); // first tab → active
+        r.upsert("agentB".into(), owner, None); // background
+
+        let p = r.placement_for_create("agentB", None);
+        assert_eq!(
+            p,
+            Placement {
+                bounds: Some(rect()),
+                show: false,
+            },
+            "an inactive tab must stay hidden (invariant: only the active tab is visible)"
+        );
+    }
+
+    /// The overlay is off screen (Browser view unmounted): even the active tab's
+    /// fresh webview stays hidden, or it paints over the app chrome.
+    #[test]
+    fn navigate_create_hides_when_overlay_not_visible() {
+        let mut r = TabRegistry::new();
+        r.set_last_bounds(rect());
+        let t1 = r.new_human_tab();
+
+        // Default is off screen — nothing has mounted the Browser view.
+        assert!(!r.placement_for_create(&t1, None).show);
+    }
+
+    /// A caller-supplied rect is fresher than the stored one and wins.
+    #[test]
+    fn placement_prefers_the_callers_rect_over_the_stored_one() {
+        let mut r = TabRegistry::new();
+        r.set_overlay_visible(true);
+        r.set_last_bounds(rect());
+        let t1 = r.new_human_tab();
+
+        let fresher = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        assert_eq!(
+            r.placement_for_create(&t1, Some(fresher)).bounds,
+            Some(fresher)
+        );
+    }
+
+    /// Inactive webviews hold whatever bounds they were created with, so
+    /// activating one must reposition it before showing — otherwise a window
+    /// resize while on another tab leaves the incoming page misplaced.
+    #[test]
+    fn set_active_applies_last_bounds() {
+        let mut r = TabRegistry::new();
+        let t1 = r.new_human_tab();
+        let t2 = r.new_human_tab();
+        r.set_last_bounds(rect());
+        r.set_overlay_visible(true);
+
+        let act = r.activate(&t2);
+        assert!(act.known);
+        assert_eq!(act.hide, vec![t1], "every OTHER tab hides first");
+        assert_eq!(
+            act.incoming,
+            Placement {
+                bounds: Some(rect()),
+                show: true,
+            },
+            "the incoming webview must be repositioned before it is shown"
+        );
+        assert_eq!(r.state().active_tab_id.as_deref(), Some(t2.as_str()));
+    }
+
+    /// An unknown id changes nothing and asks the native pool to touch nothing.
+    #[test]
+    fn activate_unknown_id_is_a_no_op() {
+        let mut r = TabRegistry::new();
+        let t1 = r.new_human_tab();
+        r.set_overlay_visible(true);
+        let act = r.activate("nope");
+        assert!(!act.known);
+        assert!(act.hide.is_empty());
+        assert!(!act.incoming.show, "an unknown id reveals nothing");
+        assert_eq!(r.state().active_tab_id.as_deref(), Some(t1.as_str()));
+    }
+
+    /// Re-showing the overlay (Browser view remounted) must reposition the
+    /// active webview first — its bounds are from whenever it was last placed.
+    #[test]
+    fn set_visible_true_applies_last_bounds() {
+        let mut r = TabRegistry::new();
+        let t1 = r.new_human_tab();
+        r.set_last_bounds(rect());
+        r.set_overlay_visible(true);
+
+        assert_eq!(
+            r.active_placement(),
+            Some((
+                t1,
+                Placement {
+                    bounds: Some(rect()),
+                    show: true,
+                }
+            ))
+        );
+    }
+
+    /// Nothing active → nothing to reveal (graceful no-op, empty rail).
+    #[test]
+    fn active_placement_is_none_without_an_active_tab() {
+        let r = TabRegistry::new();
+        assert_eq!(r.active_placement(), None);
+    }
+
+    // ── Decision 7: a reveal never paints while the overlay is off screen ────
+    //
+    // The human hit this live at 10:51 on 2026-09-05 — a stray webview painted
+    // over the terminal while they were on another view
+    // (docs/superpowers/plans/assets/2026-09-05-browser-overlay-covers-terminal.png).
+    // `conclave browser close` is a CLI verb, so an agent closing its own tab
+    // promotes the next one; before this rule that promotion showed it
+    // unconditionally.
+
+    /// Activating a tab with the Browser view unmounted is registry-only: the
+    /// active pointer moves, and NO webview is touched — nothing is visible to
+    /// hide, and showing the incoming one would cover the app chrome.
+    #[test]
+    fn set_active_does_not_show_when_overlay_hidden() {
+        let mut r = TabRegistry::new();
+        let _t1 = r.new_human_tab();
+        let t2 = r.new_human_tab();
+        r.set_last_bounds(rect());
+        // overlay_visible defaults to false — the Browser view is not mounted.
+
+        let act = r.activate(&t2);
+        assert!(act.known);
+        assert!(!act.incoming.show, "must not paint over the app chrome");
+        assert!(
+            act.hide.is_empty(),
+            "registry-only: every webview is already hidden"
+        );
+        assert_eq!(
+            r.state().active_tab_id.as_deref(),
+            Some(t2.as_str()),
+            "the registry still records the switch"
+        );
+    }
+
+    /// Closing a tab promotes the next one, but with the overlay off screen the
+    /// promotion must not reveal it.
+    #[test]
+    fn close_tab_reselect_does_not_show_when_overlay_hidden() {
+        let mut r = TabRegistry::new();
+        let t1 = r.new_human_tab();
+        let t2 = r.new_human_tab();
+        r.set_last_bounds(rect());
+
+        assert!(r.close(&t1));
+        let (id, placement) = r.active_placement().expect("t2 was promoted");
+        assert_eq!(id, t2);
+        assert!(!placement.show, "the promoted tab must stay hidden");
+    }
+
+    /// The same promotion WITH the overlay on screen does reveal, at the last
+    /// reported rect — the overlay must never go blank while a tab remains.
+    #[test]
+    fn close_tab_reselect_shows_when_overlay_visible() {
+        let mut r = TabRegistry::new();
+        let t1 = r.new_human_tab();
+        let t2 = r.new_human_tab();
+        r.set_last_bounds(rect());
+        r.set_overlay_visible(true);
+
+        assert!(r.close(&t1));
+        assert_eq!(
+            r.active_placement(),
+            Some((
+                t2,
+                Placement {
+                    bounds: Some(rect()),
+                    show: true,
+                }
+            ))
+        );
     }
 
     /// The wire shape is the frontend contract — pin the camelCase serialization
