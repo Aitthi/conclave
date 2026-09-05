@@ -14,6 +14,18 @@
   <img src="docs/screenshots/workspace.png" alt="Conclave workspace: agent roster, a live agent terminal, and the workspace chat" width="900" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/Aitthi/conclave/releases"><strong>Download</strong></a>
+</p>
+
+## Download
+
+Prebuilt macOS builds are published on the GitHub Releases page:
+
+**[Download the latest release](https://github.com/Aitthi/conclave/releases)**
+
+Grab the `.dmg` (or `.app.tar.gz`) for Apple Silicon, open it, and drag Conclave into `Applications`.
+
 ## Requirements
 
 | | Notes |
