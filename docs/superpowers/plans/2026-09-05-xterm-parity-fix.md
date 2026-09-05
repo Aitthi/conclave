@@ -253,22 +253,45 @@ the window no longer exists, which only the live GUI probe below can show. R3's 
 verdict stands: this supports H1's general desynchronization mechanism without
 establishing that the 200 ms window caused the reported screenshot.
 
-### GUI probe for the human (gate 5 — the only place the defect ever appeared)
+### Gate 5 — human acceptance, VISUAL ONLY (Detoro ruling, 2026-09-05)
 
-Needs a rebuilt + relaunched app: a `pnpm tauri dev` instance cannot take `conclave.sock` and
-its janitor prunes the live DB, so this cannot be run from a lane.
+The built app ships without devtools, so the human cannot open a console. Acceptance
+is therefore what the eye can see; the `__conclaveTerms` probe below is a DEV-BUILD
+tool and is not part of this gate. Needs a rebuilt + relaunched app either way — a
+`pnpm tauri dev` instance cannot take `conclave.sock` and its janitor prunes the live DB.
 
-1. Open a Claude Code agent tab and let it paint.
-2. Type `/`, then `s`, then ` at` — slowly, one key at a time. Screenshot the popup.
-3. In devtools console:
-   `[...window.__conclaveTerms.values()].map(t => t.modes.synchronizedOutputMode)`
-   → expect `true` while output is flowing. `false` means F3's
-   `CLAUDE_CODE_FORCE_SYNC_OUTPUT` did not take (check the agent is `cliKind: claude-code`
-   and that the app was actually rebuilt).
-4. If any row is garbled, run
-   `[...window.__conclaveTerms.values()].forEach(t => t.clearTextureAtlas())`.
-   Rows that HEAL with no new PTY output → renderer fault (H2), closed by the F2 bump.
-   Rows that STAY → buffer fault (H1), i.e. the cursor-model desync F5/F6 target.
-5. Also worth one pass: switch workspaces / open the Lane board and come back (this remounts
-   every terminal, `AppShell.tsx:288`) and confirm the pane repaints at the right size with no
-   column-0 rows — that is the exact path F5 and F6 change.
+What to do, and what a pass looks like:
+
+1. Open a Claude Code agent tab and let it finish painting. **Pass:** the frame fills
+   the pane at the real size on the first paint — no black pane, no 80-column-wide
+   frame sitting in a wider pane, no rows left over from a narrower layout.
+2. Type `/`, then `s`, then ` at` — slowly, one key at a time. **Pass:** every row of
+   the autocomplete popup keeps its `  /` indent. **Fail:** any row's first segment
+   jumps to column 0 while the rest of the row is stale — that is the reported
+   screenshot (`docs/superpowers/plans/assets/2026-09-05-xterm-autocomplete-garble.png`).
+3. Switch workspace, or open the Lane board and come back. This remounts every terminal
+   (`AppShell.tsx:288`), which is the exact path F5 and F6 change. **Pass:** the pane
+   repaints at the right size with no column-0 rows and no stray fragments.
+4. Resize the window a few times, including narrow. **Pass:** one clean repaint per
+   settle, no leftover glyph fragments at the old width.
+
+**What this gate cannot tell you.** With no console there is no `clearTextureAtlas()`,
+so a failure at step 2 cannot be attributed to a renderer fault (H2) versus a buffer
+fault (H1) by eye — both look identical. If step 2 fails, the next move is to reproduce
+it on a dev build and run the probe below; do not re-rank the hypotheses from the
+screenshot alone.
+
+#### Dev-build-only probe (not part of gate 5)
+
+On a dev build, where devtools are available:
+
+- `[...window.__conclaveTerms.values()].map(t => t.modes.synchronizedOutputMode)`
+  → expect `true` while output is flowing. `false` means F3's
+  `CLAUDE_CODE_FORCE_SYNC_OUTPUT` did not take (check the agent is `cliKind:
+  claude-code` and that the binary was actually rebuilt).
+- `[...window.__conclaveTerms.values()].forEach(t => t.clearTextureAtlas())` when garble
+  is on screen. Rows that HEAL with no new PTY output → renderer fault (H2), closed by
+  the F2 bump. Rows that STAY → buffer fault (H1), what F5/F6 target.
+
+The registry is behind `import.meta.env.DEV` and is tree-shaken out of the packaged
+build, so it is absent from the app the human accepts — by design, not by omission.
