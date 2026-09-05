@@ -46,18 +46,18 @@ On dark surfaces, change both council-ink pieces to Chalk and retain Signal ambe
 
 ## Reproducible exports
 
-Prerequisites are the repo's installed Tauri CLI and ImageMagick. From the repository root:
+Prerequisites are the repo's installed Tauri CLI, ImageMagick, and macOS `iconutil`. From the repository root:
 
 ```sh
 node scripts/generate-brand-icons.mjs
 ```
 
-The script invokes Tauri's icon generator in a temporary directory, copies only the tracked desktop/Windows bundle assets into `src-tauri/icons/`, and regenerates `public/brand/preview.png`. Tauri's generated mobile trees are intentionally not copied.
+The script invokes Tauri's icon generator in a temporary directory, copies only the tracked desktop/Windows bundle assets into `src-tauri/icons/`, normalizes the ICNS container through `iconutil`, and regenerates `public/brand/preview.png`. The normalization makes repeat runs byte-stable; Tauri's generated mobile trees are intentionally not copied.
 
 To override locally discovered tools:
 
 ```sh
-TAURI_CLI=/absolute/path/to/tauri MAGICK=/absolute/path/to/magick node scripts/generate-brand-icons.mjs
+TAURI_CLI=/absolute/path/to/tauri MAGICK=/absolute/path/to/magick ICONUTIL=/usr/bin/iconutil node scripts/generate-brand-icons.mjs
 ```
 
 Verify the container families after export:

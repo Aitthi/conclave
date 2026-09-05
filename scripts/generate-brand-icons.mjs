@@ -14,6 +14,7 @@ const previewOutput = path.join(root, "public", "brand", "preview.png");
 const outputDir = path.join(root, "src-tauri", "icons");
 const tauriCli = process.env.TAURI_CLI || path.join(root, "node_modules", ".bin", "tauri");
 const magick = process.env.MAGICK || "magick";
+const iconutil = process.env.ICONUTIL || "/usr/bin/iconutil";
 
 const iconFiles = [
   "32x32.png",
@@ -47,6 +48,9 @@ await access(previewSource);
 await access(tauriCli).catch(() => {
   throw new Error(`Tauri CLI not found at ${tauriCli}. Run pnpm install or set TAURI_CLI.`);
 });
+await access(iconutil).catch(() => {
+  throw new Error(`iconutil not found at ${iconutil}. Set ICONUTIL to the macOS iconutil path.`);
+});
 
 const temporaryOutput = await mkdtemp(path.join(tmpdir(), "conclave-brand-icons-"));
 
@@ -56,6 +60,15 @@ try {
   await Promise.all(
     iconFiles.map((name) => copyFile(path.join(temporaryOutput, name), path.join(outputDir, name))),
   );
+  const iconset = path.join(temporaryOutput, "conclave.iconset");
+  run(iconutil, [
+    "--convert",
+    "iconset",
+    "--output",
+    iconset,
+    path.join(temporaryOutput, "icon.icns"),
+  ]);
+  run(iconutil, ["--convert", "icns", "--output", path.join(outputDir, "icon.icns"), iconset]);
   run(magick, [
     "-background",
     "none",
