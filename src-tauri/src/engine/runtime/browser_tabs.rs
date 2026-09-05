@@ -241,31 +241,30 @@ impl TabRegistry {
         self.overlay_visible = visible;
     }
 
-    /// Whether the Browser view wants the overlay on screen right now.
-    pub fn overlay_visible(&self) -> bool {
-        self.overlay_visible
-    }
-
     /// Record the region rect the frontend last reported.
     pub fn set_last_bounds(&mut self, bounds: Bounds) {
         self.last_bounds = Some(bounds);
     }
 
-    /// The region rect the frontend last reported, if any.
-    pub fn last_bounds(&self) -> Option<Bounds> {
-        self.last_bounds
-    }
-
     /// Decide where a webview created for `tab_id` lands and whether it may
     /// paint immediately.
-    pub fn placement_for_create(&self, _tab_id: &str, requested: Option<Bounds>) -> Placement {
+    ///
+    /// The caller's rect wins when it has one (it is fresher); otherwise the
+    /// last rect the frontend reported, so a webview created between a mount and
+    /// the next `set_bounds` still lands over the reserved region instead of
+    /// offscreen. It paints only when it IS the active tab AND the overlay is on
+    /// screen — the invariant is that exactly one tab is ever visible, and never
+    /// while the Browser view is unmounted.
+    pub fn placement_for_create(&self, tab_id: &str, requested: Option<Bounds>) -> Placement {
         Placement {
-            bounds: requested,
-            show: false,
+            bounds: requested.or(self.last_bounds),
+            show: self.overlay_visible && self.active.as_deref() == Some(tab_id),
         }
     }
 
-    /// Make `tab_id` active and report what the native pool must do about it.
+    /// Make `tab_id` active and report what the native pool must do about it:
+    /// which other webviews to hide first, and the rect to apply to the incoming
+    /// one before showing it. An unknown id changes nothing.
     pub fn activate(&mut self, tab_id: &str) -> Activation {
         let known = self.set_active(tab_id);
         let hide = if known {
@@ -280,13 +279,16 @@ impl TabRegistry {
         Activation {
             known,
             hide,
-            bounds: None,
+            bounds: self.last_bounds,
         }
     }
 
-    /// The active tab paired with the rect a reveal must apply to it first.
+    /// The active tab paired with the rect a reveal must apply to it first. A
+    /// hidden webview keeps whatever frame it last had, so every reveal path
+    /// (`set_visible(true)`, the reselect after a close) repositions before it
+    /// shows.
     pub fn active_reveal(&self) -> Option<(TabId, Option<Bounds>)> {
-        self.active.clone().map(|id| (id, None))
+        self.active.clone().map(|id| (id, self.last_bounds))
     }
 
     /// A read-only snapshot of every tab plus the active pointer.
@@ -417,7 +419,6 @@ mod tests {
         assert_eq!(tab.title.as_deref(), Some("Title"));
     }
 
-
     // ── First-paint placement (task browser-first-paint) ─────────────────────
     //
     // The human's bug: the FIRST page opened in the in-app browser stays blank
@@ -509,8 +510,8 @@ mod tests {
         let mut r = TabRegistry::new();
         r.set_last_bounds(rect());
         let t1 = r.new_human_tab();
-        assert!(!r.overlay_visible());
 
+        // Default is off screen — nothing has mounted the Browser view.
         assert!(!r.placement_for_create(&t1, None).show);
     }
 
