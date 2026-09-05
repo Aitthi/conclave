@@ -78,6 +78,12 @@ export function AppShell() {
     fixtureView() === "archived" ? "archived" : "active",
   );
   const [workspaceNavigationError, setWorkspaceNavigationError] = useState<string | null>(null);
+  const workspaceNavigationGenerationRef = useRef(0);
+  const workspaceNavigationTargetRef = useRef<{ id: string; generation: number } | null>(null);
+  const workspaceNavigationValidationRef = useRef<{
+    generation: number;
+    promise: Promise<void>;
+  } | null>(null);
   const [workspaceNotice, setWorkspaceNotice] = useState<WorkspaceNotice | null>(null);
 
   // ── Blackboard state ───────────────────────────────────────────────────
@@ -149,6 +155,9 @@ export function AppShell() {
 
   // ── EditWorkspace state ────────────────────────────────────────────────
   const [editWorkspaceId, setEditWorkspaceId] = useState<string | null>(null);
+  const editWorkspaceIdRef = useRef<string | null>(null);
+  const [editWorkspaceSnapshot, setEditWorkspaceSnapshot] = useState<Workspace | null>(null);
+  const editWorkspacePendingRef = useRef(false);
 
   // ── Fixture-mode boot flag (DEV-only) — true once the initial workspace
   //    fetch has settled, gating the readiness sentinel below. ────────────────
@@ -186,6 +195,26 @@ export function AppShell() {
       setWorkspaces(active);
       setArchivedWorkspaces(archived);
       setWorkspaceListsError(null);
+      const editingWorkspaceId = editWorkspaceIdRef.current;
+      if (
+        editingWorkspaceId
+        && !editWorkspacePendingRef.current
+        && !active.some((workspace) => workspace.id === editingWorkspaceId)
+        && !archived.some((workspace) => workspace.id === editingWorkspaceId)
+      ) {
+        editWorkspaceIdRef.current = null;
+        setEditWorkspaceId(null);
+        setEditWorkspaceSnapshot(null);
+      }
+      const pendingNavigation = workspaceNavigationTargetRef.current;
+      if (
+        pendingNavigation
+        && !active.some((workspace) => workspace.id === pendingNavigation.id)
+        && workspaceNavigationGenerationRef.current === pendingNavigation.generation
+      ) {
+        workspaceNavigationGenerationRef.current += 1;
+        workspaceNavigationTargetRef.current = null;
+      }
       const selected = activeWorkspaceIdRef.current;
       if (selected && !active.some((workspace) => workspace.id === selected)) {
         const workspaceWasVisible = globalDestinationRef.current == null;
@@ -220,6 +249,24 @@ export function AppShell() {
   // so ignore the active workspace's event while our own transition is in flight;
   // the command result below carries the authoritative batch outcome.
   useEvent<WorkspaceChangedEvent>(EVENT_NAMES.workspaceChanged, (payload) => {
+    const pendingNavigation = workspaceNavigationTargetRef.current;
+    if (
+      payload.archivedAt
+      && pendingNavigation?.id === payload.workspaceId
+      && workspaceNavigationGenerationRef.current === pendingNavigation.generation
+    ) {
+      workspaceNavigationGenerationRef.current += 1;
+      workspaceNavigationTargetRef.current = null;
+    }
+    if (
+      payload.archivedAt
+      && editWorkspaceIdRef.current === payload.workspaceId
+      && !editWorkspacePendingRef.current
+    ) {
+      editWorkspaceIdRef.current = null;
+      setEditWorkspaceId(null);
+      setEditWorkspaceSnapshot(null);
+    }
     const ownedLifecycle =
       payload.workspaceId === activeWorkspaceId &&
       workspaceLifecyclePhaseRef.current !== "idle";
@@ -243,7 +290,14 @@ export function AppShell() {
         payload.runState === "started" ? "Workspace started." : "Workspace stopped.",
       );
     }
-    void refreshWorkspaceLists();
+    const refresh = refreshWorkspaceLists();
+    if (pendingNavigation?.id === payload.workspaceId && !payload.archivedAt) {
+      workspaceNavigationValidationRef.current = {
+        generation: pendingNavigation.generation,
+        promise: refresh,
+      };
+    }
+    void refresh;
   });
 
   // Fixture mode (DEV-only): route the initial view from the URL hash so a
@@ -291,7 +345,11 @@ export function AppShell() {
     if (fixtureView() !== "workspace-settings" || editWorkspaceId || workspaceListsLoading) return;
     const target = workspaces.find((workspace) => workspace.runState === "stopped") ?? workspaces[0]
       ?? archivedWorkspaces[0];
-    if (target) setEditWorkspaceId(target.id);
+    if (target) {
+      setEditWorkspaceSnapshot(target);
+      editWorkspaceIdRef.current = target.id;
+      setEditWorkspaceId(target.id);
+    }
   }, [archivedWorkspaces, editWorkspaceId, workspaceListsLoading, workspaces]);
 
   // Fixture mode (DEV-only): open the Builder in EDIT mode on the first
@@ -445,6 +503,9 @@ export function AppShell() {
   }
 
   function clearVisibleWorkspaceSelection() {
+    workspaceNavigationGenerationRef.current += 1;
+    workspaceNavigationTargetRef.current = null;
+    workspaceNavigationValidationRef.current = null;
     setActiveWorkspaceId(null);
     activeWorkspaceIdRef.current = null;
     workspaceLifecycleGenerationRef.current += 1;
@@ -458,24 +519,62 @@ export function AppShell() {
   }
 
   function openGlobal(destination: GlobalDestination, tab: "active" | "archived" = "active") {
+    workspaceNavigationGenerationRef.current += 1;
+    workspaceNavigationTargetRef.current = null;
+    workspaceNavigationValidationRef.current = null;
     clearWorkspaceSurfaces();
     globalDestinationRef.current = destination;
     setGlobalDestination(destination);
     if (destination === "workspaces") setWorkspaceManagerTab(tab);
     setWorkspaceNavigationError(null);
+    clearEditWorkspaceTarget();
+  }
+
+  function openEditWorkspace(id: string) {
+    const workspace = workspaces.find((candidate) => candidate.id === id)
+      ?? archivedWorkspaces.find((candidate) => candidate.id === id);
+    if (!workspace) return;
+    editWorkspacePendingRef.current = false;
+    setEditWorkspaceSnapshot(workspace);
+    editWorkspaceIdRef.current = id;
+    setEditWorkspaceId(id);
+  }
+
+  function clearEditWorkspaceTarget() {
+    editWorkspacePendingRef.current = false;
+    editWorkspaceIdRef.current = null;
     setEditWorkspaceId(null);
+    setEditWorkspaceSnapshot(null);
+  }
+
+  function pendingWorkspaceNavigationValidation(): {
+    generation: number;
+    promise: Promise<void>;
+  } | null {
+    return workspaceNavigationValidationRef.current;
   }
 
   async function handleSelectWorkspace(id: string) {
+    const navigationGeneration = ++workspaceNavigationGenerationRef.current;
+    workspaceNavigationTargetRef.current = { id, generation: navigationGeneration };
+    workspaceNavigationValidationRef.current = null;
     setWorkspaceNavigationError(null);
     try {
       await ipc.workspace.use({ workspaceId: id });
     } catch (error) {
+      if (workspaceNavigationGenerationRef.current !== navigationGeneration) return;
+      workspaceNavigationTargetRef.current = null;
+      workspaceNavigationValidationRef.current = null;
       const message = error instanceof Error ? error.message : String(error);
       openGlobal("workspaces", "active");
       setWorkspaceNavigationError(`Couldn’t open workspace: ${message}`);
       throw error;
     }
+    const validation = pendingWorkspaceNavigationValidation();
+    if (validation?.generation === navigationGeneration) await validation.promise;
+    if (workspaceNavigationGenerationRef.current !== navigationGeneration) return;
+    workspaceNavigationTargetRef.current = null;
+    workspaceNavigationValidationRef.current = null;
     setActiveWorkspaceId(id);
     activeWorkspaceIdRef.current = id;
     workspaceLifecycleGenerationRef.current += 1;
@@ -493,10 +592,15 @@ export function AppShell() {
   const activeWorkspace = activeWorkspaceId
     ? (workspaces.find((w) => w.id === activeWorkspaceId) ?? null)
     : null;
-  const editWorkspace = editWorkspaceId
-    ? (workspaces.find((workspace) => workspace.id === editWorkspaceId)
+  const currentEditWorkspace = editWorkspaceId
+    ? workspaces.find((workspace) => workspace.id === editWorkspaceId)
       ?? archivedWorkspaces.find((workspace) => workspace.id === editWorkspaceId)
-      ?? null)
+      ?? null
+    : null;
+  const editWorkspace = editWorkspaceId
+    ? editWorkspacePendingRef.current
+      ? editWorkspaceSnapshot ?? currentEditWorkspace
+      : currentEditWorkspace
     : null;
 
   async function handleStartWorkspace() {
@@ -914,7 +1018,7 @@ export function AppShell() {
               }
               laneBoardOpen={showLaneBoard}
               onEditWorkspace={
-                activeWorkspaceId ? () => setEditWorkspaceId(activeWorkspaceId) : undefined
+                activeWorkspaceId ? () => openEditWorkspace(activeWorkspaceId) : undefined
               }
             />
             </div>
@@ -924,17 +1028,17 @@ export function AppShell() {
               <UsageOverview onManageWorkspaces={() => openGlobal("workspaces", "active")} />
             ) : globalDestination === "workspaces" ? (
               <WorkspaceManager
-                key={workspaceManagerTab}
                 activeWorkspaces={workspaces}
                 archivedWorkspaces={archivedWorkspaces}
                 loading={workspaceListsLoading}
                 error={workspaceListsError}
                 navigationError={workspaceNavigationError}
                 initialTab={workspaceManagerTab}
+                onTabChange={setWorkspaceManagerTab}
                 notice={workspaceNotice}
                 onRetry={() => void refreshWorkspaceLists(true)}
                 onOpen={(id) => handleSelectWorkspace(id)}
-                onManage={(id) => setEditWorkspaceId(id)}
+                onManage={openEditWorkspace}
                 onLink={() => setShowLinkFolder(true)}
                 onRestore={restoreWorkspace}
                 onDismissNotice={() => setWorkspaceNotice(null)}
@@ -1130,23 +1234,39 @@ export function AppShell() {
         <EditWorkspace
           key={editWorkspace.id}
           workspace={editWorkspace}
-          onClose={() => setEditWorkspaceId(null)}
+          onClose={clearEditWorkspaceTarget}
+          onPendingChange={(pending) => {
+            editWorkspacePendingRef.current = pending;
+            if (pending) setEditWorkspaceSnapshot(editWorkspace);
+          }}
           onSaved={(updated) => {
             workspaceListGenerationRef.current += 1;
             setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
             setArchivedWorkspaces((prev) =>
               prev.map((w) => (w.id === updated.id ? updated : w)),
             );
+            setEditWorkspaceSnapshot(updated);
           }}
-          onStopped={reconcileStopped}
-          onArchived={reconcileArchived}
-          onRestored={reconcileRestored}
+          onStopped={(workspace) => {
+            reconcileStopped(workspace);
+            editWorkspacePendingRef.current = false;
+            setEditWorkspaceSnapshot(workspace);
+          }}
+          onArchived={(workspace) => {
+            reconcileArchived(workspace);
+            clearEditWorkspaceTarget();
+          }}
+          onRestored={(workspace) => {
+            reconcileRestored(workspace);
+            clearEditWorkspaceTarget();
+          }}
           onDeleted={(deletedId) => {
             workspaceListGenerationRef.current += 1;
             setWorkspaces((prev) => prev.filter((w) => w.id !== deletedId));
             setArchivedWorkspaces((prev) => prev.filter((w) => w.id !== deletedId));
             if (activeWorkspaceIdRef.current === deletedId) clearVisibleWorkspaceSelection();
             setGlobalDestination("workspaces");
+            clearEditWorkspaceTarget();
           }}
         />
       )}

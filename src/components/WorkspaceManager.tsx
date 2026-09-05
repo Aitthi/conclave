@@ -26,6 +26,7 @@ export interface WorkspaceManagerProps {
   error: string | null;
   navigationError?: string | null;
   initialTab?: WorkspaceTab;
+  onTabChange?: (tab: WorkspaceTab) => void;
   notice?: WorkspaceNotice | null;
   onRetry: () => void;
   onOpen: (id: string) => Promise<void>;
@@ -84,6 +85,7 @@ export function WorkspaceManager({
   error,
   navigationError = null,
   initialTab = "active",
+  onTabChange,
   notice = null,
   onRetry,
   onOpen,
@@ -136,6 +138,7 @@ export function WorkspaceManager({
 
   function changeTab(nextTab: WorkspaceTab) {
     setTab(nextTab);
+    onTabChange?.(nextTab);
     setExpandedWorkspaceId(null);
   }
 

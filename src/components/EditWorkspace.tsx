@@ -25,6 +25,7 @@ export interface EditWorkspaceProps {
   onArchived: (workspace: Workspace) => void;
   onRestored: (workspace: Workspace) => void;
   onDeleted: (workspaceId: string) => void;
+  onPendingChange?: (pending: boolean) => void;
 }
 
 function detail(error: unknown): string {
@@ -39,6 +40,7 @@ export function EditWorkspace({
   onArchived,
   onRestored,
   onDeleted,
+  onPendingChange,
 }: EditWorkspaceProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(workspace.name);
@@ -63,6 +65,7 @@ export function EditWorkspace({
 
   async function run<T>(kind: Mutation, operation: () => Promise<T>, done: (value: T) => void) {
     if (busy) return;
+    onPendingChange?.(true);
     setMutation(kind);
     setError(null);
     try {
@@ -70,6 +73,7 @@ export function EditWorkspace({
     } catch (reason) {
       setError(detail(reason));
       setMutation(null);
+      onPendingChange?.(false);
       if (kind === "delete") setConfirmingDelete(false);
       if (kind === "stop") setConfirmingStop(false);
     }
@@ -101,6 +105,7 @@ export function EditWorkspace({
       () => ipc.workspace.stop({ workspaceId: workspace.id }),
       (result) => {
         onStopped(result.workspace);
+        onPendingChange?.(false);
         setMutation(null);
         setConfirmingStop(false);
       },
@@ -226,7 +231,10 @@ export function EditWorkspace({
                 <strong>Stop workspace before archiving.</strong>
                 <p>This workspace is started. Archiving never stops agents automatically.</p>
                 {confirmingStop && (
-                  <p role="alert">Stop all live runtimes and their current work? Saved records remain. Archive will still require a separate action.</p>
+                  <>
+                    <p role="alert">All live agent runtimes and current work terminate immediately. The workspace, agents, configuration, tasks, messages, and history stay.</p>
+                    <p>Archive will still require a separate action.</p>
+                  </>
                 )}
                 <div>
                   <button type="button" data-workspace-action="stop" className="workspace-neutral-button" disabled={busy} onClick={handleStop}>

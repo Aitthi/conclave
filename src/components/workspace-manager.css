@@ -89,9 +89,11 @@
 
 .workspace-manager-tabs button.is-selected {
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-  color: var(--color-accent);
+  color: #0060c0;
   font-weight: 650;
 }
+
+.dark .workspace-manager-tabs button.is-selected { color: #58a6ff; }
 
 .workspace-manager-tabs button span {
   margin-left: 4px;

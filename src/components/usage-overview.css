@@ -466,8 +466,11 @@
   font-weight: 600;
 }
 
-.usage-basis.is-reported { color: var(--color-success); }
-.usage-basis.is-selected { color: var(--color-accent); }
+.usage-basis.is-reported { color: #1a7f37; }
+.usage-basis.is-selected { color: #0969da; }
+
+.dark .usage-basis.is-reported { color: #30d158; }
+.dark .usage-basis.is-selected { color: #58a6ff; }
 
 .usage-empty-row,
 .usage-context-empty {
@@ -535,9 +538,11 @@
   border-radius: 8px;
   background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
   padding: 11px 13px;
-  color: var(--color-danger);
+  color: #b42318;
   font-size: 11.5px;
 }
+
+.dark .usage-request-error { color: #ff8a80; }
 
 .usage-request-error button {
   flex: none;

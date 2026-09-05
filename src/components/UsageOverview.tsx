@@ -57,6 +57,17 @@ function activitySplit(totals: UsageTotals): string {
   return `${responses} · ${drafts}`;
 }
 
+function formatVerificationTime(instant: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(instant));
+}
+
 function ageLabel(observedAt: string | null, generatedAt: string): string {
   if (!observedAt) return "Observation time unavailable";
   const observed = Date.parse(observedAt);
@@ -388,9 +399,11 @@ export function UsageOverview({ onManageWorkspaces }: UsageOverviewProps) {
               <SummaryCard
                 label="Coverage"
                 value={coverageLabel(visible.coverage.state)}
-                helper={visible.coverage.collectingSince
+                helper={`${visible.coverage.collectingSince
                   ? `Collection since ${visible.coverage.collectingSince.slice(0, 10)}`
-                  : "No supported observation in this range"}
+                  : "Collection start unknown"} · ${visible.coverage.lastVerifiedAt
+                  ? `Last verified ${formatVerificationTime(visible.coverage.lastVerifiedAt, visible.range.timeZone)}`
+                  : "Last verification unknown"}`}
               />
             </section>
 

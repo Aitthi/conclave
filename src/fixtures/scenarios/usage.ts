@@ -247,7 +247,11 @@ function buildOverview(
     contexts: contexts.map((context) => ({ ...context })),
     coverage: {
       state: coverage,
-      collectingSince: variant === "none" || variant === "unsupported" ? null : "2026-08-15T00:00:00.000Z",
+      collectingSince: variant === "none" || variant === "unsupported"
+        ? null
+        : variant === "verified-empty"
+          ? "2026-06-08T00:00:00.000Z"
+          : "2026-08-15T00:00:00.000Z",
       lastVerifiedAt: variant === "none" ? null : "2026-09-05T07:59:00.000Z",
       pendingImport: coverage !== "complete" && (variant === "partial" || variant === "empty"),
       unsupportedSources: variant === "unsupported"
