@@ -161,3 +161,94 @@ boundary listed. Ruled: boundary widened by exactly that file for the mechanical
 gains `pixel_width/pixel_height`). Landed as its own scoped commit (`git commit --
 src-tauri/src/engine/runtime/mod.rs`). Lead defect: the importer was pinned instead of the
 defining file — see memory `lead-boundary-defining-file-not-importer`.
+
+## Outcome (Tiësto, 2026-09-05)
+
+Items F1–F9 landed, one commit per item (F8 split in two — see the boundary note).
+Branch `lane/xterm-parity-fix`.
+
+| Item | Commit | What changed |
+|---|---|---|
+| F1 | `ad3b994` | `convertEol` removed from the xterm constructor; the comment now records WHY it is absent (PTY keeps `onlcr`, audit §0 F1) so it does not get re-added. |
+| F2 | `30904ee` | xterm/webgl/unicode11/serialize/headless pinned to VS Code 1.138's exact builds (`vscode:package.json:137-146`). Closes H2. |
+| F3 | `ca7c3a5` | `TERM_PROGRAM=Conclave` + `TERM_PROGRAM_VERSION`; `LANG` now follows VS Code's `'auto'` UTF-8 rule instead of only firing when unset (extracted as `should_set_lang`); `CLAUDE_CODE_FORCE_SYNC_OUTPUT=1` for `cliKind == claude-code` only. |
+| F4 | `c705eed` | `console.warn` on both WebGL-unavailable and context-loss; DEV-only `window.__conclaveTerms` registry for the GUI probe. |
+| F5 | `d047b38` | xterm fitted SYNCHRONOUSLY at mount (after the WebGL addon loads), before the snapshot restore and the first live write; output queued and replayed in order while the pane cannot be measured. Kills the ~200 ms 80×24-vs-real window. |
+| F6 | `9d511b9` | Both jiggle legs now move xterm and the PTY together. |
+| F7 | `bc3cdde` | One ordered stdin channel; all three call sites (onData, wheel, file-drop) join it. |
+| F8 | `fbedfb6` (seam) + `9d8e8c6` (wire-up) | Pixel dimensions carried through `LiveHandle.resize` → `PtySize`; `windowOptions` report ops enabled. |
+| F9 | `7a93280` | `scrollOnEraseInDisplay: true`. |
+
+### Gates (all recorded on task `xterm-parity-fix`, final sweep at `7a93280`)
+
+1. `pnpm build` — exit 0 (also run at `30904ee`, right after the bump).
+2. `node scripts/xterm-replay.mjs …/rec-a.jsonl` — exit 0, `LAYOUT INVARIANT: PASS`
+   (also at `30904ee`: the bumped headless build still renders the recording clean).
+3. `cargo test --manifest-path src-tauri/Cargo.toml pty::` — exit 0, 8 passed / 2 ignored,
+   including the two new tests `spawn_cli_advertises_terminal_identity` and
+   `should_set_lang_matches_vscode_auto_rule`. `runtime::` also green (190 passed).
+4. `pnpm uishot home` — exit 0, `.shots/home-default.png` written AND inspected: chrome,
+   roster, chat panel and composer all intact; the terminal pane is black with a cursor
+   block, which is the documented fixture-mode caveat, not a regression.
+5. rustfmt — see the note below.
+
+### Boundary
+
+`src-tauri/src/engine/runtime/mod.rs` is out of the declared boundary and was ruled in by
+Detoro (challenge `602f6ff7`); it lands in its own commit `fbedfb6`. That commit also carries
+**`src-tauri/src/engine/runtime/chat.rs`** — a one-line `|_, _|` → `|_, _, _, _|` on the chat
+backend's no-op resize stub. It is a third construction site of the same closure that the
+challenge missed; the compiler found it, grep had not. It is named here and in the READY note
+rather than filed as a second challenge, because leaving it out simply does not build.
+The one-line `(…, 0, 0)` caller update in `instance.rs` rides along in `fbedfb6` for the same
+reason: every commit in this lane builds and tests green on its own.
+
+### Deviations and judgment calls (logged as task notes, not escalated)
+
+- **F8 pixel source.** The plan's wording said `el.getBoundingClientRect()`; the implementation
+  reads `term.dimensions?.css.canvas`, rounded. The plan cites
+  `vscode:…/browser/terminalInstance.ts:2095-2104` as the thing to mirror and that line reads
+  `rawXterm.dimensions?.css.canvas`. The container box includes the sub-cell remainder the grid
+  does not cover, so a child dividing `pixel_width` by `cols` would derive a cell width slightly
+  too large. `term.dimensions` is public API in `@xterm/xterm 6.1.0-beta.303`
+  (`typings/xterm.d.ts:987`).
+- **F5 fit position.** The synchronous fit runs after the WebGL addon is loaded, not immediately
+  after `term.open()`. WebGL cell metrics differ from the DOM renderer's, which is why VS Code
+  fires `_onDidRequestRefreshDimensions` at exactly that point (`xtermTerminal.ts:947`).
+- **F6.** No same-size SIGWINCH exists to replace the jiggle with — `TIOCSWINSZ` with unchanged
+  dimensions signals nothing on macOS. The jiggle stays; audit §4 item 10 remains the
+  structural fix.
+- **rustfmt gate shape.** `rustfmt <file>` follows the `mod` declarations in `runtime/mod.rs`
+  and reports pre-existing drift in `browser.rs` and `task_timer.rs`, which this lane never
+  touched (matching the recorded "cargo fmt drift on main"). `--skip-children` /
+  `--unstable-features` are not available on this stable rustfmt. The recorded gate therefore
+  greps the diff for THIS lane's four files only and passes when none appear. It was falsified
+  before being trusted: deliberately misformatting one line in `chat.rs` makes it exit 1.
+
+### Deferred (unchanged from the plan, plus one)
+
+- Audit §4 item 10 (keep xterm alive across tab switches) — structural, after GUI confirmation.
+- Audit §4 item 11 (output coalescing + flow control) — needs the `seq` probe first.
+- Audit §4 item 7's Rust form (reordering in `message.rs`) — out of boundary, and unnecessary
+  now that the TS side is a single ordered channel. Remaining exposure: a terminal write racing
+  a NON-terminal stdin source, e.g. `message.inject`.
+
+### GUI probe for the human (gate 5 — the only place the defect ever appeared)
+
+Needs a rebuilt + relaunched app: a `pnpm tauri dev` instance cannot take `conclave.sock` and
+its janitor prunes the live DB, so this cannot be run from a lane.
+
+1. Open a Claude Code agent tab and let it paint.
+2. Type `/`, then `s`, then ` at` — slowly, one key at a time. Screenshot the popup.
+3. In devtools console:
+   `[...window.__conclaveTerms.values()].map(t => t.modes.synchronizedOutputMode)`
+   → expect `true` while output is flowing. `false` means F3's
+   `CLAUDE_CODE_FORCE_SYNC_OUTPUT` did not take (check the agent is `cliKind: claude-code`
+   and that the app was actually rebuilt).
+4. If any row is garbled, run
+   `[...window.__conclaveTerms.values()].forEach(t => t.clearTextureAtlas())`.
+   Rows that HEAL with no new PTY output → renderer fault (H2), closed by the F2 bump.
+   Rows that STAY → buffer fault (H1), i.e. the cursor-model desync F5/F6 target.
+5. Also worth one pass: switch workspaces / open the Lane board and come back (this remounts
+   every terminal, `AppShell.tsx:288`) and confirm the pane repaints at the right size with no
+   column-0 rows — that is the exact path F5 and F6 change.
