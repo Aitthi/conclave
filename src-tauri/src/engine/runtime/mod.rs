@@ -36,6 +36,7 @@ pub mod pty;
 pub mod sandbox_config;
 pub mod task_timer;
 pub mod transcript_context;
+pub mod usage;
 // T2 lands the codec before the T4 exact-search consumer.
 #[allow(dead_code)]
 pub mod vec_codec;

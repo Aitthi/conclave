@@ -95,6 +95,13 @@ pub fn run() {
         .menu(menu::build)
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .manage(std::sync::Arc::new(AppState::new()))
+        // The in-process usage collectors (draft, chat, fusion) observe every
+        // call this process makes; stamping the instant they came online is
+        // what lets them claim honest coverage from here on.
+        .setup(|_app| {
+            engine::runtime::usage::mark_collectors_online();
+            Ok(())
+        })
         .setup(|app| {
             // Wire the AppHandle into AppState so that bus::emit helpers and
             // state.emit(...) can push events to the UI from any async context.

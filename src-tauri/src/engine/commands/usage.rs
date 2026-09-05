@@ -27,6 +27,7 @@
 use crate::engine::repo::model_usage::{
     self, GroupColumn, ModelKeyFilter, UsageAggregate, UsageScope, UNSUPPORTED_SOURCE,
 };
+use crate::engine::runtime::usage::{provider_for_cli_kind, COLLECTED_SOURCES};
 use crate::engine::{repo, AppError, AppState};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -47,34 +48,6 @@ const UNASSIGNED_AGENT_NAME: &str = "Unassigned activity";
 
 /// Displayed name of a model identity the source never proved.
 const UNKNOWN_MODEL_NAME: &str = "Unknown model";
-
-// ── Sources this build collects ──────────────────────────────────────────────
-
-/// Claude Code transcript importer.
-pub const SOURCE_CLAUDE_TRANSCRIPT: &str = "claude-code";
-/// Codex transcript importer.
-pub const SOURCE_CODEX_TRANSCRIPT: &str = "codex";
-/// Direct provider chat (`runtime::chat`).
-pub const SOURCE_DIRECT_CHAT: &str = "chat";
-/// Fusion panel/judge/synthesis provider calls.
-pub const SOURCE_FUSION: &str = "fusion";
-/// Non-persistent one-shot draft invocations.
-pub const SOURCE_DRAFT: &str = "draft";
-
-/// The source set a `complete` answer must account for.
-///
-/// This list is DECLARED, not derived from the coverage table: inferring the
-/// required sources from whichever rows exist would let a single collector's
-/// interval certify a window nobody else observed. A source with no interval
-/// covering the window keeps the answer `partial`, which is the honest reading
-/// of "we never heard from that collector".
-pub const COLLECTED_SOURCES: &[&str] = &[
-    SOURCE_CLAUDE_TRANSCRIPT,
-    SOURCE_CODEX_TRANSCRIPT,
-    SOURCE_DIRECT_CHAT,
-    SOURCE_FUSION,
-    SOURCE_DRAFT,
-];
 
 // ── Request ──────────────────────────────────────────────────────────────────
 
@@ -388,11 +361,7 @@ fn provider_for_agent(provider_id: Option<&str>, cli_kind: Option<&str>) -> Opti
     if let Some(id) = provider_id.filter(|p| !p.is_empty()) {
         return Some(id.to_string());
     }
-    match cli_kind {
-        Some("claude-code") => Some("anthropic".to_string()),
-        Some("codex") => Some("openai".to_string()),
-        _ => None,
-    }
+    cli_kind.and_then(provider_for_cli_kind).map(str::to_string)
 }
 
 // ── Scope selection ──────────────────────────────────────────────────────────
@@ -1292,6 +1261,9 @@ mod tests {
         insert_coverage, insert_event, CoverageIntervalRow, NewUsageEvent,
     };
     use crate::engine::repo::{agent_definition, session, workspace, workspace_agent};
+    use crate::engine::runtime::usage::{
+        SOURCE_CLAUDE_TRANSCRIPT, SOURCE_CODEX_TRANSCRIPT, SOURCE_DRAFT,
+    };
     use chrono::Timelike;
     use serde_json::json;
     use sqlx::SqlitePool;
