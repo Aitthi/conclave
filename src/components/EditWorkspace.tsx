@@ -1,9 +1,9 @@
-import { useState } from "react";
-import { X, Pencil, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Archive, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+
 import { ipc } from "../ipc";
 import type { Workspace } from "../ipc";
-
-// ── Color swatches (matches LinkFolder / Builder palette) ─────────────────────
+import "./workspace-manager.css";
 
 const COLOR_SWATCHES = [
   "#ff3b30",
@@ -15,209 +15,267 @@ const COLOR_SWATCHES = [
   "#0fa3a3",
 ];
 
+type Mutation = "save" | "delete" | "stop" | "archive" | "restore";
+
 export interface EditWorkspaceProps {
   workspace: Workspace;
   onClose: () => void;
-  /** The workspace was renamed/recolored — carries the updated row. */
   onSaved: (workspace: Workspace) => void;
-  /** The workspace was deleted — carries the deleted id explicitly (rather than
-   *  the caller re-deriving "the active workspace") so a future change to
-   *  active-workspace tracking can't make this delete the wrong one. */
+  onStopped: (workspace: Workspace) => void;
+  onArchived: (workspace: Workspace) => void;
+  onRestored: (workspace: Workspace) => void;
   onDeleted: (workspaceId: string) => void;
 }
 
-/**
- * Rename, recolor, or delete a workspace. Opened from the Roster's workspace
- * header (pencil icon). `folderPath` is not editable here — a workspace stays
- * bound to the folder it was linked from.
- */
-export function EditWorkspace({ workspace, onClose, onSaved, onDeleted }: EditWorkspaceProps) {
+function detail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function EditWorkspace({
+  workspace,
+  onClose,
+  onSaved,
+  onStopped,
+  onArchived,
+  onRestored,
+  onDeleted,
+}: EditWorkspaceProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(workspace.name);
   const [color, setColor] = useState(workspace.color ?? COLOR_SWATCHES[0]);
-  const isCustomColor = !COLOR_SWATCHES.includes(color);
-  const [saving, setSaving] = useState(false);
+  const [mutation, setMutation] = useState<Mutation | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // Two-step delete so a stray click can't destroy a workspace: the first
-  // click arms the confirm, the second (red) click commits.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const archived = workspace.archivedAt != null;
+  const busy = mutation != null;
+  const isCustomColor = !COLOR_SWATCHES.includes(color);
 
-  // Neither mutation may run while the other is in flight — save and delete
-  // both target the same row, and a race (e.g. two quick clicks) could apply
-  // an update to an already-deleted workspace.
-  const busy = saving || deleting;
+  useEffect(() => {
+    const node = dialog.current;
+    if (node && !node.open) node.showModal();
+  }, []);
 
-  async function handleSave() {
+  function close() {
     if (busy) return;
-    const trimmed = name.trim();
-    if (!trimmed) {
-      setError("Name can't be empty.");
-      return;
-    }
-    setSaving(true);
+    dialog.current?.close();
+  }
+
+  async function run<T>(kind: Mutation, operation: () => Promise<T>, done: (value: T) => void) {
+    if (busy) return;
+    setMutation(kind);
     setError(null);
     try {
-      const updated = await ipc.workspace.update({
-        workspaceId: workspace.id,
-        name: trimmed,
-        color,
-      });
-      onSaved(updated);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
+      done(await operation());
+    } catch (reason) {
+      setError(detail(reason));
+      setMutation(null);
+      if (kind === "delete") setConfirmingDelete(false);
+      if (kind === "stop") setConfirmingStop(false);
     }
   }
 
-  async function handleDelete() {
-    if (busy) return;
-    setDeleting(true);
-    setError(null);
-    try {
-      await ipc.workspace.delete({ workspaceId: workspace.id });
-      onDeleted(workspace.id);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setDeleting(false);
-      setConfirmingDelete(false);
+  function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError("Name can’t be empty.");
+      return;
     }
+    void run(
+      "save",
+      () => ipc.workspace.update({ workspaceId: workspace.id, name: trimmed, color }),
+      (updated) => {
+        onSaved(updated);
+        dialog.current?.close();
+      },
+    );
+  }
+
+  function handleStop() {
+    if (!confirmingStop) {
+      setConfirmingStop(true);
+      return;
+    }
+    void run(
+      "stop",
+      () => ipc.workspace.stop({ workspaceId: workspace.id }),
+      (result) => {
+        onStopped(result.workspace);
+        setMutation(null);
+        setConfirmingStop(false);
+      },
+    );
+  }
+
+  function handleArchive() {
+    void run(
+      "archive",
+      () => ipc.workspace.archive({ workspaceId: workspace.id }),
+      (updated) => {
+        onArchived(updated);
+        dialog.current?.close();
+      },
+    );
+  }
+
+  function handleRestore() {
+    void run(
+      "restore",
+      () => ipc.workspace.restore({ workspaceId: workspace.id }),
+      (updated) => {
+        onRestored(updated);
+        dialog.current?.close();
+      },
+    );
+  }
+
+  function handleDelete() {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    void run(
+      "delete",
+      () => ipc.workspace.delete({ workspaceId: workspace.id }),
+      () => {
+        onDeleted(workspace.id);
+        dialog.current?.close();
+      },
+    );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="w-[420px] bg-surface rounded-2xl shadow-2xl flex flex-col overflow-hidden ring-1 ring-overlay/[0.08]">
-        {/* ── Header ── */}
-        <div className="h-12 flex items-center justify-between px-5 border-b border-overlay/[0.06] shrink-0">
-          <div className="flex items-center gap-2">
-            <Pencil className="w-4 h-4 text-accent" />
-            <span className="text-[13px] font-semibold tracking-tight">Edit workspace</span>
+    <dialog
+      ref={dialog}
+      className="workspace-dialog"
+      data-workspace-id={workspace.id}
+      data-workspace-settings-state={mutation ?? (error ? "error" : "ready")}
+      aria-label={archived ? "Archived workspace" : "Edit workspace"}
+      onCancel={(event) => {
+        if (busy) event.preventDefault();
+      }}
+      onClose={onClose}
+    >
+      <div className="workspace-dialog-frame">
+        <header>
+          <div>
+            {archived ? <Archive aria-hidden="true" /> : <Pencil aria-hidden="true" />}
+            <h2>{archived ? "Archived workspace" : "Edit workspace"}</h2>
           </div>
-          <button
-            onClick={onClose}
-            disabled={busy}
-            className="w-7 h-7 grid place-items-center rounded-md hover:bg-overlay/[0.05] text-text-secondary disabled:opacity-50"
-            aria-label="Close"
-          >
-            <X className="w-[15px] h-[15px]" />
+          <button type="button" onClick={close} disabled={busy} aria-label="Close workspace settings">
+            <X aria-hidden="true" />
           </button>
-        </div>
+        </header>
 
-        {/* ── Body ── */}
-        <div className="p-6">
-          <div className="mb-4">
-            <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-              Folder
-            </div>
-            <div className="text-[12.5px] font-mono text-text-muted truncate">
-              {workspace.folderPath}
-            </div>
-          </div>
+        <div className="workspace-dialog-body">
+          <p className="workspace-dialog-path" title={workspace.folderPath}>{workspace.folderPath}</p>
 
-          <div className="mb-5">
-            <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-              Name
-            </div>
+          <label className="workspace-field">
+            <span>Name</span>
             <input
               value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg ring-1 ring-overlay/[0.10] bg-fill-softer px-3 h-10 text-[13px] outline-none focus:ring-accent/50"
+              disabled={archived || busy}
+              onChange={(event) => setName(event.target.value)}
             />
-          </div>
+          </label>
 
-          <div className="mb-5">
-            <div className="text-[11px] font-bold tracking-wider text-text-tertiary uppercase mb-1.5">
-              Color
-            </div>
-            <div className="flex items-center gap-1.5 h-10">
+          <fieldset className="workspace-color-field" disabled={archived || busy}>
+            <legend>Color</legend>
+            <div>
               {COLOR_SWATCHES.map((swatch) => (
                 <button
                   key={swatch}
+                  type="button"
                   onClick={() => setColor(swatch)}
-                  className={`w-5 h-5 rounded-full transition-all ${
-                    color === swatch ? "ring-2 ring-offset-2" : ""
-                  }`}
-                  style={
-                    {
-                      backgroundColor: swatch,
-                      "--tw-ring-color": swatch,
-                    } as React.CSSProperties
-                  }
+                  className={color === swatch ? "is-selected" : ""}
+                  style={{ backgroundColor: swatch, "--workspace-swatch": swatch } as React.CSSProperties}
                   aria-label={`Color ${swatch}`}
+                  aria-pressed={color === swatch}
                 />
               ))}
-              {/* Custom color — native OS color panel via a fully transparent
-                  <input type="color"> overlaid on a swatch-styled label. Shows
-                  a rainbow ring when the current color isn't one of the presets
-                  above (so the swatch itself doubles as the "active" indicator,
-                  same as the preset buttons), otherwise a neutral conic
-                  gradient signals "pick a custom color". */}
               <label
-                className={`relative w-5 h-5 rounded-full shrink-0 cursor-pointer overflow-hidden transition-all ${
-                  isCustomColor ? "ring-2 ring-offset-2" : "ring-1 ring-overlay/[0.15]"
-                }`}
-                style={
-                  isCustomColor
-                    ? ({ backgroundColor: color, "--tw-ring-color": color } as React.CSSProperties)
-                    : {
-                        background:
-                          "conic-gradient(from 0deg, #ff3b30, #ff9f0a, #30d158, #0a84ff, #5e5ce6, #d6409f, #ff3b30)",
-                      }
-                }
+                className={`workspace-custom-color${isCustomColor ? " is-selected" : ""}`}
+                style={isCustomColor ? { background: color, "--workspace-swatch": color } as React.CSSProperties : undefined}
                 title="Custom color"
               >
-                <input
-                  type="color"
-                  value={color}
-                  onChange={(e) => setColor(e.target.value)}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                  aria-label="Custom color"
-                />
+                <input type="color" value={color} onChange={(event) => setColor(event.target.value)} aria-label="Custom color" />
               </label>
             </div>
-          </div>
+          </fieldset>
 
-          {error && <p className="text-[12px] text-danger mb-3">{error}</p>}
+          {archived && (
+            <p className="workspace-archived-lock">Restore this workspace before renaming or changing its color.</p>
+          )}
 
-          {/* ── Danger zone ── */}
-          <div className="pt-4 border-t border-overlay/[0.06] flex items-center justify-between">
-            <div>
-              <div className="text-[12.5px] font-semibold">Delete workspace</div>
-              <div className="text-[10.5px] text-text-muted">
-                Removes all agents, sessions, and blackboard data for this workspace.
+          <section className="workspace-archive-section">
+            <h3>
+              {archived ? <RotateCcw aria-hidden="true" /> : <Archive aria-hidden="true" />}
+              {archived ? "Restore workspace" : "Archive workspace"}
+            </h3>
+            <p>
+              {archived
+                ? "Restore to edit or open this workspace. It returns stopped and no agents launch."
+                : "Hide this workspace from the Rail and normal list. All agents, sessions, tasks, memory, artifacts and project files stay."}
+            </p>
+            {archived ? (
+              <button type="button" data-workspace-action="restore" className="workspace-neutral-button" disabled={busy} onClick={handleRestore}>
+                {mutation === "restore" ? "Restoring…" : "Restore workspace"}
+              </button>
+            ) : workspace.runState === "started" ? (
+              <div className="workspace-stop-box">
+                <strong>Stop workspace before archiving.</strong>
+                <p>This workspace is started. Archiving never stops agents automatically.</p>
+                {confirmingStop && (
+                  <p role="alert">Stop all live runtimes and their current work? Saved records remain. Archive will still require a separate action.</p>
+                )}
+                <div>
+                  <button type="button" data-workspace-action="stop" className="workspace-neutral-button" disabled={busy} onClick={handleStop}>
+                    {mutation === "stop" ? "Stopping…" : confirmingStop ? "Confirm stop" : "Stop workspace"}
+                  </button>
+                  {confirmingStop && (
+                    <button type="button" className="workspace-neutral-button" disabled={busy} onClick={() => setConfirmingStop(false)}>Cancel</button>
+                  )}
+                  <button type="button" className="workspace-primary-button" disabled>Archive</button>
+                </div>
               </div>
+            ) : (
+              <div>
+                <p className="workspace-archive-hint">Workspace stopped. Archive also checks for live or busy work.</p>
+                <button type="button" data-workspace-action="archive" className="workspace-neutral-button" disabled={busy} onClick={handleArchive}>
+                  {mutation === "archive" ? "Archiving…" : "Archive workspace"}
+                </button>
+              </div>
+            )}
+            {error && <p className="workspace-inline-error" role="alert">{error}</p>}
+          </section>
+
+          <section className="workspace-delete-section">
+            <h3>Permanently delete workspace</h3>
+            <p>Removes this workspace and its Conclave records. This cannot be undone.</p>
+            {confirmingDelete && (
+              <p role="alert">Permanently delete {workspace.name} and its Conclave records?</p>
+            )}
+            <div>
+              <button type="button" data-workspace-action="delete" className="workspace-delete-button" disabled={busy} onClick={handleDelete}>
+                <Trash2 aria-hidden="true" />
+                {mutation === "delete" ? "Deleting…" : confirmingDelete ? "Confirm permanent delete" : "Delete…"}
+              </button>
+              {confirmingDelete && (
+                <button type="button" className="workspace-neutral-button" disabled={busy} onClick={() => setConfirmingDelete(false)}>Cancel</button>
+              )}
             </div>
-            <button
-              onClick={confirmingDelete ? handleDelete : () => setConfirmingDelete(true)}
-              disabled={busy}
-              className="flex items-center gap-1.5 text-[11.5px] font-semibold text-white bg-danger px-3 py-1.5 rounded-md shrink-0 disabled:opacity-50"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              {deleting ? "Deleting…" : confirmingDelete ? "Confirm delete" : "Delete"}
-            </button>
-          </div>
+          </section>
         </div>
 
-        {/* ── Footer actions ── */}
-        <div className="border-t border-overlay/[0.07] px-6 py-3 bg-surface shrink-0 flex items-center gap-2">
-          <button
-            onClick={onClose}
-            className="flex-1 text-[12.5px] font-medium text-text-secondary bg-surface ring-1 ring-overlay/[0.08] rounded-lg py-2.5 hover:bg-overlay/[0.02]"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex-[1.4] text-[12.5px] font-semibold text-white bg-accent rounded-lg py-2.5 hover:brightness-105 disabled:opacity-50"
-          >
-            {saving ? "Saving…" : "Save changes"}
-          </button>
-        </div>
+        <footer>
+          <button type="button" className="workspace-neutral-button" disabled={busy} onClick={close}>Cancel</button>
+          {!archived && (
+            <button type="button" data-workspace-action="save" className="workspace-primary-button" disabled={busy || !name.trim()} onClick={handleSave}>
+              {mutation === "save" ? "Saving…" : "Save changes"}
+            </button>
+          )}
+        </footer>
       </div>
-    </div>
+    </dialog>
   );
 }

@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import {
   CirclePause,
+  FolderCog,
   Globe,
-  Hexagon,
   FolderPlus,
   Package,
   PenTool,
@@ -18,7 +18,10 @@ const DEFAULT_WORKSPACE_COLOR = "#6e6e73";
 interface RailProps {
   workspaces: Workspace[];
   activeWorkspaceId: string | null;
+  globalDestination?: "overview" | "workspaces" | null;
   onSelectWorkspace: (id: string) => void;
+  onOpenOverview?: () => void;
+  onOpenWorkspaces?: () => void;
   artifactsOpen?: boolean;
   designOpen?: boolean;
   browserOpen?: boolean;
@@ -68,7 +71,10 @@ function RailActionButton({
 export function Rail({
   workspaces,
   activeWorkspaceId,
+  globalDestination,
   onSelectWorkspace,
+  onOpenOverview,
+  onOpenWorkspaces,
   artifactsOpen,
   designOpen,
   browserOpen,
@@ -89,18 +95,34 @@ export function Rail({
           across the Rail column. */}
       <div className="h-12 w-full shrink-0 grid place-items-center border-b border-overlay/[0.06] bg-sidebar">
         <button
-          className="w-8 h-8 rounded-[9px] grid place-items-center"
-          title="Conclave"
+          className={`relative w-8 h-8 rounded-[9px] grid place-items-center transition-colors ${
+            globalDestination === "overview" ? "bg-accent/10" : "hover:bg-overlay/[0.04]"
+          }`}
+          title="Overview"
+          aria-label="Overview"
+          aria-current={globalDestination === "overview" ? "page" : undefined}
+          onClick={onOpenOverview}
         >
-          <Hexagon className="w-[18px] h-[18px] text-accent" />
+          {globalDestination === "overview" && (
+            <span className="absolute -left-3 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-accent" />
+          )}
+          <img src="/brand/logo-mark.svg" alt="" className="h-[19px] w-[19px]" />
         </button>
       </div>
 
       {/* Switcher + actions, below the brand header zone */}
       <div className="flex-1 w-full flex flex-col items-center gap-1 pt-2.5 pb-2.5 overflow-hidden">
+        <RailActionButton
+          active={globalDestination === "workspaces"}
+          title="Manage workspaces"
+          onClick={onOpenWorkspaces}
+        >
+          <FolderCog className="h-[17px] w-[17px]" />
+        </RailActionButton>
+
         {/* Workspace switcher — driven by real DB data from workspace.list */}
         {workspaces.map((ws) => {
-          const isActive = ws.id === activeWorkspaceId;
+          const isActive = globalDestination == null && ws.id === activeWorkspaceId;
           const color = ws.color ?? DEFAULT_WORKSPACE_COLOR;
           const letter = ws.name.charAt(0).toUpperCase();
 

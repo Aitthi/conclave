@@ -20,6 +20,10 @@ import type {
   Skill,
   Provider,
   DraftResponse,
+  UsageAgentOption,
+  UsageContext,
+  UsageModelOption,
+  UsageWorkspaceOption,
 } from "../../ipc/types";
 
 export const WS_ID = "fx-ws-codeup";
@@ -41,7 +45,177 @@ export const workspaces: Workspace[] = [
     folderPath: "/Users/dev/code/codeup",
     color: "#7c6af2",
     runState: "started",
+    archivedAt: null,
     createdAt: "2026-07-01T09:00:00.000Z",
+  },
+  {
+    id: "fx-ws-northstar",
+    name: "northstar",
+    folderPath: "/Users/dev/code/northstar",
+    color: "#3fb27f",
+    runState: "stopped",
+    archivedAt: null,
+    createdAt: "2026-06-18T10:00:00.000Z",
+  },
+];
+
+export const archivedWorkspaces: Workspace[] = [
+  {
+    id: "fx-ws-polaris",
+    name: "polaris",
+    folderPath: "/Users/dev/code/polaris",
+    color: "#d857a8",
+    runState: "stopped",
+    archivedAt: "2026-09-04T15:30:00.000Z",
+    createdAt: "2026-04-12T08:00:00.000Z",
+  },
+  {
+    id: "fx-ws-atlas",
+    name: "atlas-long-running-migration-workspace",
+    folderPath: "/Users/dev/code/archive/atlas-long-running-migration-workspace",
+    color: "#e0863b",
+    runState: "stopped",
+    archivedAt: "2026-08-28T11:15:00.000Z",
+    createdAt: "2026-02-03T07:45:00.000Z",
+  },
+];
+
+// ── Usage Overview fixture evidence ─────────────────────────────────────────
+// These are raw, event-shaped inputs. scenarios/usage.ts applies the request
+// filters BEFORE deriving every total and breakdown; it never swaps labels on a
+// pre-aggregated response. Null workspace/agent values intentionally exercise
+// the wire-only __unscoped__ and __unassigned__ buckets.
+export const USAGE_GENERATED_AT = "2026-09-05T08:00:00.000Z";
+
+export const USAGE_DATES_90 = [
+  "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12",
+  "2026-06-13", "2026-06-14", "2026-06-15", "2026-06-16", "2026-06-17",
+  "2026-06-18", "2026-06-19", "2026-06-20", "2026-06-21", "2026-06-22",
+  "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-27",
+  "2026-06-28", "2026-06-29", "2026-06-30", "2026-07-01", "2026-07-02",
+  "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06", "2026-07-07",
+  "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-11", "2026-07-12",
+  "2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17",
+  "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21", "2026-07-22",
+  "2026-07-23", "2026-07-24", "2026-07-25", "2026-07-26", "2026-07-27",
+  "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-01",
+  "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06",
+  "2026-08-07", "2026-08-08", "2026-08-09", "2026-08-10", "2026-08-11",
+  "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-15", "2026-08-16",
+  "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21",
+  "2026-08-22", "2026-08-23", "2026-08-24", "2026-08-25", "2026-08-26",
+  "2026-08-27", "2026-08-28", "2026-08-29", "2026-08-30", "2026-08-31",
+  "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05",
+] as const;
+
+export const USAGE_MODEL_REPORTED = "fx-model:anthropic:claude-sonnet-4:reported";
+export const USAGE_MODEL_SELECTED = "fx-model:anthropic:claude-sonnet-4:selected";
+export const USAGE_MODEL_CODEX = "fx-model:openai:gpt-5-codex:selected";
+export const USAGE_MODEL_UNKNOWN = "fx-model:unknown";
+
+export const usageModelOptions: UsageModelOption[] = [
+  { key: USAGE_MODEL_REPORTED, name: "Claude Sonnet 4", provider: "anthropic", basis: "reported" },
+  { key: USAGE_MODEL_SELECTED, name: "Claude Sonnet 4", provider: "anthropic", basis: "selected" },
+  { key: USAGE_MODEL_CODEX, name: "gpt-5-codex", provider: "openai", basis: "selected" },
+  { key: USAGE_MODEL_UNKNOWN, name: "Unknown model", provider: null, basis: "unknown" },
+];
+
+export const usageWorkspaceOptions: UsageWorkspaceOption[] = [
+  { id: WS_ID, name: "codeup", archived: false },
+  { id: "fx-ws-northstar", name: "northstar", archived: false },
+  { id: "fx-ws-polaris", name: "polaris", archived: true },
+  { id: "fx-ws-atlas", name: "atlas-long-running-migration-workspace", archived: true },
+  { id: "__unscoped__", name: "No workspace", archived: false },
+];
+
+export const usageAgentOptions: UsageAgentOption[] = [
+  { id: AG_DETORO, name: "Detoro", workspaceId: WS_ID },
+  { id: AG_TIESTO, name: "Tiesto", workspaceId: WS_ID },
+  { id: "fx-ag-northstar", name: "Mira", workspaceId: "fx-ws-northstar" },
+  { id: "fx-ag-polaris", name: "Legacy reviewer with a long display name", workspaceId: "fx-ws-polaris" },
+  { id: "__unassigned__", name: "Unassigned activity", workspaceId: null },
+];
+
+export type FixtureUsageRecord = {
+  id: string;
+  date: (typeof USAGE_DATES_90)[number];
+  kind: "response" | "invocation";
+  workspaceId: string | null;
+  workspaceAgentId: string | null;
+  modelKey: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+};
+
+export const usageRecords: FixtureUsageRecord[] = [
+  {
+    id: "fx-usage-1", date: "2026-08-15", kind: "response", workspaceId: WS_ID,
+    workspaceAgentId: AG_DETORO, modelKey: USAGE_MODEL_UNKNOWN, inputTokens: null, outputTokens: null,
+  },
+  {
+    id: "fx-usage-2", date: "2026-08-30", kind: "invocation", workspaceId: "fx-ws-northstar",
+    workspaceAgentId: null, modelKey: USAGE_MODEL_CODEX, inputTokens: 100, outputTokens: 50,
+  },
+  {
+    id: "fx-usage-3", date: "2026-09-02", kind: "response", workspaceId: WS_ID,
+    workspaceAgentId: AG_DETORO, modelKey: USAGE_MODEL_REPORTED, inputTokens: 800, outputTokens: 200,
+  },
+  // Complete coverage plus observed activity with every usage component unknown:
+  // filtering to this Selected key must yield measuredTokens:null, never zero.
+  {
+    id: "fx-usage-4", date: "2026-09-03", kind: "response", workspaceId: WS_ID,
+    workspaceAgentId: AG_TIESTO, modelKey: USAGE_MODEL_SELECTED, inputTokens: null, outputTokens: null,
+  },
+  {
+    id: "fx-usage-5", date: "2026-09-03", kind: "invocation", workspaceId: null,
+    workspaceAgentId: null, modelKey: USAGE_MODEL_UNKNOWN, inputTokens: null, outputTokens: null,
+  },
+  {
+    id: "fx-usage-6", date: "2026-09-04", kind: "response", workspaceId: "fx-ws-polaris",
+    workspaceAgentId: "fx-ag-polaris", modelKey: USAGE_MODEL_REPORTED, inputTokens: 300, outputTokens: 100,
+  },
+  {
+    id: "fx-usage-7", date: "2026-09-05", kind: "response", workspaceId: WS_ID,
+    workspaceAgentId: AG_DETORO, modelKey: USAGE_MODEL_REPORTED, inputTokens: 0, outputTokens: 0,
+  },
+];
+
+export const usageContexts: UsageContext[] = [
+  {
+    workspaceAgentId: AG_DETORO,
+    agentName: "Detoro",
+    workspaceId: WS_ID,
+    workspaceName: "codeup",
+    archived: false,
+    modelKey: USAGE_MODEL_REPORTED,
+    tokens: 82_400,
+    capacity: 200_000,
+    source: "claude-code-transcript",
+    observedAt: "2026-09-05T07:58:00.000Z",
+  },
+  {
+    workspaceAgentId: "fx-ag-northstar",
+    agentName: "Mira",
+    workspaceId: "fx-ws-northstar",
+    workspaceName: "northstar",
+    archived: false,
+    modelKey: USAGE_MODEL_CODEX,
+    tokens: null,
+    capacity: 258_400,
+    source: "codex-transcript",
+    observedAt: null,
+  },
+  {
+    workspaceAgentId: "fx-ag-polaris",
+    agentName: "Legacy reviewer with a long display name",
+    workspaceId: "fx-ws-polaris",
+    workspaceName: "polaris",
+    archived: true,
+    modelKey: USAGE_MODEL_SELECTED,
+    tokens: 155_000,
+    capacity: 200_000,
+    source: null,
+    observedAt: "2026-09-02T04:00:00.000Z",
   },
 ];
 
