@@ -38,6 +38,18 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface Commands {
+  "workspace.listArchived": {
+    req: void;
+    res: Workspace[];
+  };
+  "workspace.archive": {
+    req: { workspaceId: string };
+    res: Workspace;
+  };
+  "workspace.restore": {
+    req: { workspaceId: string };
+    res: Workspace;
+  };
   "workspace.list": {
     req: void;
     res: Workspace[];
@@ -450,6 +462,9 @@ export async function call<K extends keyof Commands>(
 export const ipc = {
   workspace: {
     list: () => call("workspace.list"),
+    listArchived: () => call("workspace.listArchived"),
+    archive: (req: Commands["workspace.archive"]["req"]) => call("workspace.archive", req),
+    restore: (req: Commands["workspace.restore"]["req"]) => call("workspace.restore", req),
     link: (req: Commands["workspace.link"]["req"]) => call("workspace.link", req),
     use: (req: Commands["workspace.use"]["req"]) => call("workspace.use", req),
     update: (req: Commands["workspace.update"]["req"]) => call("workspace.update", req),

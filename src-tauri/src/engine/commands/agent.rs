@@ -418,6 +418,13 @@ pub async fn delete(state: &AppState, payload: Value) -> Result<Value, AppError>
         _workspace_guards.push(lock.write_owned().await);
     }
 
+    // Validate every target after all workspace locks are held and before any
+    // instance teardown. A definition shared by active and archived workspaces
+    // must reject atomically rather than partially removing the active side.
+    for workspace_id in &workspace_ids {
+        super::workspace::require_active(state, workspace_id).await?;
+    }
+
     // Remove every instance of this def across all workspaces.
     for inst in &instances {
         let agent_lock = state.agent_lifecycle_lock(&inst.id);
@@ -465,6 +472,22 @@ pub async fn add_to_workspace(state: &AppState, payload: Value) -> Result<Value,
         )));
     }
 
+    // Lock and validate every target before writing any membership. Sorting
+    // prevents cross-workspace additions from acquiring locks in reverse order.
+    let mut workspace_ids = req.workspace_ids.clone();
+    workspace_ids.sort_unstable();
+    workspace_ids.dedup();
+    let locks: Vec<_> = workspace_ids
+        .iter()
+        .map(|id| state.workspace_lifecycle_lock(id))
+        .collect();
+    let mut guards = Vec::new();
+    for lock in &locks {
+        guards.push(lock.read().await);
+    }
+    for id in &workspace_ids {
+        super::workspace::require_active(state, id).await?;
+    }
     let mut results: Vec<WorkspaceAgentRow> = Vec::new();
 
     for workspace_id in &req.workspace_ids {
@@ -992,6 +1015,128 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_mixed_active_and_archived_memberships_without_partial_teardown() {
+        let state = AppState::for_tests().await;
+        let def = repo::agent_definition::create(
+            &state.db,
+            &repo::agent_definition::AgentDefinitionInput {
+                name: "Shared definition".into(),
+                agent_type: "orchestrator".into(),
+                harness_mode: "own".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut memberships = Vec::new();
+        for (name, path) in [("First", "/tmp/first"), ("Second", "/tmp/second")] {
+            let workspace = repo::workspace::create(&state.db, name, path, None)
+                .await
+                .unwrap();
+            let agent = repo::workspace_agent::instantiate(&state.db, &workspace.id, &def.id)
+                .await
+                .unwrap();
+            let session = repo::session::get_by_instance(&state.db, &agent.id)
+                .await
+                .unwrap()
+                .unwrap();
+            memberships.push((workspace, agent, session));
+        }
+        memberships.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+        let (active_workspace, active_agent, active_session) = &memberships[0];
+        let (archived_workspace, archived_agent, _) = &memberships[1];
+
+        assert!(state
+            .runtime
+            .register(
+                &active_agent.id,
+                crate::engine::runtime::LiveHandle::placeholder(&active_session.id),
+            )
+            .is_some());
+        crate::engine::router::dispatch(
+            &state,
+            "workspace.archive",
+            serde_json::json!({ "workspaceId": archived_workspace.id }),
+        )
+        .await
+        .unwrap();
+
+        let error = crate::engine::router::dispatch(
+            &state,
+            "agentDef.delete",
+            serde_json::json!({ "id": def.id }),
+        )
+        .await
+        .expect_err("an archived membership must reject global definition deletion");
+        assert!(matches!(error, AppError::Invalid(_)), "{error}");
+        assert!(error.to_string().contains("archived"), "{error}");
+        assert!(error.to_string().contains("restore"), "{error}");
+
+        assert!(state.runtime.is_live(&active_agent.id));
+        assert!(repo::agent_definition::get(&state.db, &def.id)
+            .await
+            .unwrap()
+            .is_some());
+        for (_, agent, session) in &memberships {
+            assert!(repo::workspace_agent::get(&state.db, &agent.id)
+                .await
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                repo::session::get_by_instance(&state.db, &agent.id)
+                    .await
+                    .unwrap()
+                    .as_ref()
+                    .map(|row| row.id.as_str()),
+                Some(session.id.as_str())
+            );
+        }
+
+        crate::engine::router::dispatch(
+            &state,
+            "workspace.restore",
+            serde_json::json!({ "workspaceId": archived_workspace.id }),
+        )
+        .await
+        .unwrap();
+        crate::engine::router::dispatch(
+            &state,
+            "agentDef.delete",
+            serde_json::json!({ "id": def.id }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.runtime.is_live(&active_agent.id));
+        assert!(repo::agent_definition::get(&state.db, &def.id)
+            .await
+            .unwrap()
+            .is_none());
+        for (_, agent, _) in &memberships {
+            assert!(repo::workspace_agent::get(&state.db, &agent.id)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(repo::session::get_by_instance(&state.db, &agent.id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+
+        assert!(repo::workspace::get(&state.db, &active_workspace.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(repo::workspace::get(&state.db, &archived_workspace.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!state.runtime.is_live(&archived_agent.id));
+        assert!(!state.runtime.is_live(&active_agent.id));
     }
 
     #[tokio::test]

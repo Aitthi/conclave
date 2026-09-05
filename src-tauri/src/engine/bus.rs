@@ -197,6 +197,7 @@ pub struct RosterChanged {
 pub struct WorkspaceChanged {
     pub workspace_id: String,
     pub run_state: String,
+    pub archived_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -499,9 +500,13 @@ mod tests {
         let val = serde_json::to_value(WorkspaceChanged {
             workspace_id: "ws1".into(),
             run_state: "stopped".into(),
+            archived_at: None,
         })
         .unwrap();
-        assert_eq!(val, json!({ "workspaceId": "ws1", "runState": "stopped" }));
+        assert_eq!(
+            val,
+            json!({ "workspaceId": "ws1", "runState": "stopped", "archivedAt": null })
+        );
     }
 
     #[test]

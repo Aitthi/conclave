@@ -794,6 +794,7 @@ pub async fn instantiate(
 pub struct RuntimeEligibility {
     pub workspace_id: String,
     pub run_state: String,
+    pub archived_at: Option<String>,
     pub availability: String,
 }
 
@@ -802,7 +803,7 @@ pub async fn runtime_eligibility(
     id: &str,
 ) -> sqlx::Result<Option<RuntimeEligibility>> {
     sqlx::query_as(
-        "SELECT wa.workspace_id, w.run_state, wa.availability \
+        "SELECT wa.workspace_id, w.run_state, w.archived_at, wa.availability \
          FROM workspace_agent wa JOIN workspace w ON w.id = wa.workspace_id \
          WHERE wa.id = ?",
     )

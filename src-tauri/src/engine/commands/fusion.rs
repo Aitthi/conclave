@@ -74,6 +74,11 @@ pub enum ModelCaller {
     /// Test-only: map of model name → canned `Ok(answer)` / `Err(error)`.
     #[cfg(test)]
     Mock(std::collections::HashMap<String, Result<String, String>>),
+    #[cfg(test)]
+    Paused(
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Semaphore>,
+    ),
 }
 
 impl ModelCaller {
@@ -97,6 +102,15 @@ impl ModelCaller {
                 .get(model)
                 .cloned()
                 .unwrap_or_else(|| Ok(format!("[mock answer for {model}]"))),
+            #[cfg(test)]
+            ModelCaller::Paused(entered, release) => {
+                entered.notify_one();
+                release.acquire().await.unwrap().forget();
+                Ok(
+                    "{\"consensus\":\"c\",\"disagreements\":[],\"insights\":[],\"blindSpots\":[]}"
+                        .into(),
+                )
+            }
         }
     }
 }
@@ -361,6 +375,14 @@ async fn run_pipeline(
 
 /// `fusion.run` — orchestrate a fusion run and return the resulting `FusionRun`.
 pub async fn run(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    run_with_state(state, payload, &ModelCaller::Live).await
+}
+
+async fn run_with_state(
+    state: &AppState,
+    payload: Value,
+    caller: &ModelCaller,
+) -> Result<Value, AppError> {
     let req: RunReq =
         serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
     if req.prompt.trim().is_empty() {
@@ -377,6 +399,9 @@ pub async fn run(state: &AppState, payload: Value) -> Result<Value, AppError> {
                 req.orchestrator_id
             ))
         })?;
+    let lock = state.workspace_lifecycle_lock(&orchestrator.workspace_id);
+    let _guard = lock.read().await;
+    super::workspace::require_active(state, &orchestrator.workspace_id).await?;
     let orch_def = agent_definition::get(db, &orchestrator.agent_def_id)
         .await?
         .ok_or_else(|| {
@@ -408,7 +433,7 @@ pub async fn run(state: &AppState, payload: Value) -> Result<Value, AppError> {
     let row = run_pipeline(
         db,
         state.app(),
-        &ModelCaller::Live,
+        caller,
         &session.id,
         &req.prompt,
         judge_ref,
@@ -580,6 +605,44 @@ mod tests {
         assert!(panel.iter().any(|m| m.instance_id == p1));
         let names: Vec<&str> = panel.iter().map(|m| m.name.as_str()).collect();
         assert!(names.contains(&"Panel1") && names.contains(&"Panel2"));
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_busy_fusion_and_fusion_rechecks_after_write_guard() {
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "Fusion", "/tmp/fusion", None)
+            .await
+            .unwrap();
+        let orch = instance_in(&state, &ws.id, &chat_input("Orch", None, Some("judge"))).await;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let caller = ModelCaller::Paused(entered.clone(), release.clone());
+        let payload = json!({"orchestratorId":orch,"prompt":"Work"});
+        let mut fusion = Box::pin(run_with_state(&state, payload.clone(), &caller));
+        tokio::select! {
+            result = &mut fusion => panic!("completed before model barrier: {result:?}"),
+            _ = entered.notified() => {}
+        }
+        let error = super::super::workspace::archive(&state, json!({"workspaceId":ws.id}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("busy"));
+        release.add_permits(10);
+        fusion.await.unwrap();
+        let lock = state.workspace_lifecycle_lock(&ws.id);
+        let guard = lock.write().await;
+        let mut blocked = Box::pin(run_with_state(&state, payload, &caller));
+        // Drive through the orchestrator lookup until the workspace read lock
+        // is queued, then archive while holding the production write lock.
+        tokio::select! {
+            result = &mut blocked => panic!("bypassed write guard: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        repo::workspace::set_archived(&state.db, &ws.id, Some("2026-09-05T00:00:00Z"))
+            .await
+            .unwrap();
+        drop(guard);
+        assert!(blocked.await.unwrap_err().to_string().contains("archived"));
     }
 
     /// Full pipeline with a Mock caller: one panelist answers, one fails; the

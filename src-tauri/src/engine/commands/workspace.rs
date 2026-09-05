@@ -5,12 +5,39 @@ use serde_json::{json, Value};
 
 use crate::engine::{bus, repo, AppError, AppState};
 
-/// `workspace.list` — return all workspaces as a JSON array.
+/// `workspace.list` — return non-hidden, unarchived workspaces as a JSON array.
 ///
 /// No payload fields are expected; the TS call site sends `null`.
 pub async fn list(state: &AppState, _payload: Value) -> Result<Value, AppError> {
     let rows = repo::workspace::list(&state.db).await?;
     serde_json::to_value(rows).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+pub async fn list_archived(state: &AppState, _payload: Value) -> Result<Value, AppError> {
+    serde_json::to_value(repo::workspace::list_archived(&state.db).await?)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+pub(crate) fn require_not_archived(id: &str, archived_at: Option<&str>) -> Result<(), AppError> {
+    if archived_at.is_some() {
+        return Err(AppError::Invalid(format!(
+            "workspace {id} is archived — restore it first"
+        )));
+    }
+    Ok(())
+}
+
+/// Caller holds the workspace lifecycle guard; always read current persistence.
+/// Active means unarchived here: stopped workspaces remain valid for one-shots.
+pub(crate) async fn require_active(
+    state: &AppState,
+    id: &str,
+) -> Result<repo::workspace::WorkspaceRow, AppError> {
+    let row = repo::workspace::get(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace {id}")))?;
+    require_not_archived(id, row.archived_at.as_deref())?;
+    Ok(row)
 }
 
 // ── workspace.use ───────────────────────────────────────────────────────────
@@ -27,12 +54,9 @@ pub async fn use_workspace(state: &AppState, payload: Value) -> Result<Value, Ap
     let req =
         serde_json::from_value::<UseReq>(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
-    if !repo::workspace::exists(&state.db, &req.workspace_id).await? {
-        return Err(AppError::NotFound(format!(
-            "workspace {}",
-            req.workspace_id
-        )));
-    }
+    let lock = state.workspace_lifecycle_lock(&req.workspace_id);
+    let _guard = lock.read().await;
+    require_active(state, &req.workspace_id).await?;
 
     // TS contract: `res: void` — return JSON null, not a wrapper object.
     Ok(Value::Null)
@@ -123,6 +147,10 @@ pub async fn update(state: &AppState, payload: Value) -> Result<Value, AppError>
     let req = serde_json::from_value::<UpdateReq>(payload)
         .map_err(|e| AppError::Invalid(e.to_string()))?;
 
+    let lock = state.workspace_lifecycle_lock(&req.workspace_id);
+    let _guard = lock.read().await;
+    require_active(state, &req.workspace_id).await?;
+
     let row = repo::workspace::update(
         &state.db,
         &req.workspace_id,
@@ -149,9 +177,7 @@ pub async fn start(state: &AppState, payload: Value) -> Result<Value, AppError> 
     let workspace_lock = state.workspace_lifecycle_lock(&req.workspace_id);
     let _workspace_guard = workspace_lock.write().await;
 
-    let workspace = repo::workspace::get(&state.db, &req.workspace_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+    let workspace = require_active(state, &req.workspace_id).await?;
     let workspace = if workspace.run_state == "started" {
         workspace
     } else {
@@ -220,8 +246,64 @@ fn emit_lifecycle_changed(state: &AppState, workspace: &repo::workspace::Workspa
         bus::WorkspaceChanged {
             workspace_id: workspace.id.clone(),
             run_state: workspace.run_state.clone(),
+            archived_at: workspace.archived_at.clone(),
         },
     );
+}
+
+pub async fn archive(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: LifecycleReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let lock = state.workspace_lifecycle_lock(&req.workspace_id);
+    let _guard = lock.try_write().map_err(|_| {
+        AppError::Invalid(
+            "Workspace is busy — wait for current work to finish before archiving".into(),
+        )
+    })?;
+    let row = repo::workspace::get(&state.db, &req.workspace_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+    if row.hidden {
+        return Err(AppError::Invalid(
+            "Hidden workspaces cannot be archived".into(),
+        ));
+    }
+    if row.archived_at.is_some() {
+        return serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()));
+    }
+    let agents = repo::workspace_agent::list_by_workspace(&state.db, &row.id).await?;
+    if row.run_state != "stopped" || agents.iter().any(|a| state.runtime.is_live(&a.id)) {
+        return Err(AppError::Invalid("Stop workspace before archiving".into()));
+    }
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let row = repo::workspace::set_archived(&state.db, &row.id, Some(&timestamp))
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+    emit_lifecycle_changed(state, &row);
+    serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+pub async fn restore(state: &AppState, payload: Value) -> Result<Value, AppError> {
+    let req: LifecycleReq =
+        serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
+    let lock = state.workspace_lifecycle_lock(&req.workspace_id);
+    let _guard = lock.write().await;
+    let row = repo::workspace::get(&state.db, &req.workspace_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+    if row.hidden {
+        return Err(AppError::Invalid(
+            "Hidden workspaces cannot be restored".into(),
+        ));
+    }
+    if row.archived_at.is_none() {
+        return serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()));
+    }
+    let row = repo::workspace::set_archived(&state.db, &row.id, None)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("workspace {}", req.workspace_id)))?;
+    emit_lifecycle_changed(state, &row);
+    serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -278,6 +360,355 @@ mod tests {
         },
         AppState,
     };
+
+    async fn archive_fixture(state: &AppState) -> (String, String, String) {
+        let mut input = agent_input("Archive resident");
+        input.agent_type = "orchestrator".into();
+        let def = agent_definition::create(&state.db, &input).await.unwrap();
+        let linked = link(
+            state,
+            json!({"folderPath":"/tmp/archive-test", "agentDefIds":[def.id]}),
+        )
+        .await
+        .unwrap();
+        (
+            linked["workspace"]["id"].as_str().unwrap().into(),
+            linked["agents"][0]["id"].as_str().unwrap().into(),
+            def.id,
+        )
+    }
+
+    #[tokio::test]
+    async fn archive_roundtrip_preserves_data_and_restore_is_inert() {
+        let state = AppState::for_tests().await;
+        let (ws, agent, _) = archive_fixture(&state).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("retained.txt");
+        std::fs::write(&file, "retain project content").unwrap();
+        sqlx::query("UPDATE workspace SET folder_path=? WHERE id=?")
+            .bind(dir.path().to_str().unwrap())
+            .bind(&ws)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        workspace_agent::set_availability(&state.db, &agent, "stopped")
+            .await
+            .unwrap();
+        workspace_agent::set_status(&state.db, &agent, "running")
+            .await
+            .unwrap();
+        let session_before = session::get_by_instance(&state.db, &agent)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("INSERT INTO inter_agent_message (id,from_instance_id,to_instance_id,text,status,created_at) VALUES ('archive-msg',?,?, 'retained','queued','2026-09-05T00:00:00Z')")
+            .bind(&agent).bind(&agent).execute(&state.db).await.unwrap();
+        sqlx::query("INSERT INTO task (id,workspace_id,slug,title,owner_agent_id,created_at,updated_at) VALUES ('archive-task',?,'retain','Retain',?,'2026-09-05','2026-09-05')")
+            .bind(&ws).bind(&agent).execute(&state.db).await.unwrap();
+        sqlx::query("INSERT INTO task_event (id,task_id,kind,payload,created_at) VALUES ('archive-note','archive-task','note','{\"text\":\"retained\"}','2026-09-05')")
+            .execute(&state.db).await.unwrap();
+        sqlx::query("INSERT INTO blackboard_entry (id,workspace_id,key,value,updated_at) VALUES ('archive-bb',?,'retain','retained','2026-09-05')")
+            .bind(&ws).execute(&state.db).await.unwrap();
+        sqlx::query("INSERT INTO artifact (id,workspace_id,content,created_at) VALUES ('archive-artifact',?,'retained','2026-09-05')")
+            .bind(&ws).execute(&state.db).await.unwrap();
+        sqlx::query("INSERT INTO memory_chunk (id,workspace_id,source_kind,text,embedding,dimension,content_hash,created_at,updated_at) VALUES ('archive-memory',?,'manual','retained',X'0000803F',1,'retained','2026-09-05','2026-09-05')")
+            .bind(&ws).execute(&state.db).await.unwrap();
+        let first = archive(&state, json!({"workspaceId":ws})).await.unwrap();
+        assert!(first["archivedAt"].is_string());
+        assert_eq!(first["runState"], "stopped");
+        assert_eq!(
+            archive(&state, json!({"workspaceId":ws})).await.unwrap(),
+            first
+        );
+        assert!(list(&state, Value::Null)
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            list_archived(&state, Value::Null).await.unwrap(),
+            json!([first])
+        );
+        assert!(repo::workspace::get(&state.db, &ws)
+            .await
+            .unwrap()
+            .is_some());
+        let retained = workspace_agent::get(&state.db, &agent)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.status, "idle");
+        assert_eq!(retained.availability, "stopped");
+        let restored = restore(&state, json!({"workspaceId":ws})).await.unwrap();
+        assert!(restored["archivedAt"].is_null());
+        assert_eq!(restored["runState"], "stopped");
+        assert_eq!(
+            restore(&state, json!({"workspaceId":ws})).await.unwrap(),
+            restored
+        );
+        assert!(!state.runtime.is_live(&agent));
+        assert_eq!(
+            workspace_agent::get(&state.db, &agent)
+                .await
+                .unwrap()
+                .unwrap(),
+            retained
+        );
+        assert_eq!(
+            session::get_by_instance(&state.db, &agent)
+                .await
+                .unwrap()
+                .unwrap(),
+            session_before
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM task WHERE id='archive-task'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM inter_agent_message WHERE id='archive-msg' AND status='queued'").fetch_one(&state.db).await.unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "retain project content"
+        );
+        for (sql, id) in [
+            ("SELECT payload FROM task_event WHERE id=?", "archive-note"),
+            (
+                "SELECT value FROM blackboard_entry WHERE id=?",
+                "archive-bb",
+            ),
+            (
+                "SELECT content FROM artifact WHERE id=?",
+                "archive-artifact",
+            ),
+            ("SELECT text FROM memory_chunk WHERE id=?", "archive-memory"),
+        ] {
+            let value: String = sqlx::query_scalar(sql)
+                .bind(id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert!(value.contains("retained"), "{id} changed");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT hex(embedding) FROM memory_chunk WHERE id='archive-memory'"
+            )
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+            "0000803F"
+        );
+        archive(&state, json!({"workspaceId":ws})).await.unwrap();
+        delete(&state, json!({"workspaceId":ws})).await.unwrap();
+        assert!(repo::workspace::get(&state.db, &ws)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(workspace_agent::get(&state.db, &agent)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "retain project content"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_started_live_hidden_missing_and_busy_without_teardown() {
+        let state = AppState::for_tests().await;
+        let empty = repo::workspace::create(&state.db, "Empty", "/tmp/empty", None)
+            .await
+            .unwrap();
+        start(&state, json!({"workspaceId":empty.id}))
+            .await
+            .unwrap();
+        assert!(archive(&state, json!({"workspaceId":empty.id}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Stop workspace"));
+        let (ws, agent, _) = archive_fixture(&state).await;
+        start(&state, json!({"workspaceId":ws})).await.unwrap();
+        assert!(archive(&state, json!({"workspaceId":ws})).await.is_err());
+        assert!(state.runtime.is_live(&agent));
+        repo::workspace::set_run_state(&state.db, &ws, "stopped")
+            .await
+            .unwrap();
+        assert!(archive(&state, json!({"workspaceId":ws})).await.is_err());
+        assert!(state.runtime.is_live(&agent));
+        stop(&state, json!({"workspaceId":ws})).await.unwrap();
+        let lock = state.workspace_lifecycle_lock(&ws);
+        let guard = lock.read().await;
+        assert!(archive(&state, json!({"workspaceId":ws}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("busy"));
+        drop(guard);
+        let hidden = repo::workspace::create_hidden(&state.db, "Hidden", "/tmp/hidden")
+            .await
+            .unwrap();
+        assert!(matches!(
+            archive(&state, json!({"workspaceId":hidden.id})).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            restore(&state, json!({"workspaceId":hidden.id})).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            archive(&state, json!({"workspaceId":"missing"})).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            restore(&state, json!({"workspaceId":"missing"})).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn archive_blocks_production_execution_and_membership_routes_before_queueing() {
+        let state = AppState::for_tests().await;
+        let (ws, agent, def) = archive_fixture(&state).await;
+        let session = session::get_by_instance(&state.db, &agent)
+            .await
+            .unwrap()
+            .unwrap();
+        archive(&state, json!({"workspaceId":ws})).await.unwrap();
+        let cases = [
+            ("workspace.start", json!({"workspaceId":ws})),
+            ("workspace.use", json!({"workspaceId":ws})),
+            (
+                "workspace.update",
+                json!({"workspaceId":ws,"name":"Changed"}),
+            ),
+            ("instance.spawn", json!({"workspaceAgentId":agent})),
+            ("instance.resume", json!({"workspaceAgentId":agent})),
+            ("instance.restart", json!({"workspaceAgentId":agent})),
+            ("instance.stop", json!({"workspaceAgentId":agent})),
+            ("instance.remove", json!({"workspaceAgentId":agent})),
+            (
+                "instance.setPosition",
+                json!({"workspaceId":ws,"workspaceAgentId":agent,"level":"senior"}),
+            ),
+            (
+                "agentDef.addToWorkspace",
+                json!({"workspaceIds":[ws],"agentDefId":def}),
+            ),
+            (
+                "message.send",
+                json!({"sessionId":session.id,"text":"do work"}),
+            ),
+            (
+                "message.inject",
+                json!({"fromInstanceId":agent,"toInstanceId":agent,"text":"do work"}),
+            ),
+            (
+                "draft.agents",
+                json!({"workspaceId":ws,"drafterDefId":def,"mode":"team","brief":"Build a team"}),
+            ),
+            (
+                "fusion.run",
+                json!({"orchestratorId":agent,"prompt":"do work"}),
+            ),
+        ];
+        for (method, payload) in cases {
+            let error = crate::engine::router::dispatch(&state, method, payload)
+                .await
+                .expect_err(method);
+            assert!(matches!(error, AppError::Invalid(_)), "{method}: {error}");
+            assert!(error.to_string().contains("archived"), "{method}: {error}");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM inter_agent_message")
+                .fetch_one(&state.db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!state.runtime.is_live(&agent));
+        assert!(session::get_by_instance(&state.db, &agent)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn archive_and_spawn_are_serialized_and_detached_restart_cannot_relaunch() {
+        let state = std::sync::Arc::new(AppState::for_tests().await);
+        let (ws, agent, _) = archive_fixture(&state).await;
+        let (archived, spawned) = tokio::join!(
+            archive(&state, json!({"workspaceId":ws})),
+            super::super::instance::spawn(&state, json!({"workspaceAgentId":agent}))
+        );
+        assert!(spawned.is_err());
+        if archived.is_err() {
+            archive(&state, json!({"workspaceId":ws})).await.unwrap();
+        }
+        super::super::instance::run_respawn_resume_state(state.clone(), agent.clone(), false).await;
+        assert!(!state.runtime.is_live(&agent));
+        assert_eq!(
+            repo::workspace::get(&state.db, &ws)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_state,
+            "stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_transaction_rolls_back_if_agent_normalization_fails() {
+        let state = AppState::for_tests().await;
+        let (ws, agent, _) = archive_fixture(&state).await;
+        workspace_agent::set_status(&state.db, &agent, "running")
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TRIGGER fail_archive BEFORE UPDATE OF status ON workspace_agent BEGIN SELECT RAISE(ABORT, 'normalization failed'); END;")
+            .execute(&state.db).await.unwrap();
+        assert!(archive(&state, json!({"workspaceId":ws})).await.is_err());
+        assert!(repo::workspace::get(&state.db, &ws)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert_eq!(
+            workspace_agent::get(&state.db, &agent)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_racing_start_never_leaves_an_archived_live_workspace() {
+        let state = AppState::for_tests().await;
+        let (ws, agent, _) = archive_fixture(&state).await;
+        let (started, archived) = tokio::join!(
+            start(&state, json!({"workspaceId":ws})),
+            archive(&state, json!({"workspaceId":ws}))
+        );
+        let row = repo::workspace::get(&state.db, &ws).await.unwrap().unwrap();
+        if row.archived_at.is_some() {
+            assert!(archived.is_ok());
+            assert!(started.is_err());
+            assert_eq!(row.run_state, "stopped");
+            assert!(!state.runtime.is_live(&agent));
+        } else {
+            assert!(archived.is_err());
+            assert!(started.is_ok());
+            assert_eq!(row.run_state, "started");
+            assert!(state.runtime.is_live(&agent));
+        }
+    }
     use serde_json::json;
 
     fn agent_input(name: &str) -> AgentDefinitionInput {

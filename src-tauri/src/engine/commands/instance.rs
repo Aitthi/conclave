@@ -546,6 +546,10 @@ pub async fn set_position(state: &AppState, payload: Value) -> Result<Value, App
     let level = parse_position_field(obj, "level")?;
     let supervisor = parse_position_field(obj, "supervisorAgentId")?;
 
+    let workspace_lock = state.workspace_lifecycle_lock(workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    super::workspace::require_active(state, workspace_id).await?;
+
     use repo::workspace_agent::SetPositionError as E;
     repo::workspace_agent::set_position_validated(
         &state.db,
@@ -807,6 +811,10 @@ async fn require_launch_eligible(
     let eligibility = repo::workspace_agent::runtime_eligibility(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("workspace_agent id={id} not found")))?;
+    super::workspace::require_not_archived(
+        &eligibility.workspace_id,
+        eligibility.archived_at.as_deref(),
+    )?;
     if eligibility.run_state != "started" {
         return Err(AppError::Invalid(format!(
             "workspace {} is stopped — start it first",
@@ -1364,6 +1372,7 @@ pub async fn remove(state: &AppState, payload: Value) -> Result<Value, AppError>
     let _workspace_guard = workspace_lock.read().await;
     let agent_lock = state.agent_lifecycle_lock(&id);
     let _agent_guard = agent_lock.lock().await;
+    super::workspace::require_active(state, &eligibility.workspace_id).await?;
     remove_under_workspace_write(state, &id).await
 }
 
@@ -1865,6 +1874,7 @@ pub async fn stop(state: &AppState, payload: Value) -> Result<Value, AppError> {
 
     // Individual availability is the linearization point: after this write,
     // generic spawn/message/task paths reject even while teardown completes.
+    super::workspace::require_not_archived(&current.workspace_id, current.archived_at.as_deref())?;
     repo::workspace_agent::set_availability(&state.db, &id, "stopped").await?;
     teardown_under_lifecycle_lock(state, &id).await?;
     if current.availability != "stopped" {
@@ -2055,7 +2065,11 @@ pub(crate) async fn run_respawn_resume(
     run_respawn_resume_state(state, instance_id, kill_first).await;
 }
 
-async fn run_respawn_resume_state(state: Arc<AppState>, instance_id: String, kill_first: bool) {
+pub(super) async fn run_respawn_resume_state(
+    state: Arc<AppState>,
+    instance_id: String,
+    kill_first: bool,
+) {
     if kill_first {
         // Let the agent render its "saved" confirmation, then kill its process.
         tokio::time::sleep(std::time::Duration::from_millis(RESTART_SETTLE_MS)).await;
