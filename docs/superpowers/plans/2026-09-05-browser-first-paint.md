@@ -59,6 +59,8 @@ at claim time).
   surface they exercise, still encoding today's behavior (gate 1's red).
 - `a679e3f` — `fix(browser)`: the registry decisions and the native pool wired to
   them.
+- `90162d7` — `fix(browser)`: Decision 7 (reveals gated on `overlay_visible`) plus
+  Armin's `reveal_at` finding.
 
 **Gates**
 
@@ -69,6 +71,10 @@ at claim time).
 | 2b | `cargo test -p conclave --lib` @ `a679e3f` | exit 0 — 1029 passed, 11 ignored |
 | 3 | `rustfmt --edition 2021 --check` on both boundary files @ `a679e3f` | exit 0 |
 | 4 | `cargo clippy -p conclave --all-targets` @ `a679e3f` | exit 0 — 2 warnings, both pre-existing (`instance.rs:2083`, `pty.rs:230`), zero in the boundary files |
+| 2 | `cargo test -p conclave --lib browser` @ `90162d7` | exit 0 — 56 passed |
+| 2b | `cargo test -p conclave --lib` @ `90162d7` | exit 0 — 1032 passed, 11 ignored |
+| 3 | `rustfmt --edition 2021 --check` on both boundary files @ `90162d7` | exit 0 |
+| 4 | `cargo clippy -p conclave --all-targets` @ `90162d7` | exit 0 — same 2 pre-existing warnings, zero in the boundary files |
 | 5 | Human acceptance after rebuild + relaunch | pending |
 
 All four named tests exist: `navigate_create_shows_when_active_and_overlay_visible`,
@@ -76,6 +82,32 @@ All four named tests exist: `navigate_create_shows_when_active_and_overlay_visib
 `set_visible_true_applies_last_bounds` — plus four more covering the
 agent-on-empty-rail create, the overlay-off-screen create, caller-rect
 precedence, and the unknown-id no-op.
+
+**Round 2 — Decision 7 and Armin's review finding (`90162d7`)**
+
+Challenge `a4e3a72b` (the create path was gated on `overlay_visible`, the two
+reveal paths were not) was ruled ACCEPTED and amended in as Decision 7; the human
+had hit it live at 10:51 (`assets/2026-09-05-browser-overlay-covers-terminal.png`).
+
+- `set_active` and `close_tab`'s reselect now position at `last_bounds` and show
+  ONLY when `overlay_visible`. Otherwise the activation is registry-only: the
+  active pointer moves and no webview is touched at all, since a reveal is the
+  only thing that ever shows one. `set_visible(true)` still reveals the active
+  tab, reading its own decision back off the registry.
+- `Activation` carries a `Placement` for the incoming tab and `active_reveal`
+  became `active_placement`, so "where does it land" and "may it paint" stay one
+  decision made in one place.
+- Armin's finding: a reveal must never `show()` after a failed bounds
+  application, or the page paints at whatever frame it was holding. All three
+  reveals funnel through `reveal_at(view, bounds)` — position, then show,
+  propagating either failure. `close_tab` previously swallowed both with `let _ =`
+  and showed anyway; it now reports, because the tab is already gone and an `Ok`
+  would describe a screen the human is not looking at.
+- Tests: `set_active_does_not_show_when_overlay_hidden` and
+  `close_tab_reselect_does_not_show_when_overlay_hidden` per the ruling, plus
+  `close_tab_reselect_shows_when_overlay_visible` for the other arm.
+  `reveal_at` itself is native-only and so is not unit-testable here — same seam
+  limit gate 2 already names for `add_child`/`show`.
 
 **Deviations from the plan**
 
@@ -89,7 +121,12 @@ precedence, and the unknown-id no-op.
    `cargo fmt -- --check <paths>` ignores the path arguments and formats the whole
    workspace, which surfaces the pre-existing drift on `main` (`crates/codeintel/*`).
    `rustfmt --edition 2021 --check <paths>` is the scoping the gate asked for.
-3. **No `overlay_visible()` / `last_bounds()` accessors.** They were written and
+3. **`navigate`'s create-show was left as `let _ =`.** The `reveal_at` ruling
+   names `close_tab`/`set_active`/`set_visible(true)`. `navigate` has no separate
+   bounds application to fail — `add_child(.., position, size)` places the webview
+   and its failure already propagates before any `show()` — so it already
+   satisfies "never show after a failed bounds application".
+4. **No `overlay_visible()` / `last_bounds()` accessors.** They were written and
    then removed: nothing outside the registry reads them (the three decision
    functions read the fields directly), and dead code is a `dead_code` warning,
    which gate 4 forbids in the boundary files.
