@@ -353,6 +353,18 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
         tx.commit().await?;
     }
+    if version < 32 {
+        let mut tx = connection.begin().await?;
+        sqlx::raw_sql(include_str!(
+            "migrations/0032_model_usage_reconciliation.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::raw_sql("PRAGMA user_version = 32;")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -563,7 +575,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, 32);
         let workspace: (String, String) =
             sqlx::query_as("SELECT id,run_state FROM workspace WHERE id='ws'")
                 .fetch_one(&pool)
@@ -716,7 +728,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, 32);
         use sqlx::Row as _;
         let retained = sqlx::query(
             "SELECT id,name,role,type,cli_kind,color,provider_id,model,harness_mode,\
@@ -845,7 +857,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version_after_second_run, 31);
+        assert_eq!(version_after_second_run, 32);
     }
 
     #[tokio::test]
@@ -998,7 +1010,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 31, "migrate() from v13 must reach schema v31");
+        assert_eq!(version, 32, "migrate() from v13 must reach schema v32");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -1249,7 +1261,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 31, "user_version should be 31");
+        assert_eq!(version, 32, "user_version should be 32");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -1452,7 +1464,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 31);
+        assert_eq!(version, 32);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -1543,7 +1555,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 31);
+        assert_eq!(version, 32);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1653,7 +1665,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 31);
+        assert_eq!(version, 32);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
@@ -1795,7 +1807,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 31, "user_version must reach 31");
+        assert_eq!(version, 32, "user_version must reach 32");
 
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
             .fetch_one(&pool)
@@ -1835,6 +1847,113 @@ mod tests {
         assert_eq!(
             observed, None,
             "legacy reading has no invented observation time"
+        );
+    }
+
+    /// A populated schema-31 store: the v29 graph plus the usage tables of
+    /// 0030/0031, with one measured event already recorded.
+    async fn connect_at_v31_with_event() -> SqlitePool {
+        let pool = connect_at_v29().await;
+        let mut tx = pool.begin().await.expect("begin v31 setup");
+        for sql in [
+            include_str!("migrations/0030_model_usage.sql"),
+            include_str!("migrations/0031_session_context_provenance.sql"),
+        ] {
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .expect("apply 0030/0031");
+        }
+        sqlx::raw_sql("PRAGMA user_version = 31;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 31");
+        sqlx::query(
+            "INSERT INTO model_usage_event (
+                id, event_key, source_kind, source_version, event_kind,
+                source_response_id, occurred_at, recorded_at, served_model,
+                input_tokens, output_tokens, cache_read_input_tokens,
+                cache_write_input_tokens, token_completeness, validity
+             ) VALUES (
+                'e1', 'claude-code:v1:S1:R1', 'claude-code', 'v1', 'response',
+                'msg-R1', '2026-09-05T10:00:00.000Z', '2026-09-05T10:00:01.000Z',
+                'claude-fable-5-1', 54431, 433, 26445, 27984, 'known', 'valid'
+             )",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert legacy event");
+        tx.commit().await.expect("commit v31 setup");
+        pool
+    }
+
+    /// 0032 is purely additive: a populated schema-31 event survives with
+    /// every counter intact, and the new reconciliation evidence starts NULL —
+    /// a legacy row is never relabelled as carrying a stop reason it did not
+    /// record (plan docs/plans/2026-09-05-usage-reconciliation-schema.md).
+    #[tokio::test]
+    async fn migrate_0031_0032_preserves_events_and_initializes_evidence_to_null() {
+        let pool = connect_at_v31_with_event().await;
+
+        migrate(&pool).await.expect("migrate to head");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 32, "user_version must reach 32");
+
+        type UpgradedRow = (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        );
+        let row: UpgradedRow = sqlx::query_as(
+            "SELECT event_key, input_tokens, output_tokens, cache_read_input_tokens,
+                    cache_write_input_tokens, stop_reason, source_uncached_input_tokens
+               FROM model_usage_event WHERE id = 'e1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "claude-code:v1:S1:R1");
+        assert_eq!(
+            (row.1, row.2, row.3, row.4),
+            (Some(54431), Some(433), Some(26445), Some(27984)),
+            "populated counters survive the upgrade"
+        );
+        assert_eq!(row.5, None, "legacy row has no invented stop reason");
+        assert_eq!(row.6, None, "legacy row has no invented uncached input");
+
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 1, "migration neither drops nor invents events");
+
+        // The bounds are enforced by the schema itself, not only by the repo.
+        let oversized = "x".repeat(129);
+        let rejected = sqlx::query("UPDATE model_usage_event SET stop_reason = ?1 WHERE id = 'e1'")
+            .bind(&oversized)
+            .execute(&pool)
+            .await;
+        assert!(
+            rejected.is_err(),
+            "a 129-char stop reason violates the CHECK"
+        );
+        let rejected = sqlx::query(
+            "UPDATE model_usage_event SET source_uncached_input_tokens = 1099511627777 \
+             WHERE id = 'e1'",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            rejected.is_err(),
+            "an uncached counter above 2^40 violates the CHECK"
         );
     }
 }
