@@ -32,6 +32,7 @@ The human's manual checklist remains the final acceptance; this gate catches bro
 - PTY/terminal panes render empty in fixture mode — accepted, not a bug.
 - `uishot` exits 1 on any error-type console message or any message containing `[fixture]`, even when a component catches the throw (closed by task `uishot-console-fail-v2`, commit 78d4b2c). The PNG is still written on failure so you can inspect it; offending lines print as `[uishot] console-fail:`.
 - A stale vite dev server on :1420 from ANOTHER checkout/worktree silently serves that checkout's code and uishot reuses it — always `lsof -nP -iTCP:1420 -sTCP:LISTEN` and kill foreign servers before trusting a shot (three incidents on 2026-07-10 alone).
+- `--full` clips the agent Builder modal (`builder`, `builder-edit`): expanding the inner scroller pushes the content column past the 880px box. Use `--viewport 1440x1900` to see Skills/Position/Advanced in one frame (Dew, task agent-builder-redesign).
 - Any `@tauri-apps/api` getter on the render path can throw **synchronously** in plain Chrome (`__TAURI_INTERNALS__` missing). A promise `.catch()` will not save you — wrap the getter call itself in try/catch (see `src/lib/fileDrop.ts`).
 
 ## Pointers
