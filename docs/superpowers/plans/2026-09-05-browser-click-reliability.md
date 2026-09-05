@@ -49,7 +49,20 @@ Agents abandon the in-app browser and open the human's Google Chrome (via the cl
 
 Implemented by Tiësto on `lane/browser-click-reliability`, base main `daa9dcc`.
 
-**Commit:** `daecd77` — all six decisions in one change (they share `click_js`,
+**Commits:** `daecd77` — D1-D5 (they share `click_js`, the action result shape,
+and the conceal/reveal pair; splitting them would produce commits that do not
+build). `03ab5fa` — D6, which READY-1 wrongly claimed was in `daecd77`.
+
+**Correction (Armin's finding, Detoro confirmed).** D6 was not in the lane at
+READY-1. Its patch ran with the shell still in the MAIN checkout, so it edited
+that working tree rather than this worktree, and the grep used to verify it ran
+in the same wrong place — so it read as landed. The stray edit has been reverted
+and the main checkout is clean; D6 is now in `03ab5fa`. Guard recorded in
+workspace memory: `cd <lane worktree> &&` in the same command as any patch
+script, and check `git diff --stat` in the lane for every decision claimed
+before committing.
+
+**Superseded:** `daecd77` — all six decisions in one change (they share `click_js`,
 the action result shape, and the conceal/reveal pair; splitting them would have
 produced commits that do not build).
 
@@ -57,6 +70,10 @@ produced commits that do not build).
 
 | # | Command | Result |
 |---|---|---|
+| 1 | `cargo test -p conclave --lib browser` @ `03ab5fa` | exit 0 — 69 passed |
+| 2 | `cargo test -p conclave --lib` @ `03ab5fa` | exit 0 — 1045 passed, 11 ignored |
+| 2 | `rustfmt --check` on all five boundary files @ `03ab5fa` | exit 0 |
+| 2 | `cargo clippy -p conclave --all-targets` @ `03ab5fa` | exit 0 — same 2 pre-existing warnings |
 | 1 | `cargo test -p conclave --lib browser` @ `daecd77` | exit 0 — 69 passed |
 | 1 | `cargo test --bin conclave-cli` @ `daecd77` | exit 0 — 169 passed |
 | 2 | `cargo test -p conclave --lib` @ `daecd77` | exit 0 — 1045 passed, 11 ignored |
