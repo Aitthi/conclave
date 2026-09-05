@@ -49,4 +49,58 @@ The first page opened in the in-app browser stays blank until the human switches
 
 ## Outcome
 
-_(implementer fills: commits, gate ids, deviations)_
+Implemented by Tiësto on `lane/browser-first-paint`, base `201b814` (the plan
+header says `f65f391`; the lane was branched from `201b814`, the head of `main`
+at claim time).
+
+**Commits**
+
+- `2e4b544` — `test(browser)`: the five failing placement tests plus the registry
+  surface they exercise, still encoding today's behavior (gate 1's red).
+- `a679e3f` — `fix(browser)`: the registry decisions and the native pool wired to
+  them.
+
+**Gates**
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `cargo test -p conclave --lib browser` @ `2e4b544` | exit 101 — 5 failed, the intended red |
+| 2 | `cargo test -p conclave --lib browser` @ `a679e3f` | exit 0 — 53 passed |
+| 2b | `cargo test -p conclave --lib` @ `a679e3f` | exit 0 — 1029 passed, 11 ignored |
+| 3 | `rustfmt --edition 2021 --check` on both boundary files @ `a679e3f` | exit 0 |
+| 4 | `cargo clippy -p conclave --all-targets` @ `a679e3f` | exit 0 — 2 warnings, both pre-existing (`instance.rs:2083`, `pty.rs:230`), zero in the boundary files |
+| 5 | Human acceptance after rebuild + relaunch | pending |
+
+All four named tests exist: `navigate_create_shows_when_active_and_overlay_visible`,
+`navigate_create_hides_when_inactive`, `set_active_applies_last_bounds`,
+`set_visible_true_applies_last_bounds` — plus four more covering the
+agent-on-empty-rail create, the overlay-off-screen create, caller-rect
+precedence, and the unknown-id no-op.
+
+**Deviations from the plan**
+
+1. **`close_tab`'s reselect also repositions before showing** (the plan enumerates
+   `navigate`, `set_active`, `set_visible` only). Decision 1 says the registry is
+   the source of truth "so every path that creates or reveals a webview lands it
+   at the right place", and the reselect after a close is such a path — the
+   promoted tab has been hidden and may hold a pre-resize frame. Implementation
+   judgment inside the plan's intent; positioning only, no change to what shows.
+2. **Gate 3 runs `rustfmt --check` on the two files, not `cargo fmt --check`.**
+   `cargo fmt -- --check <paths>` ignores the path arguments and formats the whole
+   workspace, which surfaces the pre-existing drift on `main` (`crates/codeintel/*`).
+   `rustfmt --edition 2021 --check <paths>` is the scoping the gate asked for.
+3. **No `overlay_visible()` / `last_bounds()` accessors.** They were written and
+   then removed: nothing outside the registry reads them (the three decision
+   functions read the fields directly), and dead code is a `dead_code` warning,
+   which gate 4 forbids in the boundary files.
+
+**Not deviated:** no frontend edits (decision 6). The React view already reports
+both facts at mount — `setVisible({visible:true})` then `syncBounds()`
+(`InAppBrowserView.tsx:262-266`) — and `doGoto` sends `{tabId, url}` with no
+rect, which is exactly the `bounds: None` case the registry now backfills from
+`last_bounds`.
+
+**Verification limits.** No live GUI repro was run — per the plan's gate 1 and the
+recorded environment constraint, `pnpm tauri dev` cannot take `conclave.sock`, so
+GUI e2e is the human's after a rebuild + relaunch. The root cause was accepted on
+reading and pinned at the registry level; gate 5 remains the real acceptance.
