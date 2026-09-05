@@ -1,7 +1,7 @@
 # Usage measurement contract review
 
-Date: 2026-09-05  
-Reviewer: Armin (`be81029a-bde1-4d64-ad03-d3079cb19603`)  
+Date: 2026-09-05
+Reviewer: Armin (`be81029a-bde1-4d64-ad03-d3079cb19603`)
 Decision owner: Aoki (`2004f459-52ad-445c-9c70-e605a0ffdfe3`)
 
 ## Verdict
