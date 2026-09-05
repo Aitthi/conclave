@@ -356,8 +356,10 @@ pub struct NewUsageEvent {
 /// The bound is enforced twice: [`insert_event`] normalizes an out-of-range
 /// counter to NULL (unknown) with [`COUNTER_OUT_OF_RANGE`], and the 0030 schema
 /// `CHECK`s the same ceiling so no other writer can bypass it. With every
-/// counter ≤ 2^40 a per-row `input + output` is ≤ 2^41, and a grouped `SUM`
-/// cannot reach 2^63 before 2^22 (4.19 million) rows land in ONE group.
+/// counter ≤ 2^40 a per-row `input + output` is ≤ 2^41 — the bound the split
+/// summation in [`AGG_COLUMNS`] relies on. The ceiling alone is NOT what keeps
+/// aggregation safe (4,194,304 such rows still overflow a plain `SUM`); the
+/// split columns plus [`recombine`] are.
 pub const MAX_TOKEN_COUNTER: i64 = 1 << 40;
 
 /// Diagnostic stamped on an event whose counter(s) were dropped as unknown
@@ -621,9 +623,22 @@ pub struct UsageAggregate {
     pub measured_event_count: i64,
     pub unknown_usage_count: i64,
     /// Sum over rows where BOTH components are known and the row is valid.
+    /// `None` when no row contributed OR when the exact sum does not fit an
+    /// i64 (then the matching `*_overflow` flag is set).
     pub measured_tokens: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// The exact sum exceeded i64: the tokens are unavailable, never rounded.
+    pub measured_overflow: bool,
+    pub input_overflow: bool,
+    pub output_overflow: bool,
+    /// Rows whose counters were rejected at insertion ([`COUNTER_OUT_OF_RANGE`]).
+    /// Evidence that the observation of this group was damaged, so the command
+    /// layer caps its coverage at partial (ruling on challenge 34201f49).
+    pub rejected_counter_count: i64,
+    /// Rows in `validity = 'conflict'`: one activity each, no tokens, and the
+    /// same partial-coverage consequence.
+    pub conflict_count: i64,
 }
 
 /// Build the shared `WHERE` fragment and its binds for a scope.
@@ -681,19 +696,61 @@ fn scope_predicate(scope: &UsageScope) -> (String, Vec<Option<String>>) {
 ///
 /// `validity = 'valid'` gates only the TOKEN sums — a conflicting row is still
 /// counted as activity, because the response demonstrably happened.
+///
+/// # Why every token sum is split into two columns
+///
+/// SQLite's `SUM` over integers raises "integer overflow" the moment the running
+/// total passes i64::MAX, and the alternative `TOTAL` silently rounds in a
+/// double. Neither is acceptable: the first turns a large history into an
+/// Overview error, the second fabricates digits (review 34201f49 reproduced the
+/// error with 4,194,304 rows at the [`MAX_TOKEN_COUNTER`] ceiling). So each
+/// per-row value `x` (≤ 2^41 under the schema CHECK) is summed as two exact
+/// integer parts, `x / 2^20` and `x % 2^20`; each part is ≤ 2^21 per row, so
+/// the SQL-side sums cannot overflow before 2^42 rows — beyond any SQLite
+/// table. [`recombine`] then rebuilds `hi * 2^20 + lo` in Rust with checked
+/// arithmetic, and an unrepresentable total becomes `None` plus an overflow
+/// flag instead of an error or a rounded number.
 const AGG_COLUMNS: &str = "
     COUNT(*) AS activity_count,
     COALESCE(SUM(CASE WHEN e.event_kind = 'response'   THEN 1 ELSE 0 END), 0) AS response_count,
     COALESCE(SUM(CASE WHEN e.event_kind = 'invocation' THEN 1 ELSE 0 END), 0) AS invocation_count,
     COALESCE(SUM(CASE WHEN e.validity = 'valid' AND e.token_completeness = 'known' THEN 1 ELSE 0 END), 0) AS measured_event_count,
     COALESCE(SUM(CASE WHEN e.validity <> 'valid' OR e.token_completeness <> 'known' THEN 1 ELSE 0 END), 0) AS unknown_usage_count,
+    COALESCE(SUM(CASE WHEN e.diagnostic_code = 'counter_out_of_range' THEN 1 ELSE 0 END), 0) AS rejected_counter_count,
+    COALESCE(SUM(CASE WHEN e.validity = 'conflict' THEN 1 ELSE 0 END), 0) AS conflict_count,
     SUM(CASE WHEN e.validity = 'valid' AND e.token_completeness = 'known'
-             THEN e.input_tokens + e.output_tokens END) AS measured_tokens,
-    SUM(CASE WHEN e.validity = 'valid' THEN e.input_tokens  END) AS input_tokens,
-    SUM(CASE WHEN e.validity = 'valid' THEN e.output_tokens END) AS output_tokens
+             THEN (e.input_tokens + e.output_tokens) / 1048576 END) AS measured_hi,
+    SUM(CASE WHEN e.validity = 'valid' AND e.token_completeness = 'known'
+             THEN (e.input_tokens + e.output_tokens) % 1048576 END) AS measured_lo,
+    SUM(CASE WHEN e.validity = 'valid' THEN e.input_tokens  / 1048576 END) AS input_hi,
+    SUM(CASE WHEN e.validity = 'valid' THEN e.input_tokens  % 1048576 END) AS input_lo,
+    SUM(CASE WHEN e.validity = 'valid' THEN e.output_tokens / 1048576 END) AS output_hi,
+    SUM(CASE WHEN e.validity = 'valid' THEN e.output_tokens % 1048576 END) AS output_lo
 ";
 
+/// The split factor used by [`AGG_COLUMNS`]: 2^20.
+const SPLIT: i64 = 1_048_576;
+
+/// Rebuild an exact sum from its `hi`/`lo` parts.
+///
+/// Returns `(None, false)` when no row contributed (both parts NULL),
+/// `(Some(total), false)` when the total fits, and `(None, true)` when the true
+/// total does not fit an i64 — unavailable, not rounded, not zero.
+pub fn recombine(hi: Option<i64>, lo: Option<i64>) -> (Option<i64>, bool) {
+    match (hi, lo) {
+        (Some(hi), Some(lo)) => match hi.checked_mul(SPLIT).and_then(|h| h.checked_add(lo)) {
+            Some(total) => (Some(total), false),
+            None => (None, true),
+        },
+        _ => (None, false),
+    }
+}
+
 fn read_aggregate(row: &sqlx::sqlite::SqliteRow, bucket: String) -> UsageAggregate {
+    let (measured_tokens, measured_overflow) =
+        recombine(row.get("measured_hi"), row.get("measured_lo"));
+    let (input_tokens, input_overflow) = recombine(row.get("input_hi"), row.get("input_lo"));
+    let (output_tokens, output_overflow) = recombine(row.get("output_hi"), row.get("output_lo"));
     UsageAggregate {
         bucket,
         activity_count: row.get("activity_count"),
@@ -701,9 +758,14 @@ fn read_aggregate(row: &sqlx::sqlite::SqliteRow, bucket: String) -> UsageAggrega
         invocation_count: row.get("invocation_count"),
         measured_event_count: row.get("measured_event_count"),
         unknown_usage_count: row.get("unknown_usage_count"),
-        measured_tokens: row.get("measured_tokens"),
-        input_tokens: row.get("input_tokens"),
-        output_tokens: row.get("output_tokens"),
+        measured_tokens,
+        input_tokens,
+        output_tokens,
+        measured_overflow,
+        input_overflow,
+        output_overflow,
+        rejected_counter_count: row.get("rejected_counter_count"),
+        conflict_count: row.get("conflict_count"),
     }
 }
 
@@ -1643,5 +1705,100 @@ mod tests {
             json["workspaceAgentId"].is_null(),
             "None serializes as null"
         );
+    }
+
+    // ── Review 34201f49 regressions ──────────────────────────────────────
+
+    /// Exact at the boundary, unavailable one past it — never rounded.
+    #[test]
+    fn recombine_is_exact_up_to_i64_max_and_unavailable_beyond() {
+        assert_eq!(recombine(None, None), (None, false), "no contributing row");
+        assert_eq!(recombine(Some(0), Some(0)), (Some(0), false));
+        assert_eq!(recombine(Some(3), Some(7)), (Some(3 * SPLIT + 7), false));
+
+        // i64::MAX = hi * 2^20 + lo with hi = 2^43 - 1, lo = 2^20 - 1.
+        let hi = (1i64 << 43) - 1;
+        let lo = SPLIT - 1;
+        assert_eq!(recombine(Some(hi), Some(lo)), (Some(i64::MAX), false));
+        // One more than i64::MAX: exactly the 4,194,304-row reproduction
+        // (2^22 rows × 2^41 = 2^63 → hi = 2^43, lo = 0).
+        assert_eq!(recombine(Some(1i64 << 43), Some(0)), (None, true));
+        assert_eq!(recombine(Some(hi + 1), Some(lo)), (None, true));
+    }
+
+    /// The reviewer's exact reproduction, end to end through the pinned
+    /// projection: 4,194,304 schema-valid rows at the ceiling. Plain `SUM`
+    /// raised "integer overflow" here; the split projection returns the
+    /// activity and reports the tokens as unavailable. Inserts ~4M rows (about
+    /// 30 s and 1.6 GB RSS measured on 2026-09-05), so it is `#[ignore]` and
+    /// run as its own recorded gate:
+    /// `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored aggregate_at_the_real_overflow_threshold`.
+    #[tokio::test]
+    #[ignore]
+    async fn aggregate_at_the_real_overflow_threshold_is_unavailable_not_an_error() {
+        let pool = connect_in_memory().await;
+        let rows: i64 = 1 << 22;
+        sqlx::query(
+            "INSERT INTO model_usage_event (id, event_key, source_kind, source_version,
+                event_kind, occurred_at, recorded_at, input_tokens, output_tokens,
+                token_completeness, validity)
+             WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < ?1)
+             SELECT 'id' || x, 'k' || x, 'claude-code', 'v1', 'response',
+                    '2026-09-05T10:00:00.000Z', '2026-09-05T10:00:00.000Z',
+                    ?2, ?2, 'known', 'valid'
+               FROM n",
+        )
+        .bind(rows)
+        .bind(MAX_TOKEN_COUNTER)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let total = agg(&pool, &UsageScope::default()).await;
+        assert_eq!(total.activity_count, rows);
+        assert_eq!(total.measured_event_count, rows);
+        assert_eq!(
+            total.measured_tokens, None,
+            "2^63 does not fit; unavailable"
+        );
+        assert!(total.measured_overflow);
+        // The components individually DO fit (2^22 × 2^40 = 2^62) and stay
+        // exact: known finite sums are preserved.
+        assert_eq!(total.input_tokens, Some(1i64 << 62));
+        assert_eq!(total.output_tokens, Some(1i64 << 62));
+        assert!(!total.input_overflow && !total.output_overflow);
+    }
+
+    /// Rejected counters and conflicts are counted so the reader can cap the
+    /// group's coverage; an ordinary unknown-usage row is neither.
+    #[tokio::test]
+    async fn damaged_observations_are_counted_separately_from_ordinary_unknowns() {
+        let pool = connect_in_memory().await;
+        let mut rejected = event("rejected", "2026-09-05T10:00:00Z");
+        rejected.input_tokens = Some(-5);
+        insert_event(&pool, &rejected).await.unwrap();
+        insert_event(&pool, &event("conflicted", "2026-09-05T10:00:00Z"))
+            .await
+            .unwrap();
+        mark_conflict(&pool, "conflicted", "claude_group_disagrees")
+            .await
+            .unwrap();
+        let mut blind = event("blind", "2026-09-05T10:00:00Z");
+        blind.input_tokens = None;
+        blind.output_tokens = None;
+        insert_event(&pool, &blind).await.unwrap();
+
+        let total = agg(&pool, &UsageScope::default()).await;
+        assert_eq!(total.activity_count, 3);
+        assert_eq!(total.rejected_counter_count, 1);
+        assert_eq!(total.conflict_count, 1);
+        assert_eq!(total.unknown_usage_count, 3);
+        assert_eq!(total.measured_tokens, None);
+        assert_eq!(
+            total.output_tokens,
+            Some(20),
+            "the rejected row's good output stays known"
+        );
+        assert!(!total.measured_overflow);
     }
 }

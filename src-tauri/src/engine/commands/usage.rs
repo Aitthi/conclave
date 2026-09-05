@@ -474,6 +474,11 @@ struct CoverageInterval {
     end: DateTime<Utc>,
     complete: bool,
     unsupported: bool,
+    /// A partial interval that carries ANY diagnostic: the collector saw the
+    /// window and knows the observation was damaged (unsupported shape, invalid
+    /// counters, a conflict). Such a row caps a compatible scope at partial even
+    /// when complete spans cover the same window (ruling on 34201f49).
+    damaged: bool,
     last_verified_at: String,
 }
 
@@ -541,7 +546,7 @@ fn coverage_for(
     if evidence.is_empty() {
         return Coverage::None;
     }
-    if evidence.iter().any(|row| row.unsupported) {
+    if evidence.iter().any(|row| row.unsupported || row.damaged) {
         return Coverage::Partial;
     }
     for source in COLLECTED_SOURCES {
@@ -654,15 +659,30 @@ const EMPTY_AGGREGATE: UsageAggregate = UsageAggregate {
     measured_tokens: None,
     input_tokens: None,
     output_tokens: None,
+    measured_overflow: false,
+    input_overflow: false,
+    output_overflow: false,
+    rejected_counter_count: 0,
+    conflict_count: 0,
 };
 
 /// Plan D4, in one place: a measured number, a verified zero, or `null`.
 ///
 /// `known` is the value the query actually summed. It is returned as-is when
-/// measured events exist (a summed 0 IS a measurement). With no measured
-/// event, only a verifiably complete AND empty window may report 0 — coverage
-/// proves events were observed, never that a missing component was zero.
-fn measured_value(known: Option<i64>, agg: &UsageAggregate, coverage: Coverage) -> Option<i64> {
+/// measured events exist (a summed 0 IS a measurement) — unless the exact sum
+/// did not fit, in which case it is unavailable rather than 0 or rounded. With
+/// no measured event, only a verifiably complete AND empty window may report 0
+/// — coverage proves events were observed, never that a missing component was
+/// zero.
+fn measured_value(
+    known: Option<i64>,
+    overflow: bool,
+    agg: &UsageAggregate,
+    coverage: Coverage,
+) -> Option<i64> {
+    if overflow {
+        return None;
+    }
     if agg.measured_event_count > 0 {
         return Some(known.unwrap_or(0));
     }
@@ -672,24 +692,56 @@ fn measured_value(known: Option<i64>, agg: &UsageAggregate, coverage: Coverage) 
     None
 }
 
-fn totals_from(agg: &UsageAggregate, coverage: Coverage) -> UsageTotals {
+/// The coverage a group may claim once its own rows are taken into account.
+///
+/// Observation coverage says the collectors watched the window; a rejected
+/// counter, a conflicting response group or an unrepresentable sum says what
+/// they saw could not be trusted in full. Either damages the proof, so the
+/// group is capped at `partial` (ruling on 34201f49). Ordinary missing usage —
+/// a source that simply did not report tokens — is NOT damage and leaves
+/// `complete` intact (plan D4). `none` stays `none`: damage never upgrades an
+/// unobserved window.
+fn effective_coverage(agg: &UsageAggregate, observed: Coverage) -> Coverage {
+    let damaged = agg.rejected_counter_count > 0
+        || agg.conflict_count > 0
+        || agg.measured_overflow
+        || agg.input_overflow
+        || agg.output_overflow;
+    if damaged && observed == Coverage::Complete {
+        Coverage::Partial
+    } else {
+        observed
+    }
+}
+
+fn totals_from(agg: &UsageAggregate, observed: Coverage) -> UsageTotals {
+    let coverage = effective_coverage(agg, observed);
     UsageTotals {
         activity_count: agg.activity_count,
         response_count: agg.response_count,
         invocation_count: agg.invocation_count,
-        measured_tokens: measured_value(agg.measured_tokens, agg, coverage),
+        measured_tokens: measured_value(agg.measured_tokens, agg.measured_overflow, agg, coverage),
         measured_event_count: agg.measured_event_count,
         unknown_usage_count: agg.unknown_usage_count,
-        input_tokens: measured_component(agg.input_tokens, agg, coverage),
-        output_tokens: measured_component(agg.output_tokens, agg, coverage),
+        input_tokens: measured_component(agg.input_tokens, agg.input_overflow, agg, coverage),
+        output_tokens: measured_component(agg.output_tokens, agg.output_overflow, agg, coverage),
         coverage: coverage.wire(),
     }
 }
 
 /// Component subtotals follow the same rule as the total, except that a
 /// component is known whenever ANY valid event reported it — a `partial` event
-/// (input known, output missing) still contributes its known side.
-fn measured_component(known: Option<i64>, agg: &UsageAggregate, coverage: Coverage) -> Option<i64> {
+/// (input known, output missing) still contributes its known side. A finite
+/// component stays known even when the combined total overflowed.
+fn measured_component(
+    known: Option<i64>,
+    overflow: bool,
+    agg: &UsageAggregate,
+    coverage: Coverage,
+) -> Option<i64> {
+    if overflow {
+        return None;
+    }
     if known.is_some() {
         return known;
     }
@@ -800,6 +852,9 @@ pub async fn overview(state: &AppState, payload: Value) -> Result<Value, AppErro
     let summary_agg =
         model_usage::aggregate_range(&state.db, &scope, &start_text, &end_text).await?;
     let summary = totals_from(&summary_agg, range_coverage);
+    // What the scope may claim overall, after its own rows are weighed; model
+    // rows and the coverage block inherit this rather than the raw observation.
+    let range_coverage = effective_coverage(&summary_agg, range_coverage);
 
     let bucket_binds: Vec<(String, String, String)> = buckets
         .iter()
@@ -1056,6 +1111,7 @@ async fn load_intervals(
                 end,
                 complete: row.state == "complete",
                 unsupported: row.diagnostic_code.as_deref() == Some(UNSUPPORTED_SOURCE),
+                damaged: row.state != "complete" && row.diagnostic_code.is_some(),
                 last_verified_at: row.last_verified_at,
             })
         })
@@ -1520,6 +1576,7 @@ mod tests {
             end: base + Duration::hours(end_h),
             complete,
             unsupported: false,
+            damaged: false,
             last_verified_at: "2026-09-02T00:00:00.000Z".into(),
         }
     }
@@ -1701,19 +1758,24 @@ mod tests {
             ..EMPTY_AGGREGATE
         };
         assert_eq!(
-            measured_value(measured.measured_tokens, &measured, Coverage::Partial),
+            measured_value(
+                measured.measured_tokens,
+                false,
+                &measured,
+                Coverage::Partial
+            ),
             Some(0),
             "a source-reported zero IS a measurement, whatever the coverage"
         );
 
         let empty = EMPTY_AGGREGATE;
         assert_eq!(
-            measured_value(None, &empty, Coverage::Complete),
+            measured_value(None, false, &empty, Coverage::Complete),
             Some(0),
             "verified empty window"
         );
-        assert_eq!(measured_value(None, &empty, Coverage::Partial), None);
-        assert_eq!(measured_value(None, &empty, Coverage::None), None);
+        assert_eq!(measured_value(None, false, &empty, Coverage::Partial), None);
+        assert_eq!(measured_value(None, false, &empty, Coverage::None), None);
 
         let unknown_only = UsageAggregate {
             activity_count: 3,
@@ -1721,9 +1783,119 @@ mod tests {
             ..EMPTY_AGGREGATE
         };
         assert_eq!(
-            measured_value(None, &unknown_only, Coverage::Complete),
+            measured_value(None, false, &unknown_only, Coverage::Complete),
             None,
             "complete observation never turns missing usage into zero"
+        );
+
+        // An unrepresentable sum is unavailable even though events were
+        // measured — never 0, never rounded — and damages the proof.
+        let overflowed = UsageAggregate {
+            activity_count: 5,
+            measured_event_count: 5,
+            measured_overflow: true,
+            ..EMPTY_AGGREGATE
+        };
+        assert_eq!(
+            measured_value(None, true, &overflowed, Coverage::Complete),
+            None
+        );
+        assert_eq!(
+            effective_coverage(&overflowed, Coverage::Complete),
+            Coverage::Partial
+        );
+        assert_eq!(
+            effective_coverage(&overflowed, Coverage::None),
+            Coverage::None,
+            "damage never upgrades an unobserved window"
+        );
+    }
+
+    /// Ruling on 34201f49: a rejected counter or a conflict inside a fully
+    /// observed window caps that window at partial, while an ordinary
+    /// unknown-usage event leaves `complete` intact (D4 preserved).
+    #[tokio::test]
+    async fn damaged_events_cap_complete_coverage_but_plain_unknowns_do_not() {
+        let state = AppState::for_tests().await;
+        cover_everything(&state.db, "complete").await;
+        let at = Utc::now() - Duration::hours(1);
+
+        // Plain unknown usage: still complete.
+        insert_event(&state.db, &ev("blind", at)).await.unwrap();
+        let out = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(out.pointer("/summary/coverage").unwrap(), "complete");
+        assert_eq!(out.pointer("/coverage/state").unwrap(), "complete");
+
+        // A rejected counter: the observation was damaged.
+        let mut rejected = ev("rejected", at);
+        rejected.input_tokens = Some(-1);
+        rejected.output_tokens = Some(10);
+        insert_event(&state.db, &rejected).await.unwrap();
+        let out = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(out.pointer("/summary/coverage").unwrap(), "partial");
+        assert_eq!(out.pointer("/coverage/state").unwrap(), "partial");
+        assert_eq!(
+            rows(&out, "daily").last().unwrap().get("coverage").unwrap(),
+            "partial"
+        );
+        assert_eq!(rows(&out, "byModel")[0].get("coverage").unwrap(), "partial");
+        assert_eq!(
+            i64_at(&out, "/summary/outputTokens"),
+            10,
+            "the finite known component is preserved"
+        );
+        // Yesterday held no damaged row and stays complete.
+        let daily = rows(&out, "daily");
+        assert_eq!(daily[daily.len() - 2].get("coverage").unwrap(), "complete");
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_response_caps_complete_coverage() {
+        let state = AppState::for_tests().await;
+        cover_everything(&state.db, "complete").await;
+        let at = Utc::now() - Duration::hours(1);
+        let mut e = ev("dup", at);
+        e.input_tokens = Some(5);
+        e.output_tokens = Some(5);
+        insert_event(&state.db, &e).await.unwrap();
+        model_usage::mark_conflict(&state.db, "dup", "claude_group_disagrees")
+            .await
+            .unwrap();
+        let out = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(
+            i64_at(&out, "/summary/activityCount"),
+            1,
+            "still one activity"
+        );
+        assert!(out.pointer("/summary/measuredTokens").unwrap().is_null());
+        assert_eq!(out.pointer("/summary/coverage").unwrap(), "partial");
+    }
+
+    /// A compatible partial interval that carries a diagnostic caps complete
+    /// proof even when complete spans cover the same window.
+    #[test]
+    fn a_damaged_partial_interval_caps_complete_proof() {
+        let (start, end) = window();
+        let mut intervals = all_sources(None, None);
+        let mut damaged = interval(Some("ws-1"), None, SOURCE_CLAUDE_TRANSCRIPT, 0, 24, false);
+        damaged.damaged = true;
+        intervals.push(damaged);
+        let global = ScopeQuery {
+            workspace: Sel::All,
+            agent: Sel::All,
+        };
+        assert_eq!(
+            coverage_for(&intervals, &global, start, end),
+            Coverage::Partial
+        );
+        // A scope the damaged row is not compatible with keeps its proof.
+        let other = ScopeQuery {
+            workspace: Sel::Id("ws-2".into()),
+            agent: Sel::All,
+        };
+        assert_eq!(
+            coverage_for(&intervals, &other, start, end),
+            Coverage::Complete
         );
     }
 
