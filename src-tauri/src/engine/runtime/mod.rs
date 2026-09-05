@@ -36,6 +36,9 @@ pub mod pty;
 pub mod sandbox_config;
 pub mod task_timer;
 pub mod transcript_context;
+// The usage importer lands before its worker (next commit in the same lane).
+#[allow(dead_code)]
+pub mod transcript_usage;
 pub mod usage;
 // T2 lands the codec before the T4 exact-search consumer.
 #[allow(dead_code)]

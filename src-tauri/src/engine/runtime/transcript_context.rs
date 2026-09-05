@@ -392,7 +392,7 @@ fn choose_newer(
 /// absolute cwd by replacing every non-alphanumeric character with `-` (e.g.
 /// `/Users/x/code/app` → `-Users-x-code-app`); mirror that so we can scan just
 /// this workspace's transcripts instead of the whole projects tree.
-fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
+pub(crate) fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
     let slug: String = workspace_folder
         .to_string_lossy()
         .chars()
@@ -402,7 +402,9 @@ fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
 }
 
 /// Collect `.jsonl` files under `root` that were modified at or after
-/// `min_mtime`. This is a cheap `stat`-only PRE-FILTER — before any file is
+/// `min_mtime`. Shared with the usage importer (`transcript_usage`) together
+/// with the owner-marker and project-dir helpers — the importer reuses ONLY
+/// these validated discovery/ownership rules, never this reader's scan state. This is a cheap `stat`-only PRE-FILTER — before any file is
 /// opened or parsed — that keeps the meter off the (potentially many GB of)
 /// historical transcripts a full parse would otherwise churn every poll. A
 /// file whose newest usage row is at or after the anchor necessarily has an
@@ -413,7 +415,7 @@ fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
 /// proves nothing about the usage inside. Admissibility is decided by the
 /// usage row's own timestamp in [`ClaudeAcc::finalize`] (and
 /// [`CodexAcc::ingest_line`] for rollouts).
-fn collect_jsonl_files(root: &Path, min_mtime: DateTime<Utc>) -> Vec<PathBuf> {
+pub(crate) fn collect_jsonl_files(root: &Path, min_mtime: DateTime<Utc>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_jsonl_files_inner(root, min_mtime, &mut out);
     out
@@ -733,7 +735,7 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
 /// declarations arrive as SessionStart hook attachments
 /// (`hook_additional_context` / `hook_success`), none from a user or system
 /// line — so this restriction loses no real declaration.
-fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
+pub(crate) fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("attachment") {
         return false;
     }
@@ -763,7 +765,7 @@ fn is_session_start_hook(attachment: &Value) -> bool {
         .is_some_and(|name| name.starts_with(SESSION_START))
 }
 
-fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
+pub(crate) fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("response_item") {
         return false;
     }
@@ -845,12 +847,12 @@ fn sum_claude_usage(usage: &Value) -> i64 {
             .unwrap_or(0)
 }
 
-fn file_modified_at(path: &Path) -> Option<DateTime<Utc>> {
+pub(crate) fn file_modified_at(path: &Path) -> Option<DateTime<Utc>> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     Some(DateTime::<Utc>::from(modified))
 }
 
-fn parse_ts(text: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_ts(text: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))

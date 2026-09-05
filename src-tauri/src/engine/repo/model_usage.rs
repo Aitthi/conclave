@@ -474,6 +474,35 @@ where
     Ok(result.rows_affected() > 0)
 }
 
+/// The stored identity of an event, for reconciling a replayed source row
+/// against what was recorded first: `(source_response_id, served_model,
+/// input_tokens, output_tokens)`.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct StoredIdentity {
+    pub source_response_id: Option<String>,
+    pub served_model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub validity: String,
+}
+
+/// Read back what was recorded under `event_key`, if anything.
+pub async fn stored_identity<'e, E>(
+    executor: E,
+    event_key: &str,
+) -> sqlx::Result<Option<StoredIdentity>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_as(
+        "SELECT source_response_id, served_model, input_tokens, output_tokens, validity
+           FROM model_usage_event WHERE event_key = ?1",
+    )
+    .bind(event_key)
+    .fetch_optional(executor)
+    .await
+}
+
 /// Mark an already-stored event as conflicting. It remains one activity; only
 /// its measured token contribution is withdrawn (contract: a conflict "never
 /// creates a second activity").
