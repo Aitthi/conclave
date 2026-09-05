@@ -331,6 +331,26 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
         tx.commit().await?;
     }
+    if version < 30 {
+        let mut tx = connection.begin().await?;
+        sqlx::raw_sql(include_str!("migrations/0030_model_usage.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 30;")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+    if version < 31 {
+        let mut tx = connection.begin().await?;
+        sqlx::raw_sql(include_str!("migrations/0031_session_context_provenance.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("PRAGMA user_version = 31;")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -1670,5 +1690,143 @@ mod tests {
             details.iter().all(|detail| !detail.contains("TEMP B-TREE")),
             "query must not sort each page into a temp B-tree: {details:?}"
         );
+    }
+
+    /// Build an in-memory database at schema v29 (every migration up to and
+    /// including the archive engine's 0029) so the usage migrations can be
+    /// exercised against a populated pre-usage graph.
+    async fn connect_at_v29() -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("invalid in-memory connection string")
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .expect("open v29 pool");
+        let mut tx = pool.begin().await.expect("begin v29 setup");
+        for sql in [
+            include_str!("migrations/0001_init.sql"),
+            include_str!("migrations/0002_seed_core_tools.sql"),
+            include_str!("migrations/0003_agent_cli_config.sql"),
+            include_str!("migrations/0004_skill_system.sql"),
+            include_str!("migrations/0005_drop_skill_kind.sql"),
+            include_str!("migrations/0006_selected_builtin_skills.sql"),
+            include_str!("migrations/0007_workspace_hidden.sql"),
+            include_str!("migrations/0008_role_system.sql"),
+            include_str!("migrations/0009_memory_system.sql"),
+            include_str!("migrations/0010_memory_search_index.sql"),
+            include_str!("migrations/0011_seed_memory_tool.sql"),
+            include_str!("migrations/0012_task_system.sql"),
+            include_str!("migrations/0013_memory_proposal.sql"),
+            include_str!("migrations/0014_artifact_workspace.sql"),
+            include_str!("migrations/0015_position_system.sql"),
+            include_str!("migrations/0016_agent_default_level.sql"),
+            include_str!("migrations/0017_agent_rtk_enabled.sql"),
+            include_str!("migrations/0018_task_event_plan_check.sql"),
+            include_str!("migrations/0019_proxy_metric.sql"),
+            include_str!("migrations/0020_agent_proxy_enabled.sql"),
+            include_str!("migrations/0021_proxy_checkpoint_metric.sql"),
+            include_str!("migrations/0022_proxy_checkpoint_outcome.sql"),
+            include_str!("migrations/0023_proxy_checkpoint_error_snippet.sql"),
+            include_str!("migrations/0024_proxy_summary_metric.sql"),
+            include_str!("migrations/0025_proxy_quality_metric.sql"),
+            include_str!("migrations/0026_proxy_summary_stop_reason.sql"),
+            include_str!("migrations/0027_workspace_lifecycle.sql"),
+            include_str!("migrations/0028_antigravity_cli.sql"),
+            include_str!("migrations/0029_workspace_archive.sql"),
+        ] {
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .expect("apply pre-0030 migration");
+        }
+        sqlx::raw_sql("PRAGMA user_version = 29;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 29");
+        tx.commit().await.expect("commit v29 setup");
+        pool
+    }
+
+    /// The usage migrations must be purely additive: every existing row
+    /// survives, and the new event table starts EMPTY. A migration that
+    /// back-filled usage from the context gauge would be inventing history the
+    /// contract explicitly forbids.
+    #[tokio::test]
+    async fn migrate_0030_0031_preserves_graph_and_invents_no_usage() {
+        let pool = connect_at_v29().await;
+        sqlx::query(
+            "INSERT INTO workspace (id,name,folder_path,hidden,created_at) \
+             VALUES ('ws','WS','/tmp/ws',0,'2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_definition (id,name,type,harness_mode,created_at) \
+             VALUES ('def','Def','cli','own','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO workspace_agent (id,workspace_id,agent_def_id,status,added_at) \
+             VALUES ('wa','ws','def','idle','2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A session carrying a context reading: the migration must NOT turn
+        // this latest gauge into usage history.
+        sqlx::query(
+            "INSERT INTO session (id,workspace_agent_id,context_tokens,context_limit,started_at) \
+             VALUES ('s','wa',1234,200000,'2020-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.expect("migrate to head");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 31, "user_version must reach 31");
+
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 0, "migration must not invent usage events");
+        let coverage: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_coverage")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(coverage, 0, "migration must not claim coverage it never observed");
+
+        // Populated graph survives untouched.
+        let (tokens, limit): (i64, i64) =
+            sqlx::query_as("SELECT context_tokens, context_limit FROM session WHERE id='s'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((tokens, limit), (1234, 200_000), "context gauge preserved");
+        let agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_agent")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(agents, 1, "workspace_agent preserved");
+
+        // Provenance columns exist and are NULL for pre-existing readings —
+        // an old row is never relabelled as newly measured.
+        let (source, observed): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT context_source, context_observed_at FROM session WHERE id='s'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(source, None, "legacy reading has no invented source");
+        assert_eq!(observed, None, "legacy reading has no invented observation time");
     }
 }
