@@ -214,6 +214,26 @@ async function graphState(page) {
   });
 }
 
+async function waitForStableGraph(page, predicate, message) {
+  const deadline = Date.now() + 3_000;
+  let previous = null;
+  let stableSamples = 0;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await graphState(page);
+    const stable =
+      previous &&
+      state.transform === previous.transform &&
+      Math.abs(state.worldWidth - previous.worldWidth) <= 1.5 &&
+      Math.abs(state.worldHeight - previous.worldHeight) <= 1.5;
+    stableSamples = predicate(state) && stable ? stableSamples + 1 : 0;
+    if (stableSamples >= 2) return state;
+    previous = state;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`${message}; last state: ${JSON.stringify(state)}`);
+}
+
 function assertInitialState(state) {
   assert.equal(state.circleCount, NODE_COUNT, "every stress node must render");
   assert.equal(state.edgeCount, EDGE_COUNT, "every stress edge must render");
@@ -225,6 +245,11 @@ function assertInitialState(state) {
   assert.equal(state.labelCount, 0, "dense overview must not render the global label cloud");
   assert.equal(state.groupLabels.filter((label) => label === "Shared").length, 1);
   assert.ok(state.groupLabels.some((label) => label.startsWith("Former agent · ")));
+  assert.equal(
+    state.groupLabels.some((label) => label.startsWith("Former agent · fx-ag-")),
+    false,
+    "distilled memories from current agents must resolve through the roster",
+  );
   assert.ok(new Set(state.sourceTitles).size === state.sourceTitles.length, "source tooltips must be unique");
   assert.ok(state.panel && state.panel.bottom <= VIEWPORT.height - 16 + 1, "settings panel must fit viewport");
   assert.ok(state.panel && state.panel.scrollHeight > state.panel.clientHeight, "stress panel must scroll");
@@ -302,15 +327,22 @@ try {
   }));
   await page.mouse.move(dragRect.x + dragRect.width / 2, dragRect.y + dragRect.height / 2);
   await page.mouse.down();
+  await new Promise((resolve) => setTimeout(resolve, 20));
   await page.mouse.move(dragRect.x + dragRect.width / 2 + 28, dragRect.y + dragRect.height / 2 + 18, {
-    steps: 3,
+    steps: 6,
   });
+  await new Promise((resolve) => setTimeout(resolve, 20));
   await page.mouse.up();
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  const afterDrag = await dragCircle.evaluate((circle) => ({
-    x: Number(circle.getAttribute("cx")),
-    y: Number(circle.getAttribute("cy")),
-  }));
+  const dragDeadline = Date.now() + 1_000;
+  let afterDrag = beforeDrag;
+  while (Date.now() < dragDeadline) {
+    afterDrag = await dragCircle.evaluate((circle) => ({
+      x: Number(circle.getAttribute("cx")),
+      y: Number(circle.getAttribute("cy")),
+    }));
+    if (Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) > 5) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   assert.ok(
     Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) > 5,
     "node drag must move the selected node",
@@ -350,8 +382,11 @@ try {
 
   await page.setViewport({ width: 1100, height: 700, deviceScaleFactor: 1 });
   await page.click('button[title="Fit graph to view"]');
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  const constrained = await graphState(page);
+  const constrained = await waitForStableGraph(
+    page,
+    (state) => state.centersInCanvas === NODE_COUNT,
+    "resize and Fit did not settle with every node center visible",
+  );
   assert.equal(constrained.centersInCanvas, NODE_COUNT, "resize and Fit must keep every node center visible");
   assert.ok(constrained.panel && constrained.panel.bottom <= 700 - 16 + 1, "panel must fit constrained height");
   await page.evaluate(() => {
