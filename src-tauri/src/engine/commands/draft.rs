@@ -18,9 +18,11 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use super::draft_prompt::build_prompt;
+use super::usage::{record_collected_event, CollectedEvent};
 use crate::engine::repo::{self, role::RoleRow, skill::SkillRow};
-use crate::engine::runtime::cli_oneshot::{CliKind, Oneshot, OneshotSpec};
+use crate::engine::runtime::cli_oneshot::{CliKind, Oneshot, OneshotOutcome, OneshotSpec};
 use crate::engine::runtime::launch_common::{agent_env_overrides, effective_claude_model};
+use crate::engine::runtime::usage::{provider_for_cli_kind, SOURCE_DRAFT};
 use crate::engine::{AppError, AppState};
 
 // ── Catalogue constants ──────────────────────────────────────────────────────
@@ -683,11 +685,31 @@ pub async fn run_with(
         timeout: DRAFT_TIMEOUT,
     };
     // Timeout / non-zero exit / model errors surface verbatim so the panel can
-    // show the CLI's own words (spec error table).
-    let raw = oneshot
-        .run(&spec)
+    // show the CLI's own words (spec error table). A failed run is not
+    // activity: nothing below records it.
+    let outcome = oneshot
+        .run_measured(&spec)
         .await
         .map_err(|e| AppError::Invalid(format!("draft.run: {e}")))?;
+    // One successful invocation = one `invocation` activity, whatever the
+    // schema validation below says about the answer: the model was called and
+    // completed. Best-effort — a collection failure must never turn a good
+    // draft into a user-facing error (plan, direct/one-shot collectors).
+    if let Err(e) = record_draft_invocation(
+        db,
+        &outcome,
+        req.workspace_id.as_deref(),
+        cli_kind,
+        model.as_deref(),
+    )
+    .await
+    {
+        eprintln!(
+            "[usage] draft invocation {} not recorded: {e}",
+            outcome.invocation_id
+        );
+    }
+    let raw = outcome.value;
 
     /// The model answers the schema, which has no `drafter` field — that is
     /// filled in here from the definition the user picked.
@@ -715,6 +737,53 @@ pub async fn run_with(
     };
     validate_draft(&resp, req.mode, &cat).map_err(AppError::Invalid)?;
     Ok(resp)
+}
+
+/// Persist one successful draft invocation as measured usage
+/// ([`record_collected_event`]).
+///
+/// * `event_key = draft:v1:<invocation id>` — the id was generated before the
+///   child spawned, so a replay of the same invocation is a no-op and two
+///   invocations can never share an identity.
+/// * `workspace_id` is the request's, which is legitimately `None` for a
+///   Library draft: it is stored unscoped and surfaced as `__unscoped__`, never
+///   attributed to the current workspace (preflight correction D1).
+/// * `requested_model` is the definition's CONFIGURED model — the user's
+///   selection — not the launch-time effective id, so the event unifies with
+///   the agent's context gauge under one Selected key. `served_model` is set
+///   only when the CLI itself named exactly one serving model.
+async fn record_draft_invocation(
+    db: &SqlitePool,
+    outcome: &OneshotOutcome,
+    workspace_id: Option<&str>,
+    cli_kind: CliKind,
+    configured_model: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let cli_kind_name = match cli_kind {
+        CliKind::ClaudeCode => "claude-code",
+        CliKind::Codex => "codex",
+    };
+    record_collected_event(
+        db,
+        &CollectedEvent {
+            source_kind: SOURCE_DRAFT,
+            operation_id: &outcome.invocation_id,
+            event_kind: "invocation",
+            workspace_id,
+            workspace_agent_id: None,
+            session_id: None,
+            generation: None,
+            source_session_id: outcome.source_session_id.as_deref(),
+            source_request_id: None,
+            source_response_id: None,
+            occurred_at: outcome.completed_at,
+            provider: provider_for_cli_kind(cli_kind_name),
+            requested_model: configured_model,
+            served_model: outcome.served_model.as_deref(),
+            usage: &outcome.usage,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1433,5 +1502,248 @@ pub(crate) mod tests {
         // An explicit `"supervisorKey": null` must read as "no supervisor",
         // not as a supervisor named null — codex emits the key, claude omits it.
         assert!(draft.positions[0].supervisor_key.is_none());
+    }
+
+    // ── Usage collection ─────────────────────────────────────────────────
+
+    use crate::engine::runtime::cli_oneshot::OneshotUsage;
+
+    fn measured_outcome(value: Value) -> OneshotOutcome {
+        OneshotOutcome {
+            value,
+            invocation_id: "inv-1".into(),
+            requested_model: Some("claude-sonnet-5[1m]".into()),
+            served_model: Some("claude-sonnet-5".into()),
+            source_session_id: Some("sess-1".into()),
+            usage: OneshotUsage {
+                input_tokens: Some(31_063),
+                output_tokens: Some(3_297),
+                cache_read_input_tokens: Some(0),
+                cache_write_input_tokens: Some(31_061),
+                reasoning_output_tokens: Some(2_489),
+                invalid_counters: 0,
+            },
+            completed_at: chrono::Utc::now(),
+        }
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct StoredEvent {
+        event_key: String,
+        workspace_id: Option<String>,
+        workspace_agent_id: Option<String>,
+        source_kind: String,
+        event_kind: String,
+        source_session_id: Option<String>,
+        provider: Option<String>,
+        requested_model: Option<String>,
+        served_model: Option<String>,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        reasoning_output_tokens: Option<i64>,
+        token_completeness: String,
+    }
+
+    async fn stored_events(db: &SqlitePool) -> Vec<StoredEvent> {
+        sqlx::query_as(
+            "SELECT event_key, workspace_id, workspace_agent_id, source_kind, event_kind,
+                    source_session_id, provider, requested_model, served_model,
+                    input_tokens, output_tokens, reasoning_output_tokens, token_completeness
+               FROM model_usage_event ORDER BY event_key",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    /// A successful Library draft is ONE unscoped invocation carrying the
+    /// CLI's own usage, keyed by the pre-generated invocation id.
+    #[tokio::test]
+    async fn a_successful_draft_records_one_unscoped_invocation() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        let mock = Oneshot::MockMeasured(Ok(measured_outcome(canned_team())));
+        run_with(&db, &mock, req(&def.id, "b")).await.unwrap();
+
+        let events = stored_events(&db).await;
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.event_key, "draft:v1:inv-1");
+        assert_eq!(e.workspace_id, None, "a Library draft has no workspace");
+        assert_eq!(e.workspace_agent_id, None);
+        assert_eq!(e.source_kind, SOURCE_DRAFT);
+        assert_eq!(e.event_kind, "invocation");
+        assert_eq!(e.source_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(e.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            e.requested_model.as_deref(),
+            Some("claude-sonnet-5"),
+            "the configured selection, not the launch-time effective id"
+        );
+        assert_eq!(e.served_model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(e.input_tokens, Some(31_063));
+        assert_eq!(e.output_tokens, Some(3_297));
+        assert_eq!(e.reasoning_output_tokens, Some(2_489));
+        assert_eq!(e.token_completeness, "known");
+    }
+
+    /// A workspace draft is scoped to that workspace, still with no agent.
+    #[tokio::test]
+    async fn a_workspace_draft_is_scoped_to_its_workspace_without_an_agent() {
+        let state = AppState::for_tests().await;
+        let ws = repo::workspace::create(&state.db, "Draft", "/tmp/draft", None)
+            .await
+            .unwrap();
+        repo::workspace::set_run_state(&state.db, &ws.id, "started")
+            .await
+            .unwrap();
+        let def = repo::agent_definition::create(&state.db, &drafter_input("cli", Some("codex")))
+            .await
+            .unwrap();
+        let mut outcome = measured_outcome(canned_team());
+        outcome.served_model = None; // codex never proves the serving model
+        outcome.usage = OneshotUsage::default(); // …and may report no usage
+        run_with_state(
+            &state,
+            json!({
+                "mode": "team",
+                "brief": "b",
+                "drafterDefId": def.id,
+                "workspaceId": ws.id,
+            }),
+            &Oneshot::MockMeasured(Ok(outcome)),
+        )
+        .await
+        .unwrap();
+
+        let events = stored_events(&state.db).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(events[0].workspace_agent_id, None);
+        assert_eq!(events[0].provider.as_deref(), Some("openai"));
+        assert_eq!(events[0].served_model, None);
+        assert_eq!(
+            events[0].input_tokens, None,
+            "unavailable usage stays unknown"
+        );
+        assert_eq!(events[0].token_completeness, "unknown");
+    }
+
+    /// A failed run is not activity — no row, not even an unknown one.
+    #[tokio::test]
+    async fn a_failed_draft_records_nothing() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        let err = run_with(
+            &db,
+            &Oneshot::MockMeasured(Err("The drafter did not answer in 120 s".into())),
+            req(&def.id, "b"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+        assert!(stored_events(&db).await.is_empty());
+    }
+
+    /// The invocation id is the identity: replaying the same outcome is a
+    /// no-op, two different invocations are two activities.
+    #[tokio::test]
+    async fn invocation_identity_dedups_replay_but_not_a_second_run() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        let same = Oneshot::MockMeasured(Ok(measured_outcome(canned_team())));
+        run_with(&db, &same, req(&def.id, "b")).await.unwrap();
+        run_with(&db, &same, req(&def.id, "b")).await.unwrap();
+        assert_eq!(
+            stored_events(&db).await.len(),
+            1,
+            "same invocation id, one row"
+        );
+
+        let mut second = measured_outcome(canned_team());
+        second.invocation_id = "inv-2".into();
+        run_with(&db, &Oneshot::MockMeasured(Ok(second)), req(&def.id, "b"))
+            .await
+            .unwrap();
+        assert_eq!(stored_events(&db).await.len(), 2);
+    }
+
+    /// An invalid answer still records the invocation: the model was called
+    /// and completed even though the draft is rejected.
+    #[tokio::test]
+    async fn an_invalid_answer_still_records_the_completed_invocation() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        let mut canned = canned_team();
+        canned["agents"][0]["model"] = json!("not-a-real-model");
+        let err = run_with(
+            &db,
+            &Oneshot::MockMeasured(Ok(measured_outcome(canned))),
+            req(&def.id, "b"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Invalid(_)));
+        assert_eq!(stored_events(&db).await.len(), 1);
+    }
+
+    /// With the collectors online, a draft also extends the `draft` source's
+    /// complete, unrestricted coverage from the online instant to completion.
+    #[tokio::test]
+    async fn a_draft_extends_the_draft_source_coverage_when_collectors_are_online() {
+        let db = connect_in_memory().await;
+        let def = repo::agent_definition::create(&db, &drafter_input("cli", Some("claude-code")))
+            .await
+            .unwrap();
+        crate::engine::runtime::usage::mark_collectors_online();
+        let online = crate::engine::runtime::usage::collectors_online_since().expect("marked");
+        let mut outcome = measured_outcome(canned_team());
+        outcome.completed_at = online + chrono::Duration::seconds(30);
+        run_with(&db, &Oneshot::MockMeasured(Ok(outcome)), req(&def.id, "b"))
+            .await
+            .unwrap();
+
+        #[derive(sqlx::FromRow)]
+        struct Interval {
+            workspace_id: Option<String>,
+            workspace_agent_id: Option<String>,
+            source_kind: String,
+            state: String,
+            interval_start: String,
+            interval_end: String,
+        }
+        let rows: Vec<Interval> = sqlx::query_as(
+            "SELECT workspace_id, workspace_agent_id, source_kind, state,
+                    interval_start, interval_end
+               FROM model_usage_coverage",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            (&row.workspace_id, &row.workspace_agent_id),
+            (&None, &None),
+            "unrestricted: every draft passes here"
+        );
+        assert_eq!(row.source_kind, SOURCE_DRAFT);
+        assert_eq!(row.state, "complete");
+        assert_eq!(
+            row.interval_start,
+            crate::engine::repo::model_usage::canonical_ts(online)
+        );
+        assert_eq!(
+            row.interval_end,
+            crate::engine::repo::model_usage::canonical_ts(online + chrono::Duration::seconds(30))
+        );
     }
 }

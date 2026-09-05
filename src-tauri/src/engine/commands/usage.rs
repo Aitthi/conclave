@@ -25,13 +25,19 @@
 //! handler is bounded SQL over indexed timestamps plus small metadata reads.
 
 use crate::engine::repo::model_usage::{
-    self, GroupColumn, ModelKeyFilter, UsageAggregate, UsageScope, UNSUPPORTED_SOURCE,
+    self, GroupColumn, ModelKeyFilter, NewUsageEvent, ObservedInterval, UsageAggregate, UsageScope,
+    UNSUPPORTED_SOURCE,
+};
+use crate::engine::runtime::usage::{
+    collectors_online_since, provider_for_cli_kind, MeasuredUsage, COLLECTED_SOURCES,
+    COLLECTOR_VERSION,
 };
 use crate::engine::{repo, AppError, AppState};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::SqlitePool;
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── Reserved wire identities (preflight correction b1140da9) ─────────────────
@@ -48,33 +54,268 @@ const UNASSIGNED_AGENT_NAME: &str = "Unassigned activity";
 /// Displayed name of a model identity the source never proved.
 const UNKNOWN_MODEL_NAME: &str = "Unknown model";
 
-// ── Sources this build collects ──────────────────────────────────────────────
+// ── In-process collector write path ──────────────────────────────────────────
 
-/// Claude Code transcript importer.
-pub const SOURCE_CLAUDE_TRANSCRIPT: &str = "claude-code";
-/// Codex transcript importer.
-pub const SOURCE_CODEX_TRANSCRIPT: &str = "codex";
-/// Direct provider chat (`runtime::chat`).
-pub const SOURCE_DIRECT_CHAT: &str = "chat";
-/// Fusion panel/judge/synthesis provider calls.
-pub const SOURCE_FUSION: &str = "fusion";
-/// Non-persistent one-shot draft invocations.
-pub const SOURCE_DRAFT: &str = "draft";
+/// One completed response or invocation observed by an IN-PROCESS collector
+/// (draft one-shot, direct chat, fusion). The transcript importers have their
+/// own write path with cursors; this one is for calls the process itself made.
+#[derive(Debug, Clone)]
+pub(crate) struct CollectedEvent<'a> {
+    /// One of the `runtime::usage::SOURCE_*` in-process sources.
+    pub source_kind: &'a str,
+    /// Generated BEFORE the request went out; `event_key` is
+    /// `<source>:<version>:<operation id>`, so a replay is a no-op and two
+    /// operations can never share an identity.
+    pub operation_id: &'a str,
+    /// `"response"` for a provider completion, `"invocation"` for a one-shot.
+    pub event_kind: &'a str,
+    pub workspace_id: Option<&'a str>,
+    pub workspace_agent_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    /// Stamped only when an actual launch interval proves it.
+    pub generation: Option<i64>,
+    pub source_session_id: Option<&'a str>,
+    /// Bounded attribution such as `<run id>:<stage>:<ordinal>` for fusion.
+    pub source_request_id: Option<&'a str>,
+    /// The provider's own response id — evidence, not identity.
+    pub source_response_id: Option<&'a str>,
+    pub occurred_at: DateTime<Utc>,
+    pub provider: Option<&'a str>,
+    pub requested_model: Option<&'a str>,
+    pub served_model: Option<&'a str>,
+    pub usage: &'a MeasuredUsage,
+}
 
-/// The source set a `complete` answer must account for.
+// ── Pending collection gaps (review a12f77f2 C5) ─────────────────────────────
+
+/// Diagnostic on the partial interval written where an in-process collector
+/// FAILED to persist an event: the call happened, its measurement is lost, and
+/// the `complete` span this source later claims must not paper over it.
+pub(crate) const COLLECTION_GAP: &str = "collection_gap";
+
+/// Most lost instants held in memory before they coalesce per source.
+const MAX_PENDING_GAPS: usize = 64;
+
+/// Smallest width a gap is written with, so a single lost instant is visible
+/// to overlap queries (a `[t, t)` interval is not).
+const GAP_MIN_WIDTH: Duration = Duration::milliseconds(1);
+
+/// One stretch of a source's time whose events were lost to a persistence
+/// failure. Held in memory until a later write lands it as coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingGap {
+    source_kind: String,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+/// The bounded in-memory ledger of instants an in-process collector could
+/// not persist. A failed write remembers its instant here; the NEXT write of
+/// any in-process source lands every remembered gap as a partial
+/// `collection_gap` interval in the same transaction, BEFORE its own complete
+/// span, and forgets only what that commit made durable. Coverage rows of a
+/// different state or diagnostic never merge, so the gap stays a separate
+/// row a later complete span cannot absorb.
 ///
-/// This list is DECLARED, not derived from the coverage table: inferring the
-/// required sources from whichever rows exist would let a single collector's
-/// interval certify a window nobody else observed. A source with no interval
-/// covering the window keeps the answer `partial`, which is the honest reading
-/// of "we never heard from that collector".
-pub const COLLECTED_SOURCES: &[&str] = &[
-    SOURCE_CLAUDE_TRANSCRIPT,
-    SOURCE_CODEX_TRANSCRIPT,
-    SOURCE_DIRECT_CHAT,
-    SOURCE_FUSION,
-    SOURCE_DRAFT,
-];
+/// Bounded: past [`MAX_PENDING_GAPS`] the ledger coalesces into one envelope
+/// per source — wider than the truth, never narrower — so a store that keeps
+/// failing costs a fixed amount of memory and reports one long gap instead
+/// of nothing.
+#[derive(Debug, Default)]
+pub(crate) struct PendingGaps {
+    gaps: Vec<PendingGap>,
+}
+
+impl PendingGaps {
+    pub(crate) const fn new() -> Self {
+        Self { gaps: Vec::new() }
+    }
+
+    /// Remember that `source_kind` lost an event completing at `at`.
+    fn remember(&mut self, source_kind: &str, at: DateTime<Utc>) {
+        if self
+            .gaps
+            .iter()
+            .any(|g| g.source_kind == source_kind && g.start <= at && at <= g.end)
+        {
+            return;
+        }
+        if self.gaps.len() >= MAX_PENDING_GAPS {
+            let mut merged: Vec<PendingGap> = Vec::new();
+            for gap in self.gaps.drain(..) {
+                match merged.iter_mut().find(|m| m.source_kind == gap.source_kind) {
+                    Some(m) => {
+                        m.start = m.start.min(gap.start);
+                        m.end = m.end.max(gap.end);
+                    }
+                    None => merged.push(gap),
+                }
+            }
+            self.gaps = merged;
+        }
+        self.gaps.push(PendingGap {
+            source_kind: source_kind.to_owned(),
+            start: at,
+            end: at,
+        });
+    }
+
+    fn snapshot(&self) -> Vec<PendingGap> {
+        self.gaps.clone()
+    }
+
+    /// Drop exactly the gaps a commit made durable; anything remembered
+    /// meanwhile stays.
+    fn forget(&mut self, landed: &[PendingGap]) {
+        self.gaps.retain(|g| !landed.contains(g));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.gaps.len()
+    }
+}
+
+/// The process-wide ledger shared by every in-process collector.
+static PENDING_GAPS: std::sync::Mutex<PendingGaps> = std::sync::Mutex::new(PendingGaps::new());
+
+/// Serializes snapshot → persist → remember/forget across concurrent
+/// collector writes. Without it two writes can both snapshot an empty ledger
+/// before touching the store, the first fail, and the second commit a
+/// complete span over the lost instant while its gap is still memory-only
+/// (review 229a4753 C5). Held across the write, so a failure is on the
+/// ledger before the next snapshot is taken. In-process collectors write a
+/// few rows a minute; serializing them costs nothing measurable.
+static COLLECTOR_WRITE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn with_ledger<T>(
+    ledger: &std::sync::Mutex<PendingGaps>,
+    f: impl FnOnce(&mut PendingGaps) -> T,
+) -> T {
+    // A panic while holding the lock leaves plain data behind; the ledger is
+    // still the best record of what was lost, so keep using it.
+    let mut guard = ledger
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+/// Persist an in-process collector's event and extend its source's coverage,
+/// in one transaction.
+///
+/// An in-process collector sees every call this process makes, so — once the
+/// collectors are marked online — it may claim `complete`, unrestricted
+/// observation of its own source from the online instant to this completion.
+/// A test state with no online instant claims nothing. Callers treat a failure
+/// here as a logged collection gap, never as a user-facing error: the answer
+/// the model gave is already in hand — and the gap itself is remembered in
+/// [`PendingGaps`] so the next successful write records it as partial
+/// coverage instead of letting the complete span silently cover it.
+pub(crate) async fn record_collected_event(
+    db: &SqlitePool,
+    event: &CollectedEvent<'_>,
+) -> Result<(), sqlx::Error> {
+    record_collected_event_with(db, event, &PENDING_GAPS).await
+}
+
+/// [`record_collected_event`] against an explicit ledger (tests own theirs).
+pub(crate) async fn record_collected_event_with(
+    db: &SqlitePool,
+    event: &CollectedEvent<'_>,
+    ledger: &std::sync::Mutex<PendingGaps>,
+) -> Result<(), sqlx::Error> {
+    let _serialized = COLLECTOR_WRITE_GATE.lock().await;
+    let pending = with_ledger(ledger, |l| l.snapshot());
+    let result = persist_collected_event(db, event, &pending).await;
+    match &result {
+        Ok(()) => with_ledger(ledger, |l| l.forget(&pending)),
+        Err(_) => with_ledger(ledger, |l| l.remember(event.source_kind, event.occurred_at)),
+    }
+    result
+}
+
+async fn persist_collected_event(
+    db: &SqlitePool,
+    event: &CollectedEvent<'_>,
+    pending: &[PendingGap],
+) -> Result<(), sqlx::Error> {
+    let recorded_at = Utc::now();
+    let row = NewUsageEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        event_key: format!(
+            "{}:{COLLECTOR_VERSION}:{}",
+            event.source_kind, event.operation_id
+        ),
+        workspace_id: event.workspace_id.map(str::to_owned),
+        workspace_agent_id: event.workspace_agent_id.map(str::to_owned),
+        session_id: event.session_id.map(str::to_owned),
+        generation: event.generation,
+        source_kind: event.source_kind.to_owned(),
+        source_version: COLLECTOR_VERSION.to_owned(),
+        event_kind: event.event_kind.to_owned(),
+        source_session_id: event.source_session_id.map(str::to_owned),
+        source_request_id: event.source_request_id.map(str::to_owned),
+        source_response_id: event.source_response_id.map(str::to_owned),
+        occurred_at: event.occurred_at,
+        recorded_at,
+        provider: event.provider.map(str::to_owned),
+        requested_model: event.requested_model.map(str::to_owned),
+        served_model: event.served_model.map(str::to_owned),
+        input_tokens: event.usage.input_tokens,
+        output_tokens: event.usage.output_tokens,
+        cache_read_input_tokens: event.usage.cache_read_input_tokens,
+        cache_write_input_tokens: event.usage.cache_write_input_tokens,
+        reasoning_output_tokens: event.usage.reasoning_output_tokens,
+        // Reconciliation evidence is a transcript-replay concern; an
+        // in-process call is observed exactly once and never replayed.
+        stop_reason: None,
+        source_uncached_input_tokens: None,
+        validity: "valid".to_owned(),
+        // A source that reported nonsense counters leaves its mark here;
+        // insert_event's own range check stamps the same code for values that
+        // parsed but exceed the ceiling.
+        diagnostic_code: event.usage.diagnostic_code().map(str::to_owned),
+    };
+    let mut tx = db.begin().await?;
+    // Gaps first, so no complete span in this transaction is ever written
+    // without the partial rows that bound it.
+    for gap in pending {
+        model_usage::record_coverage(
+            &mut tx,
+            &ObservedInterval {
+                workspace_id: None,
+                workspace_agent_id: None,
+                source_kind: &gap.source_kind,
+                start: gap.start,
+                end: gap.end + GAP_MIN_WIDTH,
+                state: "partial",
+                diagnostic_code: Some(COLLECTION_GAP),
+                collector_version: COLLECTOR_VERSION,
+                last_verified_at: recorded_at,
+            },
+        )
+        .await?;
+    }
+    model_usage::insert_event(&mut *tx, &row).await?;
+    if let Some(online_since) = collectors_online_since() {
+        model_usage::record_coverage(
+            &mut tx,
+            &ObservedInterval {
+                workspace_id: None,
+                workspace_agent_id: None,
+                source_kind: event.source_kind,
+                start: online_since,
+                end: event.occurred_at.max(online_since),
+                state: "complete",
+                diagnostic_code: None,
+                collector_version: COLLECTOR_VERSION,
+                last_verified_at: recorded_at,
+            },
+        )
+        .await?;
+    }
+    tx.commit().await
+}
 
 // ── Request ──────────────────────────────────────────────────────────────────
 
@@ -388,11 +629,7 @@ fn provider_for_agent(provider_id: Option<&str>, cli_kind: Option<&str>) -> Opti
     if let Some(id) = provider_id.filter(|p| !p.is_empty()) {
         return Some(id.to_string());
     }
-    match cli_kind {
-        Some("claude-code") => Some("anthropic".to_string()),
-        Some("codex") => Some("openai".to_string()),
-        _ => None,
-    }
+    cli_kind.and_then(provider_for_cli_kind).map(str::to_string)
 }
 
 // ── Scope selection ──────────────────────────────────────────────────────────
@@ -768,6 +1005,10 @@ pub async fn overview(state: &AppState, payload: Value) -> Result<Value, AppErro
         .time_zone
         .parse()
         .map_err(|_| AppError::Invalid(format!("unknown IANA time zone: {}", req.time_zone)))?;
+
+    // Ask the importer to catch up soon — never awaited: the answer below is
+    // what is stored NOW, with its coverage saying how much that is.
+    crate::engine::runtime::transcript_usage::nudge();
 
     let now = Utc::now();
     let buckets = build_buckets(tz, req.days, now)?;
@@ -1292,6 +1533,9 @@ mod tests {
         insert_coverage, insert_event, CoverageIntervalRow, NewUsageEvent,
     };
     use crate::engine::repo::{agent_definition, session, workspace, workspace_agent};
+    use crate::engine::runtime::usage::{
+        SOURCE_CLAUDE_TRANSCRIPT, SOURCE_CODEX_TRANSCRIPT, SOURCE_DRAFT,
+    };
     use chrono::Timelike;
     use serde_json::json;
     use sqlx::SqlitePool;
@@ -1328,6 +1572,8 @@ mod tests {
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
             reasoning_output_tokens: None,
+            stop_reason: None,
+            source_uncached_input_tokens: None,
             validity: "valid".into(),
             diagnostic_code: None,
         }
@@ -1663,6 +1909,185 @@ mod tests {
             coverage_for(&intervals, &scope, start, end),
             Coverage::Partial
         );
+    }
+
+    // ── Pending collection gaps (review a12f77f2 C5) ─────────────────────
+
+    fn collected<'a>(
+        usage: &'a MeasuredUsage,
+        op: &'a str,
+        at: DateTime<Utc>,
+    ) -> CollectedEvent<'a> {
+        CollectedEvent {
+            source_kind: SOURCE_DRAFT,
+            operation_id: op,
+            event_kind: "invocation",
+            workspace_id: None,
+            workspace_agent_id: None,
+            session_id: None,
+            generation: None,
+            source_session_id: None,
+            source_request_id: None,
+            source_response_id: None,
+            occurred_at: at,
+            provider: Some("anthropic"),
+            requested_model: None,
+            served_model: None,
+            usage,
+        }
+    }
+
+    async fn gap_rows(pool: &SqlitePool) -> Vec<(String, String, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT source_kind, interval_start, interval_end, diagnostic_code
+               FROM model_usage_coverage WHERE state = 'partial'
+              ORDER BY interval_start",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A persistence failure is remembered; the next successful write lands
+    /// it as a partial `collection_gap` interval in its own transaction, a
+    /// later complete span does not absorb it, and the reader sees partial.
+    #[tokio::test]
+    async fn a_failed_persist_becomes_a_collection_gap_on_recovery() {
+        let usage = MeasuredUsage::default();
+        let ledger = std::sync::Mutex::new(PendingGaps::new());
+        let lost_at = Utc.with_ymd_and_hms(2026, 9, 5, 10, 0, 0).unwrap();
+
+        let closed = AppState::for_tests().await.db.clone();
+        closed.close().await;
+        let failed =
+            record_collected_event_with(&closed, &collected(&usage, "op-lost", lost_at), &ledger)
+                .await;
+        assert!(failed.is_err(), "a closed pool cannot persist");
+        assert_eq!(with_ledger(&ledger, |l| l.len()), 1);
+
+        let state = AppState::for_tests().await;
+        let pool = state.db.clone();
+        record_collected_event_with(
+            &pool,
+            &collected(&usage, "op-ok", lost_at + Duration::minutes(5)),
+            &ledger,
+        )
+        .await
+        .expect("recovery write");
+        assert_eq!(
+            with_ledger(&ledger, |l| l.len()),
+            0,
+            "landed gaps are forgotten"
+        );
+        let rows = gap_rows(&pool).await;
+        assert_eq!(
+            rows,
+            vec![(
+                SOURCE_DRAFT.to_string(),
+                ts(lost_at),
+                ts(lost_at + Duration::milliseconds(1)),
+                Some(COLLECTION_GAP.to_string())
+            )]
+        );
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 1, "the lost event is not invented on recovery");
+
+        // What an online instance writes next: a complete span over the gap.
+        let mut conn = pool.acquire().await.unwrap();
+        model_usage::record_coverage(
+            &mut conn,
+            &ObservedInterval {
+                workspace_id: None,
+                workspace_agent_id: None,
+                source_kind: SOURCE_DRAFT,
+                start: lost_at - Duration::hours(1),
+                end: lost_at + Duration::hours(1),
+                state: "complete",
+                diagnostic_code: None,
+                collector_version: COLLECTOR_VERSION,
+                last_verified_at: lost_at + Duration::hours(1),
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn); // the test pool has one connection
+        assert_eq!(
+            gap_rows(&pool).await.len(),
+            1,
+            "the gap row survives the complete span"
+        );
+        let intervals = load_intervals(
+            &state,
+            &[],
+            &ts(lost_at - Duration::hours(1)),
+            &ts(lost_at + Duration::hours(1)),
+        )
+        .await
+        .unwrap();
+        let scope = ScopeQuery {
+            workspace: Sel::All,
+            agent: Sel::All,
+        };
+        assert_eq!(
+            coverage_for(
+                &intervals,
+                &scope,
+                lost_at - Duration::minutes(1),
+                lost_at + Duration::minutes(1)
+            ),
+            Coverage::Partial,
+            "a window holding the lost instant is never complete"
+        );
+
+        // Nothing pending: a further write lands no second gap row.
+        record_collected_event_with(
+            &pool,
+            &collected(&usage, "op-ok-2", lost_at + Duration::minutes(6)),
+            &ledger,
+        )
+        .await
+        .unwrap();
+        assert_eq!(gap_rows(&pool).await.len(), 1);
+    }
+
+    /// Repeated failures stay bounded in memory and coalesce per source into
+    /// an envelope that is wider than the truth, never narrower.
+    #[test]
+    fn pending_gaps_are_bounded_and_coalesce_conservatively() {
+        let mut ledger = PendingGaps::new();
+        let base = Utc.with_ymd_and_hms(2026, 9, 5, 10, 0, 0).unwrap();
+        for i in 0..(MAX_PENDING_GAPS as i64 * 3) {
+            let source = if i % 2 == 0 { SOURCE_DRAFT } else { "chat" };
+            ledger.remember(source, base + Duration::seconds(i));
+        }
+        assert!(ledger.len() <= MAX_PENDING_GAPS);
+        let snapshot = ledger.snapshot();
+        let draft_start = snapshot
+            .iter()
+            .filter(|g| g.source_kind == SOURCE_DRAFT)
+            .map(|g| g.start)
+            .min()
+            .unwrap();
+        let draft_end = snapshot
+            .iter()
+            .filter(|g| g.source_kind == SOURCE_DRAFT)
+            .map(|g| g.end)
+            .max()
+            .unwrap();
+        assert_eq!(draft_start, base, "the first lost instant is still covered");
+        assert_eq!(
+            draft_end,
+            base + Duration::seconds(MAX_PENDING_GAPS as i64 * 3 - 2),
+            "so is the last"
+        );
+        // Forgetting is exact: only what was landed leaves.
+        let landed = vec![snapshot[0].clone()];
+        ledger.forget(&landed);
+        assert_eq!(ledger.len(), snapshot.len() - 1);
+        assert!(!ledger.snapshot().contains(&snapshot[0]));
     }
 
     #[test]
@@ -2496,6 +2921,68 @@ mod tests {
         assert_eq!(i64_at(&by_model, "/summary/activityCount"), 0);
     }
 
+    // ── Archive lifecycle ────────────────────────────────────────────────
+
+    /// Archived history stays in the default Overview, labelled archived;
+    /// archive and restore change no totals and no coverage.
+    #[tokio::test]
+    async fn archive_and_restore_never_move_usage_history() {
+        let state = AppState::for_tests().await;
+        let ws = workspace::create(&state.db, "Old", "/tmp/old", None)
+            .await
+            .unwrap()
+            .id;
+        let agent = fixture_agent(
+            &state,
+            &ws,
+            "Dew",
+            Some("claude-opus-5"),
+            Some("claude-code"),
+        )
+        .await;
+        let mut e = ev("hist", Utc::now() - Duration::hours(3));
+        e.workspace_id = Some(ws.clone());
+        e.workspace_agent_id = Some(agent.clone());
+        e.input_tokens = Some(10);
+        e.output_tokens = Some(5);
+        insert_event(&state.db, &e).await.unwrap();
+        let before = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+
+        workspace::set_archived(&state.db, &ws, Some("2026-09-05T00:00:00Z"))
+            .await
+            .unwrap();
+        let archived = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(
+            archived["summary"], before["summary"],
+            "archiving moves no history"
+        );
+        let row = row_by(&archived, "byWorkspace", "id", &ws);
+        assert_eq!(row.get("archived").unwrap().as_bool(), Some(true));
+        assert_eq!(row.get("activityCount").unwrap().as_i64(), Some(1));
+        assert_eq!(
+            row_by(&archived, "contexts", "workspaceAgentId", &agent)
+                .get("archived")
+                .unwrap()
+                .as_bool(),
+            Some(true),
+            "the gauge stays visible and labelled"
+        );
+
+        workspace::set_archived(&state.db, &ws, None).await.unwrap();
+        let restored = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        assert_eq!(
+            restored["summary"], before["summary"],
+            "restore is invariant"
+        );
+        assert_eq!(
+            row_by(&restored, "byWorkspace", "id", &ws)
+                .get("archived")
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+    }
+
     // ── Backlog ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -2631,5 +3118,38 @@ mod tests {
             .map(|m| m.get("key").unwrap().as_str().unwrap())
             .collect();
         assert_eq!(keys.iter().filter(|k| **k == "unknown::").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn review_acceptance_c5_concurrent_failure_preserves_gap_truth() {
+        let state = AppState::for_tests().await;
+        let pool = &state.db;
+        crate::engine::runtime::usage::mark_collectors_online();
+        let online = collectors_online_since().unwrap();
+        let lost_at = online + Duration::seconds(1);
+        sqlx::query("CREATE TRIGGER review_fail_event BEFORE INSERT ON model_usage_event WHEN NEW.event_key LIKE '%op-lost' BEGIN SELECT RAISE(ABORT, 'review injected failure'); END")
+            .execute(pool).await.unwrap();
+        let held = pool.acquire().await.unwrap();
+        let ledger = std::sync::Mutex::new(PendingGaps::new());
+        let usage = MeasuredUsage::default();
+        let a_event = collected(&usage, "op-lost", lost_at);
+        let b_event = collected(&usage, "op-ok", lost_at + Duration::seconds(1));
+        let a = record_collected_event_with(pool, &a_event, &ledger);
+        let b = record_collected_event_with(pool, &b_event, &ledger);
+        tokio::pin!(a, b);
+        assert!(futures_util::poll!(a.as_mut()).is_pending());
+        assert!(futures_util::poll!(b.as_mut()).is_pending());
+        drop(held);
+        let failure = a.await.unwrap_err();
+        b.await.unwrap();
+        let pending = with_ledger(&ledger, |l| l.len());
+        let persisted_gaps = gap_rows(pool).await.len();
+        let complete_over_loss: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_coverage WHERE state='complete' AND interval_start <= ?1 AND interval_end > ?1")
+            .bind(ts(lost_at)).fetch_one(pool).await.unwrap();
+        println!("REVIEW_C5 error={failure}; pending_gaps={pending}; persisted_partial_gaps={persisted_gaps}; complete_spans_covering_lost_event={complete_over_loss}");
+        assert!(
+            complete_over_loss == 0 || persisted_gaps > 0,
+            "complete coverage must not cover a lost event while its gap remains memory-only"
+        );
     }
 }

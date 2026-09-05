@@ -20,9 +20,51 @@
 //! - The `shutdown` closure aborts the loop task directly (dropping its
 //!   channels) for an immediate teardown without waiting on an in-flight stream.
 
-use super::provider::{ChatMessage, ChatRole, Provider};
+use super::provider::{ChatMessage, ChatRole, Provider, ProviderCompletion};
+use super::usage::MeasuredUsage;
 use super::LiveHandle;
-use tokio::sync::mpsc::{self, Receiver};
+use chrono::{DateTime, Utc};
+use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
+
+/// Metadata of ONE completed assistant turn, handed to the usage observer.
+///
+/// Sent only for a completion whose provider terminal marker arrived
+/// (`ProviderCompletion::completed`): a provider error, a dropped receiver or
+/// an early EOF is not completed activity and produces no record. Carries NO
+/// prompt or answer text — only identity and counts, so the unbounded observer
+/// queue holds bytes of metadata, never a copy of the conversation (review
+/// a12f77f2 C8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTurnRecord {
+    /// Generated BEFORE the request went out; the collector keys the event by
+    /// it, so a late provider id can never change the identity.
+    pub operation_id: String,
+    pub requested_model: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub response_id: Option<String>,
+    pub served_model: Option<String>,
+    pub usage: MeasuredUsage,
+}
+
+impl ChatTurnRecord {
+    fn from_completion(
+        operation_id: String,
+        requested_model: &str,
+        started_at: DateTime<Utc>,
+        completion: &ProviderCompletion,
+    ) -> Self {
+        Self {
+            operation_id,
+            requested_model: requested_model.to_owned(),
+            started_at,
+            completed_at: Utc::now(),
+            response_id: completion.response_id.clone(),
+            served_model: completion.served_model.clone(),
+            usage: completion.usage.clone(),
+        }
+    }
+}
 
 /// Bound on buffered output chunks, mirroring [`super::pty`]. The provider
 /// stream `send`s deltas onto this channel, so a slow forwarder applies natural
@@ -40,11 +82,23 @@ pub struct ChatBackend {
     pub output_rx: Receiver<String>,
 }
 
-/// Spawn the chat loop for `session_id`, driving `provider`/`model`.
-///
-/// Returns immediately; the loop runs as a detached tokio task that owns the
-/// stdin receiver, output sender, provider, model, and conversation history.
+/// Spawn the chat loop for `session_id`, driving `provider`/`model`, with no
+/// usage observer. Production always observes (`commands::instance`), so this
+/// text-only form exists for the loop's own tests.
+#[cfg(test)]
 pub fn spawn_chat(session_id: &str, provider: Provider, model: String) -> ChatBackend {
+    spawn_chat_observed(session_id, provider, model, None)
+}
+
+/// [`spawn_chat`] with a usage observer: every COMPLETED assistant turn is
+/// reported on `observer` as a [`ChatTurnRecord`]. The runtime stays free of
+/// the database — the command layer drains the channel and persists.
+pub fn spawn_chat_observed(
+    session_id: &str,
+    provider: Provider,
+    model: String,
+    observer: Option<UnboundedSender<ChatTurnRecord>>,
+) -> ChatBackend {
     let (output_tx, output_rx) = mpsc::channel::<String>(OUTPUT_CHANNEL_CAP);
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
 
@@ -60,11 +114,30 @@ pub fn spawn_chat(session_id: &str, provider: Provider, model: String) -> ChatBa
                 role: ChatRole::User,
                 content: user_text,
             });
-            match provider.stream_chat(&model, &history, &output_tx).await {
-                Ok(assistant) => history.push(ChatMessage {
-                    role: ChatRole::Assistant,
-                    content: assistant,
-                }),
+            // Identity first, so whatever the provider returns — or fails to —
+            // this request is this operation.
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let started_at = Utc::now();
+            match provider
+                .stream_chat_measured(&model, &history, &output_tx)
+                .await
+            {
+                Ok(completion) => {
+                    if completion.completed {
+                        if let Some(observer) = &observer {
+                            let _ = observer.send(ChatTurnRecord::from_completion(
+                                operation_id,
+                                &model,
+                                started_at,
+                                &completion,
+                            ));
+                        }
+                    }
+                    history.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: completion.text,
+                    });
+                }
                 // Surface provider errors as an output chunk so the user sees
                 // them; keep the loop alive so they can retry.
                 Err(e) => {
@@ -149,5 +222,77 @@ mod tests {
         );
 
         drop(rt);
+    }
+
+    /// The observer hears exactly the COMPLETED turns, with the provider's
+    /// terminal metadata and a fresh operation id per turn; a completion whose
+    /// terminal marker never arrived is not reported.
+    #[tokio::test]
+    async fn observer_receives_completed_turns_only() {
+        let completion = ProviderCompletion {
+            text: "THE-ANSWER-TEXT".into(),
+            completed: true,
+            response_id: Some("msg_1".into()),
+            served_model: Some("m-served".into()),
+            usage: MeasuredUsage {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                ..MeasuredUsage::default()
+            },
+        };
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let backend = spawn_chat_observed(
+            "s1",
+            Provider::MockCompletion(completion.clone()),
+            "m-requested".into(),
+            Some(observer_tx),
+        );
+        let mut output_rx = backend.output_rx;
+        let rt = Runtime::new();
+        assert!(rt.register("inst-1", backend.handle).is_some());
+
+        rt.send_stdin("inst-1", "one").expect("send 1");
+        assert_eq!(output_rx.recv().await.as_deref(), Some("THE-ANSWER-TEXT"));
+        let first = observer_rx.recv().await.expect("first record");
+        assert_eq!(first.requested_model, "m-requested");
+        assert_eq!(first.response_id, completion.response_id);
+        assert_eq!(first.served_model, completion.served_model);
+        assert_eq!(first.usage, completion.usage);
+        assert!(first.completed_at >= first.started_at);
+        assert!(
+            !format!("{first:?}").contains("THE-ANSWER-TEXT"),
+            "the record carries no answer text: {first:?}"
+        );
+
+        rt.send_stdin("inst-1", "two").expect("send 2");
+        assert_eq!(output_rx.recv().await.as_deref(), Some("THE-ANSWER-TEXT"));
+        let second = observer_rx.recv().await.expect("second record");
+        assert_ne!(
+            first.operation_id, second.operation_id,
+            "one identity per turn"
+        );
+        drop(rt);
+
+        // Not completed → nothing observed, but the text still reaches the user.
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let backend = spawn_chat_observed(
+            "s2",
+            Provider::MockCompletion(ProviderCompletion {
+                completed: false,
+                ..completion
+            }),
+            "m".into(),
+            Some(observer_tx),
+        );
+        let mut output_rx = backend.output_rx;
+        let rt = Runtime::new();
+        assert!(rt.register("inst-2", backend.handle).is_some());
+        rt.send_stdin("inst-2", "cut").expect("send");
+        assert_eq!(output_rx.recv().await.as_deref(), Some("THE-ANSWER-TEXT"));
+        drop(rt);
+        assert!(
+            observer_rx.recv().await.is_none(),
+            "channel closed with no record"
+        );
     }
 }

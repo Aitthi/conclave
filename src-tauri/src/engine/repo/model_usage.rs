@@ -344,9 +344,28 @@ pub struct NewUsageEvent {
     pub cache_read_input_tokens: Option<i64>,
     pub cache_write_input_tokens: Option<i64>,
     pub reasoning_output_tokens: Option<i64>,
+    /// The source's terminal stop reason, kept as reconciliation evidence for
+    /// replayed Claude request groups (migration 0032). `None` for sources
+    /// that report none and for an oversized value, which is dropped with
+    /// [`STOP_REASON_OUT_OF_RANGE`] rather than truncated into apparent
+    /// agreement.
+    pub stop_reason: Option<String>,
+    /// The source's own UNCACHED input counter. `input_tokens` is the
+    /// cache-inclusive sum, which cannot recover this value when a cache
+    /// component was missing; so it is stored as reported (migration 0032).
+    pub source_uncached_input_tokens: Option<i64>,
     pub validity: String,
     pub diagnostic_code: Option<String>,
 }
+
+/// Longest `stop_reason` the store accepts, in characters — the 0032 schema
+/// `CHECK`s the same bound.
+pub const MAX_STOP_REASON_CHARS: usize = 128;
+
+/// Diagnostic stamped on an event whose stop reason was dropped as unknown
+/// because it exceeded [`MAX_STOP_REASON_CHARS`]. A counter rejection
+/// ([`COUNTER_OUT_OF_RANGE`]) takes precedence when both happen.
+pub const STOP_REASON_OUT_OF_RANGE: &str = "stop_reason_out_of_range";
 
 #[allow(dead_code)]
 /// Largest token counter this store accepts: 2^40 (about 1.1e12 tokens for
@@ -385,7 +404,7 @@ impl NewUsageEvent {
     /// the aggregate identifies damaged observations by this one code, so a
     /// collector's own note must not hide a rejection from it (review of
     /// 8770c7cf).
-    fn normalized(&self) -> NewUsageEvent {
+    pub(crate) fn normalized(&self) -> NewUsageEvent {
         fn bounded(value: Option<i64>, dropped: &mut bool) -> Option<i64> {
             match value {
                 Some(v) if !(0..=MAX_TOKEN_COUNTER).contains(&v) => {
@@ -402,6 +421,17 @@ impl NewUsageEvent {
         event.cache_read_input_tokens = bounded(self.cache_read_input_tokens, &mut dropped);
         event.cache_write_input_tokens = bounded(self.cache_write_input_tokens, &mut dropped);
         event.reasoning_output_tokens = bounded(self.reasoning_output_tokens, &mut dropped);
+        event.source_uncached_input_tokens =
+            bounded(self.source_uncached_input_tokens, &mut dropped);
+        let mut oversized_stop = false;
+        if let Some(stop) = &self.stop_reason {
+            if stop.chars().count() > MAX_STOP_REASON_CHARS {
+                // Never truncated: two distinct oversized strings must not
+                // become one agreeing value.
+                event.stop_reason = None;
+                oversized_stop = true;
+            }
+        }
         if let (Some(i), Some(o)) = (event.input_tokens, event.output_tokens) {
             if i.checked_add(o).is_none() {
                 // Unreachable under the ceiling, kept so the invariant does not
@@ -413,6 +443,8 @@ impl NewUsageEvent {
         }
         if dropped {
             event.diagnostic_code = Some(COUNTER_OUT_OF_RANGE.to_owned());
+        } else if oversized_stop {
+            event.diagnostic_code = Some(STOP_REASON_OUT_OF_RANGE.to_owned());
         }
         event
     }
@@ -437,10 +469,11 @@ where
             occurred_at, recorded_at, provider, requested_model, served_model,
             input_tokens, output_tokens,
             cache_read_input_tokens, cache_write_input_tokens, reasoning_output_tokens,
-            token_completeness, validity, diagnostic_code
+            token_completeness, validity, diagnostic_code,
+            stop_reason, source_uncached_input_tokens
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
          )
          ON CONFLICT(event_key) DO NOTHING",
     )
@@ -469,9 +502,77 @@ where
     .bind(event.token_completeness())
     .bind(&event.validity)
     .bind(&event.diagnostic_code)
+    .bind(&event.stop_reason)
+    .bind(event.source_uncached_input_tokens)
     .execute(executor)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// The stored identity of an event, for reconciling a replayed source row
+/// against what was recorded first: response id, served model, stop reason,
+/// the source's uncached input and every stored input-side counter. A legacy
+/// row (pre-0032) carries `None` evidence, which can never AGREE with a row
+/// that has it — replay against incomplete evidence stays conflicting.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct StoredIdentity {
+    pub source_response_id: Option<String>,
+    pub served_model: Option<String>,
+    pub stop_reason: Option<String>,
+    pub source_uncached_input_tokens: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
+    /// The stored rejection, if any. Part of the identity: a replayed block
+    /// whose counters were REJECTED normalizes to the same `None` as a block
+    /// that never carried them, and only the diagnostic tells the two apart
+    /// (review 229a4753 C7).
+    pub diagnostic_code: Option<String>,
+    pub validity: String,
+}
+
+/// Read back what was recorded under `event_key`, if anything.
+pub async fn stored_identity<'e, E>(
+    executor: E,
+    event_key: &str,
+) -> sqlx::Result<Option<StoredIdentity>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_as(
+        "SELECT source_response_id, served_model, stop_reason,
+                source_uncached_input_tokens, input_tokens, output_tokens,
+                cache_read_input_tokens, cache_write_input_tokens,
+                diagnostic_code, validity
+           FROM model_usage_event WHERE event_key = ?1",
+    )
+    .bind(event_key)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Move an event's `occurred_at` FORWARD to `at` when a later agreeing source
+/// row proves the response completed later than first recorded (a Claude
+/// request group completes at its last block). Never moves it backwards.
+pub async fn advance_occurred_at<'e, E>(
+    executor: E,
+    event_key: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> sqlx::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let at = canonical_ts(at);
+    sqlx::query(
+        "UPDATE model_usage_event SET occurred_at = ?2
+          WHERE event_key = ?1 AND occurred_at < ?2",
+    )
+    .bind(event_key)
+    .bind(at)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Mark an already-stored event as conflicting. It remains one activity; only
@@ -985,6 +1086,8 @@ mod tests {
             cache_read_input_tokens: Some(90),
             cache_write_input_tokens: None,
             reasoning_output_tokens: None,
+            stop_reason: None,
+            source_uncached_input_tokens: None,
             validity: "valid".into(),
             diagnostic_code: None,
         }
@@ -1770,6 +1873,67 @@ mod tests {
         assert_eq!(total.input_tokens, Some(1i64 << 62));
         assert_eq!(total.output_tokens, Some(1i64 << 62));
         assert!(!total.input_overflow && !total.output_overflow);
+    }
+
+    /// 0032 evidence is bounded at the repo the same way the schema bounds it:
+    /// an oversized stop reason is dropped (never truncated) with its own
+    /// diagnostic, an out-of-range uncached counter is dropped as a counter
+    /// rejection, and a counter rejection outranks the stop-reason code.
+    #[tokio::test]
+    async fn reconciliation_evidence_is_bounded_not_truncated() {
+        let pool = connect_in_memory().await;
+        let mut exact = event("exact", "2026-09-05T10:00:00Z");
+        exact.stop_reason = Some("s".repeat(MAX_STOP_REASON_CHARS));
+        exact.source_uncached_input_tokens = Some(MAX_TOKEN_COUNTER);
+        insert_event(&pool, &exact).await.unwrap();
+        let mut long_stop = event("long_stop", "2026-09-05T10:00:00Z");
+        long_stop.stop_reason = Some("s".repeat(MAX_STOP_REASON_CHARS + 1));
+        insert_event(&pool, &long_stop).await.unwrap();
+        let mut big_uncached = event("big_uncached", "2026-09-05T10:00:00Z");
+        big_uncached.source_uncached_input_tokens = Some(MAX_TOKEN_COUNTER + 1);
+        insert_event(&pool, &big_uncached).await.unwrap();
+        let mut both = event("both", "2026-09-05T10:00:00Z");
+        both.stop_reason = Some("s".repeat(MAX_STOP_REASON_CHARS + 1));
+        both.source_uncached_input_tokens = Some(-1);
+        insert_event(&pool, &both).await.unwrap();
+
+        type EvidenceRow = (String, Option<String>, Option<i64>, Option<String>);
+        let rows: Vec<EvidenceRow> = sqlx::query_as(
+            "SELECT event_key, stop_reason, source_uncached_input_tokens, diagnostic_code
+               FROM model_usage_event ORDER BY event_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "big_uncached".into(),
+                    None,
+                    None,
+                    Some(COUNTER_OUT_OF_RANGE.into())
+                ),
+                ("both".into(), None, None, Some(COUNTER_OUT_OF_RANGE.into())),
+                (
+                    "exact".into(),
+                    Some("s".repeat(MAX_STOP_REASON_CHARS)),
+                    Some(MAX_TOKEN_COUNTER),
+                    None
+                ),
+                (
+                    "long_stop".into(),
+                    None,
+                    None,
+                    Some(STOP_REASON_OUT_OF_RANGE.into())
+                ),
+            ]
+        );
+        // The measured totals are untouched by evidence rejection: the
+        // stop-reason code is not a counter rejection.
+        let total = agg(&pool, &UsageScope::default()).await;
+        assert_eq!(total.rejected_counter_count, 2);
+        assert_eq!(total.activity_count, 4);
     }
 
     /// Rejected counters and conflicts are counted so the reader can cap the

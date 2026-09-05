@@ -392,7 +392,7 @@ fn choose_newer(
 /// absolute cwd by replacing every non-alphanumeric character with `-` (e.g.
 /// `/Users/x/code/app` → `-Users-x-code-app`); mirror that so we can scan just
 /// this workspace's transcripts instead of the whole projects tree.
-fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
+pub(crate) fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
     let slug: String = workspace_folder
         .to_string_lossy()
         .chars()
@@ -402,7 +402,9 @@ fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
 }
 
 /// Collect `.jsonl` files under `root` that were modified at or after
-/// `min_mtime`. This is a cheap `stat`-only PRE-FILTER — before any file is
+/// `min_mtime`. Shared with the usage importer (`transcript_usage`) together
+/// with the owner-marker and project-dir helpers — the importer reuses ONLY
+/// these validated discovery/ownership rules, never this reader's scan state. This is a cheap `stat`-only PRE-FILTER — before any file is
 /// opened or parsed — that keeps the meter off the (potentially many GB of)
 /// historical transcripts a full parse would otherwise churn every poll. A
 /// file whose newest usage row is at or after the anchor necessarily has an
@@ -413,7 +415,7 @@ fn claude_project_dir(root: &Path, workspace_folder: &Path) -> PathBuf {
 /// proves nothing about the usage inside. Admissibility is decided by the
 /// usage row's own timestamp in [`ClaudeAcc::finalize`] (and
 /// [`CodexAcc::ingest_line`] for rollouts).
-fn collect_jsonl_files(root: &Path, min_mtime: DateTime<Utc>) -> Vec<PathBuf> {
+pub(crate) fn collect_jsonl_files(root: &Path, min_mtime: DateTime<Utc>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_jsonl_files_inner(root, min_mtime, &mut out);
     out
@@ -714,6 +716,76 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
     text.contains(&needle)
 }
 
+/// EVERY agent id a marker text declares, whoever it names: each token after
+/// an `own agent id is`, lower-cased like the ids it is compared with. One
+/// text can carry several declarations (ruling 1db7827f); stopping at the
+/// first would let a second owner hide behind the first.
+fn declared_agent_ids(text: &str) -> Vec<String> {
+    const PHRASE: &str = "own agent id is ";
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(PHRASE) {
+        let start = from + found + PHRASE.len();
+        let id: String = lower[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            out.push(id);
+        }
+        from = start;
+    }
+    out
+}
+
+/// Every agent id a Claude SessionStart hook attachment structurally
+/// declares — registered with the workspace or not. Attribution needs the
+/// UNKNOWN owner as much as the known one (usage review a12f77f2 C3): a
+/// marker naming an agent the workspace cannot place is an ownership
+/// conflict, never silence. Same structure gate as
+/// [`claude_value_declares_owner`].
+pub(crate) fn claude_value_declared_owners(value: &Value) -> Vec<String> {
+    if value.get("type").and_then(Value::as_str) != Some("attachment") {
+        return Vec::new();
+    }
+    let Some(attachment) = value.get("attachment") else {
+        return Vec::new();
+    };
+    if !is_session_start_hook(attachment) {
+        return Vec::new();
+    }
+    session_start_hook_texts(attachment)
+        .iter()
+        .flat_map(|text| declared_agent_ids(text))
+        .collect()
+}
+
+/// Every agent id a Codex developer message structurally declares; see
+/// [`claude_value_declared_owners`].
+pub(crate) fn codex_value_declared_owners(value: &Value) -> Vec<String> {
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return Vec::new();
+    }
+    let Some(payload) = value.get("payload") else {
+        return Vec::new();
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("developer")
+    {
+        return Vec::new();
+    }
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("input_text"))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .flat_map(declared_agent_ids)
+        .collect()
+}
+
 /// Ownership is bound to the ONE channel Conclave actually writes the marker
 /// on: the SessionStart hook (`runtime::sandbox_config::owner_marker_command`),
 /// which claude-code records as an `attachment` line on every session start —
@@ -733,7 +805,7 @@ fn text_declares_own_agent_id(text: &str, instance_id: &str) -> bool {
 /// declarations arrive as SessionStart hook attachments
 /// (`hook_additional_context` / `hook_success`), none from a user or system
 /// line — so this restriction loses no real declaration.
-fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
+pub(crate) fn claude_value_declares_owner(value: &Value, instance_id: &str) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("attachment") {
         return false;
     }
@@ -763,7 +835,7 @@ fn is_session_start_hook(attachment: &Value) -> bool {
         .is_some_and(|name| name.starts_with(SESSION_START))
 }
 
-fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
+pub(crate) fn codex_value_declares_owner(value: &Value, instance_id: &str) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("response_item") {
         return false;
     }
@@ -845,12 +917,12 @@ fn sum_claude_usage(usage: &Value) -> i64 {
             .unwrap_or(0)
 }
 
-fn file_modified_at(path: &Path) -> Option<DateTime<Utc>> {
+pub(crate) fn file_modified_at(path: &Path) -> Option<DateTime<Utc>> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     Some(DateTime::<Utc>::from(modified))
 }
 
-fn parse_ts(text: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_ts(text: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
