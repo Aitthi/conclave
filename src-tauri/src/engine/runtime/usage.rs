@@ -43,6 +43,29 @@ pub const COLLECTED_SOURCES: &[&str] = &[
 /// build writes. Bump when a parser's meaning of a stored field changes.
 pub const COLLECTOR_VERSION: &str = "v1";
 
+// ── Normalized usage ─────────────────────────────────────────────────────────
+
+/// Token usage a source reported for ONE completed response or invocation,
+/// normalized to the storage contract (`repo::model_usage`): `input_tokens`
+/// includes cached input, `output_tokens` includes reasoning, the rest are
+/// subsets kept as provenance. A component the source did not report — or
+/// reported in a shape this build cannot verify — is `None`, never 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeasuredUsage {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
+    pub reasoning_output_tokens: Option<i64>,
+}
+
+/// A non-negative integer counter, or `None` for anything else (absent,
+/// negative, fractional, a string). Strictness is the point: a value this
+/// function cannot vouch for is unknown, not zero.
+pub fn counter(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().filter(|n| *n >= 0)
+}
+
 // ── Provider identity ────────────────────────────────────────────────────────
 
 /// The provider id behind a CLI harness, in the vocabulary of the `provider`
@@ -85,6 +108,17 @@ pub fn collectors_online_since() -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counters_are_non_negative_integers_or_unknown() {
+        use serde_json::json;
+        assert_eq!(counter(&json!(42)), Some(42));
+        assert_eq!(counter(&json!(0)), Some(0));
+        assert_eq!(counter(&json!(-1)), None);
+        assert_eq!(counter(&json!(12.5)), None);
+        assert_eq!(counter(&json!("42")), None);
+        assert_eq!(counter(&json!(null)), None);
+    }
 
     #[test]
     fn provider_follows_the_harness() {

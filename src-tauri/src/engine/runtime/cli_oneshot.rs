@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 #[cfg(test)]
 use super::launch_common::prefix_conclave_path_with;
 use super::launch_common::{prefix_conclave_path, shell_quote};
+use super::usage::{counter, MeasuredUsage};
 use crate::engine::commands::fusion::strip_code_fences;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,19 +175,9 @@ pub fn parse_codex_last_message(text: &str) -> Result<Value, OneshotError> {
 
 // ── Measured outcome ─────────────────────────────────────────────────────────
 
-/// Token usage the CLI itself reported for the WHOLE invocation, normalized to
-/// the storage contract (`repo::model_usage`): `input_tokens` includes cached
-/// input, `output_tokens` includes reasoning, the rest are subsets. A component
-/// the CLI did not report — or reported in a shape this build cannot verify —
-/// is `None`, never 0.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OneshotUsage {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_write_input_tokens: Option<i64>,
-    pub reasoning_output_tokens: Option<i64>,
-}
+/// Token usage the CLI itself reported for the WHOLE invocation — the shared
+/// normalized shape, see [`MeasuredUsage`].
+pub type OneshotUsage = MeasuredUsage;
 
 /// What a successful one-shot returns to a measured caller: the schema-shaped
 /// answer plus the metadata the usage collector needs. A failed, timed-out or
@@ -251,13 +242,6 @@ impl Oneshot {
             }
         }
     }
-}
-
-/// A non-negative integer counter, or `None` for anything else (absent,
-/// negative, fractional, a string). Strictness is the point: a value this
-/// function cannot vouch for is unknown, not zero.
-fn counter(value: &Value) -> Option<i64> {
-    value.as_i64().filter(|n| *n >= 0)
 }
 
 /// Usage from `claude -p --output-format json`'s terminal `result` envelope.

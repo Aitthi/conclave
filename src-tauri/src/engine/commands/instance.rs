@@ -1287,7 +1287,12 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 .clone()
                 .ok_or_else(|| AppError::Invalid("chat agent has no model configured".into()))?;
 
-            let backend = runtime::chat::spawn_chat(&session.id, provider, model);
+            // Every completed turn is reported on this channel; the drain task
+            // below persists it as measured usage. The runtime never sees the
+            // database.
+            let (usage_tx, usage_rx) = tokio::sync::mpsc::unbounded_channel();
+            let backend =
+                runtime::chat::spawn_chat_observed(&session.id, provider, model, Some(usage_tx));
 
             require_launch_eligible(state, &id, mode).await?;
 
@@ -1297,6 +1302,15 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 return serde_json::to_value(&session)
                     .map_err(|e| AppError::Internal(e.to_string()));
             };
+            tokio::spawn(record_chat_turns(
+                state.db.clone(),
+                instance.workspace_id.clone(),
+                id.clone(),
+                session.id.clone(),
+                def.provider_id.clone(),
+                epoch,
+                usage_rx,
+            ));
             Some((backend.output_rx, epoch, None))
         }
         _ => {
@@ -1352,6 +1366,49 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
     }
 
     serde_json::to_value(&session).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Drain a chat backend's completed-turn records into measured usage.
+///
+/// One `response` event per completed turn, keyed by the operation id the
+/// loop generated before the request (`chat:v1:<operation id>`), attributed to
+/// the instance, its session and the registration epoch as the launch
+/// generation. Ends when the chat loop drops its sender. A persistence failure
+/// is a logged collection gap — the user already has the answer.
+async fn record_chat_turns(
+    db: sqlx::SqlitePool,
+    workspace_id: String,
+    instance_id: String,
+    session_id: String,
+    provider_id: Option<String>,
+    epoch: u64,
+    mut records: tokio::sync::mpsc::UnboundedReceiver<runtime::chat::ChatTurnRecord>,
+) {
+    while let Some(record) = records.recv().await {
+        let event = super::usage::CollectedEvent {
+            source_kind: crate::engine::runtime::usage::SOURCE_DIRECT_CHAT,
+            operation_id: &record.operation_id,
+            event_kind: "response",
+            workspace_id: Some(&workspace_id),
+            workspace_agent_id: Some(&instance_id),
+            session_id: Some(&session_id),
+            generation: i64::try_from(epoch).ok(),
+            source_session_id: None,
+            source_request_id: None,
+            source_response_id: record.completion.response_id.as_deref(),
+            occurred_at: record.completed_at,
+            provider: provider_id.as_deref(),
+            requested_model: Some(&record.requested_model),
+            served_model: record.completion.served_model.as_deref(),
+            usage: &record.completion.usage,
+        };
+        if let Err(e) = super::usage::record_collected_event(&db, &event).await {
+            eprintln!(
+                "[usage] chat turn {} for instance {instance_id} not recorded: {e}",
+                record.operation_id
+            );
+        }
+    }
 }
 
 /// Remove a workspace_agent instance from its workspace.
@@ -5188,5 +5245,109 @@ mod tests {
             "an estimate carries no source; the old reading's must not survive"
         );
         assert_eq!(after.context_observed_at, None);
+    }
+
+    /// The chat drain turns each completed-turn record into one `response`
+    /// event attributed to the instance, its session and the launch epoch,
+    /// keyed by the loop's operation id, and ends when the loop drops its
+    /// sender.
+    #[tokio::test]
+    async fn chat_turn_records_become_attributed_usage_events() {
+        use crate::engine::runtime::chat::ChatTurnRecord;
+        use crate::engine::runtime::provider::ProviderCompletion;
+        use crate::engine::runtime::usage::MeasuredUsage;
+
+        let state = AppState::for_tests().await;
+        let instance_id = fixture_instance(&state).await;
+        let instance = repo::workspace_agent::get(&state.db, &instance_id)
+            .await
+            .unwrap()
+            .expect("instance");
+        let session = repo::session::get_by_instance(&state.db, &instance_id)
+            .await
+            .unwrap()
+            .expect("session");
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let drain = tokio::spawn(record_chat_turns(
+            state.db.clone(),
+            instance.workspace_id.clone(),
+            instance_id.clone(),
+            session.id.clone(),
+            Some("anthropic".into()),
+            7,
+            rx,
+        ));
+        let at = chrono::Utc::now();
+        tx.send(ChatTurnRecord {
+            operation_id: "op-1".into(),
+            requested_model: "claude-opus-5".into(),
+            started_at: at,
+            completed_at: at,
+            completion: ProviderCompletion {
+                text: "hello".into(),
+                completed: true,
+                response_id: Some("msg_01".into()),
+                served_model: Some("claude-opus-5".into()),
+                usage: MeasuredUsage {
+                    input_tokens: Some(1_425),
+                    output_tokens: Some(15),
+                    cache_read_input_tokens: Some(400),
+                    cache_write_input_tokens: Some(1_000),
+                    reasoning_output_tokens: None,
+                },
+            },
+        })
+        .unwrap();
+        drop(tx);
+        drain.await.expect("drain ends when the sender drops");
+
+        #[derive(sqlx::FromRow)]
+        struct Stored {
+            event_key: String,
+            event_kind: String,
+            source_kind: String,
+            workspace_id: Option<String>,
+            workspace_agent_id: Option<String>,
+            session_id: Option<String>,
+            generation: Option<i64>,
+            source_response_id: Option<String>,
+            provider: Option<String>,
+            requested_model: Option<String>,
+            served_model: Option<String>,
+            input_tokens: Option<i64>,
+            output_tokens: Option<i64>,
+        }
+        let rows: Vec<Stored> = sqlx::query_as(
+            "SELECT event_key, event_kind, source_kind, workspace_id, workspace_agent_id,
+                    session_id, generation, source_response_id, provider, requested_model,
+                    served_model, input_tokens, output_tokens
+               FROM model_usage_event",
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let e = &rows[0];
+        assert_eq!(e.event_key, "chat:v1:op-1");
+        assert_eq!(e.event_kind, "response");
+        assert_eq!(e.source_kind, "chat");
+        assert_eq!(
+            e.workspace_id.as_deref(),
+            Some(instance.workspace_id.as_str())
+        );
+        assert_eq!(e.workspace_agent_id.as_deref(), Some(instance_id.as_str()));
+        assert_eq!(e.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(
+            e.generation,
+            Some(7),
+            "the registration epoch is the launch proof"
+        );
+        assert_eq!(e.source_response_id.as_deref(), Some("msg_01"));
+        assert_eq!(e.provider.as_deref(), Some("anthropic"));
+        assert_eq!(e.requested_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(e.served_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(e.input_tokens, Some(1_425));
+        assert_eq!(e.output_tokens, Some(15));
     }
 }

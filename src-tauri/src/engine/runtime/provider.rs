@@ -23,6 +23,7 @@
 //! chat loop through the `#[cfg(test)] Provider::Mock` variant, which yields
 //! canned deltas without any network I/O.
 
+use super::usage::{counter, MeasuredUsage};
 use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
@@ -96,6 +97,32 @@ pub enum Provider {
     /// lets a test prove the chat loop accumulates history across turns.
     #[cfg(test)]
     EchoLen,
+    /// Test-only provider that streams `text` as one delta and returns exactly
+    /// this completion — for collector tests that need terminal metadata.
+    #[cfg(test)]
+    MockCompletion(ProviderCompletion),
+}
+
+// ── Terminal completion metadata ─────────────────────────────────────────────
+
+/// What a completed provider call reports about itself, beside the text.
+///
+/// `completed` is `true` ONLY when the provider's own terminal marker arrived
+/// (Anthropic `message_stop`, OpenAI `[DONE]`). Receiver loss, a transport
+/// error or an EOF before that marker leave it `false`: the text gathered so
+/// far may still be shown, but it is not completed activity and the usage
+/// collector never records it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderCompletion {
+    pub text: String,
+    pub completed: bool,
+    /// The provider's own response/message id — evidence for reconciliation,
+    /// never the identity a record is keyed by.
+    pub response_id: Option<String>,
+    /// The model the PROVIDER said served the response (Anthropic
+    /// `message_start.message.model`, OpenAI chunk `model`).
+    pub served_model: Option<String>,
+    pub usage: MeasuredUsage,
 }
 
 impl Provider {
@@ -177,14 +204,32 @@ impl Provider {
     /// Stream a chat completion for `messages`, forwarding each assistant TEXT
     /// delta to `tx`, and return the full accumulated assistant text.
     ///
-    /// `tx` send errors (the receiver was dropped) stop the stream early — the
-    /// accumulated text so far is still returned.
+    /// Text-only view of [`Self::stream_chat_measured`], kept for callers that
+    /// want no metadata; every in-process caller now takes the measured form.
+    #[allow(dead_code)]
     pub async fn stream_chat(
         &self,
         model: &str,
         messages: &[ChatMessage],
         tx: &mpsc::Sender<String>,
     ) -> Result<String, ProviderError> {
+        self.stream_chat_measured(model, messages, tx)
+            .await
+            .map(|c| c.text)
+    }
+
+    /// Stream a chat completion and return it WITH its terminal metadata
+    /// ([`ProviderCompletion`]): whether the provider's terminal marker was
+    /// seen, its response id, the served model and the usage it reported.
+    ///
+    /// `tx` send errors (the receiver was dropped) stop the stream early — the
+    /// accumulated text so far is still returned, marked NOT completed.
+    pub async fn stream_chat_measured(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        tx: &mpsc::Sender<String>,
+    ) -> Result<ProviderCompletion, ProviderError> {
         match self {
             Provider::Anthropic { api_key, base_url } => {
                 stream_anthropic(api_key, base_url, model, messages, tx).await
@@ -195,31 +240,60 @@ impl Provider {
             #[cfg(test)]
             Provider::Mock { deltas } => {
                 let mut acc = String::new();
+                let mut completed = true;
                 for d in deltas {
                     acc.push_str(d);
                     if tx.send(d.clone()).await.is_err() {
+                        completed = false;
                         break; // receiver gone
                     }
                 }
-                Ok(acc)
+                Ok(ProviderCompletion {
+                    text: acc,
+                    completed,
+                    ..ProviderCompletion::default()
+                })
             }
             #[cfg(test)]
             Provider::EchoLen => {
                 let s = messages.len().to_string();
                 let _ = tx.send(s.clone()).await;
-                Ok(s)
+                Ok(ProviderCompletion {
+                    text: s,
+                    completed: true,
+                    ..ProviderCompletion::default()
+                })
+            }
+            #[cfg(test)]
+            Provider::MockCompletion(completion) => {
+                let _ = tx.send(completion.text.clone()).await;
+                Ok(completion.clone())
             }
         }
     }
 
     /// Perform a NON-streaming completion of a single user `prompt`, returning
-    /// the full accumulated assistant text.
-    ///
-    /// Thin wrapper over [`stream_chat`]: it builds one `User` message, creates
-    /// an internal `mpsc` channel, and drains the receiver on a spawned task so a
-    /// long answer can't deadlock by filling the channel while `stream_chat` is
-    /// still producing. Reuses the existing provider plumbing — no new HTTP code.
+    /// the full accumulated assistant text. Text-only view of
+    /// [`Self::complete_chat_measured`]; see [`Self::stream_chat`].
+    #[allow(dead_code)]
     pub async fn complete_chat(&self, model: &str, prompt: &str) -> Result<String, ProviderError> {
+        self.complete_chat_measured(model, prompt)
+            .await
+            .map(|c| c.text)
+    }
+
+    /// Non-streaming completion WITH terminal metadata.
+    ///
+    /// Thin wrapper over [`Self::stream_chat_measured`]: it builds one `User`
+    /// message, creates an internal `mpsc` channel, and drains the receiver on a
+    /// spawned task so a long answer can't deadlock by filling the channel while
+    /// the stream is still producing. Reuses the existing provider plumbing — no
+    /// new HTTP code.
+    pub async fn complete_chat_measured(
+        &self,
+        model: &str,
+        prompt: &str,
+    ) -> Result<ProviderCompletion, ProviderError> {
         let msg = ChatMessage {
             role: ChatRole::User,
             content: prompt.to_owned(),
@@ -227,7 +301,7 @@ impl Provider {
         let (tx, mut rx) = mpsc::channel::<String>(1024);
         // Drain deltas concurrently so the sender never blocks on a full channel.
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let result = self.stream_chat(model, &[msg], &tx).await;
+        let result = self.stream_chat_measured(model, &[msg], &tx).await;
         drop(tx); // close the channel so the drain task terminates
                   // The drain body can't panic, so a JoinError is unreachable here; we still
                   // await it to guarantee the task is gone before returning (no leak).
@@ -272,6 +346,158 @@ pub(crate) fn openai_text_delta(data_json: &str) -> Option<String> {
     Some(content.to_owned())
 }
 
+// ── SSE accumulators (terminal metadata) ─────────────────────────────────────
+
+/// Per-stream state that turns SSE payloads into text deltas AND remembers the
+/// terminal metadata. One implementation per wire protocol; both are pure and
+/// unit-tested by feeding payloads directly.
+trait SseAccumulator {
+    /// Ingest one `data:` JSON payload, returning the text delta it carries.
+    fn ingest(&mut self, payload: &str) -> Option<String>;
+    /// The `[DONE]` sentinel arrived.
+    fn done(&mut self);
+    /// The completion as seen so far, `text` being the accumulated deltas.
+    fn finish(&self, text: String) -> ProviderCompletion;
+}
+
+/// Anthropic Messages stream: `message_start` carries the id, the served model
+/// and the INPUT usage (uncached + cache-create + cache-read, all three needed
+/// for a cache-inclusive input); `message_delta` carries the cumulative OUTPUT
+/// count; `message_stop` is the terminal marker. Nothing else is trusted — a
+/// stream that ends without `message_stop` is not completed.
+#[derive(Debug, Default)]
+struct AnthropicAcc {
+    response_id: Option<String>,
+    served_model: Option<String>,
+    uncached_input: Option<i64>,
+    cache_write: Option<i64>,
+    cache_read: Option<i64>,
+    output: Option<i64>,
+    stopped: bool,
+}
+
+impl SseAccumulator for AnthropicAcc {
+    fn ingest(&mut self, payload: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+        match v.get("type")?.as_str()? {
+            "message_start" => {
+                let message = &v["message"];
+                self.response_id = message["id"].as_str().map(str::to_owned);
+                self.served_model = message["model"].as_str().map(str::to_owned);
+                let usage = &message["usage"];
+                self.uncached_input = counter(&usage["input_tokens"]);
+                self.cache_write = counter(&usage["cache_creation_input_tokens"]);
+                self.cache_read = counter(&usage["cache_read_input_tokens"]);
+                None
+            }
+            "message_delta" => {
+                // Cumulative for the whole message; the last one wins.
+                if let Some(output) = counter(&v["usage"]["output_tokens"]) {
+                    self.output = Some(output);
+                }
+                None
+            }
+            "message_stop" => {
+                self.stopped = true;
+                None
+            }
+            "content_block_delta" => anthropic_text_delta(payload),
+            _ => None,
+        }
+    }
+
+    fn done(&mut self) {
+        // Anthropic has no `[DONE]` sentinel; only `message_stop` completes.
+    }
+
+    fn finish(&self, text: String) -> ProviderCompletion {
+        let input_tokens = match (self.uncached_input, self.cache_write, self.cache_read) {
+            (Some(a), Some(b), Some(c)) => a.checked_add(b).and_then(|ab| ab.checked_add(c)),
+            _ => None,
+        };
+        ProviderCompletion {
+            text,
+            completed: self.stopped,
+            response_id: self.response_id.clone(),
+            served_model: self.served_model.clone(),
+            usage: MeasuredUsage {
+                input_tokens,
+                output_tokens: self.output,
+                cache_read_input_tokens: self.cache_read,
+                cache_write_input_tokens: self.cache_write,
+                reasoning_output_tokens: None,
+            },
+        }
+    }
+}
+
+/// OpenAI-compatible `/chat/completions` stream: every chunk repeats `id` and
+/// `model`; text rides `choices[0].delta.content`; with
+/// `stream_options.include_usage` the LAST chunk before `[DONE]` carries
+/// `usage` (`prompt_tokens` already includes cached input,
+/// `completion_tokens` already includes reasoning; the `*_details` are
+/// subsets). `[DONE]` is the terminal marker.
+#[derive(Debug, Default)]
+struct OpenAiAcc {
+    response_id: Option<String>,
+    served_model: Option<String>,
+    usage: MeasuredUsage,
+    done: bool,
+}
+
+impl SseAccumulator for OpenAiAcc {
+    fn ingest(&mut self, payload: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+        if self.response_id.is_none() {
+            self.response_id = v["id"].as_str().map(str::to_owned);
+        }
+        if self.served_model.is_none() {
+            self.served_model = v["model"]
+                .as_str()
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned);
+        }
+        if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
+            self.usage = MeasuredUsage {
+                input_tokens: counter(&usage["prompt_tokens"]),
+                output_tokens: counter(&usage["completion_tokens"]),
+                cache_read_input_tokens: counter(&usage["prompt_tokens_details"]["cached_tokens"]),
+                cache_write_input_tokens: None,
+                reasoning_output_tokens: counter(
+                    &usage["completion_tokens_details"]["reasoning_tokens"],
+                ),
+            };
+        }
+        openai_text_delta(payload)
+    }
+
+    fn done(&mut self) {
+        self.done = true;
+    }
+
+    fn finish(&self, text: String) -> ProviderCompletion {
+        ProviderCompletion {
+            text,
+            completed: self.done,
+            response_id: self.response_id.clone(),
+            served_model: self.served_model.clone(),
+            usage: self.usage.clone(),
+        }
+    }
+}
+
+/// Whether to ask an OpenAI-compatible server for `stream_options.include_usage`.
+///
+/// Only the official endpoint is known to accept the field; an unknown
+/// compatible server (a proxy, Ollama, a lab gateway) may reject the whole
+/// request with 400, and a usage flag must never cost the user their answer.
+/// Elsewhere the usage stays unknown unless the server volunteers it.
+fn openai_requests_usage(base_url: &str) -> bool {
+    base_url
+        .trim_end_matches('/')
+        .starts_with(OPENAI_DEFAULT_BASE.trim_end_matches('/'))
+}
+
 // ── HTTP streaming drivers ───────────────────────────────────────────────────
 
 /// Shared HTTP client (reqwest's client is internally `Arc`, cheap to clone and
@@ -304,7 +530,7 @@ async fn stream_anthropic(
     model: &str,
     messages: &[ChatMessage],
     tx: &mpsc::Sender<String>,
-) -> Result<String, ProviderError> {
+) -> Result<ProviderCompletion, ProviderError> {
     let body = serde_json::json!({
         "model": model,
         "max_tokens": ANTHROPIC_MAX_TOKENS,
@@ -328,7 +554,7 @@ async fn stream_anthropic(
         .error_for_status()
         .map_err(http_err)?;
 
-    consume_sse(resp, tx, anthropic_text_delta).await
+    consume_sse(resp, tx, AnthropicAcc::default()).await
 }
 
 /// Drive an OpenAI-compatible `/chat/completions` streaming request.
@@ -338,15 +564,8 @@ async fn stream_openai(
     model: &str,
     messages: &[ChatMessage],
     tx: &mpsc::Sender<String>,
-) -> Result<String, ProviderError> {
-    let body = serde_json::json!({
-        "model": model,
-        "stream": true,
-        "messages": messages
-            .iter()
-            .map(|m| serde_json::json!({ "role": m.role.as_wire(), "content": m.content }))
-            .collect::<Vec<_>>(),
-    });
+) -> Result<ProviderCompletion, ProviderError> {
+    let body = openai_request_body(base_url, model, messages);
 
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut req = http_client()
@@ -363,39 +582,61 @@ async fn stream_openai(
         .error_for_status()
         .map_err(http_err)?;
 
-    consume_sse(resp, tx, openai_text_delta).await
+    consume_sse(resp, tx, OpenAiAcc::default()).await
+}
+
+/// The `/chat/completions` request body; `stream_options.include_usage` only
+/// where [`openai_requests_usage`] says the server accepts it.
+fn openai_request_body(base_url: &str, model: &str, messages: &[ChatMessage]) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "messages": messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role.as_wire(), "content": m.content }))
+            .collect::<Vec<_>>(),
+    });
+    if openai_requests_usage(base_url) {
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+    body
 }
 
 /// Consume an SSE response: accumulate RAW BYTES, split on the `\n` byte, and
-/// for each `data:` line feed the JSON payload to `parse` and forward any
-/// `Some(text)` to `tx`. Keeps a leftover partial-line buffer across network
-/// chunks. The `[DONE]` sentinel is skipped. Returns the full accumulated text.
+/// for each `data:` line feed the JSON payload to the accumulator, forwarding
+/// any text delta to `tx`. Keeps a leftover partial-line buffer across network
+/// chunks. Returns the completion with its terminal metadata.
 ///
 /// Decoding happens per COMPLETE LINE, not per network chunk: `0x0A` never
 /// appears inside a multi-byte UTF-8 sequence, so line boundaries are safe to
 /// find in raw bytes, and each whole line decodes as valid UTF-8. Decoding a raw
 /// chunk directly would split a multi-byte codepoint at a chunk boundary into
 /// `U+FFFD` replacement chars — corrupting non-ASCII (CJK/Thai/emoji) deltas.
-async fn consume_sse(
+///
+/// A dropped receiver stops the stream early; the text so far comes back but
+/// the completion is marked NOT completed — nobody saw the terminal marker.
+async fn consume_sse<A: SseAccumulator>(
     resp: reqwest::Response,
     tx: &mpsc::Sender<String>,
-    parse: fn(&str) -> Option<String>,
-) -> Result<String, ProviderError> {
+    mut acc: A,
+) -> Result<ProviderCompletion, ProviderError> {
     use futures_util::StreamExt;
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
-    let mut acc = String::new();
+    let mut text = String::new();
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| ProviderError::Stream(e.to_string()))?;
         buf.extend_from_slice(&bytes);
 
         for line in drain_lines(&mut buf) {
-            if let Some(text) = parse_data_line(&line, parse) {
-                acc.push_str(&text);
-                if tx.send(text).await.is_err() {
-                    return Ok(acc); // receiver gone → stop early
+            if let Some(delta) = ingest_line(&mut acc, &line) {
+                text.push_str(&delta);
+                if tx.send(delta).await.is_err() {
+                    let mut completion = acc.finish(text);
+                    completion.completed = false; // receiver gone → not completed
+                    return Ok(completion);
                 }
             }
         }
@@ -403,12 +644,51 @@ async fn consume_sse(
 
     // Flush any trailing line without a final newline.
     let tail = String::from_utf8_lossy(&buf);
-    if let Some(text) = parse_data_line(tail.trim_end_matches(['\r', '\n']), parse) {
-        acc.push_str(&text);
-        let _ = tx.send(text).await;
+    if let Some(delta) = ingest_line(&mut acc, tail.trim_end_matches(['\r', '\n'])) {
+        text.push_str(&delta);
+        let _ = tx.send(delta).await;
     }
 
-    Ok(acc)
+    Ok(acc.finish(text))
+}
+
+/// Feed one SSE line to the accumulator: non-`data:` lines are ignored, the
+/// `[DONE]` sentinel is reported to it, a payload is ingested. Returns the
+/// text delta, if any.
+fn ingest_line<A: SseAccumulator>(acc: &mut A, line: &str) -> Option<String> {
+    match classify_line(line) {
+        SseLine::Skip => None,
+        SseLine::Done => {
+            acc.done();
+            None
+        }
+        SseLine::Payload(payload) => acc.ingest(payload),
+    }
+}
+
+/// One SSE line, classified.
+#[derive(Debug, PartialEq, Eq)]
+enum SseLine<'a> {
+    /// Not a `data:` line, or an empty payload.
+    Skip,
+    /// The OpenAI-style `[DONE]` sentinel.
+    Done,
+    /// A `data:` JSON payload.
+    Payload(&'a str),
+}
+
+fn classify_line(line: &str) -> SseLine<'_> {
+    let Some(payload) = line.strip_prefix("data:") else {
+        return SseLine::Skip;
+    };
+    let payload = payload.trim();
+    if payload.is_empty() {
+        SseLine::Skip
+    } else if payload == "[DONE]" {
+        SseLine::Done
+    } else {
+        SseLine::Payload(payload)
+    }
 }
 
 /// Drain complete `\n`-terminated lines from `buf`, each decoded as a whole and
@@ -427,16 +707,6 @@ fn drain_lines(buf: &mut Vec<u8>) -> Vec<String> {
         );
     }
     lines
-}
-
-/// Extract the text delta from a single SSE line, or `None` for non-`data:`
-/// lines, the `[DONE]` sentinel, and payloads with no text.
-fn parse_data_line(line: &str, parse: fn(&str) -> Option<String>) -> Option<String> {
-    let payload = line.strip_prefix("data:")?.trim();
-    if payload.is_empty() || payload == "[DONE]" {
-        return None;
-    }
-    parse(payload)
 }
 
 #[cfg(test)]
@@ -474,14 +744,191 @@ mod tests {
     }
 
     #[test]
-    fn parse_data_line_skips_non_data_and_done() {
-        let p = openai_text_delta;
-        assert_eq!(parse_data_line("event: message", p), None);
-        assert_eq!(parse_data_line("data: [DONE]", p), None);
-        assert_eq!(parse_data_line("", p), None);
+    fn classify_line_skips_non_data_and_reports_done() {
+        assert_eq!(classify_line("event: message"), SseLine::Skip);
+        assert_eq!(classify_line("data: [DONE]"), SseLine::Done);
+        assert_eq!(classify_line(""), SseLine::Skip);
+        assert_eq!(classify_line("data:   "), SseLine::Skip);
         assert_eq!(
-            parse_data_line(r#"data: {"choices":[{"delta":{"content":"x"}}]}"#, p),
-            Some("x".to_owned())
+            classify_line(r#"data: {"choices":[{"delta":{"content":"x"}}]}"#),
+            SseLine::Payload(r#"{"choices":[{"delta":{"content":"x"}}]}"#)
+        );
+    }
+
+    // ── Terminal metadata ────────────────────────────────────────────────
+
+    /// Feed SSE lines through the same path `consume_sse` uses.
+    fn run_lines<A: SseAccumulator>(mut acc: A, lines: &[&str]) -> ProviderCompletion {
+        let mut text = String::new();
+        for line in lines {
+            if let Some(delta) = ingest_line(&mut acc, line) {
+                text.push_str(&delta);
+            }
+        }
+        acc.finish(text)
+    }
+
+    const ANTHROPIC_STREAM: &[&str] = &[
+        "event: message_start",
+        r#"data: {"type":"message_start","message":{"id":"msg_01X","type":"message","role":"assistant","model":"claude-opus-5","content":[],"stop_reason":null,"usage":{"input_tokens":25,"cache_creation_input_tokens":1000,"cache_read_input_tokens":400,"output_tokens":1}}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"data: {"type":"ping"}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}"#,
+        r#"data: {"type":"content_block_stop","index":0}"#,
+        r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}"#,
+        r#"data: {"type":"message_stop"}"#,
+    ];
+
+    #[test]
+    fn anthropic_stream_yields_cache_inclusive_input_and_terminal_output() {
+        let c = run_lines(AnthropicAcc::default(), ANTHROPIC_STREAM);
+        assert_eq!(c.text, "Hello");
+        assert!(c.completed, "message_stop seen");
+        assert_eq!(c.response_id.as_deref(), Some("msg_01X"));
+        assert_eq!(c.served_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(c.usage.input_tokens, Some(25 + 1000 + 400));
+        assert_eq!(
+            c.usage.output_tokens,
+            Some(15),
+            "message_delta, not message_start's 1"
+        );
+        assert_eq!(c.usage.cache_write_input_tokens, Some(1000));
+        assert_eq!(c.usage.cache_read_input_tokens, Some(400));
+        assert_eq!(c.usage.reasoning_output_tokens, None);
+    }
+
+    /// EOF before `message_stop` is not completed activity, even with text.
+    #[test]
+    fn anthropic_stream_without_message_stop_is_not_completed() {
+        let cut = &ANTHROPIC_STREAM[..ANTHROPIC_STREAM.len() - 1];
+        let c = run_lines(AnthropicAcc::default(), cut);
+        assert_eq!(c.text, "Hello");
+        assert!(!c.completed);
+        assert_eq!(
+            c.usage.output_tokens,
+            Some(15),
+            "what was seen is still reported"
+        );
+    }
+
+    /// A message_start missing a cache component makes the INPUT unknown; the
+    /// output is independent. `[DONE]` means nothing to Anthropic.
+    #[test]
+    fn anthropic_stream_with_partial_input_components_is_unknown_input() {
+        let lines = [
+            r#"data: {"type":"message_start","message":{"id":"m","model":"claude-opus-5","usage":{"input_tokens":25}}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
+            "data: [DONE]",
+        ];
+        let c = run_lines(AnthropicAcc::default(), &lines);
+        assert_eq!(c.usage.input_tokens, None);
+        assert_eq!(c.usage.output_tokens, Some(3));
+        assert!(!c.completed, "[DONE] is not Anthropic's terminal marker");
+    }
+
+    const OPENAI_STREAM: &[&str] = &[
+        r#"data: {"id":"chatcmpl-9","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
+        r#"data: {"id":"chatcmpl-9","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}"#,
+        r#"data: {"id":"chatcmpl-9","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}"#,
+        r#"data: {"id":"chatcmpl-9","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        r#"data: {"id":"chatcmpl-9","object":"chat.completion.chunk","model":"gpt-5.5","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":40,"total_tokens":160,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":8}}}"#,
+        "data: [DONE]",
+    ];
+
+    #[test]
+    fn openai_stream_yields_usage_from_the_final_chunk_and_completes_on_done() {
+        let c = run_lines(OpenAiAcc::default(), OPENAI_STREAM);
+        assert_eq!(c.text, "Hello");
+        assert!(c.completed);
+        assert_eq!(c.response_id.as_deref(), Some("chatcmpl-9"));
+        assert_eq!(c.served_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            c.usage.input_tokens,
+            Some(120),
+            "prompt_tokens already includes cached"
+        );
+        assert_eq!(
+            c.usage.output_tokens,
+            Some(40),
+            "completion_tokens already includes reasoning"
+        );
+        assert_eq!(c.usage.cache_read_input_tokens, Some(100));
+        assert_eq!(c.usage.reasoning_output_tokens, Some(8));
+        assert_eq!(c.usage.cache_write_input_tokens, None);
+    }
+
+    /// A compatible server that never sends `usage` still yields a completed
+    /// answer with unknown usage; a stream cut before `[DONE]` is not completed.
+    #[test]
+    fn openai_stream_without_usage_or_done_is_honest() {
+        let no_usage: Vec<&str> = OPENAI_STREAM
+            .iter()
+            .copied()
+            .filter(|l| !l.contains("\"usage\""))
+            .collect();
+        let c = run_lines(OpenAiAcc::default(), &no_usage);
+        assert!(c.completed);
+        assert_eq!(c.usage, MeasuredUsage::default());
+        assert_eq!(c.text, "Hello");
+
+        let cut = &OPENAI_STREAM[..OPENAI_STREAM.len() - 1];
+        let c = run_lines(OpenAiAcc::default(), cut);
+        assert!(!c.completed);
+        assert_eq!(
+            c.usage.input_tokens,
+            Some(120),
+            "seen usage is still reported"
+        );
+    }
+
+    /// `include_usage` is requested only where it is known to be accepted.
+    #[test]
+    fn include_usage_is_requested_only_from_the_official_openai_endpoint() {
+        let msgs = [ChatMessage {
+            role: ChatRole::User,
+            content: "hi".into(),
+        }];
+        let official = openai_request_body("https://api.openai.com/v1", "gpt-5.5", &msgs);
+        assert_eq!(
+            official["stream_options"]["include_usage"],
+            serde_json::json!(true)
+        );
+        for other in [
+            "http://localhost:11434/v1",
+            "https://proxy.example.com/v1",
+            "https://api.openai.com.evil.example/v1",
+        ] {
+            let body = openai_request_body(other, "gpt-5.5", &msgs);
+            assert!(
+                body.get("stream_options").is_none(),
+                "{other} must not get the flag"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_completion_returns_its_metadata_and_streams_its_text() {
+        let completion = ProviderCompletion {
+            text: "done".into(),
+            completed: true,
+            response_id: Some("r-1".into()),
+            served_model: Some("m-served".into()),
+            usage: MeasuredUsage {
+                input_tokens: Some(3),
+                output_tokens: Some(4),
+                ..MeasuredUsage::default()
+            },
+        };
+        let provider = Provider::MockCompletion(completion.clone());
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let got = provider.stream_chat_measured("m", &[], &tx).await.unwrap();
+        assert_eq!(got, completion);
+        assert_eq!(rx.recv().await.as_deref(), Some("done"));
+        assert_eq!(
+            provider.complete_chat("m", "p").await.unwrap(),
+            "done",
+            "the text-only view still works"
         );
     }
 

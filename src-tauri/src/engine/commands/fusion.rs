@@ -25,6 +25,9 @@
 //!   `fusion_config` / `fusion_panel_member` selection (the config drawer) is
 //!   M4.4.
 
+use super::usage::{record_collected_event, CollectedEvent};
+use crate::engine::runtime::provider::ProviderCompletion;
+use crate::engine::runtime::usage::SOURCE_FUSION;
 use crate::engine::{bus, repo, AppError, AppState};
 use repo::fusion::FusionRunRow;
 use repo::{agent_definition, session, workspace_agent};
@@ -82,18 +85,21 @@ pub enum ModelCaller {
 }
 
 impl ModelCaller {
-    /// Run one completion. Returns `Ok(answer)` or `Err(honest error string)`.
+    /// Run one completion. Returns the completion WITH its terminal metadata,
+    /// or `Err(honest error string)`. Mocks answer as completed calls without
+    /// usage, which is exactly what a compatible server that reports no usage
+    /// looks like.
     async fn call(
         &self,
         provider_id: Option<&str>,
         model: &str,
         prompt: &str,
-    ) -> Result<String, String> {
+    ) -> Result<ProviderCompletion, String> {
         match self {
             ModelCaller::Live => {
                 let p = crate::engine::runtime::provider::Provider::from_config(provider_id)
                     .map_err(|e| e.to_string())?;
-                p.complete_chat(model, prompt)
+                p.complete_chat_measured(model, prompt)
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -101,17 +107,90 @@ impl ModelCaller {
             ModelCaller::Mock(map) => map
                 .get(model)
                 .cloned()
-                .unwrap_or_else(|| Ok(format!("[mock answer for {model}]"))),
+                .unwrap_or_else(|| Ok(format!("[mock answer for {model}]")))
+                .map(completed_text),
             #[cfg(test)]
             ModelCaller::Paused(entered, release) => {
                 entered.notify_one();
                 release.acquire().await.unwrap().forget();
-                Ok(
+                Ok(completed_text(
                     "{\"consensus\":\"c\",\"disagreements\":[],\"insights\":[],\"blindSpots\":[]}"
                         .into(),
-                )
+                ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+fn completed_text(text: String) -> ProviderCompletion {
+    ProviderCompletion {
+        text,
+        completed: true,
+        ..ProviderCompletion::default()
+    }
+}
+
+// ── Usage attribution ────────────────────────────────────────────────────────
+
+/// Where a run's provider calls are attributed: the orchestrator's workspace,
+/// and the orchestrator itself for the judge/synthesis calls.
+struct RunScope {
+    workspace_id: String,
+    orchestrator_id: String,
+    session_id: String,
+}
+
+/// One provider call of a run, as the usage collector sees it.
+struct FusionCall<'a> {
+    run_id: &'a str,
+    /// `panel` / `judge` / `synthesize`.
+    stage: &'a str,
+    /// Position within the stage (panel members are concurrent; the judge and
+    /// synthesis are single).
+    ordinal: usize,
+    /// The instance the call is attributed to: the panelist, or the
+    /// orchestrator for judge/synthesis.
+    instance_id: &'a str,
+    provider_id: Option<&'a str>,
+    model: &'a str,
+    completion: &'a ProviderCompletion,
+    completed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Record ONE completed provider call of a fusion run as measured usage.
+///
+/// One `response` event per panel/judge/synthesis call — never one for the
+/// enclosing run — keyed by a fresh operation id and carrying
+/// `<run id>:<stage>:<ordinal>` as bounded attribution. A call that did not
+/// reach its provider's terminal marker is not completed activity and is
+/// skipped. Best-effort: a collection failure is logged, the run continues.
+async fn record_fusion_call(db: &SqlitePool, scope: &RunScope, call: &FusionCall<'_>) {
+    if !call.completion.completed {
+        return;
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let attribution = format!("{}:{}:{}", call.run_id, call.stage, call.ordinal);
+    let event = CollectedEvent {
+        source_kind: SOURCE_FUSION,
+        operation_id: &operation_id,
+        event_kind: "response",
+        workspace_id: Some(&scope.workspace_id),
+        workspace_agent_id: Some(call.instance_id),
+        session_id: (call.instance_id == scope.orchestrator_id)
+            .then_some(scope.session_id.as_str()),
+        generation: None,
+        source_session_id: None,
+        source_request_id: Some(&attribution),
+        source_response_id: call.completion.response_id.as_deref(),
+        occurred_at: call.completed_at,
+        provider: call.provider_id,
+        requested_model: Some(call.model),
+        served_model: call.completion.served_model.as_deref(),
+        usage: &call.completion.usage,
+    };
+    if let Err(e) = record_collected_event(db, &event).await {
+        eprintln!("[usage] fusion call {attribution} not recorded: {e}");
     }
 }
 
@@ -278,11 +357,12 @@ async fn run_pipeline(
     db: &SqlitePool,
     app: Option<&AppHandle>,
     caller: &ModelCaller,
-    session_id: &str,
+    scope: &RunScope,
     prompt: &str,
     judge_ref: (Option<String>, String),
     panel: Vec<PanelMember>,
 ) -> Result<FusionRunRow, AppError> {
+    let session_id = scope.session_id.as_str();
     // 5. Create the run + emit the "panel" stage.
     let run = repo::fusion::create_run(db, session_id, prompt).await?;
     let run_id = run.id.clone();
@@ -302,7 +382,7 @@ async fn run_pipeline(
         let res = caller
             .call(m.provider_id.as_deref(), &m.model, prompt)
             .await;
-        (m, res)
+        (m, res, chrono::Utc::now())
     });
     let results = futures_util::future::join_all(calls).await;
 
@@ -312,7 +392,25 @@ async fn run_pipeline(
     // as an orphan with NULL judge/synthesis. The successful answer is still fed
     // to the judge even if its row failed to persist.
     let mut answers: Vec<(String, String)> = Vec::new();
-    for (member, res) in results {
+    for (ordinal, (member, res, completed_at)) in results.into_iter().enumerate() {
+        if let Ok(completion) = &res {
+            record_fusion_call(
+                db,
+                scope,
+                &FusionCall {
+                    run_id: &run_id,
+                    stage: "panel",
+                    ordinal,
+                    instance_id: &member.instance_id,
+                    provider_id: member.provider_id.as_deref(),
+                    model: &member.model,
+                    completion,
+                    completed_at,
+                },
+            )
+            .await;
+        }
+        let res = res.map(|c| c.text);
         let (answer_opt, status): (Option<&str>, &str) = match &res {
             Ok(answer) => (Some(answer.as_str()), "done"),
             // HONEST error row — the real error string, never a fake answer.
@@ -339,11 +437,28 @@ async fn run_pipeline(
 
     // 7. Judge: analyze the successful answers into structured JSON.
     let judge_prompt = build_judge_prompt(prompt, &answers);
-    let analysis = match caller
+    let judge_call = caller
         .call(judge_ref.0.as_deref(), &judge_ref.1, &judge_prompt)
-        .await
-    {
-        Ok(text) => parse_judge_analysis(&text),
+        .await;
+    if let Ok(completion) = &judge_call {
+        record_fusion_call(
+            db,
+            scope,
+            &FusionCall {
+                run_id: &run_id,
+                stage: "judge",
+                ordinal: 0,
+                instance_id: &scope.orchestrator_id,
+                provider_id: judge_ref.0.as_deref(),
+                model: &judge_ref.1,
+                completion,
+                completed_at: chrono::Utc::now(),
+            },
+        )
+        .await;
+    }
+    let analysis = match judge_call {
+        Ok(completion) => parse_judge_analysis(&completion.text),
         // The judge call itself failed — store an HONEST error, keep going.
         Err(err) => json!({ "error": err, "parseError": true }),
     };
@@ -354,11 +469,28 @@ async fn run_pipeline(
 
     // 8. Synthesize: one final answer from the panel + judge analysis.
     let synth_prompt = build_synthesis_prompt(prompt, &answers, &analysis_str);
-    let synthesized = match caller
+    let synth_call = caller
         .call(judge_ref.0.as_deref(), &judge_ref.1, &synth_prompt)
-        .await
-    {
-        Ok(text) => text,
+        .await;
+    if let Ok(completion) = &synth_call {
+        record_fusion_call(
+            db,
+            scope,
+            &FusionCall {
+                run_id: &run_id,
+                stage: "synthesize",
+                ordinal: 0,
+                instance_id: &scope.orchestrator_id,
+                provider_id: judge_ref.0.as_deref(),
+                model: &judge_ref.1,
+                completion,
+                completed_at: chrono::Utc::now(),
+            },
+        )
+        .await;
+    }
+    let synthesized = match synth_call {
+        Ok(completion) => completion.text,
         Err(err) => format!("[synthesis failed: {err}]"),
     };
     repo::fusion::set_synthesized(db, &run_id, &synthesized).await?;
@@ -430,11 +562,16 @@ async fn run_with_state(
     //    pipeline records reality and does not error).
     let panel = derive_panel(db, &req.orchestrator_id, &orchestrator.workspace_id).await?;
 
+    let scope = RunScope {
+        workspace_id: orchestrator.workspace_id.clone(),
+        orchestrator_id: req.orchestrator_id.clone(),
+        session_id: session.id.clone(),
+    };
     let row = run_pipeline(
         db,
         state.app(),
         caller,
-        &session.id,
+        &scope,
         &req.prompt,
         judge_ref,
         panel,
@@ -692,11 +829,16 @@ mod tests {
         );
         let caller = ModelCaller::Mock(map);
 
+        let scope = RunScope {
+            workspace_id: ws.id.clone(),
+            orchestrator_id: orch.clone(),
+            session_id: session.id.clone(),
+        };
         let row = run_pipeline(
             db,
             None,
             &caller,
-            &session.id,
+            &scope,
             "What is best?",
             (None, "judge-model".into()),
             panel,
@@ -770,11 +912,16 @@ mod tests {
         );
         let caller = ModelCaller::Mock(map);
 
+        let scope = RunScope {
+            workspace_id: ws.id.clone(),
+            orchestrator_id: orch.clone(),
+            session_id: session.id.clone(),
+        };
         let row = run_pipeline(
             db,
             None,
             &caller,
-            &session.id,
+            &scope,
             "Anything?",
             (None, "judge-model".into()),
             vec![],
@@ -882,5 +1029,125 @@ mod tests {
             .await
             .expect_err("get must fail for an unknown run");
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    // ── Usage collection ─────────────────────────────────────────────────
+
+    /// One `response` event per COMPLETED provider call — panel members that
+    /// answered, the judge, the synthesis — attributed by run/stage/ordinal
+    /// to the instance that made the call, and never one for the run itself.
+    #[tokio::test]
+    async fn every_completed_fusion_call_is_one_usage_event_and_the_run_is_none() {
+        let state = AppState::for_tests().await;
+        let db = &state.db;
+        let ws = workspace::create(db, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed");
+        // Provider ids on the DEFINITION are FK-checked; the pipeline only
+        // needs them on the call refs, which are plain strings.
+        let orch = instance_in(
+            &state,
+            &ws.id,
+            &chat_input("Orch", None, Some("judge-model")),
+        )
+        .await;
+        let session = session::get_by_instance(db, &orch)
+            .await
+            .unwrap()
+            .expect("session exists");
+        let p1 = instance_in(&state, &ws.id, &chat_input("Panel1", None, Some("m1"))).await;
+        let p2 = instance_in(&state, &ws.id, &chat_input("Panel2", None, Some("m2"))).await;
+        let panel = vec![
+            PanelMember {
+                instance_id: p1.clone(),
+                name: "Panel1".into(),
+                provider_id: Some("openai".into()),
+                model: "m1".into(),
+            },
+            PanelMember {
+                instance_id: p2.clone(),
+                name: "Panel2".into(),
+                provider_id: None,
+                model: "m2".into(),
+            },
+        ];
+        let mut map: HashMap<String, Result<String, String>> = HashMap::new();
+        map.insert("m1".into(), Ok("answer one".into()));
+        map.insert("m2".into(), Err("boom".into())); // failed call: not activity
+        map.insert(
+            "judge-model".into(),
+            Ok(r#"{"consensus":"c","disagreements":[],"insights":[],"blindSpots":[]}"#.into()),
+        );
+        let scope = RunScope {
+            workspace_id: ws.id.clone(),
+            orchestrator_id: orch.clone(),
+            session_id: session.id.clone(),
+        };
+        let row = run_pipeline(
+            db,
+            None,
+            &ModelCaller::Mock(map),
+            &scope,
+            "What is best?",
+            (Some("anthropic".into()), "judge-model".into()),
+            panel,
+        )
+        .await
+        .expect("pipeline");
+
+        #[derive(sqlx::FromRow)]
+        struct Stored {
+            event_key: String,
+            event_kind: String,
+            workspace_id: Option<String>,
+            workspace_agent_id: Option<String>,
+            session_id: Option<String>,
+            source_request_id: Option<String>,
+            provider: Option<String>,
+            requested_model: Option<String>,
+            token_completeness: String,
+        }
+        let events: Vec<Stored> = sqlx::query_as(
+            "SELECT event_key, event_kind, workspace_id, workspace_agent_id, session_id,
+                    source_request_id, provider, requested_model, token_completeness
+               FROM model_usage_event ORDER BY source_request_id",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 3, "panel m1 + judge + synthesize; m2 failed");
+        for e in &events {
+            assert!(e.event_key.starts_with("fusion:v1:"), "{}", e.event_key);
+            assert_eq!(e.event_kind, "response");
+            assert_eq!(e.workspace_id.as_deref(), Some(ws.id.as_str()));
+            assert_eq!(e.token_completeness, "unknown", "mocks report no usage");
+        }
+        let by_stage = |stage: &str| -> &Stored {
+            events
+                .iter()
+                .find(|e| e.source_request_id.as_deref() == Some(&format!("{}:{stage}:0", row.id)))
+                .unwrap_or_else(|| panic!("no {stage} event"))
+        };
+        let panel_event = by_stage("panel");
+        assert_eq!(panel_event.workspace_agent_id.as_deref(), Some(p1.as_str()));
+        assert_eq!(
+            panel_event.session_id, None,
+            "a panelist's own session is not the run's"
+        );
+        assert_eq!(panel_event.provider.as_deref(), Some("openai"));
+        assert_eq!(panel_event.requested_model.as_deref(), Some("m1"));
+        for stage in ["judge", "synthesize"] {
+            let e = by_stage(stage);
+            assert_eq!(e.workspace_agent_id.as_deref(), Some(orch.as_str()));
+            assert_eq!(e.session_id.as_deref(), Some(session.id.as_str()));
+            assert_eq!(e.provider.as_deref(), Some("anthropic"));
+            assert_eq!(e.requested_model.as_deref(), Some("judge-model"));
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.source_request_id.as_deref() == Some(row.id.as_str())),
+            "the run envelope is never an event"
+        );
     }
 }

@@ -25,14 +25,19 @@
 //! handler is bounded SQL over indexed timestamps plus small metadata reads.
 
 use crate::engine::repo::model_usage::{
-    self, GroupColumn, ModelKeyFilter, UsageAggregate, UsageScope, UNSUPPORTED_SOURCE,
+    self, GroupColumn, ModelKeyFilter, NewUsageEvent, ObservedInterval, UsageAggregate, UsageScope,
+    UNSUPPORTED_SOURCE,
 };
-use crate::engine::runtime::usage::{provider_for_cli_kind, COLLECTED_SOURCES};
+use crate::engine::runtime::usage::{
+    collectors_online_since, provider_for_cli_kind, MeasuredUsage, COLLECTED_SOURCES,
+    COLLECTOR_VERSION,
+};
 use crate::engine::{repo, AppError, AppState};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::SqlitePool;
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── Reserved wire identities (preflight correction b1140da9) ─────────────────
@@ -48,6 +53,103 @@ const UNASSIGNED_AGENT_NAME: &str = "Unassigned activity";
 
 /// Displayed name of a model identity the source never proved.
 const UNKNOWN_MODEL_NAME: &str = "Unknown model";
+
+// ── In-process collector write path ──────────────────────────────────────────
+
+/// One completed response or invocation observed by an IN-PROCESS collector
+/// (draft one-shot, direct chat, fusion). The transcript importers have their
+/// own write path with cursors; this one is for calls the process itself made.
+#[derive(Debug, Clone)]
+pub(crate) struct CollectedEvent<'a> {
+    /// One of the `runtime::usage::SOURCE_*` in-process sources.
+    pub source_kind: &'a str,
+    /// Generated BEFORE the request went out; `event_key` is
+    /// `<source>:<version>:<operation id>`, so a replay is a no-op and two
+    /// operations can never share an identity.
+    pub operation_id: &'a str,
+    /// `"response"` for a provider completion, `"invocation"` for a one-shot.
+    pub event_kind: &'a str,
+    pub workspace_id: Option<&'a str>,
+    pub workspace_agent_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    /// Stamped only when an actual launch interval proves it.
+    pub generation: Option<i64>,
+    pub source_session_id: Option<&'a str>,
+    /// Bounded attribution such as `<run id>:<stage>:<ordinal>` for fusion.
+    pub source_request_id: Option<&'a str>,
+    /// The provider's own response id — evidence, not identity.
+    pub source_response_id: Option<&'a str>,
+    pub occurred_at: DateTime<Utc>,
+    pub provider: Option<&'a str>,
+    pub requested_model: Option<&'a str>,
+    pub served_model: Option<&'a str>,
+    pub usage: &'a MeasuredUsage,
+}
+
+/// Persist an in-process collector's event and extend its source's coverage,
+/// in one transaction.
+///
+/// An in-process collector sees every call this process makes, so — once the
+/// collectors are marked online — it may claim `complete`, unrestricted
+/// observation of its own source from the online instant to this completion.
+/// A test state with no online instant claims nothing. Callers treat a failure
+/// here as a logged collection gap, never as a user-facing error: the answer
+/// the model gave is already in hand.
+pub(crate) async fn record_collected_event(
+    db: &SqlitePool,
+    event: &CollectedEvent<'_>,
+) -> Result<(), sqlx::Error> {
+    let recorded_at = Utc::now();
+    let row = NewUsageEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        event_key: format!(
+            "{}:{COLLECTOR_VERSION}:{}",
+            event.source_kind, event.operation_id
+        ),
+        workspace_id: event.workspace_id.map(str::to_owned),
+        workspace_agent_id: event.workspace_agent_id.map(str::to_owned),
+        session_id: event.session_id.map(str::to_owned),
+        generation: event.generation,
+        source_kind: event.source_kind.to_owned(),
+        source_version: COLLECTOR_VERSION.to_owned(),
+        event_kind: event.event_kind.to_owned(),
+        source_session_id: event.source_session_id.map(str::to_owned),
+        source_request_id: event.source_request_id.map(str::to_owned),
+        source_response_id: event.source_response_id.map(str::to_owned),
+        occurred_at: event.occurred_at,
+        recorded_at,
+        provider: event.provider.map(str::to_owned),
+        requested_model: event.requested_model.map(str::to_owned),
+        served_model: event.served_model.map(str::to_owned),
+        input_tokens: event.usage.input_tokens,
+        output_tokens: event.usage.output_tokens,
+        cache_read_input_tokens: event.usage.cache_read_input_tokens,
+        cache_write_input_tokens: event.usage.cache_write_input_tokens,
+        reasoning_output_tokens: event.usage.reasoning_output_tokens,
+        validity: "valid".to_owned(),
+        diagnostic_code: None,
+    };
+    let mut tx = db.begin().await?;
+    model_usage::insert_event(&mut *tx, &row).await?;
+    if let Some(online_since) = collectors_online_since() {
+        model_usage::record_coverage(
+            &mut tx,
+            &ObservedInterval {
+                workspace_id: None,
+                workspace_agent_id: None,
+                source_kind: event.source_kind,
+                start: online_since,
+                end: event.occurred_at.max(online_since),
+                state: "complete",
+                diagnostic_code: None,
+                collector_version: COLLECTOR_VERSION,
+                last_verified_at: recorded_at,
+            },
+        )
+        .await?;
+    }
+    tx.commit().await
+}
 
 // ── Request ──────────────────────────────────────────────────────────────────
 

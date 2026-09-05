@@ -18,13 +18,11 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use super::draft_prompt::build_prompt;
-use crate::engine::repo::model_usage::{self, NewUsageEvent, ObservedInterval};
+use super::usage::{record_collected_event, CollectedEvent};
 use crate::engine::repo::{self, role::RoleRow, skill::SkillRow};
 use crate::engine::runtime::cli_oneshot::{CliKind, Oneshot, OneshotOutcome, OneshotSpec};
 use crate::engine::runtime::launch_common::{agent_env_overrides, effective_claude_model};
-use crate::engine::runtime::usage::{
-    collectors_online_since, provider_for_cli_kind, COLLECTOR_VERSION, SOURCE_DRAFT,
-};
+use crate::engine::runtime::usage::{provider_for_cli_kind, SOURCE_DRAFT};
 use crate::engine::{AppError, AppState};
 
 // ── Catalogue constants ──────────────────────────────────────────────────────
@@ -741,8 +739,8 @@ pub async fn run_with(
     Ok(resp)
 }
 
-/// Persist one successful draft invocation as measured usage, together with
-/// the coverage this collector can honestly claim.
+/// Persist one successful draft invocation as measured usage
+/// ([`record_collected_event`]).
 ///
 /// * `event_key = draft:v1:<invocation id>` — the id was generated before the
 ///   child spawned, so a replay of the same invocation is a no-op and two
@@ -754,10 +752,6 @@ pub async fn run_with(
 ///   selection — not the launch-time effective id, so the event unifies with
 ///   the agent's context gauge under one Selected key. `served_model` is set
 ///   only when the CLI itself named exactly one serving model.
-/// * Coverage: this collector sees every draft the process runs, so it may
-///   claim `complete` observation of the `draft` source from the instant the
-///   collectors came online until this completion, unrestricted in scope. With
-///   no online instant (test state) it claims nothing.
 async fn record_draft_invocation(
     db: &SqlitePool,
     outcome: &OneshotOutcome,
@@ -765,60 +759,31 @@ async fn record_draft_invocation(
     cli_kind: CliKind,
     configured_model: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    let recorded_at = chrono::Utc::now();
     let cli_kind_name = match cli_kind {
         CliKind::ClaudeCode => "claude-code",
         CliKind::Codex => "codex",
     };
-    let event = NewUsageEvent {
-        id: uuid::Uuid::new_v4().to_string(),
-        event_key: format!(
-            "{SOURCE_DRAFT}:{COLLECTOR_VERSION}:{}",
-            outcome.invocation_id
-        ),
-        workspace_id: workspace_id.map(str::to_owned),
-        workspace_agent_id: None,
-        session_id: None,
-        generation: None,
-        source_kind: SOURCE_DRAFT.to_owned(),
-        source_version: COLLECTOR_VERSION.to_owned(),
-        event_kind: "invocation".to_owned(),
-        source_session_id: outcome.source_session_id.clone(),
-        source_request_id: None,
-        source_response_id: None,
-        occurred_at: outcome.completed_at,
-        recorded_at,
-        provider: provider_for_cli_kind(cli_kind_name).map(str::to_owned),
-        requested_model: configured_model.map(str::to_owned),
-        served_model: outcome.served_model.clone(),
-        input_tokens: outcome.usage.input_tokens,
-        output_tokens: outcome.usage.output_tokens,
-        cache_read_input_tokens: outcome.usage.cache_read_input_tokens,
-        cache_write_input_tokens: outcome.usage.cache_write_input_tokens,
-        reasoning_output_tokens: outcome.usage.reasoning_output_tokens,
-        validity: "valid".to_owned(),
-        diagnostic_code: None,
-    };
-    let mut tx = db.begin().await?;
-    model_usage::insert_event(&mut *tx, &event).await?;
-    if let Some(online_since) = collectors_online_since() {
-        model_usage::record_coverage(
-            &mut tx,
-            &ObservedInterval {
-                workspace_id: None,
-                workspace_agent_id: None,
-                source_kind: SOURCE_DRAFT,
-                start: online_since,
-                end: outcome.completed_at.max(online_since),
-                state: "complete",
-                diagnostic_code: None,
-                collector_version: COLLECTOR_VERSION,
-                last_verified_at: recorded_at,
-            },
-        )
-        .await?;
-    }
-    tx.commit().await
+    record_collected_event(
+        db,
+        &CollectedEvent {
+            source_kind: SOURCE_DRAFT,
+            operation_id: &outcome.invocation_id,
+            event_kind: "invocation",
+            workspace_id,
+            workspace_agent_id: None,
+            session_id: None,
+            generation: None,
+            source_session_id: outcome.source_session_id.as_deref(),
+            source_request_id: None,
+            source_response_id: None,
+            occurred_at: outcome.completed_at,
+            provider: provider_for_cli_kind(cli_kind_name),
+            requested_model: configured_model,
+            served_model: outcome.served_model.as_deref(),
+            usage: &outcome.usage,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1738,7 +1703,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         crate::engine::runtime::usage::mark_collectors_online();
-        let online = collectors_online_since().expect("marked");
+        let online = crate::engine::runtime::usage::collectors_online_since().expect("marked");
         let mut outcome = measured_outcome(canned_team());
         outcome.completed_at = online + chrono::Duration::seconds(30);
         run_with(&db, &Oneshot::MockMeasured(Ok(outcome)), req(&def.id, "b"))
@@ -1771,10 +1736,13 @@ pub(crate) mod tests {
         );
         assert_eq!(row.source_kind, SOURCE_DRAFT);
         assert_eq!(row.state, "complete");
-        assert_eq!(row.interval_start, model_usage::canonical_ts(online));
+        assert_eq!(
+            row.interval_start,
+            crate::engine::repo::model_usage::canonical_ts(online)
+        );
         assert_eq!(
             row.interval_end,
-            model_usage::canonical_ts(online + chrono::Duration::seconds(30))
+            crate::engine::repo::model_usage::canonical_ts(online + chrono::Duration::seconds(30))
         );
     }
 }
