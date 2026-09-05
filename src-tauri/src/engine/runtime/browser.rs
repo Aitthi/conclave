@@ -19,13 +19,27 @@
 //! exception is swallowed on some platforms — so every injected script is an
 //! IIFE wrapped in `try/catch` that RETURNS `{ __error: string }` rather than
 //! throwing. A page tool that sees `__error` maps it to [`BrowserError::Page`].
+//!
+//! # The first-commit rule (load-bearing)
+//!
+//! `wry` queues a script and SILENTLY DROPS its callback while the webview has
+//! not committed a navigation yet (`wkwebview/mod.rs:721-723`, replayed later
+//! with no completion handler by `navigation.rs:29-35`), and `tauri-runtime-wry`
+//! reports none of that back — `eval_with_callback` still returns `Ok(())`
+//! (`lib.rs:3745-3751`, `3788-3791`). The oneshot sender then dies unheard and
+//! the caller sees a bare channel error. So every eval-backed page tool goes
+//! through [`require_ready_webview`], which waits for the tab's FIRST
+//! `PageLoadEvent::Started` (= `didCommitNavigation`, the exact moment wry
+//! drains its queue) before dispatching anything.
 
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder, WebviewUrl,
+    webview::PageLoadEvent, AppHandle, LogicalPosition, LogicalSize, Manager, Url, Webview,
+    WebviewBuilder, WebviewUrl,
 };
 use tokio::sync::oneshot;
 
@@ -41,6 +55,31 @@ const BROWSER_LABEL: &str = "agent-browser";
 /// hang or block automation; we never wait forever — [`BrowserError::Timeout`]
 /// surfaces a clear failure instead.
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often [`await_first_commit`] re-checks the commit flag. Short: the gate
+/// is on the hot path of every page tool, and a local page commits in a few ms.
+const COMMIT_POLL: Duration = Duration::from_millis(50);
+
+/// What an agent is told when a tab burns the whole [`EVAL_TIMEOUT`] without
+/// ever committing a navigation — almost always an unreachable target (a dev
+/// server that is down), which used to surface as an internal channel error.
+const NOT_COMMITTED_MSG: &str = "page has not committed a navigation yet (target unreachable?) — check `conclave browser status`";
+
+/// Internal marker for the ONE retryable round-trip failure: the upstream
+/// callback was dropped instead of called. Never reaches an agent —
+/// [`eval_value`] retries once and then replaces it with
+/// [`DROPPED_CALLBACK_MSG`].
+const DROPPED_CALLBACK_MARKER: &str = "eval callback was dropped";
+
+/// What an agent is told when the callback is dropped TWICE, i.e. the
+/// first-commit gate was satisfied and the drop came from the dispatch layer
+/// anyway (a stale window/webview id: `tauri-runtime-wry` `lib.rs:3745-3751`
+/// drops the message and its boxed callback with no log and no error).
+const DROPPED_CALLBACK_MSG: &str = "the webview dropped the eval callback twice — this tab's native view is stale or was replaced; re-open it with `browser open <url>`";
+
+/// Pause before the single [`eval_value`] retry. Long enough for the event loop
+/// to drain whatever raced us, short enough to stay invisible.
+const EVAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// How long `click`/`type` wait for their selector to appear before giving up,
 /// and how often they re-check. An SPA that has not mounted the node yet used to
@@ -324,6 +363,33 @@ where
     }
 }
 
+/// Wait until `committed()` reports the tab's first navigation commit, or spend
+/// `budget` trying. Split out as a generic so the gate is unit-testable without
+/// a WebView (the same shape as [`wait_for_selector`]).
+///
+/// The budget is [`EVAL_TIMEOUT`] at every call site: a page tool that cannot
+/// dispatch is already a 10-second failure, and reusing the constant keeps ONE
+/// number describing "how long a page tool may take to get nowhere".
+async fn await_first_commit<F>(
+    budget: Duration,
+    poll: Duration,
+    committed: F,
+) -> Result<(), BrowserError>
+where
+    F: Fn() -> bool,
+{
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if committed() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(BrowserError::Webview(NOT_COMMITTED_MSG.to_owned()));
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 /// Embed an arbitrary Rust string as a safe JS string literal. `serde_json`
 /// emits a valid double-quoted JS string (escaping quotes, backslashes,
 /// newlines, control chars), which is exactly a JSON-string-is-a-JS-string
@@ -578,6 +644,45 @@ fn with_registry<R>(f: impl FnOnce(&mut TabRegistry) -> R) -> R {
     f(&mut guard)
 }
 
+/// Tab ids whose native webview has committed at least one navigation. Kept
+/// beside — not inside — [`TabRegistry`]: the registry is the tab CONTRACT the
+/// frontend and CLI see, while this is a native-lifecycle detail of the webview
+/// pool. Membership is permanent for the life of a webview (wry's
+/// `pending_scripts` is drained exactly once and never refilled), so
+/// [`close_tab`] must forget the id — a reopened tab gets a NEW webview whose
+/// queue starts full again.
+fn committed_tabs() -> &'static Mutex<HashSet<String>> {
+    static COMMITTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    COMMITTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn with_committed<R>(f: impl FnOnce(&mut HashSet<String>) -> R) -> R {
+    let mut guard = committed_tabs().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+/// Record that `tab_id`'s webview committed a navigation. Idempotent: fired on
+/// EVERY commit, and only the first one changes anything.
+fn mark_committed(tab_id: &str) {
+    with_committed(|c| {
+        c.insert(tab_id.to_owned());
+    });
+}
+
+/// Whether `tab_id`'s webview has ever committed — i.e. whether wry will hand a
+/// callback to an eval instead of queueing the script and dropping it.
+fn has_committed(tab_id: &str) -> bool {
+    with_committed(|c| c.contains(tab_id))
+}
+
+/// Drop `tab_id`'s commit flag. Called when the native webview is destroyed, so
+/// the next webview under the same id is gated again from scratch.
+fn forget_committed(tab_id: &str) {
+    with_committed(|c| {
+        c.remove(tab_id);
+    });
+}
+
 /// Native webview label for a tab: `agent-browser:<tabId>`. Tauri v2 permits
 /// `-`, `:` and `_` in labels; every `tabId` is either an agent UUID or
 /// `human-<seq>`, both already label-safe, so no sanitization is needed.
@@ -593,6 +698,19 @@ fn webview_for(app: &AppHandle, tab_id: &str) -> Option<Webview> {
 
 fn require_webview_for(app: &AppHandle, tab_id: &str) -> Result<Webview, BrowserError> {
     webview_for(app, tab_id).ok_or(BrowserError::NotOpen)
+}
+
+/// The webview for `tab_id`, but only once it can actually run an eval: see the
+/// first-commit rule in the module docs. EVERY eval-backed page tool resolves
+/// its view through here — gating one entry point would just move the bug.
+///
+/// `screenshot` deliberately does NOT: it captures through WKWebView's native
+/// `takeSnapshot`, never through `eval_with_callback`, so it is not in this
+/// defect's class (it would only ever capture a blank frame, not hang).
+async fn require_ready_webview(app: &AppHandle, tab_id: &str) -> Result<Webview, BrowserError> {
+    let view = require_webview_for(app, tab_id)?;
+    await_first_commit(EVAL_TIMEOUT, COMMIT_POLL, || has_committed(tab_id)).await?;
+    Ok(view)
 }
 
 // ── Registry-only operations (no native webview) ─────────────────────────────
@@ -698,9 +816,21 @@ pub fn navigate(
             // the active tab, only while the overlay is on screen).
             let placement = with_registry(|r| r.placement_for_create(tab_id, bounds));
             let (position, size) = resolve_bounds(placement.bounds);
+            // The ONE place the first-commit flag is armed. `PageLoadEvent::Started`
+            // IS `didCommitNavigation`, and wry drains `pending_scripts` in that same
+            // delegate call — so a page tool that waits for this flag can never land
+            // in the queue-and-drop-the-callback window. The handler is attached at
+            // BUILD time and survives every later `view.navigate(…)` on this tab.
+            let committed_id = tab_id.to_string();
             let view = window
                 .add_child(
-                    WebviewBuilder::new(label_for(tab_id), WebviewUrl::External(target)),
+                    WebviewBuilder::new(label_for(tab_id), WebviewUrl::External(target))
+                        .on_page_load(move |_view, payload| {
+                            if matches!(payload.event(), PageLoadEvent::Started) {
+                                mark_committed(&committed_id);
+                                with_registry(|r| r.set_loaded(&committed_id, None));
+                            }
+                        }),
                     position,
                     size,
                 )
@@ -717,10 +847,12 @@ pub fn navigate(
             };
         }
     }
-    // v1 has no native load-complete signal, so clear `loading` once the
-    // navigation is dispatched rather than leave a perpetual spinner in the
-    // rail. The `loading` field stays in the contract for a future load hook.
-    with_registry(|r| r.set_loaded(tab_id, None));
+    // `loading` is NOT cleared here. `upsert` above set it, and only the
+    // `on_page_load` handler clears it — at the real commit. Clearing it at
+    // dispatch time (the old behaviour) made `loading:false` in the `open` reply
+    // mean nothing, which is what let agents fire `snapshot` into the drop
+    // window. A target that never commits now stays `loading:true`, which is the
+    // truth and is exactly what `browser status` should show.
     Ok(state())
 }
 
@@ -870,6 +1002,10 @@ pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserE
         view.close()
             .map_err(|e| BrowserError::Webview(e.to_string()))?;
     }
+    // The native view is destroyed; a tab reopened under this id gets a FRESH
+    // webview whose script queue starts full again. Keeping the flag would let
+    // the next `snapshot` skip the gate and land straight back in the bug.
+    forget_committed(tab_id);
     let promoted = with_registry(|r| {
         r.close(tab_id);
         r.active_placement()
@@ -902,10 +1038,51 @@ pub fn close_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, BrowserE
 
 // ── Tauri-backed page tools (per-tab) ────────────────────────────────────────
 
+/// Whether a failure is the upstream callback drop — the ONE retryable round-trip
+/// failure. Matched on [`DROPPED_CALLBACK_MARKER`] because the drop reaches us as
+/// an absence (a closed oneshot), not as a typed error: `eval_with_callback`
+/// already returned `Ok(())` before the message was thrown away.
+fn is_dropped_callback(e: &BrowserError) -> bool {
+    matches!(e, BrowserError::Webview(m) if m == DROPPED_CALLBACK_MARKER)
+}
+
+/// Run `attempt`, and on a dropped callback run it exactly ONCE more after
+/// `delay`. A second drop is not a transient race, so it fails with
+/// [`DROPPED_CALLBACK_MSG`] — a cause and a remedy — instead of the internal
+/// marker, which read to agents as an engine bug. Generic so the retry policy is
+/// unit-testable without a WebView.
+async fn retry_once_on_dropped_callback<F, Fut>(
+    delay: Duration,
+    mut attempt: F,
+) -> Result<serde_json::Value, BrowserError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, BrowserError>>,
+{
+    let first = attempt().await;
+    if !first.as_ref().err().is_some_and(is_dropped_callback) {
+        return first;
+    }
+    tokio::time::sleep(delay).await;
+    let second = attempt().await;
+    if second.as_ref().err().is_some_and(is_dropped_callback) {
+        return Err(BrowserError::Webview(DROPPED_CALLBACK_MSG.to_owned()));
+    }
+    second
+}
+
+/// One `eval_with_callback` round trip, retried once if the callback is dropped.
+/// Callers reach this only through [`require_ready_webview`], so the first-commit
+/// window is already closed and a drop here means the dispatch layer lost the
+/// message (a stale webview id).
+async fn eval_value(view: &Webview, js: String) -> Result<serde_json::Value, BrowserError> {
+    retry_once_on_dropped_callback(EVAL_RETRY_DELAY, || eval_once(view, js.clone())).await
+}
+
 /// Run one `eval_with_callback` round trip and parse its JSON result. Bridges
 /// the `Fn(String)` callback to async via a oneshot; the `Mutex<Option<_>>`
 /// lets the (multiply-callable, `'static`) callback consume the sender once.
-async fn eval_value(view: &Webview, js: String) -> Result<serde_json::Value, BrowserError> {
+async fn eval_once(view: &Webview, js: String) -> Result<serde_json::Value, BrowserError> {
     let (tx, rx) = oneshot::channel::<String>();
     let slot = Mutex::new(Some(tx));
     view.eval_with_callback(js, move |result: String| {
@@ -920,7 +1097,7 @@ async fn eval_value(view: &Webview, js: String) -> Result<serde_json::Value, Bro
     let raw = tokio::time::timeout(EVAL_TIMEOUT, rx)
         .await
         .map_err(|_| BrowserError::Timeout)?
-        .map_err(|_| BrowserError::Webview("eval callback was dropped".into()))?;
+        .map_err(|_| BrowserError::Webview(DROPPED_CALLBACK_MARKER.to_owned()))?;
 
     // Defense in depth: an empty callback payload means the injected script
     // itself failed to run (e.g. a wrapper-level parse error) — say so instead
@@ -982,7 +1159,7 @@ const PING_READ_JS: &str = r#"(function () {
 /// Probe tab `tab_id`: is the document loaded, and are animation frames actually
 /// running? Two evals [`PING_WINDOW`] apart — arm a counter, wait, read it back.
 pub async fn ping(app: &AppHandle, tab_id: &str) -> Result<BrowserPing, BrowserError> {
-    let view = require_webview_for(app, tab_id)?;
+    let view = require_ready_webview(app, tab_id).await?;
     let armed = eval_value(&view, PING_ARM_JS.to_string()).await?;
     reject_page_error(&armed)?;
     tokio::time::sleep(PING_WINDOW).await;
@@ -998,7 +1175,7 @@ pub async fn snapshot(
     tab_id: &str,
     max_text: Option<i64>,
 ) -> Result<BrowserSnapshot, BrowserError> {
-    let view = require_webview_for(app, tab_id)?;
+    let view = require_ready_webview(app, tab_id).await?;
     let value = eval_value(&view, snapshot_js(clamp_max_text(max_text))).await?;
     reject_page_error(&value)?;
     serde_json::from_value(value)
@@ -1013,7 +1190,7 @@ pub async fn click(
     selector: &str,
     timeout_ms: Option<u64>,
 ) -> Result<BrowserActionResult, BrowserError> {
-    let view = require_webview_for(app, tab_id)?;
+    let view = require_ready_webview(app, tab_id).await?;
     let js = click_js(selector);
     let value = wait_for_selector(resolve_selector_timeout(timeout_ms), selector, || {
         eval_value(&view, js.clone())
@@ -1033,7 +1210,7 @@ pub async fn type_text(
     text: &str,
     timeout_ms: Option<u64>,
 ) -> Result<BrowserActionResult, BrowserError> {
-    let view = require_webview_for(app, tab_id)?;
+    let view = require_ready_webview(app, tab_id).await?;
     let js = type_js(selector, text);
     let value = wait_for_selector(resolve_selector_timeout(timeout_ms), selector, || {
         eval_value(&view, js.clone())
@@ -1052,7 +1229,7 @@ pub async fn eval_json(
     tab_id: &str,
     js: &str,
 ) -> Result<serde_json::Value, BrowserError> {
-    let view = require_webview_for(app, tab_id)?;
+    let view = require_ready_webview(app, tab_id).await?;
     let value = eval_value(&view, eval_js(js)).await?;
     reject_page_error(&value)?;
     Ok(value)
@@ -1554,6 +1731,169 @@ mod tests {
         .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(out["message"], SELECTOR_MISS);
+    }
+
+    // ── D1/D2/D3: the first-commit gate and the dropped-callback retry ──────
+
+    /// D2: a tab that commits mid-wait proceeds — the whole point of the gate is
+    /// to turn the old instant failure into a short wait that then works.
+    #[tokio::test]
+    async fn await_first_commit_proceeds_once_the_tab_commits() {
+        let polls = std::cell::Cell::new(0u32);
+        await_first_commit(
+            Duration::from_millis(2_000),
+            Duration::from_millis(10),
+            || {
+                polls.set(polls.get() + 1);
+                polls.get() >= 3
+            },
+        )
+        .await
+        .expect("a tab that commits must be allowed through");
+        assert_eq!(polls.get(), 3, "it must re-check, not answer once");
+    }
+
+    /// D2: an already-committed tab pays nothing — the gate sits on the hot path
+    /// of every page tool, so the common case must not sleep even once.
+    #[tokio::test]
+    async fn await_first_commit_is_free_when_already_committed() {
+        let polls = std::cell::Cell::new(0u32);
+        let started = std::time::Instant::now();
+        await_first_commit(
+            Duration::from_millis(2_000),
+            Duration::from_millis(500),
+            || {
+                polls.set(polls.get() + 1);
+                true
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(polls.get(), 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "an already-committed tab must not sleep, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// D2: a target that never commits (dev server down) is the case that used to
+    /// surface as a bare internal channel error. It must name the cause AND the
+    /// remedy, and it must be bounded.
+    #[tokio::test]
+    async fn await_first_commit_times_out_with_the_unreachable_message() {
+        let err = await_first_commit(
+            Duration::from_millis(150),
+            Duration::from_millis(10),
+            || false,
+        )
+        .await
+        .expect_err("a tab that never commits must fail");
+        match err {
+            BrowserError::Webview(m) => {
+                assert_eq!(m, NOT_COMMITTED_MSG);
+                assert!(m.contains("browser status"), "must name the remedy: {m}");
+                assert!(
+                    !m.contains(DROPPED_CALLBACK_MARKER),
+                    "must not leak the internal channel wording: {m}"
+                );
+            }
+            other => panic!("expected a Webview error, got {other:?}"),
+        }
+    }
+
+    /// D1: the flag is per tab, idempotent, and dropped when the webview is —
+    /// a reopened tab gets a fresh queue and must be gated again.
+    #[test]
+    fn commit_flag_is_idempotent_and_forgotten_on_close() {
+        let tab = "t-commit-flag-lifecycle";
+        assert!(!has_committed(tab), "unknown tabs start ungated-through");
+        mark_committed(tab);
+        mark_committed(tab);
+        assert!(has_committed(tab));
+        forget_committed(tab);
+        assert!(
+            !has_committed(tab),
+            "closing the webview must re-arm the gate for the next one"
+        );
+    }
+
+    /// D3: a single dropped callback is a race, not a verdict — retry once and
+    /// return the real answer.
+    #[tokio::test]
+    async fn retry_once_on_dropped_callback_recovers_from_one_drop() {
+        let calls = std::cell::Cell::new(0u32);
+        let out = retry_once_on_dropped_callback(Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            let n = calls.get();
+            async move {
+                if n == 1 {
+                    Err(BrowserError::Webview(DROPPED_CALLBACK_MARKER.to_owned()))
+                } else {
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+            }
+        })
+        .await
+        .expect("the retry must be allowed to succeed");
+        assert_eq!(out["ok"], true);
+        assert_eq!(calls.get(), 2);
+    }
+
+    /// D3: two drops mean the dispatch layer lost the message (a stale webview
+    /// id). The agent gets a cause and a remedy, never the internal marker.
+    #[tokio::test]
+    async fn retry_once_on_dropped_callback_replaces_a_second_drop_with_a_remedy() {
+        let calls = std::cell::Cell::new(0u32);
+        let err = retry_once_on_dropped_callback(Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            async move { Err(BrowserError::Webview(DROPPED_CALLBACK_MARKER.to_owned())) }
+        })
+        .await
+        .expect_err("two drops must fail");
+        assert_eq!(calls.get(), 2, "exactly one retry, not a loop");
+        match err {
+            BrowserError::Webview(m) => {
+                assert_eq!(m, DROPPED_CALLBACK_MSG);
+                assert!(m.contains("browser open"), "must name the remedy: {m}");
+                assert_ne!(m, DROPPED_CALLBACK_MARKER);
+            }
+            other => panic!("expected a Webview error, got {other:?}"),
+        }
+    }
+
+    /// D3: only the drop is retryable. A real in-page failure must come straight
+    /// back — retrying it would double every genuine error's latency.
+    #[tokio::test]
+    async fn retry_once_on_dropped_callback_does_not_retry_real_failures() {
+        let calls = std::cell::Cell::new(0u32);
+        let err = retry_once_on_dropped_callback(Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            async move { Err(BrowserError::Page("boom".to_owned())) }
+        })
+        .await
+        .expect_err("a page error stays an error");
+        assert_eq!(calls.get(), 1, "a real failure must not be retried");
+        assert!(matches!(err, BrowserError::Page(m) if m == "boom"));
+    }
+
+    /// D3: the retry predicate keys on the exact marker — a Webview error that
+    /// merely mentions the webview must not be retried.
+    #[test]
+    fn is_dropped_callback_only_matches_the_marker() {
+        assert!(is_dropped_callback(&BrowserError::Webview(
+            DROPPED_CALLBACK_MARKER.to_owned()
+        )));
+        assert!(!is_dropped_callback(&BrowserError::Webview(
+            "some other webview failure".to_owned()
+        )));
+        assert!(!is_dropped_callback(&BrowserError::Webview(
+            NOT_COMMITTED_MSG.to_owned()
+        )));
+        assert!(!is_dropped_callback(&BrowserError::Timeout));
+        assert!(!is_dropped_callback(&BrowserError::Page(
+            DROPPED_CALLBACK_MARKER.to_owned()
+        )));
     }
 
     #[test]
