@@ -88,13 +88,47 @@ export function Terminal({ sessionId }: TerminalProps) {
   // means "queue, do not write yet" (see the first-sizing block in the effect);
   // null means the grid is sized and writes go straight through.
   const pendingRef = useRef<string[] | null>(null);
+  // Tail of the stdin chain — see `sendStdin`.
+  const stdinChainRef = useRef<Promise<void>>(Promise.resolve());
+
+  /**
+   * Write to the session's PTY stdin, preserving EMISSION ORDER.
+   *
+   * `ipc.message.send` is a Tauri invoke that resolves a session from the DB
+   * and runs two eligibility checks before it ever reaches `send_stdin`, so two
+   * sends fired back-to-back can reach the PTY in either order. That is not
+   * merely a typing-order nicety: xterm answers a terminal query burst — the
+   * XTVERSION report and the DA1 barrier that follows it — from ONE parse pass,
+   * as two `onData` calls in the same tick. If the DA1 reply overtakes the
+   * XTVERSION reply, Claude Code concludes there was no XTVERSION reply at all,
+   * skips its DECRQM(2026) check and runs the WHOLE session without
+   * synchronized output, so every multi-chunk frame can be shown mid-patch
+   * (audit §3 H3, rows 12-13).
+   *
+   * Chaining every write through one promise is VS Code's shape: `_handleOnData`
+   * awaits `_processManager.write` (vscode:…/browser/terminalInstance.ts:676-679
+   * → terminalProcessManager.ts:651-665), one ordered channel for keystrokes,
+   * replies and pasted text alike. The chain never rejects — a failed send is
+   * swallowed, exactly as before, so one dead invoke cannot wedge the rest.
+   */
+  const sendStdin = (text: string) => {
+    stdinChainRef.current = stdinChainRef.current
+      .then(() => ipc.message.send({ sessionId, text }))
+      .then(
+        () => {},
+        () => {
+          // Session not running / backend gone — the output stream will surface
+          // the state; dropping the write is the right behavior. Swallowed here
+          // so the next link still runs.
+        },
+      );
+  };
 
   // Drag a file onto the terminal → type its shell-quoted path into the PTY at
   // the cursor (no submit), exactly like dropping a file into a real terminal.
   // Written straight to stdin via message.send; the running TUI echoes it.
   const { ref: dropRef, isOver } = useFileDrop<HTMLDivElement>((paths) => {
-    const insert = paths.map(shellQuotePath).join(" ") + " ";
-    void ipc.message.send({ sessionId, text: insert }).catch(() => {});
+    sendStdin(paths.map(shellQuotePath).join(" ") + " ");
   });
 
   useEffect(() => {
@@ -335,14 +369,13 @@ export function Terminal({ sessionId }: TerminalProps) {
         });
       }, 60);
     };
-    // Forward every keystroke (raw, including control sequences) to the PTY
-    // stdin. `sessionId` is stable for this mount (the component is keyed by it),
-    // so capturing it here is safe.
+    // Forward every keystroke (raw, including control sequences) AND every
+    // terminal-query reply xterm generates to the PTY stdin, through the single
+    // ordered channel (`sendStdin`) — the replies xterm emits in one parse pass
+    // must reach the child in the order it emitted them. `sessionId` is stable
+    // for this mount (the component is keyed by it), so capturing it is safe.
     const dataSub = term.onData((data) => {
-      void ipc.message.send({ sessionId, text: data }).catch(() => {
-        // Session not running / backend gone — the output stream will surface
-        // the state; dropping the keystroke is the right behavior.
-      });
+      sendStdin(data);
     });
 
     // Mouse-wheel scrolling for full-screen TUIs. The "alternate" screen buffer
@@ -358,7 +391,7 @@ export function Terminal({ sessionId }: TerminalProps) {
       if (term.modes.mouseTrackingMode !== "none") return;
       e.preventDefault();
       const seq = e.deltaY < 0 ? "\x1b[A" : "\x1b[B"; // arrow up / down
-      void ipc.message.send({ sessionId, text: seq.repeat(3) }).catch(() => {});
+      sendStdin(seq.repeat(3));
     };
     el.addEventListener("wheel", wheelHandler, { passive: false });
 
