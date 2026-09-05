@@ -1,0 +1,13 @@
+# Review minimal truthful usage measurement contract
+owner: 2004f459-52ad-445c-9c70-e605a0ffdfe3 · authority: in-loop
+Reviewer: Armin (be81029a-bde1-4d64-ad03-d3079cb19603); Aoki rules.
+Read docs/research/2026-09-05-workspace-overview-archive.md (Usage sections), src-tauri/src/engine/runtime/transcript_context.rs and provider.rs with bounded symbol reads. User asks model/token usage plus GitHub-style activity heatmap across models/agents/workspaces; current gauges cannot become history.
+
+Question for review: smallest durable event model that truthfully satisfies user, avoiding an unnecessary billing/fallback analytics platform. Research proposed logical-turn + per-attempt tables. Aoki proposes one deduplicated model_usage_event per completed response or stable reported usage record, with identity/source/time/workspace/agent/requested+served model and nullable normalized input/output/cache tokens. Heatmap labelled Model activity (explicit measured event definition), not human turns or bills. A second table is warranted only if a supported actual runtime path supplies multi-attempt data that cannot be safely represented by multiple response events.
+
+Evaluate exact Claude/Codex event identities, latest-vs-total usage semantics, replay/stream duplicate handling, model identity, source generation, bounded incremental scanning, direct chat/draft/fusion coverage hooks, and reasonable archive interaction. No raw user prompt/output dumps; source shape/keys/counts only if inspecting local transcript evidence. No inferred pricing. Need honest unknown-vs-zero/history-start behavior and a crisp minimal contract proposal with risks. Date buckets default 90d calendar, local IANA date boundaries, measured input+output totals vs separate context gauge. Explicitly critique any claim that cannot be implemented from observed event semantics.
+
+Output docs/research/2026-09-05-usage-contract-review.md; main scoped doc commit. No code implementation. Record CONTRACT REVIEW READY with decisions evidence and any concrete blocker. This review runs alongside independent archive backend planning; do not wait on designers or ask human. Max scope is this contract, not full codebase architecture.
+
+## Accepted review ruling
+Armin's coverage challenge d325d8c2 is accepted (ruling 91568c7e). Canonical decisions now live in docs/plans/2026-09-05-usage-overview-contract.md: one event relation PLUS durable coverage intervals/gaps, no attempt relation. Source identity/terminal validation is required before enabling a collector. The existing Codex gauge stays context-only; usage-transcript-evidence tests the richer real source format before a final source ruling. This is a guard against mistaking lack of observation for measured zero.
