@@ -11,24 +11,81 @@ const SENTINEL = 'body[data-conclave-ready="1"]';
 
 // --- arg parsing (no deps) ---
 const args = process.argv.slice(2);
-const view = args.find((a) => !a.startsWith("--"));
+const valueOptions = new Set(["scenario", "out", "viewport", "theme", "timezone"]);
+const options = new Map();
+let view;
+let full = false;
+for (let index = 0; index < args.length; index += 1) {
+  const arg = args[index];
+  if (arg === "--") continue;
+  if (arg === "--full") {
+    full = true;
+    continue;
+  }
+  if (arg.startsWith("--")) {
+    const name = arg.slice(2);
+    if (!valueOptions.has(name)) {
+      console.error(`[uishot] unknown option ${arg}`);
+      process.exit(2);
+    }
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) {
+      console.error(`[uishot] ${arg} requires a value`);
+      process.exit(2);
+    }
+    options.set(name, value);
+    index += 1;
+    continue;
+  }
+  if (view) {
+    console.error(`[uishot] unexpected argument ${arg}`);
+    process.exit(2);
+  }
+  view = arg;
+}
 if (!view) {
   console.error(
-    "usage: pnpm uishot <viewId> [--scenario default|empty] [--full] [--out <path>] [--viewport WxH]",
+    "usage: pnpm uishot <viewId> [--scenario <name>] [--theme light|dark] [--timezone <IANA>] [--full] [--out <path>] [--viewport WxH]",
   );
   console.error(
-    "  viewIds: home laneboard memory artifacts blackboard chat library builder builder-edit browser settings",
+    "  viewIds: overview workspaces archived workspace-settings home laneboard memory artifacts blackboard chat library builder builder-edit browser settings",
   );
   process.exit(2);
 }
-const opt = (name, dflt) => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : dflt;
-};
-const scenario = opt("scenario", "default");
-const full = args.includes("--full");
-const [vw, vh] = opt("viewport", "1440x900").split("x").map(Number);
-const out = opt("out", path.join(".shots", `${view}-${scenario}.png`));
+const validViews = new Set([
+  "overview", "workspaces", "archived", "workspace-settings", "home", "laneboard",
+  "memory", "artifacts", "blackboard", "chat", "library", "builder", "builder-edit",
+  "browser", "settings",
+]);
+if (!validViews.has(view)) {
+  console.error(`[uishot] unknown view ${view}`);
+  process.exit(2);
+}
+const scenario = options.get("scenario") ?? "default";
+const theme = options.get("theme");
+if (theme && theme !== "light" && theme !== "dark") {
+  console.error(`[uishot] --theme must be light or dark`);
+  process.exit(2);
+}
+const timeZone = options.get("timezone") ?? "Asia/Bangkok";
+const viewport = options.get("viewport") ?? "1440x900";
+if (!/^\d+x\d+$/.test(viewport)) {
+  console.error(`[uishot] --viewport must look like 1440x900`);
+  process.exit(2);
+}
+const [vw, vh] = viewport.split("x").map(Number);
+if (vw <= 0 || vh <= 0) {
+  console.error(`[uishot] viewport dimensions must be positive`);
+  process.exit(2);
+}
+const themeSuffix = theme ? `-${theme}` : "";
+const out = options.get("out") ?? path.join(".shots", `${view}-${scenario}${themeSuffix}.png`);
+
+const expectedState = view === "overview"
+  ? scenario === "usage-loading" ? "loading" : scenario === "usage-error" ? "error" : "ready"
+  : view === "workspaces" || view === "archived" || view === "workspace-settings"
+    ? scenario === "workspace-loading" ? "loading" : scenario === "workspace-error" ? "error" : "ready"
+    : null;
 
 // Common install locations for a Chromium-family browser, per platform.
 // Verbatim port of arta's vite/headless-snapshot.ts findChrome table.
@@ -123,6 +180,18 @@ let failed = false;
 try {
   const page = await browser.newPage();
   await page.setViewport({ width: vw, height: vh, deviceScaleFactor: 2 });
+  try {
+    await page.emulateTimezone(timeZone);
+  } catch (error) {
+    console.error(`[uishot] invalid or unsupported timezone ${timeZone}: ${error.message}`);
+    process.exitCode = 2;
+    failed = true;
+  }
+  if (theme) {
+    await page.evaluateOnNewDocument((nextTheme) => {
+      localStorage.setItem("conclave.theme", nextTheme);
+    }, theme);
+  }
   // A component that CATCHES a fixture throw and only console.error's it used
   // to pass green — collect error-type messages and any `[fixture]` hit (not
   // warn or lower) so the run can fail AFTER the shot is written.
@@ -140,13 +209,44 @@ try {
   });
   const url = `${BASE}/?fixture=${encodeURIComponent(scenario)}#view=${encodeURIComponent(view)}`;
   await page.goto(url, { waitUntil: "load", timeout: 20000 });
+  const escapedView = view.replaceAll('"', '\\"');
+  const exactSentinel = `${SENTINEL}[data-conclave-view="${escapedView}"]${
+    expectedState ? `[data-conclave-state="${expectedState}"]` : ""
+  }`;
   const ready = await page
-    .waitForSelector(SENTINEL, { timeout: 20000 })
+    .waitForSelector(exactSentinel, { timeout: 20000 })
     .then(() => true)
     .catch(() => false);
   if (!ready) {
     failed = true;
-    console.log("[uishot] readiness sentinel never appeared (page crashed or fixture handler missing?)");
+    console.log(`[uishot] readiness sentinel never appeared: ${exactSentinel}`);
+  }
+  if (view === "workspace-settings") {
+    await page.waitForSelector('dialog.workspace-dialog[open]', { timeout: 5000 }).catch(() => {
+      failed = true;
+      console.log("[uishot] workspace settings dialog did not open");
+    });
+    if (
+      scenario === "workspace-archive-error"
+      || scenario === "workspace-archive-pending"
+      || scenario === "workspace-busy"
+    ) {
+      await page.click('dialog.workspace-dialog [data-workspace-action="archive"]');
+      const actionState = scenario === "workspace-archive-pending" ? "archive" : "error";
+      await page.waitForSelector(`dialog.workspace-dialog[data-workspace-settings-state="${actionState}"]`, {
+        timeout: 5000,
+      });
+    }
+  }
+  if (
+    view === "archived"
+    && (scenario === "workspace-restore-error" || scenario === "workspace-restore-pending")
+  ) {
+    await page.click('[data-workspace-action="restore"]');
+    const restoreSelector = scenario === "workspace-restore-pending"
+      ? '[data-workspace-action="restore"]:disabled'
+      : '.workspace-manager-row-alert[role="alert"]';
+    await page.waitForSelector(restoreSelector, { timeout: 5000 });
   }
   await new Promise((r) => setTimeout(r, 300)); // settle for image paints
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -157,7 +257,9 @@ try {
   // A shot is still written on failure when possible — a broken screenshot is
   // evidence, the exit code carries the verdict.
   fs.writeFileSync(out, await page.screenshot({ type: "png", fullPage: full }));
-  console.log(`[uishot] wrote ${out} (${vw}x${vh}@2x, scenario=${scenario})`);
+  console.log(
+    `[uishot] wrote ${out} (${vw}x${vh}@2x, scenario=${scenario}, theme=${theme ?? "system"}, timezone=${timeZone})`,
+  );
   if (consoleFails.length > 0) {
     failed = true;
     for (const line of consoleFails) console.log(`[uishot] console-fail: ${line}`);

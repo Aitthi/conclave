@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { EVENT_NAMES, ipc } from "../ipc";
 import { useEvent, type WorkspaceChangedEvent } from "../ipc/events";
 import { setThemePref } from "../lib/theme";
@@ -18,6 +18,11 @@ import { ChatHub } from "./ChatHub";
 import { MemoryGraph } from "./MemoryGraph";
 import { LaneBoard } from "./LaneBoard";
 import { InAppBrowserView } from "./InAppBrowserView";
+import { UsageOverview } from "./UsageOverview";
+import { WorkspaceManager } from "./WorkspaceManager";
+
+type GlobalDestination = "overview" | "workspaces";
+type WorkspaceNotice = { kind: "archived" | "restored"; workspace: Workspace };
 
 /** Synchronous fixture-mode check (mirrors src/fixtures/mode.ts) — kept inline
  *  so prod builds never statically import the fixture module. The
@@ -30,6 +35,11 @@ function fixtureActive(): boolean {
   );
 }
 
+function fixtureView(): string | null {
+  if (!fixtureActive()) return null;
+  return /view=([a-z-]+)/.exec(window.location.hash)?.[1] ?? "overview";
+}
+
 export function AppShell() {
   // Roster selection — propagated to WorkspacePane.focusInstanceId to switch
   // the active agent tab when the user clicks an agent in the Roster sidebar.
@@ -37,6 +47,10 @@ export function AppShell() {
 
   // ── Workspace state ────────────────────────────────────────────────────
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [archivedWorkspaces, setArchivedWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceListsLoading, setWorkspaceListsLoading] = useState(true);
+  const [workspaceListsError, setWorkspaceListsError] = useState<string | null>(null);
+  const workspaceListGenerationRef = useRef(0);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const [workspaceLifecyclePhase, setWorkspaceLifecyclePhase] = useState<
@@ -50,6 +64,27 @@ export function AppShell() {
   );
   const [lifecycleAnnouncement, setLifecycleAnnouncement] = useState("");
   const [focusWorkspaceStart, setFocusWorkspaceStart] = useState(false);
+  const [globalDestination, setGlobalDestination] = useState<GlobalDestination | null>(() => {
+    const view = fixtureView();
+    if (view === "home" || (view && !["overview", "workspaces", "archived", "workspace-settings"].includes(view))) {
+      return null;
+    }
+    return view === "workspaces" || view === "archived" || view === "workspace-settings"
+      ? "workspaces"
+      : "overview";
+  });
+  const globalDestinationRef = useRef<GlobalDestination | null>(globalDestination);
+  const [workspaceManagerTab, setWorkspaceManagerTab] = useState<"active" | "archived">(
+    fixtureView() === "archived" ? "archived" : "active",
+  );
+  const [workspaceNavigationError, setWorkspaceNavigationError] = useState<string | null>(null);
+  const workspaceNavigationGenerationRef = useRef(0);
+  const workspaceNavigationTargetRef = useRef<{ id: string; generation: number } | null>(null);
+  const workspaceNavigationValidationRef = useRef<{
+    generation: number;
+    promise: Promise<void>;
+  } | null>(null);
+  const [workspaceNotice, setWorkspaceNotice] = useState<WorkspaceNotice | null>(null);
 
   // ── Blackboard state ───────────────────────────────────────────────────
   const [showBlackboard, setShowBlackboard] = useState(false);
@@ -119,7 +154,10 @@ export function AppShell() {
   const [showLinkFolder, setShowLinkFolder] = useState(false);
 
   // ── EditWorkspace state ────────────────────────────────────────────────
-  const [showEditWorkspace, setShowEditWorkspace] = useState(false);
+  const [editWorkspaceId, setEditWorkspaceId] = useState<string | null>(null);
+  const editWorkspaceIdRef = useRef<string | null>(null);
+  const [editWorkspaceSnapshot, setEditWorkspaceSnapshot] = useState<Workspace | null>(null);
+  const editWorkspacePendingRef = useRef(false);
 
   // ── Fixture-mode boot flag (DEV-only) — true once the initial workspace
   //    fetch has settled, gating the readiness sentinel below. ────────────────
@@ -131,52 +169,119 @@ export function AppShell() {
     activeWorkspaceIdRef.current = activeWorkspaceId;
   }, [activeWorkspaceId]);
 
-  // Load workspaces from the DB on mount.
-  // Falls back to an empty list if Tauri is not present (plain Vite dev).
   useEffect(() => {
-    ipc.workspace
-      .list()
-      .then((ws) => {
-        setWorkspaces(ws);
-        // Fixture mode (DEV-only): auto-select the first workspace so the routed
-        // view renders with data — a headless shot has no human to click a
-        // workspace. Set directly (not via handleSelectWorkspace) so the
-        // hash-routed center-screen flags are NOT cleared.
-        if (fixtureActive() && ws.length > 0) {
-          setActiveWorkspaceId(ws[0].id);
+    globalDestinationRef.current = globalDestination;
+  }, [globalDestination]);
+
+  const refreshWorkspaceLists = useCallback(async (showLoading = false) => {
+    const generation = ++workspaceListGenerationRef.current;
+    if (showLoading) setWorkspaceListsLoading(true);
+    const routedView = fixtureView();
+    if (
+      fixtureActive()
+      && (routedView === "overview" || routedView === "workspaces" || routedView === "archived")
+    ) {
+      // Intentional loading fixtures never settle their list promise. The
+      // routed component supplies the exact rendered-state marker that uishot
+      // waits for, so shell boot may complete without fabricating list data.
+      setBooted(true);
+    }
+    try {
+      const [active, archived] = await Promise.all([
+        ipc.workspace.list(),
+        ipc.workspace.listArchived(),
+      ]);
+      if (workspaceListGenerationRef.current !== generation) return;
+      setWorkspaces(active);
+      setArchivedWorkspaces(archived);
+      setWorkspaceListsError(null);
+      const editingWorkspaceId = editWorkspaceIdRef.current;
+      if (
+        editingWorkspaceId
+        && !editWorkspacePendingRef.current
+        && !active.some((workspace) => workspace.id === editingWorkspaceId)
+        && !archived.some((workspace) => workspace.id === editingWorkspaceId)
+      ) {
+        editWorkspaceIdRef.current = null;
+        setEditWorkspaceId(null);
+        setEditWorkspaceSnapshot(null);
+      }
+      const pendingNavigation = workspaceNavigationTargetRef.current;
+      if (
+        pendingNavigation
+        && !active.some((workspace) => workspace.id === pendingNavigation.id)
+        && workspaceNavigationGenerationRef.current === pendingNavigation.generation
+      ) {
+        workspaceNavigationGenerationRef.current += 1;
+        workspaceNavigationTargetRef.current = null;
+      }
+      const selected = activeWorkspaceIdRef.current;
+      if (selected && !active.some((workspace) => workspace.id === selected)) {
+        const workspaceWasVisible = globalDestinationRef.current == null;
+        clearVisibleWorkspaceSelection();
+        if (workspaceWasVisible) {
+          globalDestinationRef.current = "workspaces";
+          setGlobalDestination("workspaces");
+          setWorkspaceManagerTab("active");
         }
+      }
+      if (fixtureActive() && activeWorkspaceIdRef.current == null && active.length > 0) {
+        setActiveWorkspaceId(active[0].id);
+        activeWorkspaceIdRef.current = active[0].id;
+      }
+    } catch (error) {
+      if (workspaceListGenerationRef.current !== generation) return;
+      setWorkspaceListsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (workspaceListGenerationRef.current === generation) {
+        setWorkspaceListsLoading(false);
         setBooted(true);
-      })
-      .catch((err: unknown) => {
-        // Plain `vite` dev (no Tauri shell) lands here; so does a real backend
-        // failure. Surface it in dev rather than silently showing an empty Rail.
-        if (import.meta.env.DEV) {
-          console.error("AppShell: workspace.list failed", err);
-        }
-        setWorkspaces([]);
-        setBooted(true);
-      });
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshWorkspaceLists(true);
+  }, [refreshWorkspaceLists]);
 
   // Workspace lifecycle events can originate from a CLI or another window. The
   // start command emits its own `started` event before its agent batch finishes,
   // so ignore the active workspace's event while our own transition is in flight;
   // the command result below carries the authoritative batch outcome.
   useEvent<WorkspaceChangedEvent>(EVENT_NAMES.workspaceChanged, (payload) => {
+    const pendingNavigation = workspaceNavigationTargetRef.current;
     if (
-      payload.workspaceId === activeWorkspaceId &&
-      workspaceLifecyclePhaseRef.current !== "idle"
+      payload.archivedAt
+      && pendingNavigation?.id === payload.workspaceId
+      && workspaceNavigationGenerationRef.current === pendingNavigation.generation
     ) {
-      return;
+      workspaceNavigationGenerationRef.current += 1;
+      workspaceNavigationTargetRef.current = null;
     }
-    setWorkspaces((prev) =>
-      prev.map((workspace) =>
-        workspace.id === payload.workspaceId
-          ? { ...workspace, runState: payload.runState }
-          : workspace,
-      ),
-    );
-    if (payload.workspaceId === activeWorkspaceId) {
+    if (
+      payload.archivedAt
+      && editWorkspaceIdRef.current === payload.workspaceId
+      && !editWorkspacePendingRef.current
+    ) {
+      editWorkspaceIdRef.current = null;
+      setEditWorkspaceId(null);
+      setEditWorkspaceSnapshot(null);
+    }
+    const ownedLifecycle =
+      payload.workspaceId === activeWorkspaceId &&
+      workspaceLifecyclePhaseRef.current !== "idle";
+    if (!ownedLifecycle) {
+      setWorkspaces((prev) =>
+        payload.archivedAt
+          ? prev.filter((workspace) => workspace.id !== payload.workspaceId)
+          : prev.map((workspace) =>
+              workspace.id === payload.workspaceId
+                ? { ...workspace, runState: payload.runState, archivedAt: payload.archivedAt ?? null }
+                : workspace,
+            ),
+      );
+    }
+    if (!ownedLifecycle && payload.workspaceId === activeWorkspaceId) {
       setFocusWorkspaceStart(false);
       setWorkspaceLifecycleError(null);
       setWorkspaceStartBatch(null);
@@ -185,6 +290,14 @@ export function AppShell() {
         payload.runState === "started" ? "Workspace started." : "Workspace stopped.",
       );
     }
+    const refresh = refreshWorkspaceLists();
+    if (pendingNavigation?.id === payload.workspaceId && !payload.archivedAt) {
+      workspaceNavigationValidationRef.current = {
+        generation: pendingNavigation.generation,
+        promise: refresh,
+      };
+    }
+    void refresh;
   });
 
   // Fixture mode (DEV-only): route the initial view from the URL hash so a
@@ -193,9 +306,22 @@ export function AppShell() {
   // effect's workspace auto-select doesn't clobber it. No-op outside ?fixture=.
   useEffect(() => {
     if (!fixtureActive()) return;
-    const view = /view=([a-z-]+)/.exec(window.location.hash)?.[1] ?? "home";
+    const view = fixtureView() ?? "overview";
     const open: Record<string, () => void> = {
-      home: () => {},
+      overview: () => setGlobalDestination("overview"),
+      workspaces: () => {
+        setGlobalDestination("workspaces");
+        setWorkspaceManagerTab("active");
+      },
+      archived: () => {
+        setGlobalDestination("workspaces");
+        setWorkspaceManagerTab("archived");
+      },
+      "workspace-settings": () => {
+        setGlobalDestination("workspaces");
+        setWorkspaceManagerTab("active");
+      },
+      home: () => setGlobalDestination(null),
       laneboard: () => setShowLaneBoard(true),
       memory: () => setShowMemory(true),
       artifacts: () => setShowArtifacts(true),
@@ -211,9 +337,20 @@ export function AppShell() {
       settings: () => setShowSettings(true),
       browser: () => setShowBrowser(true),
     };
-    (open[view] ?? open.home)();
+    (open[view] ?? open.overview)();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (fixtureView() !== "workspace-settings" || editWorkspaceId || workspaceListsLoading) return;
+    const target = workspaces.find((workspace) => workspace.runState === "stopped") ?? workspaces[0]
+      ?? archivedWorkspaces[0];
+    if (target) {
+      setEditWorkspaceSnapshot(target);
+      editWorkspaceIdRef.current = target.id;
+      setEditWorkspaceId(target.id);
+    }
+  }, [archivedWorkspaces, editWorkspaceId, workspaceListsLoading, workspaces]);
 
   // Fixture mode (DEV-only): open the Builder in EDIT mode on the first
   // definition that has a live workspace agent, so `pnpm uishot builder-edit`
@@ -251,12 +388,14 @@ export function AppShell() {
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
+        document.body.dataset.conclaveView = fixtureView() ?? "overview";
         document.body.dataset.conclaveReady = "1";
       });
     });
     return () => {
       cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
+      delete document.body.dataset.conclaveView;
     };
   }, [booted, pendingBuilderEdit]);
 
@@ -273,7 +412,7 @@ export function AppShell() {
         setShowLibrary(true);
         break;
       case "toggle_blackboard":
-        if (activeWorkspaceId) {
+        if (activeWorkspaceId && globalDestination == null) {
           setShowBrowser(false);
           setShowBlackboard((v) => !v);
         }
@@ -314,7 +453,12 @@ export function AppShell() {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.defaultPrevented || activeWorkspaceId == null || e.metaKey === false) return;
+      if (
+        e.defaultPrevented ||
+        activeWorkspaceId == null ||
+        globalDestination != null ||
+        e.metaKey === false
+      ) return;
 
       const target = e.target;
       if (
@@ -346,22 +490,9 @@ export function AppShell() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeWorkspaceId]);
+  }, [activeWorkspaceId, globalDestination]);
 
-  function handleSelectWorkspace(id: string) {
-    // Optimistically update selection; handler only validates on the Rust side.
-    setActiveWorkspaceId(id);
-    activeWorkspaceIdRef.current = id;
-    workspaceLifecycleGenerationRef.current += 1;
-    // Clear the previous workspace's agent selection so a stale instance id
-    // isn't carried into the remounted pane as focus.
-    setSelectedId(null);
-    workspaceLifecyclePhaseRef.current = "idle";
-    setWorkspaceLifecyclePhase("idle");
-    setWorkspaceLifecycleError(null);
-    setWorkspaceStartBatch(null);
-    setFocusWorkspaceStart(false);
-    // Switching workspace returns to that workspace's agent pane.
+  function clearWorkspaceSurfaces() {
     setShowBlackboard(false);
     setShowChat(false);
     setShowMemory(false);
@@ -369,13 +500,105 @@ export function AppShell() {
     setShowBrowser(false);
     setShowArtifacts(false);
     setShowDesign(false);
-    ipc.workspace.use({ workspaceId: id }).catch(() => {
-      // Ignore — the workspace just can't be found in the DB (stale id).
-    });
+  }
+
+  function clearVisibleWorkspaceSelection() {
+    workspaceNavigationGenerationRef.current += 1;
+    workspaceNavigationTargetRef.current = null;
+    workspaceNavigationValidationRef.current = null;
+    setActiveWorkspaceId(null);
+    activeWorkspaceIdRef.current = null;
+    workspaceLifecycleGenerationRef.current += 1;
+    setSelectedId(null);
+    workspaceLifecyclePhaseRef.current = "idle";
+    setWorkspaceLifecyclePhase("idle");
+    setWorkspaceLifecycleError(null);
+    setWorkspaceStartBatch(null);
+    setFocusWorkspaceStart(false);
+    clearWorkspaceSurfaces();
+  }
+
+  function openGlobal(destination: GlobalDestination, tab: "active" | "archived" = "active") {
+    workspaceNavigationGenerationRef.current += 1;
+    workspaceNavigationTargetRef.current = null;
+    workspaceNavigationValidationRef.current = null;
+    clearWorkspaceSurfaces();
+    globalDestinationRef.current = destination;
+    setGlobalDestination(destination);
+    if (destination === "workspaces") setWorkspaceManagerTab(tab);
+    setWorkspaceNavigationError(null);
+    clearEditWorkspaceTarget();
+  }
+
+  function openEditWorkspace(id: string) {
+    const workspace = workspaces.find((candidate) => candidate.id === id)
+      ?? archivedWorkspaces.find((candidate) => candidate.id === id);
+    if (!workspace) return;
+    editWorkspacePendingRef.current = false;
+    setEditWorkspaceSnapshot(workspace);
+    editWorkspaceIdRef.current = id;
+    setEditWorkspaceId(id);
+  }
+
+  function clearEditWorkspaceTarget() {
+    editWorkspacePendingRef.current = false;
+    editWorkspaceIdRef.current = null;
+    setEditWorkspaceId(null);
+    setEditWorkspaceSnapshot(null);
+  }
+
+  function pendingWorkspaceNavigationValidation(): {
+    generation: number;
+    promise: Promise<void>;
+  } | null {
+    return workspaceNavigationValidationRef.current;
+  }
+
+  async function handleSelectWorkspace(id: string) {
+    const navigationGeneration = ++workspaceNavigationGenerationRef.current;
+    workspaceNavigationTargetRef.current = { id, generation: navigationGeneration };
+    workspaceNavigationValidationRef.current = null;
+    setWorkspaceNavigationError(null);
+    try {
+      await ipc.workspace.use({ workspaceId: id });
+    } catch (error) {
+      if (workspaceNavigationGenerationRef.current !== navigationGeneration) return;
+      workspaceNavigationTargetRef.current = null;
+      workspaceNavigationValidationRef.current = null;
+      const message = error instanceof Error ? error.message : String(error);
+      openGlobal("workspaces", "active");
+      setWorkspaceNavigationError(`Couldn’t open workspace: ${message}`);
+      throw error;
+    }
+    const validation = pendingWorkspaceNavigationValidation();
+    if (validation?.generation === navigationGeneration) await validation.promise;
+    if (workspaceNavigationGenerationRef.current !== navigationGeneration) return;
+    workspaceNavigationTargetRef.current = null;
+    workspaceNavigationValidationRef.current = null;
+    setActiveWorkspaceId(id);
+    activeWorkspaceIdRef.current = id;
+    workspaceLifecycleGenerationRef.current += 1;
+    setSelectedId(null);
+    workspaceLifecyclePhaseRef.current = "idle";
+    setWorkspaceLifecyclePhase("idle");
+    setWorkspaceLifecycleError(null);
+    setWorkspaceStartBatch(null);
+    setFocusWorkspaceStart(false);
+    clearWorkspaceSurfaces();
+    globalDestinationRef.current = null;
+    setGlobalDestination(null);
   }
 
   const activeWorkspace = activeWorkspaceId
     ? (workspaces.find((w) => w.id === activeWorkspaceId) ?? null)
+    : null;
+  const currentEditWorkspace = editWorkspaceId
+    ? workspaces.find((workspace) => workspace.id === editWorkspaceId)
+      ?? archivedWorkspaces.find((workspace) => workspace.id === editWorkspaceId)
+      ?? null
+    : null;
+  const editWorkspace = editWorkspaceId
+    ? currentEditWorkspace ?? editWorkspaceSnapshot
     : null;
 
   async function handleStartWorkspace() {
@@ -390,6 +613,7 @@ export function AppShell() {
     setFocusWorkspaceStart(false);
     try {
       const result = await ipc.workspace.start({ workspaceId });
+      workspaceListGenerationRef.current += 1;
       setWorkspaces((prev) =>
         prev.map((workspace) => (workspace.id === workspaceId ? result.workspace : workspace)),
       );
@@ -439,6 +663,7 @@ export function AppShell() {
     setFocusWorkspaceStart(false);
     try {
       const result = await ipc.workspace.stop({ workspaceId });
+      workspaceListGenerationRef.current += 1;
       setWorkspaces((prev) =>
         prev.map((workspace) => (workspace.id === workspaceId ? result.workspace : workspace)),
       );
@@ -470,6 +695,54 @@ export function AppShell() {
         setWorkspaceLifecyclePhase("idle");
       }
     }
+  }
+
+  function reconcileStopped(workspace: Workspace) {
+    workspaceListGenerationRef.current += 1;
+    setWorkspaces((current) =>
+      current.map((candidate) => candidate.id === workspace.id ? workspace : candidate),
+    );
+    if (activeWorkspaceIdRef.current === workspace.id) {
+      setWorkspaceStartBatch(null);
+      setFocusWorkspaceStart(true);
+      setAgentsVersion((version) => version + 1);
+    }
+    setLifecycleAnnouncement(`${workspace.name} stopped. You can now archive it separately.`);
+  }
+
+  function reconcileArchived(workspace: Workspace) {
+    workspaceListGenerationRef.current += 1;
+    setWorkspaces((current) => current.filter((candidate) => candidate.id !== workspace.id));
+    setArchivedWorkspaces((current) => [
+      workspace,
+      ...current.filter((candidate) => candidate.id !== workspace.id),
+    ]);
+    if (activeWorkspaceIdRef.current === workspace.id) clearVisibleWorkspaceSelection();
+    setGlobalDestination("workspaces");
+    setWorkspaceManagerTab("active");
+    setWorkspaceNotice({ kind: "archived", workspace });
+  }
+
+  function reconcileRestored(workspace: Workspace) {
+    workspaceListGenerationRef.current += 1;
+    setArchivedWorkspaces((current) => current.filter((candidate) => candidate.id !== workspace.id));
+    setWorkspaces((current) => [
+      workspace,
+      ...current.filter((candidate) => candidate.id !== workspace.id),
+    ]);
+    setGlobalDestination("workspaces");
+    setWorkspaceManagerTab("archived");
+    setWorkspaceNotice({ kind: "restored", workspace });
+  }
+
+  async function restoreWorkspace(workspaceId: string): Promise<Workspace> {
+    const restored = await ipc.workspace.restore({ workspaceId });
+    reconcileRestored(restored);
+    return restored;
+  }
+
+  async function undoArchive(workspaceId: string): Promise<Workspace> {
+    return restoreWorkspace(workspaceId);
   }
 
   function handleAgentLifecycleChanged(
@@ -513,7 +786,8 @@ export function AppShell() {
   // visible center content exactly when a workspace is active and no center
   // screen is up. Used BOTH as the WorkspacePane render condition and as the
   // gate for full-window Design mode.
-  const workspacePaneVisible = !!activeWorkspaceId && !centerScreenOpen;
+  const workspacePaneVisible =
+    globalDestination == null && !!activeWorkspaceId && !centerScreenOpen;
 
   // Full-window slot mode (human ruling D3): while a canvas-slot view (Design OR
   // Artifacts) is OPEN and actually on screen, hide the Rail + Roster columns so
@@ -542,12 +816,13 @@ export function AppShell() {
   // point to those four flags that does NOT clear showBrowser, add
   // `&& !centerScreenOpen`-style exclusivity here (browser is last in the
   // render chain, so a peer flag would win the branch while this stays true).
-  const browserFullWindow = showBrowser && !!activeWorkspaceId;
+  const browserFullWindow = globalDestination == null && showBrowser && !!activeWorkspaceId;
 
   // Sidebars (Rail + Roster) collapse to 0 width for canvas-slot full-window
   // (Design / Artifacts) OR full-window Browser — the single predicate every
   // collapse site below reads, so the two modes can't drift apart.
-  const sidebarsCollapsed = slotFullWindow || browserFullWindow;
+  const railCollapsed = slotFullWindow || browserFullWindow;
+  const rosterCollapsed = railCollapsed || globalDestination != null;
 
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden bg-bg-canvas text-text-primary select-none">
@@ -574,11 +849,11 @@ export function AppShell() {
             strip over the canvas + terminal below. */}
         {/* Rail column bg */}
         <div
-          className={`${sidebarsCollapsed ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+          className={`${railCollapsed ? "w-0 overflow-hidden" : "w-[56px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
         />
         {/* Roster column bg */}
         <div
-          className={`${sidebarsCollapsed ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
+          className={`${rosterCollapsed ? "w-0 overflow-hidden" : "w-[266px] border-r border-overlay/[0.06]"} bg-sidebar pointer-events-none`}
         />
         {/* Main content bg */}
         <div className="flex-1 bg-sidebar pointer-events-none" />
@@ -596,18 +871,21 @@ export function AppShell() {
             CSS clipping hides pixels only, leaving focusables tabbable (Armin
             F1). */}
         <div
-          inert={sidebarsCollapsed}
-          aria-hidden={sidebarsCollapsed || undefined}
-          className={sidebarsCollapsed ? "w-0 shrink-0 overflow-hidden" : "contents"}
+          inert={railCollapsed}
+          aria-hidden={railCollapsed || undefined}
+          className={railCollapsed ? "w-0 shrink-0 overflow-hidden" : "contents"}
         >
           <Rail
             workspaces={workspaces}
-            activeWorkspaceId={activeWorkspaceId}
+            activeWorkspaceId={globalDestination == null ? activeWorkspaceId : null}
+            globalDestination={globalDestination}
             artifactsOpen={showArtifacts}
             designOpen={showDesign}
             browserOpen={showBrowser}
             browserActive={browserActive}
-            onSelectWorkspace={handleSelectWorkspace}
+            onSelectWorkspace={(id) => void handleSelectWorkspace(id).catch(() => {})}
+            onOpenOverview={() => openGlobal("overview")}
+            onOpenWorkspaces={() => openGlobal("workspaces", "active")}
             onOpenBrowser={() => {
               if (!activeWorkspaceId) return;
               // Browser is a center screen — clear the other center screens so
@@ -651,9 +929,9 @@ export function AppShell() {
                 `aria-hidden` when collapsed remove its clipped-but-mounted
                 focusables from the tab order + a11y tree (Armin F1). */}
             <div
-              inert={sidebarsCollapsed}
-              aria-hidden={sidebarsCollapsed || undefined}
-              className={sidebarsCollapsed ? "w-0 shrink-0 overflow-hidden" : "contents"}
+              inert={rosterCollapsed}
+              aria-hidden={rosterCollapsed || undefined}
+              className={rosterCollapsed ? "w-0 shrink-0 overflow-hidden" : "contents"}
             >
             <Roster
               workspaceId={activeWorkspaceId}
@@ -738,13 +1016,33 @@ export function AppShell() {
               }
               laneBoardOpen={showLaneBoard}
               onEditWorkspace={
-                activeWorkspaceId ? () => setShowEditWorkspace(true) : undefined
+                activeWorkspaceId ? () => openEditWorkspace(activeWorkspaceId) : undefined
               }
             />
             </div>
 
             {/* ── Main content: Chat Hub / Blackboard screen, else the live agent pane ─── */}
-            {showChat && activeWorkspaceId ? (
+            {globalDestination === "overview" ? (
+              <UsageOverview onManageWorkspaces={() => openGlobal("workspaces", "active")} />
+            ) : globalDestination === "workspaces" ? (
+              <WorkspaceManager
+                activeWorkspaces={workspaces}
+                archivedWorkspaces={archivedWorkspaces}
+                loading={workspaceListsLoading}
+                error={workspaceListsError}
+                navigationError={workspaceNavigationError}
+                initialTab={workspaceManagerTab}
+                onTabChange={setWorkspaceManagerTab}
+                notice={workspaceNotice}
+                onRetry={() => void refreshWorkspaceLists(true)}
+                onOpen={(id) => handleSelectWorkspace(id)}
+                onManage={openEditWorkspace}
+                onLink={() => setShowLinkFolder(true)}
+                onRestore={restoreWorkspace}
+                onDismissNotice={() => setWorkspaceNotice(null)}
+                onUndoArchive={undoArchive}
+              />
+            ) : showChat && activeWorkspaceId ? (
               <ChatHub
                 key={activeWorkspaceId}
                 workspaceId={activeWorkspaceId}
@@ -863,8 +1161,8 @@ export function AppShell() {
           key={builderInitialDef?.id || `draft-${draftSeq}`}
           initialDef={builderInitialDef}
           draftedBy={builderDraftedBy}
-          workspaceId={activeWorkspaceId ?? undefined}
-          workspaceAgentId={selectedId ?? undefined}
+          workspaceId={globalDestination == null ? activeWorkspaceId ?? undefined : undefined}
+          workspaceAgentId={globalDestination == null ? selectedId ?? undefined : undefined}
           onClose={() => {
             setShowBuilder(false);
             setBuilderInitialDef(undefined);
@@ -884,8 +1182,8 @@ export function AppShell() {
       {showDrafter && (
         <AgentDrafter
           mode={showDrafter.mode}
-          workspaceId={activeWorkspaceId ?? undefined}
-          workspaceName={activeWorkspace?.name}
+          workspaceId={globalDestination == null ? activeWorkspaceId ?? undefined : undefined}
+          workspaceName={globalDestination == null ? activeWorkspace?.name : undefined}
           onClose={() => setShowDrafter(null)}
           onDraftAgent={(def, by) => {
             setBuilderInitialDef(def);
@@ -921,34 +1219,52 @@ export function AppShell() {
         <LinkFolder
           onClose={() => setShowLinkFolder(false)}
           onLinked={(ws) => {
+            workspaceListGenerationRef.current += 1;
             setWorkspaces((prev) => [...prev, ws]);
-            setActiveWorkspaceId(ws.id);
             setShowLinkFolder(false);
+            void handleSelectWorkspace(ws.id).catch(() => {});
           }}
         />
       )}
 
       {/* ── Edit-workspace overlay ────────────────────────────────────── */}
-      {showEditWorkspace && activeWorkspace && (
+      {editWorkspace && (
         <EditWorkspace
-          workspace={activeWorkspace}
-          onClose={() => setShowEditWorkspace(false)}
+          key={editWorkspace.id}
+          workspace={editWorkspace}
+          onClose={clearEditWorkspaceTarget}
+          onPendingChange={(pending) => {
+            editWorkspacePendingRef.current = pending;
+            if (pending) setEditWorkspaceSnapshot(editWorkspace);
+          }}
           onSaved={(updated) => {
+            workspaceListGenerationRef.current += 1;
             setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
+            setArchivedWorkspaces((prev) =>
+              prev.map((w) => (w.id === updated.id ? updated : w)),
+            );
+            setEditWorkspaceSnapshot(updated);
+          }}
+          onStopped={(workspace) => {
+            reconcileStopped(workspace);
+            editWorkspacePendingRef.current = false;
+            setEditWorkspaceSnapshot(workspace);
+          }}
+          onArchived={(workspace) => {
+            reconcileArchived(workspace);
+            clearEditWorkspaceTarget();
+          }}
+          onRestored={(workspace) => {
+            reconcileRestored(workspace);
+            clearEditWorkspaceTarget();
           }}
           onDeleted={(deletedId) => {
+            workspaceListGenerationRef.current += 1;
             setWorkspaces((prev) => prev.filter((w) => w.id !== deletedId));
-            setActiveWorkspaceId(null);
-            activeWorkspaceIdRef.current = null;
-            workspaceLifecycleGenerationRef.current += 1;
-            setSelectedId(null);
-            setShowBlackboard(false);
-            setShowChat(false);
-            setShowMemory(false);
-            setShowLaneBoard(false);
-            setShowBrowser(false);
-            setShowArtifacts(false);
-            setShowDesign(false);
+            setArchivedWorkspaces((prev) => prev.filter((w) => w.id !== deletedId));
+            if (activeWorkspaceIdRef.current === deletedId) clearVisibleWorkspaceSelection();
+            setGlobalDestination("workspaces");
+            clearEditWorkspaceTarget();
           }}
         />
       )}

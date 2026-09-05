@@ -1,8 +1,9 @@
 import type { FixtureHandlers } from "../backend";
-import type { BrowserTab, Message, Session, Skill, Workspace, WorkspaceAgent } from "../../ipc/types";
+import type { BrowserTab, Message, Session, Skill } from "../../ipc/types";
 import { emitFixtureEvent } from "../events";
 import {
   workspaces,
+  archivedWorkspaces,
   agents,
   agentDefs,
   tasks,
@@ -16,6 +17,8 @@ import {
   providers,
   draftTeam,
 } from "./data";
+import { createUsageHandlers } from "./usage";
+import { createWorkspaceFixture } from "./workspaces";
 
 // One human tab (active) + two agent tabs, one `ended` — exercises every
 // side-rail chrome variant (human vs agent, active/inactive, ended badge)
@@ -57,11 +60,14 @@ let tabsState: BrowserTab[] = [
 ];
 let activeTabIdState: string | undefined = "human-1";
 let humanSeq = 1;
-let workspaceState: Workspace = workspaces[0];
-let agentsState: WorkspaceAgent[] = agents.map((agent) => ({ ...agent }));
+const workspaceFixture = createWorkspaceFixture({
+  active: workspaces,
+  archived: archivedWorkspaces,
+  agents,
+});
 
 function fixtureSession(workspaceAgentId: string): Session {
-  const agent = agentsState.find((candidate) => candidate.id === workspaceAgentId);
+  const agent = workspaceFixture.getAgents().find((candidate) => candidate.id === workspaceAgentId);
   return {
     id: `fx-sess-${workspaceAgentId}`,
     workspaceAgentId,
@@ -78,11 +84,9 @@ function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
 }
 
 // Handler coverage for every command the v1 views invoke on their render path.
-// `workspace.use` / `session.resize` are no-op void handlers so an incidental
-// call (workspace activation, terminal fit) doesn't throw the loud
-// missing-handler error. Mutations that only fire on user interaction are
-// intentionally absent — reaching one in a screenshot is a real bug worth the
-// loud failure.
+// The shared workspace fixture below now covers lifecycle mutations as well as
+// render-path reads; unrelated interaction-only commands stay intentionally
+// absent so an unexpected call remains a loud screenshot failure.
 // ── Skill-assist harness seam (task skill-assist-repair) ───────────────────
 // Mutable module state, like tabsState above. `skillsState` makes skill.save
 // durable within a page load so the harness can save then reopen the library.
@@ -174,35 +178,20 @@ const probe = {
 (globalThis as unknown as { skillAssistProbe?: typeof probe }).skillAssistProbe = probe;
 
 export const handlers: FixtureHandlers = {
-  "workspace.list": () => [workspaceState],
-  "workspace.use": () => undefined,
-  "workspace.start": ({ workspaceId }) => {
-    workspaceState = { ...workspaceState, id: workspaceId, runState: "started" };
-    const readyAgentIds = agentsState
-      .filter((agent) => agent.availability === "active")
-      .map((agent) => agent.id);
-    const skippedStoppedAgentIds = agentsState
-      .filter((agent) => agent.availability === "stopped")
-      .map((agent) => agent.id);
-    emitFixtureEvent("workspace:changed", { workspaceId, runState: "started" });
-    return { workspace: workspaceState, readyAgentIds, skippedStoppedAgentIds, failures: [] };
-  },
-  "workspace.stop": ({ workspaceId }) => {
-    workspaceState = { ...workspaceState, id: workspaceId, runState: "stopped" };
-    const stoppedRuntimeIds = agentsState
-      .filter((agent) => agent.availability === "active" && agent.status === "running")
-      .map((agent) => agent.id);
-    agentsState = agentsState.map((agent) => ({
-      ...agent,
-      status: "idle",
-      working: false,
-      sessionId: undefined,
-    }));
-    emitFixtureEvent("workspace:changed", { workspaceId, runState: "stopped" });
-    return { workspace: workspaceState, stoppedRuntimeIds };
-  },
+  ...workspaceFixture.handlers,
+  ...createUsageHandlers("partial"),
+  "design.ensure": ({ workspaceId }) => ({
+    projectId: `fx-design-${workspaceId}`,
+    running: true,
+    url: "about:blank",
+  }),
+  "design.status": ({ workspaceId }) => ({
+    projectId: `fx-design-${workspaceId}`,
+    running: true,
+    url: "about:blank",
+  }),
   "instance.list": ({ workspaceId }) =>
-    agentsState.filter((a) => a.workspaceId === workspaceId),
+    workspaceFixture.getAgents().filter((agent) => agent.workspaceId === workspaceId),
   "instance.cliStatus": () => ({
     available: true,
     installUrl: "https://antigravity.google/docs/cli/install/",
@@ -226,8 +215,9 @@ export const handlers: FixtureHandlers = {
   // (no session:output on the fixture bus) — the accepted PTY-in-fixture v1
   // limitation, not an error.
   "instance.spawn": ({ workspaceAgentId }) => {
-    const agent = agentsState.find((candidate) => candidate.id === workspaceAgentId);
-    if (workspaceState.runState !== "started") {
+    const agent = workspaceFixture.getAgents().find((candidate) => candidate.id === workspaceAgentId);
+    const workspace = agent ? workspaceFixture.getWorkspace(agent.workspaceId) : undefined;
+    if (workspace?.runState !== "started") {
       throw new Error("[fixture] attempted to spawn an agent in a stopped workspace");
     }
     if (!agent || agent.availability !== "active") {
@@ -236,19 +226,19 @@ export const handlers: FixtureHandlers = {
     return fixtureSession(workspaceAgentId);
   },
   "instance.stop": ({ workspaceAgentId }) => {
-    agentsState = agentsState.map((agent) =>
+    workspaceFixture.updateAgents((current) => current.map((agent) =>
       agent.id === workspaceAgentId
         ? { ...agent, availability: "stopped", status: "idle", working: false, sessionId: undefined }
         : agent,
-    );
+    ));
   },
   "instance.resume": ({ workspaceAgentId }) => {
     const session = fixtureSession(workspaceAgentId);
-    agentsState = agentsState.map((agent) =>
+    workspaceFixture.updateAgents((current) => current.map((agent) =>
       agent.id === workspaceAgentId
         ? { ...agent, availability: "active", status: "running", working: false, sessionId: session.id }
         : agent,
-    );
+    ));
     return session;
   },
   "agentDef.list": () => agentDefs,

@@ -1,6 +1,7 @@
 import type { FixtureHandlers } from "../backend";
 import type { BrowserTab, Workspace } from "../../ipc/types";
-import { emitFixtureEvent } from "../events";
+import { createUsageHandlers } from "./usage";
+import { createWorkspaceFixture } from "./workspaces";
 
 // `empty` scenario — the "fresh install" look. DECISION (F3 Step 4): keep ONE
 // linked-but-empty workspace rather than zero. With zero workspaces the shell
@@ -16,6 +17,7 @@ const emptyWorkspace: Workspace[] = [
     folderPath: "/Users/dev/code/new-project",
     color: "#7c6af2",
     runState: "stopped",
+    archivedAt: null,
     createdAt: "2026-07-05T12:00:00.000Z",
   },
 ];
@@ -26,31 +28,30 @@ const emptyWorkspace: Workspace[] = [
 let tabsState: BrowserTab[] = [];
 let activeTabIdState: string | undefined = undefined;
 let humanSeq = 0;
+const workspaceFixture = createWorkspaceFixture({
+  active: emptyWorkspace,
+  archived: [],
+  agents: [],
+  variant: "empty",
+});
 
 function browserSnapshot(): { tabs: BrowserTab[]; activeTabId?: string } {
   return { tabs: tabsState, activeTabId: activeTabIdState };
 }
 
 export const handlers: FixtureHandlers = {
-  "workspace.list": () => emptyWorkspace,
-  "workspace.use": () => undefined,
-  "workspace.start": ({ workspaceId }) => {
-    const workspace: Workspace = { ...emptyWorkspace[0], id: workspaceId, runState: "started" };
-    emptyWorkspace[0] = workspace;
-    emitFixtureEvent("workspace:changed", { workspaceId, runState: "started" });
-    return {
-      workspace,
-      readyAgentIds: [],
-      skippedStoppedAgentIds: [],
-      failures: [],
-    };
-  },
-  "workspace.stop": ({ workspaceId }) => {
-    const workspace: Workspace = { ...emptyWorkspace[0], id: workspaceId, runState: "stopped" };
-    emptyWorkspace[0] = workspace;
-    emitFixtureEvent("workspace:changed", { workspaceId, runState: "stopped" });
-    return { workspace, stoppedRuntimeIds: [] };
-  },
+  ...workspaceFixture.handlers,
+  ...createUsageHandlers("empty"),
+  "design.ensure": ({ workspaceId }) => ({
+    projectId: `fx-design-${workspaceId}`,
+    running: true,
+    url: "about:blank",
+  }),
+  "design.status": ({ workspaceId }) => ({
+    projectId: `fx-design-${workspaceId}`,
+    running: true,
+    url: "about:blank",
+  }),
   "instance.list": () => [],
   "instance.cliStatus": () => ({
     available: false,
