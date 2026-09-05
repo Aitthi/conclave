@@ -48,11 +48,18 @@ CREATE TABLE model_usage_event (
     requested_model         TEXT,
     served_model            TEXT,
 
-    input_tokens            INTEGER CHECK (input_tokens  IS NULL OR input_tokens  >= 0),
-    output_tokens           INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
-    cache_read_input_tokens INTEGER CHECK (cache_read_input_tokens  IS NULL OR cache_read_input_tokens  >= 0),
-    cache_write_input_tokens INTEGER CHECK (cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0),
-    reasoning_output_tokens INTEGER CHECK (reasoning_output_tokens  IS NULL OR reasoning_output_tokens  >= 0),
+    -- Every counter is bounded by 2^40 (1099511627776). Real responses are
+    -- many orders of magnitude smaller; the ceiling exists so a grouped SUM can
+    -- never overflow SQLite's 64-bit integer (that needs 2^22 rows at the max)
+    -- and never gets promoted to REAL. repo::model_usage::insert_event turns an
+    -- out-of-range counter into NULL (unknown) with diagnostic
+    -- 'counter_out_of_range' BEFORE it reaches this CHECK; the CHECK is the
+    -- backstop for any other writer.
+    input_tokens            INTEGER CHECK (input_tokens  IS NULL OR input_tokens  BETWEEN 0 AND 1099511627776),
+    output_tokens           INTEGER CHECK (output_tokens IS NULL OR output_tokens BETWEEN 0 AND 1099511627776),
+    cache_read_input_tokens INTEGER CHECK (cache_read_input_tokens  IS NULL OR cache_read_input_tokens  BETWEEN 0 AND 1099511627776),
+    cache_write_input_tokens INTEGER CHECK (cache_write_input_tokens IS NULL OR cache_write_input_tokens BETWEEN 0 AND 1099511627776),
+    reasoning_output_tokens INTEGER CHECK (reasoning_output_tokens  IS NULL OR reasoning_output_tokens  BETWEEN 0 AND 1099511627776),
 
     -- 'known' only when input AND output are both observed; 'partial' when one
     -- side is known; 'unknown' when neither is.

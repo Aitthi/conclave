@@ -212,6 +212,12 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<SessionRow>
 /// stored `context_tokens` is a labelled ESTIMATE (no real provider telemetry
 /// yet — see the forwarder's flush logic), not exact provider usage.
 ///
+/// An estimate has no source and no observation time, so this setter also
+/// NULLs `context_source` / `context_observed_at`: provenance left behind by an
+/// earlier transcript reading would otherwise describe a number it no longer
+/// belongs to, and `usage.overview` would present the estimate as measured
+/// (plan D2, review ab722021).
+///
 /// chain-builder (single-table UPDATE), mirroring `workspace_agent::set_status`.
 pub async fn set_context_tokens(
     pool: &SqlitePool,
@@ -222,6 +228,8 @@ pub async fn set_context_tokens(
     QueryBuilder::<Sqlite>::table("session")
         .update([
             ("context_tokens", Bind::I64(tokens)),
+            ("context_source", Bind::Null),
+            ("context_observed_at", Bind::Null),
             ("last_active_at", Bind::Text(now)),
         ])
         .where_eq("id", session_id)
@@ -672,6 +680,32 @@ mod tests {
             "stale provenance must not survive a reading it does not describe"
         );
         assert_eq!(after_reset.context_observed_at, None);
+
+        // The legacy ESTIMATE setter has observed nothing either (review
+        // ab722021: it used to leave the previous reading's provenance behind).
+        set_context_reading_observed(
+            &pool,
+            &session.id,
+            77_000,
+            200_000,
+            "claude-code",
+            "2026-09-05T10:30:00Z",
+        )
+        .await
+        .unwrap();
+        set_context_tokens(&pool, &session.id, 80_000)
+            .await
+            .unwrap();
+        let after_estimate = get_by_instance(&pool, &session.workspace_agent_id)
+            .await
+            .unwrap()
+            .expect("session");
+        assert_eq!(after_estimate.context_tokens, Some(80_000));
+        assert_eq!(
+            after_estimate.context_source, None,
+            "an estimate must not wear a transcript reading's provenance"
+        );
+        assert_eq!(after_estimate.context_observed_at, None);
 
         // Clearing the gauge clears its provenance too.
         set_context_reading_observed(

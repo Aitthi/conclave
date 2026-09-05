@@ -36,6 +36,9 @@
 //!   is why grouping takes an enum instead of a column name.
 //! * The hidden-workspace exclusion list interpolates `"?"` repeated N times —
 //!   again punctuation only; every id is pushed onto the bind list.
+//! * `CURSOR_COLUMNS` is a `const &'static str` shared by the cursor SELECT and
+//!   INSERT so the two can never disagree about column order; `MODEL_PROVIDER`
+//!   is likewise a const expression shared by SELECT and GROUP BY.
 //! * The bucket `VALUES` list is `"(?, ?, ?)"` repeated `buckets.len()` times —
 //!   placeholder punctuation only; the keys and boundaries are all bound.
 //!
@@ -100,6 +103,205 @@ pub async fn pending_cursor_scopes(pool: &SqlitePool) -> sqlx::Result<Vec<Pendin
     .await
 }
 
+// ── Importer cursors ─────────────────────────────────────────────────────────
+
+/// One transcript file's import position. Written in the SAME transaction as
+/// the events it produced (see [`upsert_cursor`]), so a crash between the two
+/// is impossible and a replay from the previous offset is a no-op through
+/// `event_key`.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct CursorRow {
+    pub id: String,
+    pub source_kind: String,
+    pub source_session_id: String,
+    /// Stable identity of the file itself (not its path), so rotation or
+    /// replacement is detectable.
+    pub path_fingerprint: String,
+    pub byte_offset: i64,
+    pub observed_length: i64,
+    pub collector_version: String,
+    pub workspace_id: Option<String>,
+    pub workspace_agent_id: Option<String>,
+    pub verified_owner: Option<String>,
+    pub verified_cwd: Option<String>,
+    /// Bounded parser continuation metadata — never raw transcript text.
+    pub parser_state: Option<String>,
+    pub last_verified_at: String,
+}
+
+const CURSOR_COLUMNS: &str = "id, source_kind, source_session_id, path_fingerprint, byte_offset,
+        observed_length, collector_version, workspace_id, workspace_agent_id,
+        verified_owner, verified_cwd, parser_state, last_verified_at";
+
+/// The cursor for one (source, file) pair, if the importer has seen it.
+pub async fn get_cursor<'e, E>(
+    executor: E,
+    source_kind: &str,
+    path_fingerprint: &str,
+) -> sqlx::Result<Option<CursorRow>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {CURSOR_COLUMNS} FROM model_usage_cursor
+          WHERE source_kind = ?1 AND path_fingerprint = ?2"
+    )))
+    .bind(source_kind)
+    .bind(path_fingerprint)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Insert or advance a cursor. The `(source_kind, path_fingerprint)` pair is
+/// the identity; everything else is replaced by the caller's latest view.
+pub async fn upsert_cursor<'e, E>(executor: E, row: &CursorRow) -> sqlx::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO model_usage_cursor ({CURSOR_COLUMNS})
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(source_kind, path_fingerprint) DO UPDATE SET
+            source_session_id  = excluded.source_session_id,
+            byte_offset        = excluded.byte_offset,
+            observed_length    = excluded.observed_length,
+            collector_version  = excluded.collector_version,
+            workspace_id       = excluded.workspace_id,
+            workspace_agent_id = excluded.workspace_agent_id,
+            verified_owner     = excluded.verified_owner,
+            verified_cwd       = excluded.verified_cwd,
+            parser_state       = excluded.parser_state,
+            last_verified_at   = excluded.last_verified_at"
+    )))
+    .bind(&row.id)
+    .bind(&row.source_kind)
+    .bind(&row.source_session_id)
+    .bind(&row.path_fingerprint)
+    .bind(row.byte_offset)
+    .bind(row.observed_length)
+    .bind(&row.collector_version)
+    .bind(&row.workspace_id)
+    .bind(&row.workspace_agent_id)
+    .bind(&row.verified_owner)
+    .bind(&row.verified_cwd)
+    .bind(&row.parser_state)
+    .bind(&row.last_verified_at)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+// ── Coverage recording ───────────────────────────────────────────────────────
+
+/// What a collector observed over one interval; the write-side twin of
+/// [`CoverageIntervalRow`] without the storage id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedInterval<'a> {
+    pub workspace_id: Option<&'a str>,
+    pub workspace_agent_id: Option<&'a str>,
+    pub source_kind: &'a str,
+    /// `end >= start`; stored through [`canonical_ts`].
+    pub start: chrono::DateTime<chrono::Utc>,
+    pub end: chrono::DateTime<chrono::Utc>,
+    pub state: &'a str,
+    pub diagnostic_code: Option<&'a str>,
+    pub collector_version: &'a str,
+    pub last_verified_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Record an observation, merging it into an existing interval of the SAME
+/// scope, source, state and diagnostic when the two touch or overlap.
+///
+/// A collector ticks every few seconds, so without merging the table would
+/// grow by one row per tick per source forever. Merging is safe because it is
+/// exact: two intervals are joined only when their union has no hole
+/// (`existing.end >= new.start && existing.start <= new.end`). A gap — a
+/// collector that was down — therefore always starts a NEW row, which is what
+/// lets the reader see the gap. Intervals of different state (complete vs
+/// partial) or different diagnostic never merge, so a partial stretch cannot
+/// disappear inside a complete one.
+///
+/// Takes a connection rather than a pool so the caller can run it inside the
+/// same transaction as the events and cursor it describes.
+pub async fn record_coverage(
+    conn: &mut sqlx::SqliteConnection,
+    observed: &ObservedInterval<'_>,
+) -> sqlx::Result<()> {
+    let start = canonical_ts(observed.start);
+    let end = canonical_ts(observed.end);
+    let last_verified_at = canonical_ts(observed.last_verified_at);
+    let existing: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, interval_start, interval_end
+           FROM model_usage_coverage
+          WHERE source_kind = ?1
+            AND workspace_id IS ?2
+            AND workspace_agent_id IS ?3
+            AND state = ?4
+            AND diagnostic_code IS ?5
+            AND interval_end >= ?6
+            AND interval_start <= ?7
+          ORDER BY interval_start ASC
+          LIMIT 1",
+    )
+    .bind(observed.source_kind)
+    .bind(observed.workspace_id)
+    .bind(observed.workspace_agent_id)
+    .bind(observed.state)
+    .bind(observed.diagnostic_code)
+    .bind(&start)
+    .bind(&end)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    match existing {
+        Some((id, existing_start, existing_end)) => {
+            // Canonical strings order exactly like the instants they encode.
+            let merged_start = if start < existing_start {
+                &start
+            } else {
+                &existing_start
+            };
+            let merged_end = if end > existing_end {
+                &end
+            } else {
+                &existing_end
+            };
+            sqlx::query(
+                "UPDATE model_usage_coverage
+                    SET interval_start = ?2, interval_end = ?3,
+                        collector_version = ?4, last_verified_at = ?5
+                  WHERE id = ?1",
+            )
+            .bind(&id)
+            .bind(merged_start)
+            .bind(merged_end)
+            .bind(observed.collector_version)
+            .bind(&last_verified_at)
+            .execute(&mut *conn)
+            .await?;
+        }
+        None => {
+            insert_coverage(
+                &mut *conn,
+                &CoverageIntervalRow {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    workspace_id: observed.workspace_id.map(str::to_owned),
+                    workspace_agent_id: observed.workspace_agent_id.map(str::to_owned),
+                    source_kind: observed.source_kind.to_owned(),
+                    interval_start: start,
+                    interval_end: end,
+                    state: observed.state.to_owned(),
+                    collector_version: observed.collector_version.to_owned(),
+                    diagnostic_code: observed.diagnostic_code.map(str::to_owned),
+                    last_verified_at,
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 // ── Event insertion ──────────────────────────────────────────────────────────
 
 /// One event to persist. Constructed by the collectors; every optional field is
@@ -123,8 +325,11 @@ pub struct NewUsageEvent {
     pub source_session_id: Option<String>,
     pub source_request_id: Option<String>,
     pub source_response_id: Option<String>,
-    pub occurred_at: String,
-    pub recorded_at: String,
+    /// The SOURCE's own timestamp. Typed, not a string, so the canonical
+    /// storage format ([`canonical_ts`]) is applied here and cannot be skipped
+    /// by a collector.
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
     pub provider: Option<String>,
     pub requested_model: Option<String>,
     pub served_model: Option<String>,
@@ -138,6 +343,21 @@ pub struct NewUsageEvent {
 }
 
 #[allow(dead_code)]
+/// Largest token counter this store accepts: 2^40 (about 1.1e12 tokens for
+/// ONE response — far beyond any real model). Anything above it is not a
+/// measurement, and a counter that size would also let SQLite's `SUM` overflow
+/// or promote to REAL, i.e. error out or fabricate a float (review ab722021).
+/// The bound is enforced twice: [`insert_event`] normalizes an out-of-range
+/// counter to NULL (unknown) with [`COUNTER_OUT_OF_RANGE`], and the 0030 schema
+/// `CHECK`s the same ceiling so no other writer can bypass it. With every
+/// counter ≤ 2^40 a per-row `input + output` is ≤ 2^41, and a grouped `SUM`
+/// cannot reach 2^63 before 2^22 (4.19 million) rows land in ONE group.
+pub const MAX_TOKEN_COUNTER: i64 = 1 << 40;
+
+/// Diagnostic stamped on an event whose counter(s) were dropped as unknown
+/// because they were negative or above [`MAX_TOKEN_COUNTER`].
+pub const COUNTER_OUT_OF_RANGE: &str = "counter_out_of_range";
+
 impl NewUsageEvent {
     /// Derive the stored completeness from what was actually observed. This is
     /// the single place the rule lives so a collector cannot disagree with the
@@ -148,6 +368,42 @@ impl NewUsageEvent {
             (None, None) => "unknown",
             _ => "partial",
         }
+    }
+
+    /// Reject implausible counters as UNKNOWN rather than storing a number no
+    /// aggregate can add safely. Each counter is judged on its own (a bad
+    /// output leaves a good input known → `partial`), and the diagnostic is set
+    /// only when the collector left none, so its own code is never overwritten.
+    fn normalized(&self) -> NewUsageEvent {
+        fn bounded(value: Option<i64>, dropped: &mut bool) -> Option<i64> {
+            match value {
+                Some(v) if !(0..=MAX_TOKEN_COUNTER).contains(&v) => {
+                    *dropped = true;
+                    None
+                }
+                other => other,
+            }
+        }
+        let mut dropped = false;
+        let mut event = self.clone();
+        event.input_tokens = bounded(self.input_tokens, &mut dropped);
+        event.output_tokens = bounded(self.output_tokens, &mut dropped);
+        event.cache_read_input_tokens = bounded(self.cache_read_input_tokens, &mut dropped);
+        event.cache_write_input_tokens = bounded(self.cache_write_input_tokens, &mut dropped);
+        event.reasoning_output_tokens = bounded(self.reasoning_output_tokens, &mut dropped);
+        if let (Some(i), Some(o)) = (event.input_tokens, event.output_tokens) {
+            if i.checked_add(o).is_none() {
+                // Unreachable under the ceiling, kept so the invariant does not
+                // silently depend on the constant above.
+                event.input_tokens = None;
+                event.output_tokens = None;
+                dropped = true;
+            }
+        }
+        if dropped && event.diagnostic_code.is_none() {
+            event.diagnostic_code = Some(COUNTER_OUT_OF_RANGE.to_owned());
+        }
+        event
     }
 }
 
@@ -161,6 +417,7 @@ pub async fn insert_event<'e, E>(executor: E, event: &NewUsageEvent) -> sqlx::Re
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
+    let event = &event.normalized();
     let result = sqlx::query(
         "INSERT INTO model_usage_event (
             id, event_key, workspace_id, workspace_agent_id, session_id, generation,
@@ -188,8 +445,8 @@ where
     .bind(&event.source_session_id)
     .bind(&event.source_request_id)
     .bind(&event.source_response_id)
-    .bind(&event.occurred_at)
-    .bind(&event.recorded_at)
+    .bind(canonical_ts(event.occurred_at))
+    .bind(canonical_ts(event.recorded_at))
     .bind(&event.provider)
     .bind(&event.requested_model)
     .bind(&event.served_model)
@@ -564,6 +821,11 @@ impl GroupColumn {
     }
 }
 
+/// The provider column of a model identity: NULL whenever the identity itself
+/// is unknown, so every model-less event shares one group.
+const MODEL_PROVIDER: &str =
+    "CASE WHEN e.served_model IS NULL AND e.requested_model IS NULL THEN NULL ELSE e.provider END";
+
 /// One model identity observed in the range, with its aggregate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelAggregate {
@@ -575,7 +837,10 @@ pub struct ModelAggregate {
 
 /// Group by model identity. Reported and Selected form SEPARATE groups even for
 /// the same provider and name, so a requested model can never be presented as a
-/// served one.
+/// served one. An event with NO model at all belongs to the single `unknown`
+/// identity regardless of provider — the wire key for unknown carries no
+/// provider, so grouping by it here would emit duplicate `unknown::` rows
+/// (review ab722021).
 pub async fn aggregate_by_model(
     pool: &SqlitePool,
     scope: &UsageScope,
@@ -584,13 +849,13 @@ pub async fn aggregate_by_model(
 ) -> sqlx::Result<Vec<ModelAggregate>> {
     let (pred, binds) = scope_predicate(scope);
     let sql = format!(
-        "SELECT e.provider AS provider,
+        "SELECT {MODEL_PROVIDER} AS provider,
                 e.served_model AS served_model,
                 CASE WHEN e.served_model IS NULL THEN e.requested_model END AS requested_model,
                 {AGG_COLUMNS}
            FROM model_usage_event e
           WHERE e.occurred_at >= ? AND e.occurred_at < ?{pred}
-          GROUP BY e.provider, e.served_model,
+          GROUP BY {MODEL_PROVIDER}, e.served_model,
                    CASE WHEN e.served_model IS NULL THEN e.requested_model END"
     );
     let mut q = sqlx::query(AssertSqlSafe(sql))
@@ -618,6 +883,12 @@ mod tests {
     use super::*;
     use crate::engine::db::connect_in_memory;
 
+    fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .expect("test timestamp")
+            .with_timezone(&chrono::Utc)
+    }
+
     /// Minimal valid event; each test overrides only what it is about.
     fn event(key: &str, occurred_at: &str) -> NewUsageEvent {
         NewUsageEvent {
@@ -633,8 +904,8 @@ mod tests {
             source_session_id: None,
             source_request_id: None,
             source_response_id: None,
-            occurred_at: occurred_at.to_owned(),
-            recorded_at: "2026-09-05T00:00:00Z".into(),
+            occurred_at: at(occurred_at),
+            recorded_at: at("2026-09-05T00:00:00.000Z"),
             provider: Some("anthropic".into()),
             requested_model: None,
             served_model: Some("claude-fable-5-1".into()),
@@ -648,8 +919,8 @@ mod tests {
         }
     }
 
-    const RANGE_START: &str = "2026-09-01T00:00:00Z";
-    const RANGE_END: &str = "2026-09-30T00:00:00Z";
+    const RANGE_START: &str = "2026-09-01T00:00:00.000Z";
+    const RANGE_END: &str = "2026-09-30T00:00:00.000Z";
 
     async fn agg(pool: &SqlitePool, scope: &UsageScope) -> UsageAggregate {
         aggregate_range(pool, scope, RANGE_START, RANGE_END)
@@ -662,7 +933,7 @@ mod tests {
     #[tokio::test]
     async fn replaying_the_same_event_key_cannot_double_count() {
         let pool = connect_in_memory().await;
-        let e = event("claude-code:v1:s:r", "2026-09-10T12:00:00Z");
+        let e = event("claude-code:v1:s:r", "2026-09-10T12:00:00.000Z");
         assert!(insert_event(&pool, &e).await.unwrap(), "first insert lands");
         assert!(
             !insert_event(&pool, &e).await.unwrap(),
@@ -684,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_usage_counts_as_activity_but_never_as_zero_tokens() {
         let pool = connect_in_memory().await;
-        let mut unknown = event("k1", "2026-09-10T12:00:00Z");
+        let mut unknown = event("k1", "2026-09-10T12:00:00.000Z");
         unknown.input_tokens = None;
         unknown.output_tokens = None;
         assert_eq!(unknown.token_completeness(), "unknown");
@@ -705,7 +976,7 @@ mod tests {
     #[tokio::test]
     async fn a_reported_zero_is_measured_not_unknown() {
         let pool = connect_in_memory().await;
-        let mut zero = event("k1", "2026-09-10T12:00:00Z");
+        let mut zero = event("k1", "2026-09-10T12:00:00.000Z");
         zero.input_tokens = Some(0);
         zero.output_tokens = Some(0);
         insert_event(&pool, &zero).await.unwrap();
@@ -720,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn conflict_keeps_the_activity_and_drops_only_the_measurement() {
         let pool = connect_in_memory().await;
-        insert_event(&pool, &event("k1", "2026-09-10T12:00:00Z"))
+        insert_event(&pool, &event("k1", "2026-09-10T12:00:00.000Z"))
             .await
             .unwrap();
         mark_conflict(&pool, "k1", "claude_group_disagreement")
@@ -740,11 +1011,11 @@ mod tests {
     #[tokio::test]
     async fn unscoped_events_are_separable_from_workspace_scoped_ones() {
         let pool = connect_in_memory().await;
-        let mut scoped = event("scoped", "2026-09-10T12:00:00Z");
+        let mut scoped = event("scoped", "2026-09-10T12:00:00.000Z");
         scoped.event_kind = "invocation".into();
         insert_event(&pool, &scoped).await.unwrap();
 
-        let mut unscoped = event("unscoped", "2026-09-10T13:00:00Z");
+        let mut unscoped = event("unscoped", "2026-09-10T13:00:00.000Z");
         unscoped.event_kind = "invocation".into();
         unscoped.workspace_id = None;
         unscoped.workspace_agent_id = None;
@@ -819,13 +1090,13 @@ mod tests {
     #[tokio::test]
     async fn reported_and_selected_models_are_distinct_identities() {
         let pool = connect_in_memory().await;
-        let mut reported = event("reported", "2026-09-10T12:00:00Z");
+        let mut reported = event("reported", "2026-09-10T12:00:00.000Z");
         reported.served_model = Some("gpt-6-astra".into());
         reported.requested_model = Some("gpt-6-astra".into());
         reported.provider = Some("openai".into());
         insert_event(&pool, &reported).await.unwrap();
 
-        let mut selected = event("selected", "2026-09-10T13:00:00Z");
+        let mut selected = event("selected", "2026-09-10T13:00:00.000Z");
         selected.served_model = None;
         selected.requested_model = Some("gpt-6-astra".into());
         selected.provider = Some("openai".into());
@@ -859,26 +1130,26 @@ mod tests {
     #[tokio::test]
     async fn buckets_are_half_open_and_never_fabricate_events() {
         let pool = connect_in_memory().await;
-        insert_event(&pool, &event("before", "2026-09-09T23:59:59Z"))
+        insert_event(&pool, &event("before", "2026-09-09T23:59:59.000Z"))
             .await
             .unwrap();
-        insert_event(&pool, &event("boundary", "2026-09-10T00:00:00Z"))
+        insert_event(&pool, &event("boundary", "2026-09-10T00:00:00.000Z"))
             .await
             .unwrap();
-        insert_event(&pool, &event("inside", "2026-09-10T12:00:00Z"))
+        insert_event(&pool, &event("inside", "2026-09-10T12:00:00.000Z"))
             .await
             .unwrap();
 
         let buckets = vec![
             (
                 "2026-09-09".to_string(),
-                "2026-09-09T00:00:00Z".to_string(),
-                "2026-09-10T00:00:00Z".to_string(),
+                "2026-09-09T00:00:00.000Z".to_string(),
+                "2026-09-10T00:00:00.000Z".to_string(),
             ),
             (
                 "2026-09-10".to_string(),
-                "2026-09-10T00:00:00Z".to_string(),
-                "2026-09-11T00:00:00Z".to_string(),
+                "2026-09-10T00:00:00.000Z".to_string(),
+                "2026-09-11T00:00:00.000Z".to_string(),
             ),
         ];
         let rows = aggregate_buckets(&pool, &UsageScope::default(), &buckets)
@@ -899,8 +1170,8 @@ mod tests {
             &UsageScope::default(),
             &[(
                 "2026-09-20".to_string(),
-                "2026-09-20T00:00:00Z".to_string(),
-                "2026-09-21T00:00:00Z".to_string(),
+                "2026-09-20T00:00:00.000Z".to_string(),
+                "2026-09-21T00:00:00.000Z".to_string(),
             )],
         )
         .await
@@ -915,10 +1186,10 @@ mod tests {
     async fn scope_values_are_bound_not_interpolated() {
         let pool = connect_in_memory().await;
         let injection = "' OR 1=1 --";
-        let mut evil = event("evil", "2026-09-10T12:00:00Z");
+        let mut evil = event("evil", "2026-09-10T12:00:00.000Z");
         evil.workspace_id = Some(injection.to_owned());
         insert_event(&pool, &evil).await.unwrap();
-        insert_event(&pool, &event("normal", "2026-09-10T12:00:00Z"))
+        insert_event(&pool, &event("normal", "2026-09-10T12:00:00.000Z"))
             .await
             .unwrap();
 
@@ -961,17 +1232,25 @@ mod tests {
             state: "complete".into(),
             collector_version: "v1".into(),
             diagnostic_code: None,
-            last_verified_at: "2026-09-30T00:00:00Z".into(),
+            last_verified_at: "2026-09-30T00:00:00.000Z".into(),
         };
         insert_coverage(
             &pool,
-            &row("straddles", "2026-08-20T00:00:00Z", "2026-09-05T00:00:00Z"),
+            &row(
+                "straddles",
+                "2026-08-20T00:00:00.000Z",
+                "2026-09-05T00:00:00.000Z",
+            ),
         )
         .await
         .unwrap();
         insert_coverage(
             &pool,
-            &row("outside", "2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z"),
+            &row(
+                "outside",
+                "2026-07-01T00:00:00.000Z",
+                "2026-07-02T00:00:00.000Z",
+            ),
         )
         .await
         .unwrap();
@@ -981,5 +1260,382 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "straddles");
+    }
+
+    // ── Cursors and coverage recording ───────────────────────────────────
+
+    fn cursor(offset: i64, length: i64) -> CursorRow {
+        CursorRow {
+            id: "cursor-1".into(),
+            source_kind: "claude-code".into(),
+            source_session_id: "sess-1".into(),
+            path_fingerprint: "fp-1".into(),
+            byte_offset: offset,
+            observed_length: length,
+            collector_version: "v1".into(),
+            workspace_id: Some("ws".into()),
+            workspace_agent_id: Some("wa".into()),
+            verified_owner: Some("wa".into()),
+            verified_cwd: Some("/tmp/ws".into()),
+            parser_state: None,
+            last_verified_at: "2026-09-05T00:00:00.000Z".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cursor_advances_in_place_and_stays_one_row() {
+        let pool = connect_in_memory().await;
+        upsert_cursor(&pool, &cursor(0, 100)).await.unwrap();
+        let mut advanced = cursor(100, 250);
+        advanced.id = "a-different-id-is-ignored".into();
+        advanced.parser_state = Some(r#"{"pending":"req-9"}"#.into());
+        upsert_cursor(&pool, &advanced).await.unwrap();
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_cursor")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "same file, one cursor");
+        let got = get_cursor(&pool, "claude-code", "fp-1")
+            .await
+            .unwrap()
+            .expect("cursor exists");
+        assert_eq!(got.byte_offset, 100);
+        assert_eq!(got.observed_length, 250);
+        assert_eq!(got.parser_state.as_deref(), Some(r#"{"pending":"req-9"}"#));
+        assert_eq!(
+            got.id, "cursor-1",
+            "identity is the (source, fingerprint) pair"
+        );
+        assert!(get_cursor(&pool, "codex", "fp-1").await.unwrap().is_none());
+    }
+
+    fn observed<'a>(start: &str, end: &str, state: &'a str) -> ObservedInterval<'a> {
+        ObservedInterval {
+            workspace_id: Some("ws"),
+            workspace_agent_id: None,
+            source_kind: "claude-code",
+            start: at(start),
+            end: at(end),
+            state,
+            diagnostic_code: None,
+            collector_version: "v1",
+            last_verified_at: at(end),
+        }
+    }
+
+    /// `connect_in_memory` is a ONE-connection pool: hold the connection only
+    /// for the write, or a following pool read deadlocks.
+    async fn record(pool: &SqlitePool, observed: &ObservedInterval<'_>) {
+        let mut conn = pool.acquire().await.unwrap();
+        record_coverage(&mut conn, observed).await.unwrap();
+    }
+
+    async fn coverage_rows(pool: &SqlitePool) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT interval_start, interval_end, state FROM model_usage_coverage
+              ORDER BY interval_start ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Ticks that touch or overlap collapse into one interval; a gap starts a
+    /// new one, so an outage stays visible as two rows.
+    #[tokio::test]
+    async fn coverage_merges_contiguous_ticks_but_keeps_gaps() {
+        let pool = connect_in_memory().await;
+        for (start, end) in [
+            ("2026-09-01T00:00:00.000Z", "2026-09-01T00:00:10.000Z"),
+            ("2026-09-01T00:00:10.000Z", "2026-09-01T00:00:20.000Z"), // touching
+            ("2026-09-01T00:00:15.000Z", "2026-09-01T00:00:30.000Z"), // overlapping
+            ("2026-09-01T01:00:00.000Z", "2026-09-01T01:00:10.000Z"), // after a gap
+        ] {
+            record(&pool, &observed(start, end, "complete")).await;
+        }
+        let rows = coverage_rows(&pool).await;
+        assert_eq!(rows.len(), 2, "one merged stretch plus one after the gap");
+        assert_eq!(rows[0].0, "2026-09-01T00:00:00.000Z");
+        assert_eq!(rows[0].1, "2026-09-01T00:00:30.000Z");
+        assert_eq!(rows[1].0, "2026-09-01T01:00:00.000Z");
+    }
+
+    /// A merge may widen the START too (a backfill that reaches earlier).
+    #[tokio::test]
+    async fn coverage_merge_widens_both_ends() {
+        let pool = connect_in_memory().await;
+        record(
+            &pool,
+            &observed(
+                "2026-09-01T10:00:00.000Z",
+                "2026-09-01T11:00:00.000Z",
+                "complete",
+            ),
+        )
+        .await;
+        record(
+            &pool,
+            &observed(
+                "2026-09-01T09:00:00.000Z",
+                "2026-09-01T10:30:00.000Z",
+                "complete",
+            ),
+        )
+        .await;
+        let rows = coverage_rows(&pool).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].0.as_str(), rows[0].1.as_str()),
+            ("2026-09-01T09:00:00.000Z", "2026-09-01T11:00:00.000Z")
+        );
+    }
+
+    /// Different state, scope or diagnostic never merge — a partial stretch
+    /// must not vanish inside a complete one.
+    #[tokio::test]
+    async fn coverage_never_merges_across_state_scope_or_diagnostic() {
+        let pool = connect_in_memory().await;
+        let base = observed(
+            "2026-09-01T00:00:00.000Z",
+            "2026-09-01T01:00:00.000Z",
+            "complete",
+        );
+        record(&pool, &base).await;
+        record(
+            &pool,
+            &observed(
+                "2026-09-01T01:00:00.000Z",
+                "2026-09-01T02:00:00.000Z",
+                "partial",
+            ),
+        )
+        .await;
+        let mut other_scope = base.clone();
+        other_scope.workspace_agent_id = Some("wa");
+        record(&pool, &other_scope).await;
+        let mut unsupported = base.clone();
+        unsupported.state = "partial";
+        unsupported.diagnostic_code = Some(UNSUPPORTED_SOURCE);
+        record(&pool, &unsupported).await;
+
+        assert_eq!(coverage_rows(&pool).await.len(), 4);
+    }
+
+    /// The plan's crash rule: events, coverage and the cursor advance commit
+    /// together or not at all, so a crash mid-batch replays cleanly and can
+    /// never leave a cursor claiming bytes whose events were lost.
+    #[tokio::test]
+    async fn events_coverage_and_cursor_commit_atomically() {
+        let pool = connect_in_memory().await;
+
+        // Rolled back: nothing of the batch survives.
+        {
+            let mut tx = pool.begin().await.unwrap();
+            insert_event(&mut *tx, &event("k1", "2026-09-05T10:00:00.000Z"))
+                .await
+                .unwrap();
+            record_coverage(
+                &mut tx,
+                &observed(
+                    "2026-09-05T00:00:00.000Z",
+                    "2026-09-05T11:00:00.000Z",
+                    "partial",
+                ),
+            )
+            .await
+            .unwrap();
+            upsert_cursor(&mut *tx, &cursor(0, 500)).await.unwrap();
+            tx.rollback().await.unwrap();
+        }
+        assert_eq!(agg(&pool, &UsageScope::default()).await.activity_count, 0);
+        assert!(coverage_rows(&pool).await.is_empty());
+        assert!(get_cursor(&pool, "claude-code", "fp-1")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Replay of the same batch after the "crash": one activity, one
+        // cursor, one interval.
+        for _ in 0..2 {
+            let mut tx = pool.begin().await.unwrap();
+            insert_event(&mut *tx, &event("k1", "2026-09-05T10:00:00.000Z"))
+                .await
+                .unwrap();
+            record_coverage(
+                &mut tx,
+                &observed(
+                    "2026-09-05T00:00:00.000Z",
+                    "2026-09-05T11:00:00.000Z",
+                    "partial",
+                ),
+            )
+            .await
+            .unwrap();
+            upsert_cursor(&mut *tx, &cursor(500, 500)).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        assert_eq!(agg(&pool, &UsageScope::default()).await.activity_count, 1);
+        assert_eq!(coverage_rows(&pool).await.len(), 1);
+        assert_eq!(
+            get_cursor(&pool, "claude-code", "fp-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .byte_offset,
+            500
+        );
+    }
+
+    // ── Review ab722021 regressions ──────────────────────────────────────
+
+    /// Two model-less events from different providers are ONE unknown
+    /// identity: the exact reproduction was two rows of activity=1/tokens=30
+    /// where the wire can only carry one `unknown::` key.
+    #[tokio::test]
+    async fn model_less_events_group_as_one_unknown_identity_across_providers() {
+        let pool = connect_in_memory().await;
+        for (key, provider) in [("a", "anthropic"), ("b", "openai")] {
+            let mut e = event(key, "2026-09-05T10:00:00Z");
+            e.provider = Some(provider.into());
+            e.served_model = None;
+            e.requested_model = None;
+            e.input_tokens = Some(20);
+            e.output_tokens = Some(10);
+            insert_event(&pool, &e).await.unwrap();
+        }
+        let groups = aggregate_by_model(&pool, &UsageScope::default(), RANGE_START, RANGE_END)
+            .await
+            .unwrap();
+        assert_eq!(
+            groups.len(),
+            1,
+            "one unknown identity, not one per provider"
+        );
+        assert_eq!(groups[0].provider, None);
+        assert_eq!(groups[0].served_model, None);
+        assert_eq!(groups[0].requested_model, None);
+        assert_eq!(groups[0].aggregate.activity_count, 2);
+        assert_eq!(groups[0].aggregate.measured_tokens, Some(60));
+    }
+
+    /// Counters above the ceiling are stored as UNKNOWN with a diagnostic, so
+    /// a grouped SUM can neither overflow nor promote to a float. The exact
+    /// reproduction: two rows of 2^62 made `SUM` fail with integer overflow.
+    #[tokio::test]
+    async fn implausible_counters_become_unknown_instead_of_overflowing() {
+        let pool = connect_in_memory().await;
+        for key in ["a", "b"] {
+            let mut e = event(key, "2026-09-05T10:00:00Z");
+            e.input_tokens = Some(1 << 62);
+            e.output_tokens = Some(1 << 62);
+            e.cache_read_input_tokens = Some(i64::MAX);
+            insert_event(&pool, &e).await.unwrap();
+        }
+        // One valid row proves the good side of the ceiling is still counted.
+        let mut ok = event("ok", "2026-09-05T10:00:00Z");
+        ok.input_tokens = Some(MAX_TOKEN_COUNTER);
+        ok.output_tokens = Some(MAX_TOKEN_COUNTER);
+        insert_event(&pool, &ok).await.unwrap();
+        // A negative counter is equally not a measurement.
+        let mut negative = event("neg", "2026-09-05T10:00:00Z");
+        negative.output_tokens = Some(-1);
+        insert_event(&pool, &negative).await.unwrap();
+
+        let total = agg(&pool, &UsageScope::default()).await;
+        assert_eq!(total.activity_count, 4, "the responses still happened");
+        assert_eq!(total.measured_event_count, 1);
+        assert_eq!(total.unknown_usage_count, 3);
+        assert_eq!(total.measured_tokens, Some(2 * MAX_TOKEN_COUNTER));
+        // `negative` keeps its known input: partial, not unknown.
+        assert_eq!(total.input_tokens, Some(MAX_TOKEN_COUNTER + 100));
+
+        let diagnostics: Vec<(String, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT event_key, diagnostic_code, cache_read_input_tokens
+               FROM model_usage_event WHERE event_key IN ('a', 'neg') ORDER BY event_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(diagnostics[0].1.as_deref(), Some(COUNTER_OUT_OF_RANGE));
+        assert_eq!(diagnostics[0].2, None, "the subset counter was dropped too");
+        assert_eq!(diagnostics[1].1.as_deref(), Some(COUNTER_OUT_OF_RANGE));
+    }
+
+    /// The schema enforces the same ceiling, so a writer that bypasses
+    /// `insert_event` cannot smuggle an overflowing counter in either.
+    #[tokio::test]
+    async fn schema_rejects_counters_above_the_ceiling() {
+        let pool = connect_in_memory().await;
+        let result = sqlx::query(
+            "INSERT INTO model_usage_event (id, event_key, source_kind, source_version,
+                event_kind, occurred_at, recorded_at, input_tokens, token_completeness)
+             VALUES ('x', 'x', 's', 'v1', 'response', '2026-09-05T10:00:00.000Z',
+                     '2026-09-05T10:00:00.000Z', ?1, 'partial')",
+        )
+        .bind(MAX_TOKEN_COUNTER + 1)
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "CHECK must reject a counter above 2^40");
+    }
+
+    /// Timestamps reach storage in the one canonical shape whatever the
+    /// caller's precision, so lexicographic bucket comparison stays exact.
+    #[tokio::test]
+    async fn timestamps_are_stored_canonically() {
+        let pool = connect_in_memory().await;
+        let e = event("k", "2026-09-05T10:00:00+07:00"); // offset, no fraction
+        insert_event(&pool, &e).await.unwrap();
+        let stored: (String, String) =
+            sqlx::query_as("SELECT occurred_at, recorded_at FROM model_usage_event")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.0, "2026-09-05T03:00:00.000Z");
+        assert_eq!(stored.1, "2026-09-05T00:00:00.000Z");
+    }
+
+    /// repo/mod.rs contract: serializable rows emit camelCase keys.
+    #[test]
+    fn coverage_interval_row_camel_case_contract() {
+        let row = CoverageIntervalRow {
+            id: "id".into(),
+            workspace_id: Some("ws".into()),
+            workspace_agent_id: None,
+            source_kind: "claude-code".into(),
+            interval_start: "2026-09-01T00:00:00.000Z".into(),
+            interval_end: "2026-09-02T00:00:00.000Z".into(),
+            state: "complete".into(),
+            collector_version: "v1".into(),
+            diagnostic_code: Some(UNSUPPORTED_SOURCE.into()),
+            last_verified_at: "2026-09-02T00:00:00.000Z".into(),
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        // serde_json's map is sorted, so compare key SETS.
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "id",
+                "workspaceId",
+                "workspaceAgentId",
+                "sourceKind",
+                "intervalStart",
+                "intervalEnd",
+                "state",
+                "collectorVersion",
+                "diagnosticCode",
+                "lastVerifiedAt",
+            ])
+        );
+        assert!(
+            json["workspaceAgentId"].is_null(),
+            "None serializes as null"
+        );
     }
 }

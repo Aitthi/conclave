@@ -1262,8 +1262,8 @@ mod tests {
             source_session_id: None,
             source_request_id: None,
             source_response_id: None,
-            occurred_at: ts(at),
-            recorded_at: ts(at),
+            occurred_at: at,
+            recorded_at: at,
             provider: None,
             requested_model: None,
             served_model: None,
@@ -2424,5 +2424,34 @@ mod tests {
             .unwrap();
         let out = overview_of(&state, json!({ "days": 90, "timeZone": "UTC" })).await;
         assert_eq!(i64_at(&out, "/summary/activityCount"), 0);
+    }
+
+    /// Review ab722021: model-less events from two providers must be ONE
+    /// `unknown::` row (activity 2, tokens 60), not two rows sharing a key.
+    #[tokio::test]
+    async fn unknown_model_rows_never_duplicate_across_providers() {
+        let state = AppState::for_tests().await;
+        let at = Utc::now() - Duration::hours(1);
+        for (key, provider) in [("a", "anthropic"), ("b", "openai")] {
+            let mut e = ev(key, at);
+            e.provider = Some(provider.into());
+            e.input_tokens = Some(20);
+            e.output_tokens = Some(10);
+            insert_event(&state.db, &e).await.unwrap();
+        }
+        let out = overview_of(&state, json!({ "days": 30, "timeZone": "UTC" })).await;
+        let by_model = rows(&out, "byModel");
+        assert_eq!(by_model.len(), 1);
+        assert_eq!(by_model[0].get("key").unwrap(), "unknown::");
+        assert_eq!(by_model[0].get("activityCount").unwrap().as_i64(), Some(2));
+        assert_eq!(
+            by_model[0].get("measuredTokens").unwrap().as_i64(),
+            Some(60)
+        );
+        let keys: Vec<&str> = rows(&out, "models")
+            .iter()
+            .map(|m| m.get("key").unwrap().as_str().unwrap())
+            .collect();
+        assert_eq!(keys.iter().filter(|k| **k == "unknown::").count(), 1);
     }
 }

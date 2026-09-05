@@ -5150,4 +5150,43 @@ mod tests {
         );
         assert!(!state.runtime.is_live(&id));
     }
+
+    /// Production path for review ab722021: the char-based estimate flush must
+    /// not leave a transcript reading's provenance describing the estimate.
+    #[tokio::test]
+    async fn estimate_flush_clears_transcript_provenance() {
+        let state = AppState::for_tests().await;
+        let instance_id = fixture_instance(&state).await;
+        let session = repo::session::get_by_instance(&state.db, &instance_id)
+            .await
+            .unwrap()
+            .expect("fixture session");
+        repo::session::set_context_reading_observed(
+            &state.db,
+            &session.id,
+            50_000,
+            200_000,
+            "claude-code",
+            "2026-09-05T10:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        // A flush well below the auto-compact threshold: estimate only.
+        let compacted =
+            flush_context_estimate(&state.db, None, &session.id, 400 * CHARS_PER_TOKEN, 200_000)
+                .await;
+        assert!(!compacted);
+
+        let after = repo::session::get(&state.db, &session.id)
+            .await
+            .unwrap()
+            .expect("session");
+        assert_eq!(after.context_tokens, Some(400));
+        assert_eq!(
+            after.context_source, None,
+            "an estimate carries no source; the old reading's must not survive"
+        );
+        assert_eq!(after.context_observed_at, None);
+    }
 }
