@@ -1051,6 +1051,14 @@ fn is_dropped_callback(e: &BrowserError) -> bool {
 /// [`DROPPED_CALLBACK_MSG`] — a cause and a remedy — instead of the internal
 /// marker, which read to agents as an engine bug. Generic so the retry policy is
 /// unit-testable without a WebView.
+///
+/// SAFETY INVARIANT — this retry is only sound because [`require_ready_webview`]
+/// runs first. In wry's queue-and-drop window the script is DROPPED AS A
+/// CALLBACK but still runs later (replayed on commit), so retrying there would
+/// double-fire a `click`. The first-commit gate makes that window unreachable,
+/// leaving only the dispatch-layer drops (`tauri-runtime-wry` `lib.rs:3745-3751`
+/// and `3788-3791`), where the script never executed at all and a retry cannot
+/// duplicate anything. Remove the gate and this retry stops being idempotent.
 async fn retry_once_on_dropped_callback<F, Fut>(
     delay: Duration,
     mut attempt: F,
