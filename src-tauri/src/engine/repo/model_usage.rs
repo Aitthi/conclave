@@ -109,6 +109,7 @@ pub async fn pending_cursor_scopes(pool: &SqlitePool) -> sqlx::Result<Vec<Pendin
 /// the events it produced (see [`upsert_cursor`]), so a crash between the two
 /// is impossible and a replay from the previous offset is a no-op through
 /// `event_key`.
+#[allow(dead_code)] // consumed by the transcript importer landing next in this lane
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct CursorRow {
     pub id: String,
@@ -129,11 +130,13 @@ pub struct CursorRow {
     pub last_verified_at: String,
 }
 
+#[allow(dead_code)] // see CursorRow
 const CURSOR_COLUMNS: &str = "id, source_kind, source_session_id, path_fingerprint, byte_offset,
         observed_length, collector_version, workspace_id, workspace_agent_id,
         verified_owner, verified_cwd, parser_state, last_verified_at";
 
 /// The cursor for one (source, file) pair, if the importer has seen it.
+#[allow(dead_code)] // see CursorRow
 pub async fn get_cursor<'e, E>(
     executor: E,
     source_kind: &str,
@@ -154,6 +157,7 @@ where
 
 /// Insert or advance a cursor. The `(source_kind, path_fingerprint)` pair is
 /// the identity; everything else is replaced by the caller's latest view.
+#[allow(dead_code)] // see CursorRow
 pub async fn upsert_cursor<'e, E>(executor: E, row: &CursorRow) -> sqlx::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -195,6 +199,7 @@ where
 
 /// What a collector observed over one interval; the write-side twin of
 /// [`CoverageIntervalRow`] without the storage id.
+#[allow(dead_code)] // see CursorRow
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedInterval<'a> {
     pub workspace_id: Option<&'a str>,
@@ -223,6 +228,7 @@ pub struct ObservedInterval<'a> {
 ///
 /// Takes a connection rather than a pool so the caller can run it inside the
 /// same transaction as the events and cursor it describes.
+#[allow(dead_code)] // see CursorRow
 pub async fn record_coverage(
     conn: &mut sqlx::SqliteConnection,
     observed: &ObservedInterval<'_>,
