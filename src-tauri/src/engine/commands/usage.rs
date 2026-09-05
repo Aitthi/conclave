@@ -86,6 +86,111 @@ pub(crate) struct CollectedEvent<'a> {
     pub usage: &'a MeasuredUsage,
 }
 
+// ── Pending collection gaps (review a12f77f2 C5) ─────────────────────────────
+
+/// Diagnostic on the partial interval written where an in-process collector
+/// FAILED to persist an event: the call happened, its measurement is lost, and
+/// the `complete` span this source later claims must not paper over it.
+pub(crate) const COLLECTION_GAP: &str = "collection_gap";
+
+/// Most lost instants held in memory before they coalesce per source.
+const MAX_PENDING_GAPS: usize = 64;
+
+/// Smallest width a gap is written with, so a single lost instant is visible
+/// to overlap queries (a `[t, t)` interval is not).
+const GAP_MIN_WIDTH: Duration = Duration::milliseconds(1);
+
+/// One stretch of a source's time whose events were lost to a persistence
+/// failure. Held in memory until a later write lands it as coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingGap {
+    source_kind: String,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+/// The bounded in-memory ledger of instants an in-process collector could
+/// not persist. A failed write remembers its instant here; the NEXT write of
+/// any in-process source lands every remembered gap as a partial
+/// `collection_gap` interval in the same transaction, BEFORE its own complete
+/// span, and forgets only what that commit made durable. Coverage rows of a
+/// different state or diagnostic never merge, so the gap stays a separate
+/// row a later complete span cannot absorb.
+///
+/// Bounded: past [`MAX_PENDING_GAPS`] the ledger coalesces into one envelope
+/// per source — wider than the truth, never narrower — so a store that keeps
+/// failing costs a fixed amount of memory and reports one long gap instead
+/// of nothing.
+#[derive(Debug, Default)]
+pub(crate) struct PendingGaps {
+    gaps: Vec<PendingGap>,
+}
+
+impl PendingGaps {
+    pub(crate) const fn new() -> Self {
+        Self { gaps: Vec::new() }
+    }
+
+    /// Remember that `source_kind` lost an event completing at `at`.
+    fn remember(&mut self, source_kind: &str, at: DateTime<Utc>) {
+        if self
+            .gaps
+            .iter()
+            .any(|g| g.source_kind == source_kind && g.start <= at && at <= g.end)
+        {
+            return;
+        }
+        if self.gaps.len() >= MAX_PENDING_GAPS {
+            let mut merged: Vec<PendingGap> = Vec::new();
+            for gap in self.gaps.drain(..) {
+                match merged.iter_mut().find(|m| m.source_kind == gap.source_kind) {
+                    Some(m) => {
+                        m.start = m.start.min(gap.start);
+                        m.end = m.end.max(gap.end);
+                    }
+                    None => merged.push(gap),
+                }
+            }
+            self.gaps = merged;
+        }
+        self.gaps.push(PendingGap {
+            source_kind: source_kind.to_owned(),
+            start: at,
+            end: at,
+        });
+    }
+
+    fn snapshot(&self) -> Vec<PendingGap> {
+        self.gaps.clone()
+    }
+
+    /// Drop exactly the gaps a commit made durable; anything remembered
+    /// meanwhile stays.
+    fn forget(&mut self, landed: &[PendingGap]) {
+        self.gaps.retain(|g| !landed.contains(g));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.gaps.len()
+    }
+}
+
+/// The process-wide ledger shared by every in-process collector.
+static PENDING_GAPS: std::sync::Mutex<PendingGaps> = std::sync::Mutex::new(PendingGaps::new());
+
+fn with_ledger<T>(
+    ledger: &std::sync::Mutex<PendingGaps>,
+    f: impl FnOnce(&mut PendingGaps) -> T,
+) -> T {
+    // A panic while holding the lock leaves plain data behind; the ledger is
+    // still the best record of what was lost, so keep using it.
+    let mut guard = ledger
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
 /// Persist an in-process collector's event and extend its source's coverage,
 /// in one transaction.
 ///
@@ -94,10 +199,35 @@ pub(crate) struct CollectedEvent<'a> {
 /// observation of its own source from the online instant to this completion.
 /// A test state with no online instant claims nothing. Callers treat a failure
 /// here as a logged collection gap, never as a user-facing error: the answer
-/// the model gave is already in hand.
+/// the model gave is already in hand — and the gap itself is remembered in
+/// [`PendingGaps`] so the next successful write records it as partial
+/// coverage instead of letting the complete span silently cover it.
 pub(crate) async fn record_collected_event(
     db: &SqlitePool,
     event: &CollectedEvent<'_>,
+) -> Result<(), sqlx::Error> {
+    record_collected_event_with(db, event, &PENDING_GAPS).await
+}
+
+/// [`record_collected_event`] against an explicit ledger (tests own theirs).
+pub(crate) async fn record_collected_event_with(
+    db: &SqlitePool,
+    event: &CollectedEvent<'_>,
+    ledger: &std::sync::Mutex<PendingGaps>,
+) -> Result<(), sqlx::Error> {
+    let pending = with_ledger(ledger, |l| l.snapshot());
+    let result = persist_collected_event(db, event, &pending).await;
+    match &result {
+        Ok(()) => with_ledger(ledger, |l| l.forget(&pending)),
+        Err(_) => with_ledger(ledger, |l| l.remember(event.source_kind, event.occurred_at)),
+    }
+    result
+}
+
+async fn persist_collected_event(
+    db: &SqlitePool,
+    event: &CollectedEvent<'_>,
+    pending: &[PendingGap],
 ) -> Result<(), sqlx::Error> {
     let recorded_at = Utc::now();
     let row = NewUsageEvent {
@@ -126,6 +256,10 @@ pub(crate) async fn record_collected_event(
         cache_read_input_tokens: event.usage.cache_read_input_tokens,
         cache_write_input_tokens: event.usage.cache_write_input_tokens,
         reasoning_output_tokens: event.usage.reasoning_output_tokens,
+        // Reconciliation evidence is a transcript-replay concern; an
+        // in-process call is observed exactly once and never replayed.
+        stop_reason: None,
+        source_uncached_input_tokens: None,
         validity: "valid".to_owned(),
         // A source that reported nonsense counters leaves its mark here;
         // insert_event's own range check stamps the same code for values that
@@ -133,6 +267,25 @@ pub(crate) async fn record_collected_event(
         diagnostic_code: event.usage.diagnostic_code().map(str::to_owned),
     };
     let mut tx = db.begin().await?;
+    // Gaps first, so no complete span in this transaction is ever written
+    // without the partial rows that bound it.
+    for gap in pending {
+        model_usage::record_coverage(
+            &mut tx,
+            &ObservedInterval {
+                workspace_id: None,
+                workspace_agent_id: None,
+                source_kind: &gap.source_kind,
+                start: gap.start,
+                end: gap.end + GAP_MIN_WIDTH,
+                state: "partial",
+                diagnostic_code: Some(COLLECTION_GAP),
+                collector_version: COLLECTOR_VERSION,
+                last_verified_at: recorded_at,
+            },
+        )
+        .await?;
+    }
     model_usage::insert_event(&mut *tx, &row).await?;
     if let Some(online_since) = collectors_online_since() {
         model_usage::record_coverage(
@@ -1409,6 +1562,8 @@ mod tests {
             cache_read_input_tokens: None,
             cache_write_input_tokens: None,
             reasoning_output_tokens: None,
+            stop_reason: None,
+            source_uncached_input_tokens: None,
             validity: "valid".into(),
             diagnostic_code: None,
         }
@@ -1744,6 +1899,185 @@ mod tests {
             coverage_for(&intervals, &scope, start, end),
             Coverage::Partial
         );
+    }
+
+    // ── Pending collection gaps (review a12f77f2 C5) ─────────────────────
+
+    fn collected<'a>(
+        usage: &'a MeasuredUsage,
+        op: &'a str,
+        at: DateTime<Utc>,
+    ) -> CollectedEvent<'a> {
+        CollectedEvent {
+            source_kind: SOURCE_DRAFT,
+            operation_id: op,
+            event_kind: "invocation",
+            workspace_id: None,
+            workspace_agent_id: None,
+            session_id: None,
+            generation: None,
+            source_session_id: None,
+            source_request_id: None,
+            source_response_id: None,
+            occurred_at: at,
+            provider: Some("anthropic"),
+            requested_model: None,
+            served_model: None,
+            usage,
+        }
+    }
+
+    async fn gap_rows(pool: &SqlitePool) -> Vec<(String, String, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT source_kind, interval_start, interval_end, diagnostic_code
+               FROM model_usage_coverage WHERE state = 'partial'
+              ORDER BY interval_start",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A persistence failure is remembered; the next successful write lands
+    /// it as a partial `collection_gap` interval in its own transaction, a
+    /// later complete span does not absorb it, and the reader sees partial.
+    #[tokio::test]
+    async fn a_failed_persist_becomes_a_collection_gap_on_recovery() {
+        let usage = MeasuredUsage::default();
+        let ledger = std::sync::Mutex::new(PendingGaps::new());
+        let lost_at = Utc.with_ymd_and_hms(2026, 9, 5, 10, 0, 0).unwrap();
+
+        let closed = AppState::for_tests().await.db.clone();
+        closed.close().await;
+        let failed =
+            record_collected_event_with(&closed, &collected(&usage, "op-lost", lost_at), &ledger)
+                .await;
+        assert!(failed.is_err(), "a closed pool cannot persist");
+        assert_eq!(with_ledger(&ledger, |l| l.len()), 1);
+
+        let state = AppState::for_tests().await;
+        let pool = state.db.clone();
+        record_collected_event_with(
+            &pool,
+            &collected(&usage, "op-ok", lost_at + Duration::minutes(5)),
+            &ledger,
+        )
+        .await
+        .expect("recovery write");
+        assert_eq!(
+            with_ledger(&ledger, |l| l.len()),
+            0,
+            "landed gaps are forgotten"
+        );
+        let rows = gap_rows(&pool).await;
+        assert_eq!(
+            rows,
+            vec![(
+                SOURCE_DRAFT.to_string(),
+                ts(lost_at),
+                ts(lost_at + Duration::milliseconds(1)),
+                Some(COLLECTION_GAP.to_string())
+            )]
+        );
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 1, "the lost event is not invented on recovery");
+
+        // What an online instance writes next: a complete span over the gap.
+        let mut conn = pool.acquire().await.unwrap();
+        model_usage::record_coverage(
+            &mut conn,
+            &ObservedInterval {
+                workspace_id: None,
+                workspace_agent_id: None,
+                source_kind: SOURCE_DRAFT,
+                start: lost_at - Duration::hours(1),
+                end: lost_at + Duration::hours(1),
+                state: "complete",
+                diagnostic_code: None,
+                collector_version: COLLECTOR_VERSION,
+                last_verified_at: lost_at + Duration::hours(1),
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn); // the test pool has one connection
+        assert_eq!(
+            gap_rows(&pool).await.len(),
+            1,
+            "the gap row survives the complete span"
+        );
+        let intervals = load_intervals(
+            &state,
+            &[],
+            &ts(lost_at - Duration::hours(1)),
+            &ts(lost_at + Duration::hours(1)),
+        )
+        .await
+        .unwrap();
+        let scope = ScopeQuery {
+            workspace: Sel::All,
+            agent: Sel::All,
+        };
+        assert_eq!(
+            coverage_for(
+                &intervals,
+                &scope,
+                lost_at - Duration::minutes(1),
+                lost_at + Duration::minutes(1)
+            ),
+            Coverage::Partial,
+            "a window holding the lost instant is never complete"
+        );
+
+        // Nothing pending: a further write lands no second gap row.
+        record_collected_event_with(
+            &pool,
+            &collected(&usage, "op-ok-2", lost_at + Duration::minutes(6)),
+            &ledger,
+        )
+        .await
+        .unwrap();
+        assert_eq!(gap_rows(&pool).await.len(), 1);
+    }
+
+    /// Repeated failures stay bounded in memory and coalesce per source into
+    /// an envelope that is wider than the truth, never narrower.
+    #[test]
+    fn pending_gaps_are_bounded_and_coalesce_conservatively() {
+        let mut ledger = PendingGaps::new();
+        let base = Utc.with_ymd_and_hms(2026, 9, 5, 10, 0, 0).unwrap();
+        for i in 0..(MAX_PENDING_GAPS as i64 * 3) {
+            let source = if i % 2 == 0 { SOURCE_DRAFT } else { "chat" };
+            ledger.remember(source, base + Duration::seconds(i));
+        }
+        assert!(ledger.len() <= MAX_PENDING_GAPS);
+        let snapshot = ledger.snapshot();
+        let draft_start = snapshot
+            .iter()
+            .filter(|g| g.source_kind == SOURCE_DRAFT)
+            .map(|g| g.start)
+            .min()
+            .unwrap();
+        let draft_end = snapshot
+            .iter()
+            .filter(|g| g.source_kind == SOURCE_DRAFT)
+            .map(|g| g.end)
+            .max()
+            .unwrap();
+        assert_eq!(draft_start, base, "the first lost instant is still covered");
+        assert_eq!(
+            draft_end,
+            base + Duration::seconds(MAX_PENDING_GAPS as i64 * 3 - 2),
+            "so is the last"
+        );
+        // Forgetting is exact: only what was landed leaves.
+        let landed = vec![snapshot[0].clone()];
+        ledger.forget(&landed);
+        assert_eq!(ledger.len(), snapshot.len() - 1);
+        assert!(!ledger.snapshot().contains(&snapshot[0]));
     }
 
     #[test]

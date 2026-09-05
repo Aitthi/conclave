@@ -60,7 +60,7 @@ use super::usage::{
 };
 use crate::engine::repo;
 use crate::engine::repo::model_usage::{
-    self, CursorRow, NewUsageEvent, ObservedInterval, UNSUPPORTED_SOURCE,
+    self, CursorRow, NewUsageEvent, ObservedInterval, MAX_STOP_REASON_CHARS, UNSUPPORTED_SOURCE,
 };
 
 // ── Bounds ───────────────────────────────────────────────────────────────────
@@ -90,6 +90,9 @@ pub enum Diagnostic {
     UnparsableRecord,
     /// A Claude assistant row lacked part of its identity or usage shape.
     ClaudeRowIncomplete,
+    /// A Claude row's stop reason exceeded the stored bound; kept as a
+    /// diagnostic, never truncated into apparent agreement (C6).
+    ClaudeStopReasonOversized,
     /// A repeated Claude row disagreed with the recorded response.
     ClaudeConflict,
     /// A Codex usage record lacked its session or response id.
@@ -106,6 +109,7 @@ impl Diagnostic {
             Diagnostic::OversizedRecord => "oversized_record",
             Diagnostic::UnparsableRecord => "unparsable_record",
             Diagnostic::ClaudeRowIncomplete => "claude_row_incomplete",
+            Diagnostic::ClaudeStopReasonOversized => "claude_stop_reason_oversized",
             Diagnostic::ClaudeConflict => "claude_group_disagrees",
             Diagnostic::CodexRecordIncomplete => "codex_record_incomplete",
             Diagnostic::CodexUnsupportedFormat => UNSUPPORTED_SOURCE,
@@ -263,6 +267,11 @@ pub struct ImportedEvent {
     pub requested_model: Option<String>,
     pub served_model: Option<String>,
     pub usage: MeasuredUsage,
+    /// Terminal stop reason as the source reported it (Claude only; bounded
+    /// by the parser to [`MAX_STOP_REASON_CHARS`]).
+    pub stop_reason: Option<String>,
+    /// The source's own uncached input counter (Claude only).
+    pub source_uncached_input_tokens: Option<i64>,
 }
 
 impl ImportedEvent {
@@ -292,6 +301,8 @@ impl ImportedEvent {
             cache_read_input_tokens: self.usage.cache_read_input_tokens,
             cache_write_input_tokens: self.usage.cache_write_input_tokens,
             reasoning_output_tokens: self.usage.reasoning_output_tokens,
+            stop_reason: self.stop_reason,
+            source_uncached_input_tokens: self.source_uncached_input_tokens,
             validity: "valid".to_owned(),
             diagnostic_code: self.usage.diagnostic_code().map(str::to_owned),
         }
@@ -374,7 +385,7 @@ pub fn scan_claude_lines(lines: &[String], candidate_owners: &[String]) -> Scan 
             value["timestamp"].as_str().and_then(parse_ts),
             message["stop_reason"].as_str(),
         );
-        let (Some(session), Some(request), Some(message_id), Some(at), Some(_stop)) = identity
+        let (Some(session), Some(request), Some(message_id), Some(at), Some(stop)) = identity
         else {
             if message["stop_reason"].is_null() && message.get("stop_reason").is_some() {
                 continue; // in-flight row: not yet a completed response
@@ -382,6 +393,13 @@ pub fn scan_claude_lines(lines: &[String], candidate_owners: &[String]) -> Scan 
             scan.note(Diagnostic::ClaudeRowIncomplete);
             continue;
         };
+        if stop.chars().count() > MAX_STOP_REASON_CHARS {
+            // Bounded evidence or none: an oversized stop reason is not
+            // stored (nor truncated — two distinct strings must never agree)
+            // and the row is not a valid response, so the scope goes partial.
+            scan.note(Diagnostic::ClaudeStopReasonOversized);
+            continue;
+        }
         scan.source_session_id
             .get_or_insert_with(|| session.to_owned());
 
@@ -431,6 +449,8 @@ pub fn scan_claude_lines(lines: &[String], candidate_owners: &[String]) -> Scan 
                 reasoning_output_tokens: None,
                 invalid_counters: invalid,
             },
+            stop_reason: Some(stop.to_owned()),
+            source_uncached_input_tokens: uncached,
         });
     }
     scan
@@ -606,6 +626,10 @@ pub fn scan_codex_lines(
                             invalid_counters: invalid,
                         }
                     },
+                    // Codex reports no stop reason and no separate uncached
+                    // counter; a Codex record is its own complete evidence.
+                    stop_reason: None,
+                    source_uncached_input_tokens: None,
                 });
             }
             _ => {}
@@ -702,6 +726,8 @@ pub async fn apply_scan(
             }
             let agrees = stored.source_response_id == row.source_response_id
                 && stored.served_model == row.served_model
+                && stored.stop_reason == row.stop_reason
+                && stored.source_uncached_input_tokens == row.source_uncached_input_tokens
                 && stored.input_tokens == row.input_tokens
                 && stored.output_tokens == row.output_tokens
                 && stored.cache_read_input_tokens == row.cache_read_input_tokens
@@ -2175,6 +2201,262 @@ mod tests {
         assert_eq!(total(&pool).await.conflict_count, 1, "still withdrawn");
     }
 
+    /// The two 0032 evidence scalars are stored as the source reported them.
+    #[tokio::test]
+    async fn claude_evidence_is_persisted_on_the_event() {
+        let pool = connect_in_memory().await;
+        apply_scan(
+            &pool,
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            &attribution(),
+            &cursor_for("fp", 1, 1),
+            &[],
+        )
+        .await
+        .unwrap();
+        let stored: (Option<String>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT stop_reason, source_uncached_input_tokens, input_tokens
+               FROM model_usage_event WHERE event_key = 'claude-code:v1:S1:R1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored.0.as_deref(), Some("tool_use"));
+        assert_eq!(stored.1, Some(2), "uncached input kept as reported");
+        assert_eq!(
+            stored.2,
+            Some(2 + 27984 + 26445),
+            "input stays cache-inclusive"
+        );
+    }
+
+    /// Equal cache-inclusive totals with the uncached component moved into
+    /// cache write: the sum agrees, the evidence does not (review C6).
+    #[tokio::test]
+    async fn a_changed_uncached_component_with_equal_totals_is_a_conflict() {
+        let pool = connect_in_memory().await;
+        apply_scan(
+            &pool,
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            &attribution(),
+            &cursor_for("fp", 1, 1),
+            &[],
+        )
+        .await
+        .unwrap();
+        let mut shifted: Value = serde_json::from_str(&claude_row("R1", 1, "m", 433)).unwrap();
+        shifted["message"]["usage"]["input_tokens"] = json!(3);
+        shifted["message"]["usage"]["cache_creation_input_tokens"] = json!(27983);
+        let applied = apply_scan(
+            &pool,
+            scan_claude_lines(&[shifted.to_string()], &[]),
+            &attribution(),
+            &cursor_for("fp", 2, 2),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.conflicts, 1);
+        let t = total(&pool).await;
+        assert_eq!((t.activity_count, t.conflict_count), (1, 1));
+        assert_eq!(t.measured_tokens, None);
+    }
+
+    /// A stop-reason disagreement is caught from the STORED evidence, so it
+    /// survives a restart (a fresh apply) and far more than 16 intervening
+    /// groups — nothing about it lives in a bounded cache (review C6).
+    #[tokio::test]
+    async fn a_stop_reason_disagreement_survives_restart_and_many_intervening_groups() {
+        let pool = connect_in_memory().await;
+        apply_scan(
+            &pool,
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            &attribution(),
+            &cursor_for("fp", 1, 1),
+            &[],
+        )
+        .await
+        .unwrap();
+        let intervening: Vec<String> = (2..=25)
+            .map(|n| claude_row(&format!("R{n}"), 0, "m", 1))
+            .collect();
+        apply_scan(
+            &pool,
+            scan_claude_lines(&intervening, &[]),
+            &attribution(),
+            &cursor_for("fp", 2, 2),
+            &[],
+        )
+        .await
+        .unwrap();
+        // "Restart": a new apply against the store, no in-memory state.
+        let mut later: Value = serde_json::from_str(&claude_row("R1", 1, "m", 433)).unwrap();
+        later["message"]["stop_reason"] = json!("end_turn");
+        let applied = apply_scan(
+            &pool,
+            scan_claude_lines(&[later.to_string()], &[]),
+            &attribution(),
+            &cursor_for("fp", 3, 3),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            applied,
+            Applied {
+                inserted: 0,
+                replayed: 1,
+                conflicts: 1
+            }
+        );
+        let t = total(&pool).await;
+        assert_eq!(t.activity_count, 25);
+        assert_eq!(t.conflict_count, 1);
+    }
+
+    /// A pre-0032 Claude row carries no stop reason: incomplete evidence can
+    /// never prove agreement, so a replay against it is a conflict, and a
+    /// further agreeing block does not clear it (review C6).
+    #[tokio::test]
+    async fn a_legacy_row_without_stop_reason_stays_conflicting_on_replay() {
+        let pool = connect_in_memory().await;
+        sqlx::query(
+            "INSERT INTO model_usage_event (
+                id, event_key, workspace_id, workspace_agent_id, source_kind,
+                source_version, event_kind, source_session_id, source_request_id,
+                source_response_id, occurred_at, recorded_at, provider, served_model,
+                input_tokens, output_tokens, cache_read_input_tokens,
+                cache_write_input_tokens, token_completeness, validity
+             ) VALUES (
+                'legacy', 'claude-code:v1:S1:R1', 'ws', 'agent-1', 'claude-code',
+                'v1', 'response', 'S1', 'R1', 'msg-R1', '2026-09-05T10:00:00.000Z',
+                '2026-09-05T10:00:00.000Z', 'anthropic', 'm',
+                54431, 433, 26445, 27984, 'known', 'valid'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let applied = apply_scan(
+            &pool,
+            scan_claude_lines(&[claude_row("R1", 1, "m", 433)], &[]),
+            &attribution(),
+            &cursor_for("fp", 1, 1),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.conflicts, 1, "NULL evidence cannot agree");
+        let again = apply_scan(
+            &pool,
+            scan_claude_lines(&[claude_row("R1", 2, "m", 433)], &[]),
+            &attribution(),
+            &cursor_for("fp", 2, 2),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.conflicts, 0);
+        let t = total(&pool).await;
+        assert_eq!(
+            (t.activity_count, t.conflict_count),
+            (1, 1),
+            "never cleared"
+        );
+    }
+
+    /// An agreeing replay touches nothing but the completion time: no block
+    /// counter exists to increment, and every stored evidence column is
+    /// byte-for-byte what the first block recorded (review C6).
+    #[tokio::test]
+    async fn an_agreeing_replay_changes_only_the_completion_time() {
+        type Evidence = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            String,
+            Option<String>,
+        );
+        async fn evidence(pool: &sqlx::SqlitePool) -> (i64, Evidence) {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            let row: Evidence = sqlx::query_as(
+                "SELECT source_response_id, served_model, stop_reason,
+                        source_uncached_input_tokens, input_tokens, output_tokens,
+                        cache_read_input_tokens, cache_write_input_tokens,
+                        validity, diagnostic_code
+                   FROM model_usage_event WHERE event_key = 'claude-code:v1:S1:R1'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            (count, row)
+        }
+        let pool = connect_in_memory().await;
+        apply_scan(
+            &pool,
+            scan_claude_lines(&[claude_row("R1", 0, "m", 433)], &[]),
+            &attribution(),
+            &cursor_for("fp", 1, 1),
+            &[],
+        )
+        .await
+        .unwrap();
+        let before = evidence(&pool).await;
+        for block in 1..=3 {
+            apply_scan(
+                &pool,
+                scan_claude_lines(&[claude_row("R1", block, "m", 433)], &[]),
+                &attribution(),
+                &cursor_for("fp", 1 + i64::from(block), 1 + i64::from(block)),
+                &[],
+            )
+            .await
+            .unwrap();
+        }
+        let after = evidence(&pool).await;
+        assert_eq!(before, after, "replay changed stored evidence");
+        assert_eq!(after.0, 1, "still one row");
+        let at: String = sqlx::query_scalar(
+            "SELECT occurred_at FROM model_usage_event WHERE event_key = 'claude-code:v1:S1:R1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            at, "2026-09-05T10:00:03.000Z",
+            "completion moved to the last block"
+        );
+    }
+
+    /// A stop reason past the stored bound is a diagnostic (partial coverage),
+    /// not an event and never a truncated string; the bound itself is stored
+    /// verbatim (review C6).
+    #[test]
+    fn an_oversized_stop_reason_is_a_diagnostic_not_an_event() {
+        let mut oversized: Value = serde_json::from_str(&claude_row("R1", 0, "m", 1)).unwrap();
+        oversized["message"]["stop_reason"] = json!("x".repeat(MAX_STOP_REASON_CHARS + 1));
+        let mut bounded: Value = serde_json::from_str(&claude_row("R2", 0, "m", 1)).unwrap();
+        bounded["message"]["stop_reason"] = json!("y".repeat(MAX_STOP_REASON_CHARS));
+        let scan = scan_claude_lines(&[oversized.to_string(), bounded.to_string()], &[]);
+        assert_eq!(scan.events.len(), 1);
+        assert_eq!(
+            scan.events[0].stop_reason.as_deref(),
+            Some("y".repeat(MAX_STOP_REASON_CHARS).as_str())
+        );
+        assert_eq!(
+            scan.diagnostics.get(&Diagnostic::ClaudeStopReasonOversized),
+            Some(&1)
+        );
+    }
+
     /// An agreeing later block moves the completion time forward — across
     /// midnight into the next bucket — without adding activity (review C6).
     #[tokio::test]
@@ -2784,11 +3066,10 @@ mod tests {
             "fairness: several files share one tick"
         );
         assert!(
-            model_usage::pending_cursor_scopes(&pool)
+            !model_usage::pending_cursor_scopes(&pool)
                 .await
                 .unwrap()
-                .len()
-                >= 1,
+                .is_empty(),
             "pendingImport is truthful while backlog remains"
         );
 
