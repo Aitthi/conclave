@@ -68,13 +68,22 @@ function statusOf(tab: BrowserTab): TabStatus {
   return "live";
 }
 
-function SectionLabel({ children, lock }: { children: React.ReactNode; lock?: boolean }) {
+function SectionLabel({
+  children,
+  lock,
+  action,
+}: {
+  children: React.ReactNode;
+  lock?: boolean;
+  action?: React.ReactNode;
+}) {
   return (
     <div className="flex items-center gap-1 px-2 pb-1 pt-3">
       <span className="text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">
         {children}
       </span>
       {lock && <Lock className="h-2.5 w-2.5 text-text-tertiary" />}
+      {action && <span className="ml-auto">{action}</span>}
     </div>
   );
 }
@@ -92,12 +101,12 @@ function TabRow({
   active: boolean;
   onSelect: (tabId: string) => void;
   // Present ⇒ the row is closable: a ✕ fades in on hover, replacing the
-  // right-side status indicator. Omitted ⇒ no close affordance (a live agent
-  // tab is read-only — closing is the agent's to do, not the human's, D2).
+  // right-side status indicator.
   onClose?: (tabId: string) => void;
 }) {
   const status = statusOf(tab);
   const ended = status === "ended";
+  const forceClose = tab.owner.kind === "agent" && !ended;
 
   return (
     <div className="group relative">
@@ -167,9 +176,17 @@ function TabRow({
             e.stopPropagation();
             onClose(tab.tabId);
           }}
-          title="Close tab"
-          aria-label={`Close ${tab.owner.label}'s tab`}
-          className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-text-tertiary opacity-0 transition-opacity hover:bg-overlay/[0.08] hover:text-text-primary focus-visible:opacity-100 group-hover:opacity-100"
+          title={forceClose ? "Force close — the agent is still using this tab" : "Close tab"}
+          aria-label={
+            forceClose
+              ? `Force close ${tab.owner.label}'s tab`
+              : `Close ${tab.owner.label}'s tab`
+          }
+          className={`absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-text-tertiary opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 ${
+            forceClose
+              ? "hover:bg-danger/[0.08] hover:text-danger"
+              : "hover:bg-overlay/[0.08] hover:text-text-primary"
+          }`}
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -350,6 +367,23 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
     [busy, applyState],
   );
 
+  const doCloseAllAgents = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      for (const tab of agentTabs) {
+        const st = await ipc.browser.close({ tabId: tab.tabId });
+        applyState(st);
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("InAppBrowserView: close failed", err);
+      if (mounted.current) setError("Couldn't close the tab");
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  }, [busy, agentTabs, applyState]);
+
   const liveAgents = agentTabs.filter((t) => !t.ended).length;
   const isEmpty = tabs.length === 0;
 
@@ -411,7 +445,22 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
 
               {agentTabs.length > 0 && (
                 <>
-                  <SectionLabel lock>Agents · {liveAgents} live</SectionLabel>
+                  <SectionLabel
+                    lock
+                    action={
+                      <button
+                        type="button"
+                        onClick={() => void doCloseAllAgents()}
+                        disabled={busy}
+                        aria-label="Close all agent tabs"
+                        className="rounded px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-text-tertiary transition-colors hover:bg-overlay/[0.06] hover:text-text-primary disabled:opacity-40"
+                      >
+                        Close all
+                      </button>
+                    }
+                  >
+                    Agents · {liveAgents} live
+                  </SectionLabel>
                   <div className="flex flex-col gap-0.5">
                     {agentTabs.map((t) => (
                       <TabRow
@@ -419,11 +468,7 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
                         tab={t}
                         active={t.tabId === activeTab?.tabId}
                         onSelect={(id) => void doSelect(id)}
-                        // An agent's LIVE tab is read-only (D2) — no close. An
-                        // ENDED tab is a corpse the human may dismiss.
-                        onClose={
-                          t.ended ? (id) => void doClose(id) : undefined
-                        }
+                        onClose={(id) => void doClose(id)}
                       />
                     ))}
                   </div>
@@ -446,7 +491,7 @@ export function InAppBrowserView({ workspaceName, onClose }: InAppBrowserViewPro
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-text-secondary">
               Open a page to browse it yourself. When an agent starts browsing, its
-              session shows up in the rail as a read-only tab.
+              session shows up in the rail as a read-only tab you can close at any time.
             </p>
             {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
             <button
