@@ -12,28 +12,22 @@
 
 ## Requirements
 
-| Tool | Version | Notes |
-| --- | --- | --- |
-| macOS | Apple Silicon | The only supported platform today |
-| Node.js | 22+ | |
-| pnpm | 9+ | The Tauri config runs `pnpm dev` / `pnpm build`; `bun` and `npm` are not used |
-| Rust | 1.96.0 | Pinned in `rust-toolchain.toml` (`rustup` installs it); minimum 1.88 |
-| Tauri CLI | 2.x | `cargo install tauri-cli --version "^2"` |
-| Agent CLI | any of Claude Code, Codex, Antigravity | At least one, logged in, on your login-shell `PATH` |
+| | Notes |
+| --- | --- |
+| macOS on Apple Silicon | The only supported platform today |
+| `git` | Lanes are git worktrees; the Xcode Command Line Tools version is enough |
+| One agent CLI | Claude Code (`claude`), Codex (`codex`) or Antigravity (`agy`), installed, logged in, and on your login-shell `PATH` |
 
-## Run
+The `rtk` token filter is bundled inside the app; nothing else is needed to run it.
+
+## Develop
+
+Node.js 22+, pnpm 9+, Rust 1.96.0 (pinned in `rust-toolchain.toml`) and Tauri CLI 2.x.
 
 ```sh
 pnpm install
-pnpm tauri dev
-```
-
-`pnpm tauri` first stages the pinned `rtk` binary (`scripts/fetch-rtk.sh`, via `cargo install`), then starts the app.
-
-## Build
-
-```sh
-pnpm tauri build
+pnpm tauri dev     # stages the pinned rtk binary, then starts the app
+pnpm tauri build   # produces the .app bundle
 ```
 
 ## Docs
