@@ -232,6 +232,19 @@ reason: every commit in this lane builds and tests green on its own.
 - Audit §4 item 7's Rust form (reordering in `message.rs`) — out of boundary, and unnecessary
   now that the TS side is a single ordered channel. Remaining exposure: a terminal write racing
   a NON-terminal stdin source, e.g. `message.inject`.
+- **Size-at-spawn** (raised by Mellow in review, ruled deferred by Detoro). `spawn_cli` still
+  opens every PTY at the hardcoded 80x24 (`pty.rs`, the `openpty` call) and only learns the real
+  size when the frontend's first `session.resize` arrives. VS Code never has that window: cols
+  and rows are constructor arguments to the process itself
+  (`vscode:src/vs/platform/terminal/node/terminalProcess.ts:136-137`), so the child is born at
+  the right size. F5 closed the window on the XTERM side for a fresh mount, but a RESPAWN
+  (restart · resume) creates a brand-new PTY at 80x24 while the component stays mounted, and the
+  child can paint into that before `repushSizeRef`'s 300 ms re-fit lands — the same
+  wrong-grid-first-frame mechanism as H1, just on the PTY side of the pair. Fix shape: thread
+  `cols`/`rows` into `spawn_cli` and seed `PtySize` with them, defaulting to 80x24 when the
+  caller has no measurement. Deferred because it changes `spawn_cli`'s signature and therefore
+  every caller and their tests, which is a wider blast radius than this lane's boundary; it is
+  the natural first task of a follow-up lane.
 
 ### Cross-check against lane R3's H1 replay (merged from main at `078c3b1`)
 
