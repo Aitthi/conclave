@@ -124,6 +124,8 @@ export function AppShell() {
   // ── Fixture-mode boot flag (DEV-only) — true once the initial workspace
   //    fetch has settled, gating the readiness sentinel below. ────────────────
   const [booted, setBooted] = useState(false);
+  // Fixture mode (DEV-only): `#view=builder-edit` waits for the roster.
+  const [pendingBuilderEdit, setPendingBuilderEdit] = useState(false);
 
   useEffect(() => {
     activeWorkspaceIdRef.current = activeWorkspaceId;
@@ -201,6 +203,10 @@ export function AppShell() {
       chat: () => setShowChat(true),
       library: () => setShowLibrary(true),
       builder: () => setShowBuilder(true),
+      // Edit mode with Position (spec D11): the Builder needs a definition AND
+      // the workspace agent that instantiates it, neither of which exists yet
+      // at boot — so this only arms the flag and the effect below opens it.
+      "builder-edit": () => setPendingBuilderEdit(true),
       drafter: () => setShowDrafter({ mode: "team" }),
       settings: () => setShowSettings(true),
       browser: () => setShowBrowser(true),
@@ -209,11 +215,39 @@ export function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Fixture mode (DEV-only): open the Builder in EDIT mode on the first
+  // definition that has a live workspace agent, so `pnpm uishot builder-edit`
+  // renders the Position section without any browser interaction (spec D11).
+  useEffect(() => {
+    if (!pendingBuilderEdit || !activeWorkspaceId) return;
+    let active = true;
+    void Promise.all([ipc.agentDef.list(), ipc.instance.list({ workspaceId: activeWorkspaceId })])
+      .then(([defs, instances]) => {
+        if (!active) return;
+        // positionEnabled needs the pair to agree, so pick the instance first.
+        const instance = instances.find((a) => defs.some((d) => d.id === a.agentDefId));
+        const def = defs.find((d) => d.id === instance?.agentDefId);
+        if (!instance || !def) return;
+        setBuilderInitialDef(def);
+        setSelectedId(instance.id);
+        setShowBuilder(true);
+      })
+      .catch((err: unknown) => {
+        if (import.meta.env.DEV) console.error("AppShell: builder-edit view failed", err);
+      })
+      .finally(() => {
+        if (active) setPendingBuilderEdit(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeWorkspaceId, pendingBuilderEdit]);
+
   // Fixture mode (DEV-only): set the readiness sentinel once boot data has
   // landed and the routed view has had its first real paint, so uishot knows
   // when to shoot. Double-rAF defers past the paint. No-op outside ?fixture=.
   useEffect(() => {
-    if (!booted || !fixtureActive()) return;
+    if (!booted || pendingBuilderEdit || !fixtureActive()) return;
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
@@ -224,7 +258,7 @@ export function AppShell() {
       cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
     };
-  }, [booted]);
+  }, [booted, pendingBuilderEdit]);
 
   // Native menu / accelerator events from the Rust menu bar (⌘N, ⌘L, ⌘B, the
   // Appearance submenu). Each carries the clicked item's id.
