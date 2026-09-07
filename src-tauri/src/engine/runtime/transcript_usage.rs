@@ -3712,7 +3712,7 @@ mod tests {
             &format!("own agent id is {agent}"),
             &format!("own agent id is {agent}. Your own agent id is unregistered-owner"),
         );
-        let parsed = scan_claude_lines(&[marker.clone()]);
+        let parsed = scan_claude_lines(std::slice::from_ref(&marker));
         println!("MULTI_OWNER parsed={:?}", parsed.owners_declared);
         sandbox.write_claude(
             &folder,
@@ -3792,7 +3792,7 @@ mod tests {
             read.live_scopes, 0,
             "initial partial-read tick is not complete observation"
         );
-        assert_eq!(pending_before, next_row[..split].as_bytes());
+        assert_eq!(pending_before, &next_row.as_bytes()[..split]);
         for (idle, pending_after) in idle_reports {
             assert_eq!(
                 idle.live_scopes, 0,
