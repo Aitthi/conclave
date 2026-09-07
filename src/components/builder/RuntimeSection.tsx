@@ -672,7 +672,9 @@ export function RuntimeSection({
                     -c model_context_window=1000000 -c
                     model_auto_compact_token_limit=900000
                   </span>
-                  . Some models are server-capped below 1M (GPT-5.6 ≈ 372K).
+                  . Codex clamps this to the model’s server cap and keeps 5%
+                  headroom — GPT-6 / GPT-5.6 report ≈ 828K usable; the meter shows
+                  Codex’s own numbers.
                 </p>
               ) : (
                 <p className="text-[10.5px] text-text-tertiary mt-1.5">

@@ -153,13 +153,19 @@ fn resolve_session_context_limit(
     model: Option<&str>,
     stored: Option<i64>,
     context_window: Option<&str>,
+    catalog: &crate::engine::codex_models::CodexCatalog,
 ) -> i64 {
     if cli_kind == "codex" {
-        // `context_window` is the agent definition's stored choice: "1m" seeds
-        // 1_000_000 (plan 2026-09-07 D3), anything else is Auto → table.
-        return crate::engine::codex_models::codex_effective_context_window(
+        // `context_window` is the agent definition's stored choice: "1m"
+        // requests 1_000_000, anything else is Auto → table. Either way the
+        // seed is what Codex will actually REPORT: clamped to the catalog's
+        // server cap, cut to its effective percent, minus Codex's 12_000
+        // baseline (plan 2026-09-07-codex-meter-parity.md, ruling E2 —
+        // supersedes D3's bare 1_000_000, a number Codex never serves).
+        return crate::engine::codex_models::codex_usable_context_window(
             model.unwrap_or(""),
             context_window,
+            catalog,
         )
         .unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind));
     }
@@ -1263,6 +1269,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 def.model.as_deref(),
                 session.context_limit,
                 def.context_window.as_deref(),
+                &crate::engine::codex_models::CodexCatalog::load_default(),
             );
             let transcript_ctx = if cli_kind == "antigravity" {
                 // AGY stores opaque protobuf conversations and exposes no
@@ -1540,6 +1547,7 @@ async fn forward_session_output(
         model.as_deref(),
         session_row.as_ref().and_then(|s| s.context_limit),
         context_window.as_deref(),
+        &crate::engine::codex_models::CodexCatalog::load_default(),
     );
     if track_context {
         // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
@@ -2397,49 +2405,99 @@ mod tests {
         // Known model: table value wins even when a stale stored value is
         // present (R4 — stored codex context_limit is ignored at launch).
         assert_eq!(
-            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999), None),
-            1_050_000
+            resolve_session_context_limit(
+                "codex",
+                Some("gpt-5.4"),
+                Some(999),
+                None,
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
+            985_500
         );
         // Unknown model: falls back to the conservative codex default, still
         // ignoring the stored value.
         assert_eq!(
-            resolve_session_context_limit("codex", Some("some-future-model"), Some(999), None),
+            resolve_session_context_limit(
+                "codex",
+                Some("some-future-model"),
+                Some(999),
+                None,
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
             repo::session::default_context_limit_for("codex")
         );
         // No model at all: same conservative fallback.
         assert_eq!(
-            resolve_session_context_limit("codex", None, Some(999), None),
+            resolve_session_context_limit(
+                "codex",
+                None,
+                Some(999),
+                None,
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
             repo::session::default_context_limit_for("codex")
         );
     }
 
     #[test]
-    fn resolve_session_context_limit_codex_1m_seeds_one_million() {
-        // Plan 2026-09-07 D3: "1m" seeds the meter at 1_000_000 for any
-        // model, still ignoring the stored session limit.
+    fn resolve_session_context_limit_codex_1m_seeds_usable_window() {
+        // Plan 2026-09-07 E2 (supersedes D3): "1m" seeds Codex's USABLE
+        // window, not the raw request — with no catalog cap that is
+        // 1_000_000 x 95 % - 12_000, for any model, still ignoring the
+        // stored session limit.
         assert_eq!(
-            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999), Some("1m")),
-            1_000_000
+            resolve_session_context_limit(
+                "codex",
+                Some("gpt-5.4"),
+                Some(999),
+                Some("1m"),
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
+            938_000
         );
         assert_eq!(
-            resolve_session_context_limit("codex", None, Some(999), Some("1m")),
-            1_000_000
+            resolve_session_context_limit(
+                "codex",
+                None,
+                Some(999),
+                Some("1m"),
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
+            938_000
         );
         // Legacy stored token is Auto → table.
         assert_eq!(
-            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999), Some("258400")),
-            1_050_000
+            resolve_session_context_limit(
+                "codex",
+                Some("gpt-5.4"),
+                Some(999),
+                Some("258400"),
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
+            985_500
         );
     }
 
     #[test]
     fn resolve_session_context_limit_non_codex_ignores_context_window() {
         assert_eq!(
-            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42), Some("1m")),
+            resolve_session_context_limit(
+                "claude-code",
+                Some("gpt-5.4"),
+                Some(42),
+                Some("1m"),
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
             42
         );
         assert_eq!(
-            resolve_session_context_limit("claude-code", None, None, Some("1m")),
+            resolve_session_context_limit(
+                "claude-code",
+                None,
+                None,
+                Some("1m"),
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
             repo::session::default_context_limit_for("claude-code")
         );
     }
@@ -2447,11 +2505,23 @@ mod tests {
     #[test]
     fn resolve_session_context_limit_non_codex_keeps_stored_value() {
         assert_eq!(
-            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42), None),
+            resolve_session_context_limit(
+                "claude-code",
+                Some("gpt-5.4"),
+                Some(42),
+                None,
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
             42
         );
         assert_eq!(
-            resolve_session_context_limit("claude-code", None, None, None),
+            resolve_session_context_limit(
+                "claude-code",
+                None,
+                None,
+                None,
+                &crate::engine::codex_models::CodexCatalog::empty()
+            ),
             repo::session::default_context_limit_for("claude-code")
         );
     }
@@ -3339,10 +3409,10 @@ mod tests {
     /// the reader onto `fallback_limit`) and a deliberately WRONG stored
     /// `session.context_limit` (999) pre-seeded before the forwarder runs —
     /// proving the persisted limit comes from the gpt-5.4 table entry
-    /// (1_050_000), not the stale stored value and not the generic
+    /// (via `codex_usable_context_window`), not the stale stored value and not the generic
     /// [`repo::session::DEFAULT_CONTEXT_LIMIT`] (200_000).
     #[tokio::test]
-    async fn forwarder_codex_known_model_seeds_table_limit_not_stored_or_default() {
+    async fn forwarder_codex_known_model_seeds_usable_limit_not_stored_or_default() {
         let state = AppState::for_tests().await;
         let id = fixture_instance_typed(&state, "cli", Some("codex")).await;
         let session = repo::session::get_by_instance(&state.db, &id)
@@ -3428,6 +3498,7 @@ mod tests {
                         Some("gpt-5.4"),
                         Some(999),
                         None,
+                        &crate::engine::codex_models::CodexCatalog::load_default(),
                     ),
                 },
             ),
@@ -3470,12 +3541,23 @@ mod tests {
             .await
             .expect("get failed")
             .expect("session exists");
+        // Derived through the same helper the forwarder uses rather than
+        // hard-coded: the seed now depends on Codex's catalog cache, whose
+        // contents differ per machine (plan 2026-09-07 E2). What the test
+        // pins is that the seed comes from the model, not from the stale
+        // stored 999 or the generic 200_000 default.
+        let expected = crate::engine::codex_models::codex_usable_context_window(
+            "gpt-5.4",
+            None,
+            &crate::engine::codex_models::CodexCatalog::load_default(),
+        );
         assert_eq!(
-            after.context_limit,
-            Some(1_050_000),
-            "codex + known model (gpt-5.4) must seed the table's context limit, \
+            after.context_limit, expected,
+            "codex + known model (gpt-5.4) must seed the table's usable context limit, \
              not the stale stored value (999) or the generic default (200_000)"
         );
+        assert_ne!(after.context_limit, Some(999));
+        assert_ne!(after.context_limit, Some(200_000));
 
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
@@ -3620,7 +3702,13 @@ mod tests {
         // Resolved the same way the forwarder resolves its own pre-poll limit
         // (codex ignores the stored value, R4), so `reading.limit` matches
         // `meter.limit` and the ONLY thing that can flip `changed` is the seed.
-        let resolved_limit = resolve_session_context_limit("codex", None, Some(999), None);
+        let resolved_limit = resolve_session_context_limit(
+            "codex",
+            None,
+            Some(999),
+            None,
+            &crate::engine::codex_models::CodexCatalog::empty(),
+        );
 
         // Stamped BEFORE the fixture transcript is written, exactly as `spawn`
         // stamps it before the child can create one — the reader's mtime filter
@@ -3665,7 +3753,10 @@ mod tests {
                         "info": {
                             "last_token_usage": { "total_tokens": 125_000 },
                             "total_token_usage": { "total_tokens": 125_000 },
+                            // Codex reports its RAW usable window; the reader
+                            // normalizes it back down to the seed (E1/E2).
                             "model_context_window": resolved_limit
+                                + crate::engine::codex_models::CODEX_BASELINE_TOKENS
                         }
                     }
                 }),
@@ -3721,7 +3812,8 @@ mod tests {
             .expect("session exists");
         assert_eq!(
             after.context_tokens,
-            Some(125_000),
+            // 125_000 as Codex reports it, minus its 12_000 baseline (E1).
+            Some(125_000 - crate::engine::codex_models::CODEX_BASELINE_TOKENS),
             "the first transcript reading must be persisted even when it equals \
              the stale row"
         );
@@ -3772,7 +3864,13 @@ mod tests {
             .expect("workspace get failed")
             .expect("workspace exists");
 
-        let resolved_limit = resolve_session_context_limit("codex", None, None, None);
+        let resolved_limit = resolve_session_context_limit(
+            "codex",
+            None,
+            None,
+            None,
+            &crate::engine::codex_models::CodexCatalog::empty(),
+        );
 
         // Post-reset state: `spawn` has already zeroed the row for this
         // generation via `reset_context_meter_for_new_generation`.
@@ -4051,7 +4149,13 @@ mod tests {
             .await
             .expect("seed stale generation reading");
 
-        let resolved_limit = resolve_session_context_limit("codex", None, Some(999), None);
+        let resolved_limit = resolve_session_context_limit(
+            "codex",
+            None,
+            Some(999),
+            None,
+            &crate::engine::codex_models::CodexCatalog::empty(),
+        );
         // Strictly after `session.started_at` (the row was written above), so an
         // anchor taken from the row cannot clear this bar.
         let before_spawn = Utc::now();

@@ -76,6 +76,17 @@ in §Amendment to that file — do not rewrite its original text.
   string in D4. `src/fixtures/scenarios/data.ts:278` keeps `"258400"` — it
   exercises the legacy→Auto path.
 
+- **Amendment 2026-09-07 (Detoro, plan
+  docs/superpowers/plans/2026-09-07-codex-meter-parity.md).** D3's seed of
+  1_000_000 is superseded: Codex clamps `model_context_window` to the
+  catalog `max_context_window` (872_000 for GPT-6 / GPT-5.6) and reports
+  95 % of that (828_400) as the usable window, so the meter now seeds with
+  `codex_usable_context_window` (catalog-clamped, 95 %, minus Codex's
+  12_000 baseline) and every codex transcript reading is normalized the
+  same way, making the chip percent equal Codex's own status line. D2's
+  launch pair is unchanged; Codex itself compacts at min(900_000,
+  784_800) = 784_800 and hard-stops at 828_400 on those models.
+
 ## Global constraints (every step inherits)
 
 - Work in the lane worktree from `conclave lane start`; `pnpm install` once
