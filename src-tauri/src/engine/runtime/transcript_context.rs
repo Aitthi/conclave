@@ -655,10 +655,22 @@ impl CodexAcc {
         else {
             return;
         };
-        let limit = info
+        // Codex-normalize the pair so the chip percent equals Codex's own
+        // status line (plan 2026-09-07-codex-meter-parity.md, ruling E1;
+        // supersedes the 2026-07-09 "reported total without offset" decision).
+        // When the event carries no window, the seed already went through
+        // `codex_usable_context_window` and is normalized — subtract the
+        // baseline from the total only, never from the limit twice.
+        let (tokens, limit) = match info
             .pointer("/model_context_window")
             .and_then(Value::as_i64)
-            .unwrap_or(fallback_limit);
+        {
+            Some(window) => crate::engine::codex_models::codex_normalize_reading(tokens, window),
+            None => (
+                (tokens - crate::engine::codex_models::CODEX_BASELINE_TOKENS).max(0),
+                fallback_limit,
+            ),
+        };
         let observed_at = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -1008,6 +1020,17 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// Same shape as [`codex_token_line`] minus `model_context_window` —
+    /// Codex omits it on some events, and the meter must then use its seed.
+    fn codex_token_line_without_window(timestamp: &str, tokens: i64, workspace: &Path) -> Value {
+        let mut line = codex_token_line(timestamp, tokens, 0, workspace);
+        line["payload"]["info"]
+            .as_object_mut()
+            .unwrap()
+            .remove("model_context_window");
+        line
     }
 
     /// The owner marker exactly as claude-code records it: the SessionStart
@@ -1756,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_token_formula_uses_reported_last_total_without_offset() {
+    fn codex_token_formula_matches_codex_status_line() {
         let claude_root = tmp_root("claude-root");
         let codex_root = tmp_root("codex-root");
         let workspace = tmp_root("workspace");
@@ -1775,7 +1798,7 @@ mod tests {
                     }
                 }),
                 codex_owner_line(instance_id),
-                codex_token_line("2099-01-01T00:00:01Z", 222, 8_000, &workspace),
+                codex_token_line("2099-01-01T00:00:01Z", 31_632, 828_400, &workspace),
             ],
         );
 
@@ -1793,8 +1816,63 @@ mod tests {
             )
             .expect("expected codex reading");
 
-        assert_eq!(reading.tokens, 222);
-        assert_eq!(reading.limit, 8_000);
+        // Plan 2026-09-07 E1 (supersedes the 2026-07-09 "without offset"
+        // decision): Codex's status line divides `total - 12_000` by
+        // `window - 12_000`, so the screenshot pair 31_632 / 828_400 — which
+        // Codex prints as "Context 2% used" — must reach the meter as
+        // 19_632 / 816_400, which rounds to the same 2 %.
+        assert_eq!(reading.tokens, 19_632);
+        assert_eq!(reading.limit, 816_400);
+
+        let _ = std::fs::remove_dir_all(&claude_root);
+        let _ = std::fs::remove_dir_all(&codex_root);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn codex_reading_without_window_field_normalizes_against_the_seed() {
+        // A `token_count` event that carries no `model_context_window` falls
+        // back to the seeded limit, which `codex_usable_context_window`
+        // already normalized (plan 2026-09-07 E2) — so only the total is
+        // baseline-adjusted here, never the limit twice.
+        let claude_root = tmp_root("claude-root");
+        let codex_root = tmp_root("codex-root");
+        let workspace = tmp_root("workspace");
+        let instance_id = "agent-no-window";
+
+        write_jsonl(
+            &codex_root.join("no-window.jsonl"),
+            &[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2099-01-01T00:00:00Z",
+                    "payload": {
+                        "cwd": workspace.to_string_lossy(),
+                        "id": "codex-session-no-window",
+                        "originator": "codex-tui"
+                    }
+                }),
+                codex_owner_line(instance_id),
+                codex_token_line_without_window("2099-01-01T00:00:01Z", 20_000, &workspace),
+            ],
+        );
+
+        let reader = TranscriptContextReader::new(TranscriptContextConfig {
+            claude_projects_root: claude_root.clone(),
+            codex_sessions_root: codex_root.clone(),
+            fallback_limit: 816_400,
+        });
+        let reading = reader
+            .poll(
+                instance_id,
+                &workspace,
+                "codex",
+                DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("expected codex reading");
+
+        assert_eq!(reading.tokens, 8_000);
+        assert_eq!(reading.limit, 816_400);
 
         let _ = std::fs::remove_dir_all(&claude_root);
         let _ = std::fs::remove_dir_all(&codex_root);
