@@ -55,6 +55,32 @@ pub fn codex_model_context_window(model: &str) -> Option<i64> {
     }
 }
 
+/// Stored codex `context_window` token that pins the 1M window (plan
+/// `2026-09-07-codex-context-window-1m-option.md`, ruling D1) — the same
+/// literal claude-code uses for its `[1m]` model suffix.
+pub const CODEX_CONTEXT_WINDOW_1M: &str = "1m";
+
+/// Context window the 1M choice launches with (ruling D2/D3).
+pub const CODEX_CONTEXT_WINDOW_1M_TOKENS: i64 = 1_000_000;
+
+/// Auto-compact limit the 1M choice launches with (ruling D2). The human
+/// chose 900_000 explicitly — it is NOT the 95 % derivation the Auto path
+/// applies to table values (that would be 950_000).
+pub const CODEX_CONTEXT_WINDOW_1M_AUTO_COMPACT_TOKENS: i64 = 900_000;
+
+/// Resolve the codex context window the Builder choice actually means
+/// (plan `2026-09-07-codex-context-window-1m-option.md`, ruling D3): the
+/// stored `context_window = "1m"` (trimmed, exact) pins 1_000_000 for EVERY
+/// model, known or unknown; absent or any other stored value is "Auto" and
+/// falls through to [`codex_model_context_window`]. Legacy numerics such as
+/// `"258400"` are deliberately never parsed (ruling D1).
+pub fn codex_effective_context_window(model: &str, context_window: Option<&str>) -> Option<i64> {
+    if context_window.map(str::trim) == Some(CODEX_CONTEXT_WINDOW_1M) {
+        return Some(CODEX_CONTEXT_WINDOW_1M_TOKENS);
+    }
+    codex_model_context_window(model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +110,40 @@ mod tests {
     fn unknown_model_returns_none() {
         assert_eq!(codex_model_context_window("some-future-model"), None);
         assert_eq!(codex_model_context_window(""), None);
+    }
+
+    #[test]
+    fn effective_window_pins_1m_for_any_model() {
+        // Plan 2026-09-07 D3: "1m" pins 1_000_000 regardless of the table.
+        assert_eq!(
+            codex_effective_context_window("gpt-5.4", Some("1m")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            codex_effective_context_window("some-future-model", Some("1m")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            codex_effective_context_window("gpt-5.4", Some(" 1m ")),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn effective_window_falls_through_to_table_for_auto_and_legacy_values() {
+        assert_eq!(
+            codex_effective_context_window("gpt-5.4", None),
+            Some(1_050_000)
+        );
+        // Legacy stored numerics are Auto (D1) — never parsed.
+        assert_eq!(
+            codex_effective_context_window("gpt-5.4", Some("258400")),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            codex_effective_context_window("some-future-model", Some("258400")),
+            None
+        );
     }
 
     #[test]

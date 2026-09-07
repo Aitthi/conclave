@@ -25,6 +25,9 @@ export type PermissionMode =
   "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions";
 export type CliEffort = "low" | "medium" | "high" | undefined;
 export type ClaudeContextWindow = "1m" | "200k";
+/** Codex context-window choice: "auto" = per-model table, "1m" = pin
+ *  model_context_window=1000000 / model_auto_compact_token_limit=900000. */
+export type CodexContextWindow = "auto" | "1m";
 
 export type CliAvailability =
   | { state: "idle" | "checking" }
@@ -584,8 +587,9 @@ export function RuntimeSection({
             </div>
           )}
 
-          {/* Context window — Claude's [1m] suffix remains a segmented
-              choice; Codex uses a numeric model_context_window override. */}
+          {/* Context window — Claude's [1m] suffix and Codex's Auto / 1M
+              are both segmented choices; Codex "1m" pins the literal
+              model_context_window / model_auto_compact_token_limit pair. */}
           {isClaudeCode && (
             <div className="px-3 py-2">
               <div className="flex items-center justify-between">
@@ -634,11 +638,47 @@ export function RuntimeSection({
                 <span className="text-[12.5px] text-text-secondary">
                   Context window
                 </span>
-                <span className="text-[12px] text-text-tertiary">Auto</span>
+                <div
+                  role="radiogroup"
+                  aria-label="Context window"
+                  className="flex rounded-lg bg-overlay/[0.04] p-0.5"
+                >
+                  {(
+                    [
+                      { value: "auto", label: "Auto" },
+                      { value: "1m", label: "1M" },
+                    ] as { value: CodexContextWindow; label: string }[]
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      role="radio"
+                      aria-checked={contextWindow === value}
+                      onClick={() => setContextWindow(value)}
+                      className={`text-[12px] px-2.5 py-1 rounded-[7px] transition-colors ${
+                        contextWindow === value
+                          ? "bg-surface shadow-sm font-semibold"
+                          : "text-text-secondary"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <p className="text-[10.5px] text-text-tertiary mt-1.5">
-                Derived from the model — no manual override.
-              </p>
+              {contextWindow === "1m" ? (
+                <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                  Launches with{" "}
+                  <span className="font-mono">
+                    -c model_context_window=1000000 -c
+                    model_auto_compact_token_limit=900000
+                  </span>
+                  . Some models are server-capped below 1M (GPT-5.6 ≈ 372K).
+                </p>
+              ) : (
+                <p className="text-[10.5px] text-text-tertiary mt-1.5">
+                  Derived from the model — per-model table.
+                </p>
+              )}
             </div>
           )}
 
