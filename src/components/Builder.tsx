@@ -55,7 +55,14 @@ type AgentType = "cli" | "chat" | "orchestrator";
 
 // ── Claude Code config presets ───────────────────────────────────────────────
 
+/** Seed the Builder's context-window segment from a stored definition.
+ *  claude-code: "1m" / "200k". codex: "1m" / "auto" — any other stored codex
+ *  value (legacy numerics such as "258400") is Auto (plan 2026-09-07 D1/D5).
+ *  Other kinds keep the claude default. */
 function initialContextWindow(def?: AgentDefinition): string {
+  if (def?.cliKind === "codex") {
+    return def.contextWindow === "1m" ? "1m" : "auto";
+  }
   return def?.contextWindow === "1m" ? "1m" : "200k";
 }
 
@@ -501,12 +508,17 @@ export function Builder({
     }
     if (next === "antigravity") setCliAvailability({ state: "checking" });
     setCliKind(next);
+    // "1m" deliberately survives a claude<->codex switch in both directions;
+    // only the kind-specific default token is remapped.
     if (
       next === "claude-code" &&
       contextWindow !== "1m" &&
       contextWindow !== "200k"
     ) {
       setContextWindow("200k");
+    }
+    if (next === "codex" && contextWindow === "200k") {
+      setContextWindow("auto");
     }
   }
 
@@ -521,14 +533,18 @@ export function Builder({
       setError("Name is required");
       return;
     }
-    // Claude Code keeps its "1m"/"200k" segmented value; Codex sends undefined
-    // (R2/R4 — Auto, backend derives the window from the model, any stored
-    // value is ignored at launch).
+    // Claude Code keeps its "1m"/"200k" segmented value. Codex stores only
+    // "1m" (pins the literal -c pair, plan 2026-09-07 D1) and sends undefined
+    // for Auto (R2/R4 — backend derives the window from the model).
     const contextWindowForSave: string | undefined = isClaudeCode
       ? contextWindow === "1m"
         ? "1m"
         : "200k"
-      : undefined;
+      : isCodex
+        ? contextWindow === "1m"
+          ? "1m"
+          : undefined
+        : undefined;
     const permissionModeForSave: AgentDefinition["permissionMode"] =
       isEditing && !permissionModeDirty && initialDef?.cliKind === cliKind
         ? initialDef.permissionMode

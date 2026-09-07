@@ -61,17 +61,36 @@ const ANTIGRAVITY_INSTALL_URL: &str = "https://antigravity.google/docs/cli/insta
 const CLI_MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Emit codex's numeric context-window `-c` overrides for `model`, resolved
-/// through [`crate::engine::codex_models::codex_model_context_window`] (plan
-/// ruling R2 — "Auto" derives the value from the model, the Builder no
-/// longer collects a manual number and any stored `context_window` value is
-/// ignored at launch). Emits NOTHING for an unknown model so codex's own
-/// default wins, matching the old sentinel/invalid-value behavior.
-fn append_codex_context_window_config(launch: &mut String, model: Option<&str>) {
-    let Some(tokens) = crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
-    else {
+/// through [`crate::engine::codex_models::codex_effective_context_window`].
+///
+/// - `context_window == Some("1m")` (plan `2026-09-07-codex-context-window-
+///   1m-option.md`, ruling D2): emit EXACTLY
+///   `-c 'model_context_window=1000000' -c 'model_auto_compact_token_limit=900000'`
+///   for EVERY model, known or unknown. The 900_000 auto-compact limit is the
+///   human's explicit choice — it is NOT the 95 % derivation used below.
+/// - Anything else is "Auto" (plan `2026-07-11-codex-uplift.md` ruling R2 —
+///   the value derives from the model; legacy stored numerics are ignored):
+///   table value + 95 % auto-compact, and NOTHING for an unknown model so
+///   codex's own default wins.
+fn append_codex_context_window_config(
+    launch: &mut String,
+    model: Option<&str>,
+    context_window: Option<&str>,
+) {
+    use crate::engine::codex_models::{
+        codex_effective_context_window, CODEX_CONTEXT_WINDOW_1M,
+        CODEX_CONTEXT_WINDOW_1M_AUTO_COMPACT_TOKENS, CODEX_CONTEXT_WINDOW_1M_TOKENS,
+    };
+    let Some(tokens) = codex_effective_context_window(model.unwrap_or(""), context_window) else {
         return;
     };
-    let auto_compact_token_limit = (i128::from(tokens) * 95 / 100) as i64;
+    let pinned_1m = context_window.map(str::trim) == Some(CODEX_CONTEXT_WINDOW_1M);
+    let auto_compact_token_limit = if pinned_1m {
+        debug_assert_eq!(tokens, CODEX_CONTEXT_WINDOW_1M_TOKENS);
+        CODEX_CONTEXT_WINDOW_1M_AUTO_COMPACT_TOKENS
+    } else {
+        (i128::from(tokens) * 95 / 100) as i64
+    };
     launch.push_str(&format!(
         " -c {}",
         shell_quote(&format!("model_context_window={tokens}"))
@@ -129,10 +148,20 @@ fn conclave_spawn_env(
     env
 }
 
-fn resolve_session_context_limit(cli_kind: &str, model: Option<&str>, stored: Option<i64>) -> i64 {
+fn resolve_session_context_limit(
+    cli_kind: &str,
+    model: Option<&str>,
+    stored: Option<i64>,
+    context_window: Option<&str>,
+) -> i64 {
     if cli_kind == "codex" {
-        return crate::engine::codex_models::codex_model_context_window(model.unwrap_or(""))
-            .unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind));
+        // `context_window` is the agent definition's stored choice: "1m" seeds
+        // 1_000_000 (plan 2026-09-07 D3), anything else is Auto → table.
+        return crate::engine::codex_models::codex_effective_context_window(
+            model.unwrap_or(""),
+            context_window,
+        )
+        .unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind));
     }
     stored.unwrap_or_else(|| repo::session::default_context_limit_for(cli_kind))
 }
@@ -1091,7 +1120,11 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 if let Some(model) = def.model.as_deref().filter(|m| !m.is_empty()) {
                     launch.push_str(&format!(" --model {}", shell_quote(model)));
                 }
-                append_codex_context_window_config(&mut launch, def.model.as_deref());
+                append_codex_context_window_config(
+                    &mut launch,
+                    def.model.as_deref(),
+                    def.context_window.as_deref(),
+                );
                 append_cli_effort_override(&mut launch, "codex", def.effort.as_deref());
                 // Codex's mode flags differ from claude's; map the shared
                 // permission_mode value to them. "auto" = never pause for
@@ -1229,6 +1262,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
                 &cli_kind,
                 def.model.as_deref(),
                 session.context_limit,
+                def.context_window.as_deref(),
             );
             let transcript_ctx = if cli_kind == "antigravity" {
                 // AGY stores opaque protobuf conversations and exposes no
@@ -1358,6 +1392,7 @@ async fn spawn_locked(state: &AppState, id: &str, mode: LaunchMode) -> Result<Va
             session.id.clone(),
             def.cli_kind.clone(),
             def.model.clone(),
+            def.context_window.clone(),
             output_rx,
             track_context,
             transcript_ctx,
@@ -1489,6 +1524,7 @@ async fn forward_session_output(
     session_id: String,
     cli_kind: Option<String>,
     model: Option<String>,
+    context_window: Option<String>,
     mut output_rx: tokio::sync::mpsc::Receiver<String>,
     track_context: bool,
     transcript_ctx: Option<TranscriptPollContext>,
@@ -1503,6 +1539,7 @@ async fn forward_session_output(
         cli_kind.as_deref().unwrap_or(""),
         model.as_deref(),
         session_row.as_ref().and_then(|s| s.context_limit),
+        context_window.as_deref(),
     );
     if track_context {
         // Rolling ESTIMATE of context usage in characters. `last_flush_chars`
@@ -2311,7 +2348,7 @@ mod tests {
     #[test]
     fn codex_context_window_config_appends_table_override_for_known_model() {
         let mut launch = String::from("codex --model 'gpt-5.3-codex-spark'");
-        append_codex_context_window_config(&mut launch, Some("gpt-5.3-codex-spark"));
+        append_codex_context_window_config(&mut launch, Some("gpt-5.3-codex-spark"), None);
 
         // 128_000 * 95 / 100 = 121_600.
         assert!(
@@ -2327,7 +2364,7 @@ mod tests {
     #[test]
     fn codex_astra_launch_uses_runtime_effective_context_window() {
         let mut launch = String::from("codex --model 'gpt-6-astra'");
-        append_codex_context_window_config(&mut launch, Some("gpt-6-astra"));
+        append_codex_context_window_config(&mut launch, Some("gpt-6-astra"), None);
 
         assert!(
             launch.contains(" -c 'model_context_window=272000'"),
@@ -2343,7 +2380,7 @@ mod tests {
     fn codex_context_window_config_emits_nothing_for_unknown_model() {
         for model in [Some("some-future-model"), Some(""), None] {
             let mut launch = String::from("codex");
-            append_codex_context_window_config(&mut launch, model);
+            append_codex_context_window_config(&mut launch, model, None);
             assert!(
                 !launch.contains("model_context_window"),
                 "unknown/absent model must not become a Codex context override: {launch}"
@@ -2360,46 +2397,113 @@ mod tests {
         // Known model: table value wins even when a stale stored value is
         // present (R4 — stored codex context_limit is ignored at launch).
         assert_eq!(
-            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999)),
+            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999), None),
             1_050_000
         );
         // Unknown model: falls back to the conservative codex default, still
         // ignoring the stored value.
         assert_eq!(
-            resolve_session_context_limit("codex", Some("some-future-model"), Some(999)),
+            resolve_session_context_limit("codex", Some("some-future-model"), Some(999), None),
             repo::session::default_context_limit_for("codex")
         );
         // No model at all: same conservative fallback.
         assert_eq!(
-            resolve_session_context_limit("codex", None, Some(999)),
+            resolve_session_context_limit("codex", None, Some(999), None),
             repo::session::default_context_limit_for("codex")
+        );
+    }
+
+    #[test]
+    fn resolve_session_context_limit_codex_1m_seeds_one_million() {
+        // Plan 2026-09-07 D3: "1m" seeds the meter at 1_000_000 for any
+        // model, still ignoring the stored session limit.
+        assert_eq!(
+            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999), Some("1m")),
+            1_000_000
+        );
+        assert_eq!(
+            resolve_session_context_limit("codex", None, Some(999), Some("1m")),
+            1_000_000
+        );
+        // Legacy stored token is Auto → table.
+        assert_eq!(
+            resolve_session_context_limit("codex", Some("gpt-5.4"), Some(999), Some("258400")),
+            1_050_000
+        );
+    }
+
+    #[test]
+    fn resolve_session_context_limit_non_codex_ignores_context_window() {
+        assert_eq!(
+            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42), Some("1m")),
+            42
+        );
+        assert_eq!(
+            resolve_session_context_limit("claude-code", None, None, Some("1m")),
+            repo::session::default_context_limit_for("claude-code")
         );
     }
 
     #[test]
     fn resolve_session_context_limit_non_codex_keeps_stored_value() {
         assert_eq!(
-            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42)),
+            resolve_session_context_limit("claude-code", Some("gpt-5.4"), Some(42), None),
             42
         );
         assert_eq!(
-            resolve_session_context_limit("claude-code", None, None),
+            resolve_session_context_limit("claude-code", None, None, None),
             repo::session::default_context_limit_for("claude-code")
         );
     }
 
     #[test]
-    fn codex_context_window_config_ignores_stored_context_window_entirely() {
-        // R2/R4: the function no longer takes a stored `context_window` value
-        // at all — only the model resolves the override, proving the old
-        // stored numeric/sentinel value ("400000", "1m", "200k", ...) can no
-        // longer influence codex's launch args.
+    fn codex_context_window_config_auto_resolves_from_model_when_absent() {
+        // R2/R4 (Auto): with no stored `context_window` only the model
+        // resolves the override. The 2026-09-07 amendment re-admits exactly
+        // ONE stored token ("1m", see the `_1m_pins_` tests); legacy numerics
+        // stay ignored (see `_legacy_stored_value_is_auto`).
         let mut launch = String::from("codex --model 'gpt-5.4'");
-        append_codex_context_window_config(&mut launch, Some("gpt-5.4"));
+        append_codex_context_window_config(&mut launch, Some("gpt-5.4"), None);
         assert!(
             launch.contains(" -c 'model_context_window=1050000'"),
             "{launch}"
         );
+    }
+
+    #[test]
+    fn codex_context_window_config_1m_pins_literal_pair_for_known_model() {
+        // Plan 2026-09-07 D2: "1m" emits EXACTLY the human's literal pair and
+        // NOT the table pair (gpt-5.4 would otherwise be 1050000 / 997500).
+        let mut launch = String::from("codex --model 'gpt-5.4'");
+        append_codex_context_window_config(&mut launch, Some("gpt-5.4"), Some("1m"));
+        assert_eq!(
+            launch,
+            "codex --model 'gpt-5.4' -c 'model_context_window=1000000' -c 'model_auto_compact_token_limit=900000'"
+        );
+    }
+
+    #[test]
+    fn codex_context_window_config_1m_pins_literal_pair_for_unknown_model() {
+        let mut launch = String::from("codex");
+        append_codex_context_window_config(&mut launch, Some("some-future-model"), Some(" 1m "));
+        assert_eq!(
+            launch,
+            "codex -c 'model_context_window=1000000' -c 'model_auto_compact_token_limit=900000'"
+        );
+    }
+
+    #[test]
+    fn codex_context_window_config_legacy_stored_value_is_auto() {
+        // D1: any other stored value ("258400", "200k") is Auto → table path.
+        for stored in [Some("258400"), Some("200k"), Some("")] {
+            let mut launch = String::from("codex --model 'gpt-5.4'");
+            append_codex_context_window_config(&mut launch, Some("gpt-5.4"), stored);
+            assert!(
+                launch.contains(" -c 'model_context_window=1050000'"),
+                "{stored:?}: {launch}"
+            );
+            assert!(!launch.contains("1000000"), "{stored:?}: {launch}");
+        }
     }
 
     #[test]
@@ -2885,6 +2989,7 @@ mod tests {
             session.id.clone(),
             None,
             None,
+            None,
             rx,
             true, // chat backend — context tracking enabled.
             None,
@@ -2929,6 +3034,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             None,
             rx,
@@ -2985,6 +3091,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             None,
             rx,
@@ -3056,6 +3163,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             None,
             rx,
@@ -3189,6 +3297,7 @@ mod tests {
             session.id.clone(),
             Some("codex".into()),
             None,
+            None,
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
             Some(transcript_ctx),
@@ -3318,6 +3427,7 @@ mod tests {
                         "codex",
                         Some("gpt-5.4"),
                         Some(999),
+                        None,
                     ),
                 },
             ),
@@ -3343,6 +3453,7 @@ mod tests {
             session.id.clone(),
             Some("codex".into()),
             Some("gpt-5.4".into()),
+            None,
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
             Some(transcript_ctx),
@@ -3509,7 +3620,7 @@ mod tests {
         // Resolved the same way the forwarder resolves its own pre-poll limit
         // (codex ignores the stored value, R4), so `reading.limit` matches
         // `meter.limit` and the ONLY thing that can flip `changed` is the seed.
-        let resolved_limit = resolve_session_context_limit("codex", None, Some(999));
+        let resolved_limit = resolve_session_context_limit("codex", None, Some(999), None);
 
         // Stamped BEFORE the fixture transcript is written, exactly as `spawn`
         // stamps it before the child can create one — the reader's mtime filter
@@ -3591,6 +3702,7 @@ mod tests {
             session.id.clone(),
             Some("codex".into()),
             None,
+            None,
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
             Some(transcript_ctx),
@@ -3660,7 +3772,7 @@ mod tests {
             .expect("workspace get failed")
             .expect("workspace exists");
 
-        let resolved_limit = resolve_session_context_limit("codex", None, None);
+        let resolved_limit = resolve_session_context_limit("codex", None, None, None);
 
         // Post-reset state: `spawn` has already zeroed the row for this
         // generation via `reset_context_meter_for_new_generation`.
@@ -3781,6 +3893,7 @@ mod tests {
             id.clone(),
             session.id.clone(),
             Some("codex".into()),
+            None,
             None,
             rx,
             false, // CLI/PTY backend — transcript-backed context enabled.
@@ -3938,7 +4051,7 @@ mod tests {
             .await
             .expect("seed stale generation reading");
 
-        let resolved_limit = resolve_session_context_limit("codex", None, Some(999));
+        let resolved_limit = resolve_session_context_limit("codex", None, Some(999), None);
         // Strictly after `session.started_at` (the row was written above), so an
         // anchor taken from the row cannot clear this bar.
         let before_spawn = Utc::now();
@@ -4831,6 +4944,7 @@ mod tests {
             session.id.clone(),
             None,
             None,
+            None,
             rx,
             true, // chat backend → shared epoch-guarded tail.
             None,
@@ -4879,6 +4993,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             None,
             rx,
@@ -4931,6 +5046,7 @@ mod tests {
             None,
             id.clone(),
             session.id.clone(),
+            None,
             None,
             None,
             rx,

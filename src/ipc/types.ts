@@ -68,7 +68,8 @@ export interface AgentDefinition {
   secretEnvKeys?: string[];
   /** Harness-specific context window config.
    *  Claude Code: "1m" appends the [1m] suffix; "200k" is the standard model.
-   *  Codex: decimal token count passed as -c model_context_window=<tokens>. */
+   *  Codex: "1m" pins -c model_context_window=1000000 /
+   *  model_auto_compact_token_limit=900000; absent = Auto (per-model table). */
   contextWindow?: string;
   /** Token filter (rtk) toggle — `null`/absent means enabled (default ON).
    *  Claude agents only (wire name contract: DB `rtk_enabled`). */

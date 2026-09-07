@@ -62,6 +62,13 @@ setting Auto in the UI (no manual input anymore), and make codex use rtk
   (e.g. "Context window: Auto — derived from the model"). Rejected: keeping a
   TS mirror of the Rust table just to display the number — two sources of
   truth that will drift.
+- **Amendment 2026-09-07 (Detoro, human mandate, plan
+  docs/superpowers/plans/2026-09-07-codex-context-window-1m-option.md).**
+  R2/R4/R6 remain the AUTO behaviour. The Builder now also offers a codex
+  "1M" choice, stored as `context_window = "1m"` (same token as claude-code),
+  which launches with the literal pair `-c model_context_window=1000000
+  -c model_auto_compact_token_limit=900000` for any model and seeds the
+  meter at 1_000_000. Absent/other stored values = Auto, unchanged.
 
 ## Global constraints (every lane inherits)
 
