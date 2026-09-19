@@ -299,8 +299,10 @@ pub async fn flush_stack(
     let ids: Vec<String> = items.iter().map(|i| i.row_id.clone()).collect();
 
     // Serialize deliveries per target BEFORE the eligibility round-trip (see
-    // Outbox::flush_lock): otherwise a cap/immediate flush can overtake a
-    // stack the sweeper already took and land the newer batch first.
+    // Outbox::flush_lock), so batches land in lock-acquisition order (tokio
+    // FIFO): otherwise the order is settled only after each flush's DB
+    // round-trip, and a cap/immediate flush can overtake a stack the sweeper
+    // already took.
     let flush_lock = state.outbox.flush_lock(to_instance_id);
     let _flush_guard = flush_lock.lock().await;
 
@@ -1040,6 +1042,131 @@ mod tests {
             state.outbox.take_all(&to).is_empty(),
             "cap flush emptied the stack"
         );
+    }
+
+    /// `flush_stack` waits on the target's flush lock BEFORE it touches the
+    /// DB or the PTY. Holding that lock from outside therefore freezes a
+    /// delivery mid-flight — which is exactly the window the sweeper-vs-cap
+    /// overtake needed. This is the test that actually discriminates: comment
+    /// out the two `flush_lock` lines in `flush_stack` and it fails, because
+    /// the paste lands while the guard is still held.
+    ///
+    /// (The non-interleaving property alone does NOT discriminate: the target's
+    /// agent lifecycle mutex is already held across the paste and the whole CR
+    /// loop, so writes never interleave even without the flush lock.)
+    #[tokio::test]
+    async fn flush_stack_waits_for_the_targets_flush_lock() {
+        let state = std::sync::Arc::new(AppState::for_tests().await);
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "held by the lock" }),
+        )
+        .await
+        .unwrap();
+        let items = state.outbox.take_all(&to);
+
+        // Take the target's flush lock the way an in-flight flush would.
+        let held = state.outbox.flush_lock(&to);
+        let guard = held.lock().await;
+
+        let flushing = tokio::spawn({
+            let state = std::sync::Arc::clone(&state);
+            let to = to.clone();
+            async move { flush_stack(&state, &to, items).await }
+        });
+
+        // Give the spawned flush every chance to run ahead of us.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing may reach the PTY while the target's flush lock is held"
+        );
+
+        drop(guard);
+        assert_eq!(flushing.await.expect("flush task panicked"), "delivered");
+        let first = rx
+            .try_recv()
+            .expect("the paste lands once the lock is free");
+        assert!(first.starts_with("\x1b[200~") && first.ends_with("\x1b[201~"));
+    }
+
+    /// Two flushes racing for ONE target never interleave their writes: each
+    /// stack's bracketed paste and its submit CRs come out as one contiguous
+    /// run. NOTE this invariant is carried by the target's agent lifecycle
+    /// mutex (held across the paste AND the CR loop), so it holds with or
+    /// without the flush lock — the lock's own guard is
+    /// `flush_stack_waits_for_the_targets_flush_lock` above.
+    #[tokio::test]
+    async fn concurrent_flushes_for_one_target_do_not_interleave() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "a" }),
+        )
+        .await
+        .unwrap();
+        let stack_a = state.outbox.take_all(&to);
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "b" }),
+        )
+        .await
+        .unwrap();
+        let stack_b = state.outbox.take_all(&to);
+        assert_eq!(stack_a.len(), 1);
+        assert_eq!(stack_b.len(), 1);
+
+        tokio::join!(
+            flush_stack(&state, &to, stack_a),
+            flush_stack(&state, &to, stack_b)
+        );
+
+        let mut writes = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            writes.push(w);
+        }
+        let run = 1 + SUBMIT_CR_DELAYS_MS.len();
+        assert_eq!(
+            writes.len(),
+            2 * run,
+            "each stack contributes one paste + its CRs, got {writes:?}"
+        );
+        for start in [0, run] {
+            assert!(
+                writes[start].starts_with("\x1b[200~") && writes[start].ends_with("\x1b[201~"),
+                "write {start} must be a whole bracketed paste, got {:?}",
+                writes[start]
+            );
+            for cr in &writes[start + 1..start + run] {
+                assert_eq!(
+                    cr, "\r",
+                    "a paste's submit CRs must not be split by the other flush: {writes:?}"
+                );
+            }
+        }
     }
 
     /// A human routed send (`immediate: true`) is delivered on its own, right

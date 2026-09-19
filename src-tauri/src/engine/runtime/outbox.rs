@@ -115,9 +115,11 @@ impl Outbox {
 
     /// Per-target delivery serializer. `flush_stack` awaits this FIRST — before
     /// any DB read or lifecycle guard — so two flushes for one target (sweeper
-    /// `take_due` vs a cap/immediate flush inside `inject`) deliver in the
-    /// order they were taken; tokio's Mutex is FIFO-fair. Never held by
-    /// `inject` while it holds lifecycle guards, so no lock-order inversion.
+    /// `take_due` vs a cap/immediate flush inside `inject`) deliver in
+    /// lock-acquisition order (tokio's Mutex is FIFO). Without it the ordering
+    /// is decided only after each flush's eligibility round-trip, so the later
+    /// caller can win. Never held by `inject` while it holds lifecycle guards,
+    /// so no lock-order inversion.
     pub fn flush_lock(&self, to: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.flush_locks.lock().unwrap_or_else(|e| e.into_inner());
         std::sync::Arc::clone(locks.entry(to.to_owned()).or_default())
