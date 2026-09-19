@@ -413,6 +413,7 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
                 <div className="max-w-[90%] rounded-full bg-fill-soft px-3 py-1.5 text-[11.5px] text-text-secondary flex items-center gap-1.5">
                   <CornerUpRight className="w-3 h-3 shrink-0" style={{ color: part.tint }} />
                   <span className="font-medium text-text-primary">→ sent to {part.toName}</span>
+                  {/* Fallback only: routed sends pass immediate:true, so a 'held' ack here means a non-immediate caller. */}
                   {part.status === "delivered" ? (
                     <span>· auto-submit</span>
                   ) : part.status === "held" ? (

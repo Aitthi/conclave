@@ -328,6 +328,7 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
         >
           <CornerUpRight className="w-3 h-3 shrink-0 text-text-tertiary" />
           <span className="font-medium text-text-primary">→ sent to {outbox.toName}</span>
+          {/* Fallback only: routed sends pass immediate:true, so a 'held' ack here means a non-immediate caller. */}
           {outbox.status === "delivered" ? (
             <span>· auto-submit</span>
           ) : outbox.status === "held" ? (
