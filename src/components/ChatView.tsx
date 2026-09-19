@@ -43,7 +43,7 @@ type ChatPart =
   // Inbox: an injection THIS agent received (origin-tagged incoming bubble).
   | { kind: "inbox"; fromName: string; tint: string; autoSubmitted: boolean; text: string }
   // Outbox: a routed send confirmation (this agent → another agent).
-  | { kind: "outbox"; toName: string; tint: string; status: "queued" | "delivered"; text: string };
+  | { kind: "outbox"; toName: string; tint: string; status: "queued" | "delivered" | "held"; text: string };
 
 interface ChatMsg {
   id: string;
@@ -232,6 +232,9 @@ export function ChatView({
         fromInstanceId: instanceId,
         toInstanceId: target.instanceId,
         text,
+        // The human's routed send is delivered on its own, right away — it
+        // never joins (nor flushes) the target's outbox stack (ruling 5).
+        immediate: true,
       });
       if (mounted.current) {
         const id = makeId();
@@ -410,8 +413,11 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
                 <div className="max-w-[90%] rounded-full bg-fill-soft px-3 py-1.5 text-[11.5px] text-text-secondary flex items-center gap-1.5">
                   <CornerUpRight className="w-3 h-3 shrink-0" style={{ color: part.tint }} />
                   <span className="font-medium text-text-primary">→ sent to {part.toName}</span>
+                  {/* Fallback only: routed sends pass immediate:true, so a 'held' ack here means a non-immediate caller. */}
                   {part.status === "delivered" ? (
                     <span>· auto-submit</span>
+                  ) : part.status === "held" ? (
+                    <span className="text-text-tertiary">· held — delivering in the next batch</span>
                   ) : (
                     <span className="text-warning">· target agent isn't running — queued</span>
                   )}

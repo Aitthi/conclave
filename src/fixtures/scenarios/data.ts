@@ -851,6 +851,14 @@ export const messages: InterAgentMessage[] = [
     status: "delivered",
     createdAt: "2026-07-04T13:40:00.000Z",
   },
+  {
+    id: "fx-msg-11",
+    fromInstanceId: AG_DEW,
+    toInstanceId: AG_DETORO,
+    text: "[task codex-meter-parity] Dew: state — -> review",
+    status: "held",
+    createdAt: "2026-07-05T12:01:00.000Z",
+  },
 ];
 
 // ── Roles (role.list) ───────────────────────────────────────────────────────

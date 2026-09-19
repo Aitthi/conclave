@@ -3865,8 +3865,10 @@ mod tests {
     /// The plan's literal acceptance line: "watch a task from a second agent,
     /// mutate from first, line arrives in watcher's PTY." Registers a live
     /// placeholder backend for the watcher (same fixture pattern as
-    /// `commands::message`'s own `inject_live_target_delivers` test) so the
-    /// notify actually reaches a "live" stdin, not just a queued DB row.
+    /// `commands::message`'s own `inject_live_target_holds_without_writing`
+    /// test) so the notify targets a "live" stdin: the row is `held` in the
+    /// outbox awaiting its flush, not `queued` as it would be for an offline
+    /// watcher.
     #[tokio::test]
     async fn waking_notify_arrives_in_a_live_watchers_pty() {
         let state = AppState::for_tests().await;
@@ -3928,8 +3930,8 @@ mod tests {
         );
         assert_eq!(
             arr[0]["status"],
-            json!("delivered"),
-            "a LIVE watcher's notify must be delivered, not merely queued"
+            json!("held"),
+            "a LIVE watcher's notify is held in the outbox, never queued as offline"
         );
         assert!(arr[0]["text"].as_str().unwrap().contains("[task t1]"));
     }

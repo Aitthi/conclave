@@ -59,6 +59,10 @@ pub struct AppState {
     /// handlers.
     pub code_cache: std::sync::Arc<codeintel::cache::CodeIntelCache>,
 
+    /// Inject outbox: per-target stacks of `held` inter-agent messages waiting
+    /// to be flushed as ONE paste (spec 2026-09-19-inject-outbox-coalescing).
+    pub outbox: crate::engine::runtime::outbox::Outbox,
+
     /// Instances with a restart ARMED: the agent's next `conclave snapshot save`
     /// triggers kill → respawn → resume (see `commands::instance::restart`).
     /// Keyed by instance id → arm time, with consume-once + TTL discipline so
@@ -93,6 +97,7 @@ impl AppState {
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
+            outbox: crate::engine::runtime::outbox::Outbox::new(),
             restart_pending: Mutex::new(HashMap::new()),
             workspace_lifecycle_locks: Mutex::new(HashMap::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
@@ -220,6 +225,7 @@ impl AppState {
                 crate::engine::commands::memory::MemorySearchCache::new(),
             ),
             code_cache: std::sync::Arc::new(codeintel::cache::CodeIntelCache::new()),
+            outbox: crate::engine::runtime::outbox::Outbox::new(),
             restart_pending: Mutex::new(HashMap::new()),
             workspace_lifecycle_locks: Mutex::new(HashMap::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),

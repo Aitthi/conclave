@@ -193,7 +193,8 @@ export interface InterAgentMessage {
   fromInstanceId: string;
   toInstanceId: string;
   text: string;
-  status: "queued" | "delivered";
+  /** `held` = waiting in the target's inject outbox, not yet pasted. */
+  status: "queued" | "delivered" | "held";
   autoSubmitted?: boolean;
   createdAt: string;
 }

@@ -16,7 +16,7 @@ interface StdinBarProps {
 // A transient outbox confirmation for a routed send (this agent → another).
 interface OutboxNote {
   toName: string;
-  status: "queued" | "delivered";
+  status: "queued" | "delivered" | "held";
 }
 
 /**
@@ -142,6 +142,9 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
         fromInstanceId: instanceId,
         toInstanceId: target.instanceId,
         text,
+        // The human's routed send is delivered on its own, right away — it
+        // never joins (nor flushes) the target's outbox stack (ruling 5).
+        immediate: true,
       });
       if (mounted.current) {
         setValue("");
@@ -325,8 +328,11 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
         >
           <CornerUpRight className="w-3 h-3 shrink-0 text-text-tertiary" />
           <span className="font-medium text-text-primary">→ sent to {outbox.toName}</span>
+          {/* Fallback only: routed sends pass immediate:true, so a 'held' ack here means a non-immediate caller. */}
           {outbox.status === "delivered" ? (
             <span>· auto-submit</span>
+          ) : outbox.status === "held" ? (
+            <span className="text-text-tertiary">· held — delivering in the next batch</span>
           ) : (
             <span className="text-warning">· target agent isn't running — queued</span>
           )}

@@ -303,6 +303,9 @@ export function ChatRail({ workspaceId, roster, statuses, onOpenChat }: ChatRail
                             {m.status === "queued" && (
                               <span className="text-[9px] text-warning">queued</span>
                             )}
+                            {m.status === "held" && (
+                              <span className="text-[9px] text-text-tertiary">held</span>
+                            )}
                             <span className="ml-auto flex items-center gap-1 text-[10px] text-text-tertiary">
                               <Avatar identity={to} size={4} />
                               <span>{to.name}</span>
