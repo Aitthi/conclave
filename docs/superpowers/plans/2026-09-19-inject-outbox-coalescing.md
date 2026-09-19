@@ -13,14 +13,16 @@
 ## Global Constraints
 
 - Constants (spec §Timer): `INITIAL_WAIT = 10s`, `RESET_WINDOW = 3s`, `EXTEND = 5s`, `MAX_ITEMS = 10`. No max hold time. No `source` field.
-- `message.send` (human input) is NOT modified in any way (ruling 1).
+- `message.send` (human input to own agent) is NOT modified in any way (ruling 1).
+- Human ROUTED sends (`ChatView.tsx` / `StdinBar.tsx` → another agent) go through `message.inject` and must pass `immediate: true`; the engine delivers that one message now as a single-item flush and leaves the target's stack untouched (spec ruling 5, challenge d157aa7e). CLI `tell` and system callers never set it.
+- Files outside the recorded task boundary (`src/ipc/commands.ts`, `src/components/ChatView.tsx`, `src/components/StdinBar.tsx`) land as their OWN scoped commit `git commit -- <those paths>` — the boundary is immutable, the lead has ruled the widening on the task (event d157aa7e ruling).
 - `SUBMIT_CR_DELAYS_MS`, the bracketed-paste envelope, and the `[from {name} · {id}] ` tag format are unchanged — only their caller moves.
 - Emit `bus::MESSAGE_INJECTED` once per item at flush (UI keeps one bubble per message).
 - Fixture timestamps are fixed literals (CLAUDE.md). UI copy is English.
 - Logging idiom in this crate is `eprintln!("[tag] …")` (see `commands/instance.rs`); there is no `tracing`.
 - Commit each task separately with `git commit -- <paths>` (shared tree — never a bare `git commit`).
 - Gates before READY (record each with `conclave task gate <ws> inject-outbox-coalescing -- <cmd>`):
-  `cargo test --manifest-path src-tauri/Cargo.toml`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `pnpm typecheck`, `pnpm uishot chat` (then OPEN `.shots/chat-default.png` with the Read tool).
+  `cargo test --manifest-path src-tauri/Cargo.toml`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `pnpm exec tsc --noEmit` (there is no `pnpm typecheck` script), `pnpm uishot chat` (then OPEN `.shots/chat-default.png` with the Read tool).
 
 ---
 
@@ -787,9 +789,16 @@ use std::time::Instant;
         sender_name: sender,
         text,
     };
-    let push = state.outbox.push(&to_instance_id, item, Instant::now());
+    // `immediate` (human routed send from the composer — spec ruling 5) skips
+    // the stack entirely: deliver THIS message now and leave whatever is
+    // pending for the target untouched. Everything else joins the stack.
+    let push = if immediate {
+        Push::Flush(vec![item])
+    } else {
+        state.outbox.push(&to_instance_id, item, Instant::now())
+    };
 
-    // Release BOTH lifecycle guards before a synchronous cap-flush:
+    // Release BOTH lifecycle guards before a synchronous flush:
     // `flush_stack` takes the target's guards itself and the agent mutex is
     // not re-entrant — holding them here would deadlock.
     drop(_agent_guards);
@@ -801,6 +810,63 @@ use std::time::Instant;
 
     serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
 }
+```
+
+(d) Add the flag to `InjectReq` (top of the file, ~line 124):
+
+```rust
+struct InjectReq {
+    from_instance_id: String,
+    to_instance_id: String,
+    text: String,
+    /// `true` = deliver NOW as a single-item flush, bypassing the target's
+    /// outbox stack and leaving it untouched. Set ONLY by the human's routed
+    /// send in the UI (ChatView / StdinBar) — spec ruling 5. CLI `tell` and
+    /// system notifications never set it.
+    #[serde(default)]
+    immediate: bool,
+}
+```
+
+and destructure it in `inject`: `let InjectReq { from_instance_id, to_instance_id, text, immediate } = …`.
+
+(e) Add this test next to the other new ones:
+
+```rust
+    /// A human routed send (`immediate: true`) is delivered on its own, right
+    /// now — and the target's pending stack stays exactly as it was.
+    #[tokio::test]
+    async fn immediate_inject_delivers_now_and_leaves_the_stack_alone() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let session_id = session::get_by_instance(&state.db, &to).await.unwrap().unwrap().id;
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        inject(&state, json!({ "fromInstanceId": from, "toInstanceId": to, "text": "pending" }))
+            .await
+            .unwrap();
+        let ack = inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "from the human", "immediate": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack["status"], "delivered");
+
+        let mut writes = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            writes.push(w);
+        }
+        assert_eq!(writes.len(), 1 + SUBMIT_CR_DELAYS_MS.len(), "one paste for the immediate message only");
+        assert!(writes[0].ends_with("] from the human\x1b[201~"));
+        assert!(!writes[0].contains("pending"), "the held message was NOT flushed along");
+
+        let still_held = state.outbox.take_all(&to);
+        assert_eq!(still_held.len(), 1);
+        assert_eq!(still_held[0].text, "pending");
+    }
 ```
 
 Delete the now-unused `body`/`status` bindings and the old `repo::inter_agent_message::create(... status ...)` + emit tail. Keep the long comment about the bracketed paste — move it onto `flush_stack` below so the reasoning travels with the code.
@@ -1019,6 +1085,47 @@ Append to the `messages` array in `src/fixtures/scenarios/data.ts` (keep the "de
 ```
 
 (Muted, not warning: `held` is the normal in-flight state, not a delivery problem.)
+
+- [ ] **Step 3b: ChatView + StdinBar — widen their local unions, add the `held` branch, pass `immediate: true`** (challenge d157aa7e, Dew; spec ruling 5). These three files are OUTSIDE the task boundary — land them as their own scoped commit (Step 5b).
+
+`src/ipc/commands.ts:255-258`:
+
+```ts
+  "message.inject": {
+    /** `immediate: true` = the HUMAN's routed send from the composer: delivered
+     *  now as a single-item flush, bypassing (and not flushing) the target's
+     *  outbox stack. Agents' `tell` and system notifications never set it. */
+    req: { fromInstanceId: string; toInstanceId: string; text: string; immediate?: boolean };
+    res: InterAgentMessage;
+  };
+```
+
+`src/components/ChatView.tsx:46` — `status: "queued" | "delivered" | "held";`
+`src/components/ChatView.tsx:230-234` — add `immediate: true,` after `text,` in the `ipc.message.inject({ … })` call.
+`src/components/ChatView.tsx:413-417` — replace the ternary with:
+
+```tsx
+                  {part.status === "delivered" ? (
+                    <span>· auto-submit</span>
+                  ) : part.status === "held" ? (
+                    <span className="text-text-tertiary">· held — delivering in the next batch</span>
+                  ) : (
+                    <span className="text-warning">· target agent isn't running — queued</span>
+                  )}
+```
+
+`src/components/StdinBar.tsx:19` — `status: "queued" | "delivered" | "held";`
+`src/components/StdinBar.tsx:141-145` — add `immediate: true,` after `text,` in the `ipc.message.inject({ … })` call.
+`src/components/StdinBar.tsx:328-332` — same three-branch replacement as ChatView above (same copy, same classes).
+
+Run: `pnpm exec tsc --noEmit` — Expected: clean. (There is no `pnpm typecheck` script in `package.json`; every "pnpm typecheck" in this plan means `pnpm exec tsc --noEmit`.)
+
+- [ ] **Step 5b: Commit the out-of-boundary trio separately**
+
+```bash
+git add src/ipc/commands.ts src/components/ChatView.tsx src/components/StdinBar.tsx
+git commit -m "feat(chat): routed sends bypass the outbox (immediate) + honest 'held' copy in ChatView/StdinBar" -- src/ipc/commands.ts src/components/ChatView.tsx src/components/StdinBar.tsx
+```
 
 - [ ] **Step 4: Pixel gate**
 
