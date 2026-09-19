@@ -101,8 +101,11 @@ Expected: compile error (`update_status`/`requeue_held` not found); `create_acce
 -- Inject outbox (spec docs/superpowers/specs/2026-09-19-inject-outbox-coalescing-design.md):
 -- a message can now sit in a per-target outbox before delivery, status 'held'.
 -- SQLite cannot ALTER a CHECK constraint, so rebuild inter_agent_message in
--- place — same columns and index as 0001_init.sql, all rows preserved
--- (same idiom as 0018_task_event_plan_check.sql).
+-- place — same columns and BOTH indexes as 0001_init.sql:188-189, all rows
+-- preserved (same idiom as 0018_task_event_plan_check.sql). DROP TABLE drops
+-- every index on the table; list_for_instance filters on to OR from and
+-- list_for_workspace on from, so both are load-bearing (challenge by Dew,
+-- 2026-09-19).
 CREATE TABLE inter_agent_message_new (
     id               TEXT PRIMARY KEY,
     from_instance_id TEXT NOT NULL REFERENCES workspace_agent(id),
@@ -117,7 +120,24 @@ INSERT INTO inter_agent_message_new
   FROM inter_agent_message;
 DROP TABLE inter_agent_message;
 ALTER TABLE inter_agent_message_new RENAME TO inter_agent_message;
-CREATE INDEX idx_inter_agent_msg_to ON inter_agent_message(to_instance_id);
+CREATE INDEX idx_inter_agent_msg_to   ON inter_agent_message(to_instance_id);
+CREATE INDEX idx_inter_agent_msg_from ON inter_agent_message(from_instance_id);
+```
+
+Guard (add to the Task 1 tests so the omission cannot recur):
+
+```rust
+    #[tokio::test]
+    async fn migration_0033_keeps_both_inter_agent_message_indexes() {
+        let pool = crate::engine::db::connect_in_memory().await;
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='inter_agent_message' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(names, vec!["idx_inter_agent_msg_from", "idx_inter_agent_msg_to"]);
+    }
 ```
 
 - [ ] **Step 4: Wire the migration in `db.rs`**
