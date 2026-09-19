@@ -2,8 +2,9 @@
 //! another instance's live input (the inter-agent messaging backbone, M3.1).
 //!
 //! One `inter_agent_message` row is persisted per `message.inject` call. The
-//! `status` reflects whether the text reached a live backend (`delivered`) or
-//! was merely recorded because the target wasn't running (`queued`).
+//! `status` reflects whether the text is still waiting in the per-target inject
+//! outbox (`held`), reached a live backend (`delivered`), or was merely recorded
+//! because the target wasn't running (`queued`).
 //!
 //! # chain-builder usage
 //!
@@ -52,8 +53,8 @@ pub struct InterAgentMessageRow {
 /// Insert a new inter_agent_message and return the constructed row.
 ///
 /// Generates a UUID v4 `id` and ISO-8601 UTC `created_at` timestamp.
-/// `status` must be one of `"queued"` | `"delivered"` (the schema CHECK
-/// enforces this). `auto_submitted` is always `true` for an injection.
+/// `status` must be one of `"queued"` | `"delivered"` | `"held"` (the schema
+/// CHECK enforces this). `auto_submitted` is always `true` for an injection.
 ///
 /// Returns the row directly without a re-fetch round-trip (same as the other
 /// repo `create` helpers).
@@ -95,6 +96,45 @@ pub async fn create(
         auto_submitted: Some(auto_submitted),
         created_at,
     })
+}
+
+/// Set `status` on every listed row in one statement. Used by the inject
+/// outbox at flush time (`held` → `delivered` | `queued`). An empty `ids`
+/// slice is a no-op (no round-trip, `Ok(())`).
+///
+/// Raw `sqlx` (not chain-builder): the `IN (…)` list is variable-length, which
+/// the fluent `where_eq` chain cannot express — same documented fallback as
+/// `list_for_instance`.
+///
+/// `AssertSqlSafe` audit (sqlx 0.9 refuses a non-literal statement): the only
+/// interpolated fragment is `"?"` repeated `ids.len()` times — placeholder
+/// punctuation, never data. `status` and every id are bind parameters, so no
+/// caller value ever reaches the SQL text. Same rule as `repo::model_usage`.
+pub async fn update_status(pool: &SqlitePool, ids: &[String], status: &str) -> sqlx::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("UPDATE inter_agent_message SET status = ? WHERE id IN ({placeholders})");
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(status);
+    for id in ids {
+        query = query.bind(id);
+    }
+    query.execute(pool).await?;
+    Ok(())
+}
+
+/// Startup repair: the outbox is in-memory, so any row still `held` after a
+/// restart will never be flushed. Flip them to `queued` — the same status a
+/// message to an offline target already gets. Returns the number of rows changed.
+pub async fn requeue_held(pool: &SqlitePool) -> sqlx::Result<u64> {
+    let result =
+        sqlx::query("UPDATE inter_agent_message SET status = 'queued' WHERE status = 'held'")
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
 }
 
 /// List the inbox + outbox for one instance: every message where the instance
@@ -227,6 +267,18 @@ mod tests {
             .await
             .expect("instantiate failed")
             .id
+    }
+
+    /// Helper: two instances in ONE fresh workspace — the shape the outbox
+    /// tests need (sender + target of a held stack).
+    async fn two_instances(pool: &SqlitePool) -> (String, String) {
+        let ws = workspace::create(pool, "WS", "/tmp/ws", None)
+            .await
+            .expect("create workspace failed")
+            .id;
+        let from = fixture_instance_in(pool, &ws, "Sender").await;
+        let to = fixture_instance_in(pool, &ws, "Target").await;
+        (from, to)
     }
 
     /// list_for_workspace returns only messages whose BOTH endpoints are in
@@ -413,5 +465,62 @@ mod tests {
             "must NOT have auto_submitted"
         );
         assert!(json.get("created_at").is_none(), "must NOT have created_at");
+    }
+
+    /// `held` is a legal status on the rebuilt table (migration 0033).
+    #[tokio::test]
+    async fn create_accepts_held_status() {
+        let pool = connect_in_memory().await;
+        let (from, to) = two_instances(&pool).await;
+        let row = create(&pool, &from, &to, "hi", "held", true)
+            .await
+            .expect("held is a legal status");
+        assert_eq!(row.status, "held");
+    }
+
+    /// update_status touches exactly the listed ids and nothing else.
+    #[tokio::test]
+    async fn update_status_flips_only_listed_ids() {
+        let pool = connect_in_memory().await;
+        let (from, to) = two_instances(&pool).await;
+        let a = create(&pool, &from, &to, "a", "held", true).await.unwrap();
+        let b = create(&pool, &from, &to, "b", "held", true).await.unwrap();
+        let c = create(&pool, &from, &to, "c", "held", true).await.unwrap();
+        update_status(&pool, &[a.id.clone(), b.id.clone()], "delivered")
+            .await
+            .unwrap();
+        let rows = list_for_instance(&pool, &to, 10).await.unwrap();
+        let status_of = |id: &str| rows.iter().find(|r| r.id == id).unwrap().status.clone();
+        assert_eq!(status_of(&a.id), "delivered");
+        assert_eq!(status_of(&b.id), "delivered");
+        assert_eq!(status_of(&c.id), "held");
+    }
+
+    /// An empty id slice must not build an `IN ()` statement.
+    #[tokio::test]
+    async fn update_status_with_no_ids_is_a_noop() {
+        let pool = connect_in_memory().await;
+        update_status(&pool, &[], "delivered")
+            .await
+            .expect("empty id list must not error");
+    }
+
+    /// Startup repair flips `held` leftovers and leaves every other status alone.
+    #[tokio::test]
+    async fn requeue_held_touches_only_held_rows() {
+        let pool = connect_in_memory().await;
+        let (from, to) = two_instances(&pool).await;
+        let held = create(&pool, &from, &to, "h", "held", true).await.unwrap();
+        let delivered = create(&pool, &from, &to, "d", "delivered", true)
+            .await
+            .unwrap();
+        let queued = create(&pool, &from, &to, "q", "queued", true).await.unwrap();
+        let changed = requeue_held(&pool).await.unwrap();
+        assert_eq!(changed, 1);
+        let rows = list_for_instance(&pool, &to, 10).await.unwrap();
+        let status_of = |id: &str| rows.iter().find(|r| r.id == id).unwrap().status.clone();
+        assert_eq!(status_of(&held.id), "queued");
+        assert_eq!(status_of(&delivered.id), "delivered");
+        assert_eq!(status_of(&queued.id), "queued");
     }
 }

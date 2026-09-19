@@ -365,6 +365,18 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
             .await?;
         tx.commit().await?;
     }
+    if version < 33 {
+        let mut tx = connection.begin().await?;
+        sqlx::raw_sql(include_str!(
+            "migrations/0033_inter_agent_message_held.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::raw_sql("PRAGMA user_version = 33;")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -575,7 +587,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 32);
+        assert_eq!(version, 33);
         let workspace: (String, String) =
             sqlx::query_as("SELECT id,run_state FROM workspace WHERE id='ws'")
                 .fetch_one(&pool)
@@ -728,7 +740,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 32);
+        assert_eq!(version, 33);
         use sqlx::Row as _;
         let retained = sqlx::query(
             "SELECT id,name,role,type,cli_kind,color,provider_id,model,harness_mode,\
@@ -857,7 +869,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version_after_second_run, 32);
+        assert_eq!(version_after_second_run, 33);
     }
 
     #[tokio::test]
@@ -1010,7 +1022,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 32, "migrate() from v13 must reach schema v32");
+        assert_eq!(version, 33, "migrate() from v13 must reach schema v33");
 
         // The legacy row survived, folded into the new shape.
         let row = crate::engine::repo::artifact::get_artifact(&pool, "art-1")
@@ -1261,7 +1273,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("user_version query failed");
-        assert_eq!(version, 32, "user_version should be 32");
+        assert_eq!(version, 33, "user_version should be 33");
 
         // The seed migration must not duplicate rows across an idempotent run.
         let tool_count: i64 =
@@ -1464,7 +1476,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 32);
+        assert_eq!(version, 33);
     }
 
     /// Migration 0005 drops `skill.kind` entirely — builtin skills now come
@@ -1555,7 +1567,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma failed");
-        assert_eq!(version, 32);
+        assert_eq!(version, 33);
     }
 
     /// Migration 0008 adds the `role` table (ADR 0005) and
@@ -1665,7 +1677,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("pragma read failed");
-        assert_eq!(version, 32);
+        assert_eq!(version, 33);
     }
 
     /// Migration 0010 adds the composite index required for workspace-scoped
@@ -1807,7 +1819,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 32, "user_version must reach 32");
+        assert_eq!(version, 33, "user_version must reach 33");
 
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_usage_event")
             .fetch_one(&pool)
@@ -1901,7 +1913,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 32, "user_version must reach 32");
+        assert_eq!(version, 33, "user_version must reach 33");
 
         type UpgradedRow = (
             String,
