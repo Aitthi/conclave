@@ -96,13 +96,17 @@ impl Outbox {
     }
 
     /// Remove and return `to`'s whole stack regardless of deadline (empty Vec
-    /// when there is none). Used by tests and by nothing on the hot path.
+    /// when there is none). Test-only: the hot path drains through
+    /// [`Outbox::take_due`] or a cap flush, never by target id.
+    #[cfg(test)]
     pub fn take_all(&self, to: &str) -> Vec<HeldItem> {
         let mut stacks = self.stacks.lock().unwrap_or_else(|e| e.into_inner());
         stacks.remove(to).map(|s| s.items).unwrap_or_default()
     }
 
-    /// Current deadline of `to`'s stack, if any. Test/diagnostic accessor.
+    /// Current deadline of `to`'s stack, if any. Test-only accessor — the
+    /// sweeper compares deadlines inside [`Outbox::take_due`].
+    #[cfg(test)]
     pub fn deadline(&self, to: &str) -> Option<Instant> {
         let stacks = self.stacks.lock().unwrap_or_else(|e| e.into_inner());
         stacks.get(to).map(|s| s.deadline)
@@ -125,6 +129,27 @@ impl Outbox {
             .map(Self::tagged_line)
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+}
+
+/// Sweeper cadence. The deadline is honoured within one tick.
+pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// App-wide sweeper: requeue leftovers from a previous run, then drain due
+/// stacks forever. Same spawn idiom as `task_timer::run` (see `lib.rs`).
+/// Flushes run sequentially per tick — a slow PTY only delays the next tick,
+/// never loses a stack.
+pub async fn run(state: std::sync::Arc<crate::engine::AppState>) {
+    match crate::engine::repo::inter_agent_message::requeue_held(&state.db).await {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[outbox] requeued {n} held message(s) left over from a previous run"),
+        Err(e) => eprintln!("[outbox] requeue_held failed: {e}"),
+    }
+    loop {
+        for (to, items) in state.outbox.take_due(Instant::now()) {
+            crate::engine::commands::message::flush_stack(&state, &to, items).await;
+        }
+        tokio::time::sleep(TICK_INTERVAL).await;
     }
 }
 
@@ -252,7 +277,10 @@ mod tests {
     #[test]
     fn body_tags_each_line_and_separates_with_a_blank_line() {
         let items = vec![item(1), item(2)];
-        assert_eq!(Outbox::tagged_line(&items[0]), "[from Sender1 · from-1] msg 1");
+        assert_eq!(
+            Outbox::tagged_line(&items[0]),
+            "[from Sender1 · from-1] msg 1"
+        );
         assert_eq!(
             Outbox::body(&items),
             "[from Sender1 · from-1] msg 1\n\n[from Sender2 · from-2] msg 2"

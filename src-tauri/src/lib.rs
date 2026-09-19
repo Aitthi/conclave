@@ -128,6 +128,12 @@ pub fn run() {
             let timer_state = std::sync::Arc::clone(&state);
             tauri::async_runtime::spawn(engine::runtime::task_timer::run(timer_state));
 
+            // Inject outbox sweeper: flushes per-target message stacks as one
+            // paste once their deadline passes (spec 2026-09-19). Requeues any
+            // `held` rows a previous run left behind before its first tick.
+            let outbox_state = std::sync::Arc::clone(&state);
+            tauri::async_runtime::spawn(engine::runtime::outbox::run(outbox_state));
+
             // The ONE transcript usage importer: bounded ticks over the known
             // workspaces' Claude/Codex transcripts. Started here only, so the
             // test AppState never scans a real home directory.

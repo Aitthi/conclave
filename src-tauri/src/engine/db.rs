@@ -367,11 +367,9 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> sqlx::Result<()> {
     }
     if version < 33 {
         let mut tx = connection.begin().await?;
-        sqlx::raw_sql(include_str!(
-            "migrations/0033_inter_agent_message_held.sql"
-        ))
-        .execute(&mut *tx)
-        .await?;
+        sqlx::raw_sql(include_str!("migrations/0033_inter_agent_message_held.sql"))
+            .execute(&mut *tx)
+            .await?;
         sqlx::raw_sql("PRAGMA user_version = 33;")
             .execute(&mut *tx)
             .await?;

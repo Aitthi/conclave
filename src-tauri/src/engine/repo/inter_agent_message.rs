@@ -514,7 +514,9 @@ mod tests {
         let delivered = create(&pool, &from, &to, "d", "delivered", true)
             .await
             .unwrap();
-        let queued = create(&pool, &from, &to, "q", "queued", true).await.unwrap();
+        let queued = create(&pool, &from, &to, "q", "queued", true)
+            .await
+            .unwrap();
         let changed = requeue_held(&pool).await.unwrap();
         assert_eq!(changed, 1);
         let rows = list_for_instance(&pool, &to, 10).await.unwrap();

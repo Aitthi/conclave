@@ -1,6 +1,8 @@
+use crate::engine::runtime::outbox::{HeldItem, Outbox, Push};
 use crate::engine::{bus, repo, runtime::StdinError, AppError, AppState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Instant;
 
 /// Gaps (ms) before each submit-Enter sent after an injected message's text.
 /// Escalating so at least one CR arrives after the receiver drained the text
@@ -133,21 +135,17 @@ struct InjectReq {
 ///
 /// This is the inter-agent messaging backbone (M3.1).
 ///
-/// **Auto-submit:** the tagged body is written as one bracketed paste, then
-/// submitted with separate spaced `\r` keystrokes (see [`SUBMIT_CR_DELAYS_MS`]);
-/// a chat backend receives the body raw and needs no Enter.
+/// **Outbox:** the row is persisted as `"held"` and pushed onto the target's
+/// outbox stack (`runtime::outbox`). Delivery happens in [`flush_stack`] —
+/// from the sweeper when the stack's deadline passes, or synchronously here
+/// when the push hits `MAX_ITEMS` (the ack then already reads
+/// `"delivered"`/`"queued"`). Human input (`send`) never touches the outbox.
 ///
 /// **Origin tag:** the origin is carried as `from_instance_id` on the persisted
 /// row AND on the `message:injected` event. We deliberately inject the RAW
 /// `text` into the target's stdin (no marker pollution of the agent's actual
 /// input); the UI renders the "injected from X" chrome from the event/row. The
 /// visible origin-tagged bubble/line is the M3.2 UI task.
-///
-/// Status resolution:
-/// - target live, stdin accepted → `"delivered"` (+ emit `message:injected`)
-/// - target not running ([`StdinError::NotLive`]) → `"queued"` (recorded, not
-///   delivered; no error, no event)
-/// - backend stdin channel closed ([`StdinError::Closed`]) → [`AppError::Internal`]
 ///
 /// Errors:
 /// - malformed payload → [`AppError::Invalid`]
@@ -212,79 +210,143 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
             )))
         }
     };
-    // Prefix the delivered input with the sender's name AND id so the receiving
-    // agent knows who it's from and can reply directly with `conclave tell <id>`
-    // (no roster lookup needed). The persisted row + UI carry origin separately,
-    // so `text` stays RAW for those — only the stdin line is tagged.
-    // The body goes out as ONE bracketed paste (PTY backends): a body longer
-    // than the kernel's PTY input queue (macOS: 1022 bytes) reaches the TUI as
-    // several reads, and Claude Code's un-bracketed burst handling keeps only
-    // the LAST read — the receiver then submits just the tail (a 1023-byte
-    // tell arrived as "."; docs/superpowers/plans/2026-09-04-inject-bracketed-paste.md).
-    // Inside the envelope the TUI reassembles the whole body regardless of
-    // read boundaries, exactly as it does for a human's terminal paste.
-    let body = format!("[from {sender} · {from_instance_id}] {text}");
-    let status = match state.runtime.send_stdin_paste(&to_instance_id, &body) {
-        // Delivered to a live backend — now SUBMIT it. A TUI's Enter is CR (\r),
-        // not LF; and a CR inside the paste envelope (or, on a non-bracketed
-        // burst, in the SAME write as the text) is literal paste content
-        // (cursor drops to a new line, nothing submits). Worse, a SINGLE spaced
-        // CR still races the receiver's PTY drain: under load the 40ms beat
-        // elapses before the text is read, the CR coalesces into the same read
-        // burst, and the message sits unsubmitted in the composer. So press
-        // Enter at escalating gaps — at least one CR lands as an isolated
-        // keystroke, and extra Enters on an already-empty composer are no-ops.
-        Ok(()) => {
-            for delay_ms in SUBMIT_CR_DELAYS_MS {
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                let _ = state.runtime.send_stdin(&to_instance_id, "\r");
-            }
-            "delivered"
-        }
-        // Target isn't running: RECORD the message as queued but do NOT error and
-        // do NOT emit the delivered event.
-        // TODO(M3.x): deliver-on-spawn — drain queued messages when the target
-        // becomes live. No queue drain yet.
-        Err(StdinError::NotLive) => "queued",
-        // Registered-but-closed channel is a backend fault, not a bad request.
-        // We return early WITHOUT persisting — nothing was delivered or recorded.
-        Err(StdinError::Closed) => {
-            return Err(AppError::Internal(format!(
-                "target instance {to_instance_id} backend stdin channel closed"
-            )));
-        }
-    };
-
-    // Persist the injection FIRST (auto_submitted always true for an injection),
-    // then emit. Persist-before-emit means the UI never receives a `delivered`
-    // event for a message that failed to record — "delivered" implies both sent
-    // AND recorded. `create` borrows its args, so they're still owned for the emit.
-    let row = repo::inter_agent_message::create(
+    // Persist FIRST as `held`: the row exists before anything can flush it, so
+    // a flush that races this call can never see a missing id. `text` stays
+    // RAW on the row (the persisted row + UI carry the origin separately);
+    // the `[from {name} · {id}] ` tag is applied at flush, in `Outbox::body`.
+    let mut row = repo::inter_agent_message::create(
         &state.db,
         &from_instance_id,
         &to_instance_id,
         &text,
-        status,
+        "held",
         true,
     )
     .await?;
 
-    // Emit only once the delivered row is durably persisted, so the UI can render
-    // the injection ("injected from X · auto-submitted").
-    if status == "delivered" {
+    let item = HeldItem {
+        row_id: row.id.clone(),
+        from_instance_id: from_instance_id.clone(),
+        sender_name: sender,
+        text,
+    };
+    let push = state.outbox.push(&to_instance_id, item, Instant::now());
+
+    // Release BOTH lifecycle guards before a synchronous cap-flush:
+    // `flush_stack` takes the target's guards itself and the agent mutex is
+    // not re-entrant — holding them here would deadlock.
+    drop(_agent_guards);
+    drop(_workspace_guards);
+
+    if let Push::Flush(items) = push {
+        row.status = flush_stack(state, &to_instance_id, items).await.to_owned();
+    }
+
+    serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Deliver one target's flushed stack as ONE bracketed paste + the escalating
+/// submit CRs, then settle every row's status. Called by the outbox sweeper
+/// (`runtime::outbox::run`) and by `inject` on a cap flush.
+///
+/// The body goes out as ONE bracketed paste (PTY backends): a body longer than
+/// the kernel's PTY input queue (macOS: 1022 bytes) reaches the TUI as several
+/// reads, and Claude Code's un-bracketed burst handling keeps only the LAST
+/// read — the receiver then submits just the tail (a 1023-byte tell arrived as
+/// "."; docs/superpowers/plans/2026-09-04-inject-bracketed-paste.md). Inside
+/// the envelope the TUI reassembles the whole body regardless of read
+/// boundaries, exactly as it does for a human's terminal paste. A chat backend
+/// has no terminal and receives the body raw.
+///
+/// A TUI's Enter is CR (`\r`), not LF; and a CR inside the paste envelope (or,
+/// on a non-bracketed burst, in the SAME write as the text) is literal paste
+/// content. Worse, a SINGLE spaced CR still races the receiver's PTY drain, so
+/// Enter is pressed AFTER the paste at escalating gaps
+/// ([`SUBMIT_CR_DELAYS_MS`]) — at least one lands as an isolated keystroke;
+/// extra Enters on an empty composer are no-ops.
+///
+/// Returns the final row status: `"delivered"` (PTY accepted; one
+/// `message:injected` event per item) or `"queued"` (target not live, backend
+/// channel closed, or no longer delivery-eligible; no PTY write, no event).
+/// Never errors — a flush has no caller to hand an error to.
+pub async fn flush_stack(
+    state: &AppState,
+    to_instance_id: &str,
+    items: Vec<HeldItem>,
+) -> &'static str {
+    if items.is_empty() {
+        return "delivered";
+    }
+    let ids: Vec<String> = items.iter().map(|i| i.row_id.clone()).collect();
+
+    // Same guard order as `inject`: workspace READ, then the agent mutex, then
+    // re-check eligibility under the guards so a Stop that raced us wins.
+    let eligibility = match require_delivery_eligible(state, to_instance_id).await {
+        Ok(e) => e,
+        Err(_) => return settle_rows(state, &ids, "queued").await,
+    };
+    let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+    let _workspace_guard = workspace_lock.read().await;
+    let agent_lock = state.agent_lifecycle_lock(to_instance_id);
+    let _agent_guard = agent_lock.lock().await;
+    if require_delivery_eligible(state, to_instance_id)
+        .await
+        .is_err()
+    {
+        return settle_rows(state, &ids, "queued").await;
+    }
+
+    let body = Outbox::body(&items);
+    match state.runtime.send_stdin_paste(to_instance_id, &body) {
+        Ok(()) => {
+            for delay_ms in SUBMIT_CR_DELAYS_MS {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                let _ = state.runtime.send_stdin(to_instance_id, "\r");
+            }
+        }
+        // Target isn't running: the rows stay recorded as queued.
+        // TODO(M3.x): deliver-on-spawn — drain queued messages when the target
+        // becomes live. No queue drain yet.
+        Err(StdinError::NotLive) => return settle_rows(state, &ids, "queued").await,
+        Err(StdinError::Closed) => {
+            eprintln!(
+                "[outbox] target {to_instance_id} backend stdin channel closed; {} rows queued",
+                items.len()
+            );
+            return settle_rows(state, &ids, "queued").await;
+        }
+    }
+
+    let status = settle_rows(state, &ids, "delivered").await;
+    // Persist-before-emit, one event per item so the UI keeps one bubble per
+    // message ("injected from X · auto-submitted").
+    let to_session_id = state.runtime.session_id(to_instance_id);
+    for item in items {
         state.emit(
             bus::MESSAGE_INJECTED,
             bus::MessageInjected {
-                to_instance_id,
-                to_session_id: state.runtime.session_id(&row.to_instance_id),
-                from_instance_id,
-                text,
+                to_instance_id: to_instance_id.to_owned(),
+                to_session_id: to_session_id.clone(),
+                from_instance_id: item.from_instance_id,
+                text: item.text,
                 auto_submitted: true,
             },
         );
     }
+    status
+}
 
-    serde_json::to_value(row).map_err(|e| AppError::Internal(e.to_string()))
+/// Write the final status onto every row of a flushed stack. Logs and moves
+/// on if the UPDATE fails — the PTY write (if any) already happened and the
+/// sweeper must never stall on a DB hiccup.
+async fn settle_rows(state: &AppState, ids: &[String], status: &'static str) -> &'static str {
+    if let Err(e) = repo::inter_agent_message::update_status(&state.db, ids, status).await {
+        eprintln!(
+            "[outbox] update_status({status}) for {} row(s) failed: {e}",
+            ids.len()
+        );
+    }
+    status
 }
 
 /// Payload for `message.list` — the inbox/outbox query for one instance.
@@ -707,12 +769,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inject_offline_target_queues() {
+    async fn inject_offline_target_is_held() {
         let state = AppState::for_tests().await;
         let from = fixture_instance_id(&state, "Sender").await;
         let to = fixture_instance_id(&state, "Target").await;
 
-        // Target exists but is NOT registered in the runtime → NotLive → queued.
+        // `inject` no longer touches the PTY: the row is persisted `held` and
+        // the outbox decides when to flush. The NotLive → `queued` outcome now
+        // belongs to `flush_against_not_live_target_marks_rows_queued`.
         let val = inject(
             &state,
             json!({ "fromInstanceId": from, "toInstanceId": to, "text": "hi" }),
@@ -720,7 +784,7 @@ mod tests {
         .await
         .expect("inject should record (not error) for an offline target");
 
-        assert_eq!(val.get("status").and_then(Value::as_str), Some("queued"));
+        assert_eq!(val.get("status").and_then(Value::as_str), Some("held"));
         // A row was persisted (id present).
         assert!(val.get("id").and_then(Value::as_str).is_some());
         assert_eq!(
@@ -747,9 +811,9 @@ mod tests {
         )
         .await
         .expect("self-inject must not deadlock on the same endpoint")
-        .expect("eligible self-inject should queue");
+        .expect("eligible self-inject should be held");
 
-        assert_eq!(result.get("status").and_then(Value::as_str), Some("queued"));
+        assert_eq!(result.get("status").and_then(Value::as_str), Some("held"));
     }
 
     #[tokio::test]
@@ -797,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inject_live_target_delivers() {
+    async fn inject_live_target_holds_without_writing() {
         let state = AppState::for_tests().await;
         let from = fixture_instance_id(&state, "Sender").await;
         let to = fixture_instance_id(&state, "Target").await;
@@ -819,27 +883,35 @@ mod tests {
             json!({ "fromInstanceId": from, "toInstanceId": to, "text": "hi" }),
         )
         .await
-        .expect("inject should deliver to a live target");
+        .expect("inject should record for a live target");
 
-        assert_eq!(val.get("status").and_then(Value::as_str), Some("delivered"));
+        assert_eq!(val.get("status").and_then(Value::as_str), Some("held"));
         assert_eq!(
             val.get("autoSubmitted").and_then(Value::as_bool),
             Some(true)
         );
         assert!(val.get("id").and_then(Value::as_str).is_some());
+        assert!(
+            state.outbox.deadline(&to).is_some(),
+            "the message waits in the target's outbox stack"
+        );
     }
 
+    /// Two injects inside the outbox window reach the PTY as ONE bracketed
+    /// paste (both tagged lines, FIFO, blank-line separated) followed by the
+    /// same escalating CR retries a single message got before — the receiver
+    /// handles the whole stack in one turn.
+    ///
     /// The submit CR must be RETRIED: a single CR races the receiver's PTY
     /// drain — if it coalesces into the same read burst as the text, the TUI
     /// treats it as paste content and the message sits unsubmitted in the
     /// composer. Three spaced CRs make at least one land as an isolated
     /// keystroke; extra Enters on an already-empty composer are no-ops.
     #[tokio::test]
-    async fn inject_live_target_retries_submit_cr() {
+    async fn stack_flushes_as_one_paste_then_retries_submit_cr() {
         let state = AppState::for_tests().await;
         let from = fixture_instance_id(&state, "Sender").await;
         let to = fixture_instance_id(&state, "Target").await;
-
         let session_id = session::get_by_instance(&state.db, &to)
             .await
             .expect("get_by_instance failed")
@@ -848,12 +920,26 @@ mod tests {
         let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
         assert!(state.runtime.register(&to, handle).is_some());
 
-        inject(
+        let first = inject(
             &state,
             json!({ "fromInstanceId": from, "toInstanceId": to, "text": "hi" }),
         )
         .await
-        .expect("inject should deliver to a live target");
+        .expect("inject accepted");
+        let second = inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "again" }),
+        )
+        .await
+        .expect("inject accepted");
+        assert_eq!(first["status"], "held");
+        assert_eq!(second["status"], "held");
+        assert!(rx.try_recv().is_err(), "nothing reaches the PTY while held");
+
+        let items = state.outbox.take_all(&to);
+        assert_eq!(items.len(), 2);
+        let status = flush_stack(&state, &to, items).await;
+        assert_eq!(status, "delivered");
 
         let mut writes = Vec::new();
         while let Ok(w) = rx.try_recv() {
@@ -862,20 +948,95 @@ mod tests {
         assert_eq!(
             writes.len(),
             1 + SUBMIT_CR_DELAYS_MS.len(),
-            "expected tagged body + one CR per retry slot, got {writes:?}"
+            "expected ONE body paste + one CR per retry slot, got {writes:?}"
         );
         // The body is ONE bracketed paste: the receiver accumulates it across
         // PTY reads (macOS hands a TUI at most 1022 bytes per read) instead of
         // keeping only the last burst chunk — the head-truncation bug of
         // 2026-09-04 (docs/superpowers/plans/2026-09-04-inject-bracketed-paste.md).
+        let body = &writes[0];
         assert!(
-            writes[0].starts_with("\x1b[200~[from ") && writes[0].ends_with("] hi\x1b[201~"),
-            "first write is the tagged body inside a bracketed-paste envelope, got {:?}",
-            writes[0]
+            body.starts_with("\x1b[200~[from Sender · "),
+            "bracketed paste opens with the first tag, got {body:?}"
+        );
+        assert!(
+            body.ends_with("] again\x1b[201~"),
+            "paste closes after the last message, got {body:?}"
+        );
+        assert!(
+            body.contains("] hi\n\n[from Sender · "),
+            "messages are FIFO and blank-line separated, got {body:?}"
         );
         for cr in &writes[1..] {
             assert_eq!(cr, "\r", "every follow-up write is a bare Enter");
         }
+
+        let rows = repo::inter_agent_message::list_for_instance(&state.db, &to, 10)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().all(|r| r.status == "delivered"),
+            "flush marks every row delivered: {rows:?}"
+        );
+    }
+
+    /// Reaching MAX_ITEMS flushes synchronously inside `inject`: the 10th ack
+    /// already reads `delivered` and the PTY has exactly one paste.
+    #[tokio::test]
+    async fn tenth_inject_flushes_synchronously() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        let mut last = Value::Null;
+        for n in 1..=crate::engine::runtime::outbox::MAX_ITEMS {
+            last = inject(
+                &state,
+                json!({ "fromInstanceId": from, "toInstanceId": to, "text": format!("m{n}") }),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(last["status"], "delivered");
+        let mut writes = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            writes.push(w);
+        }
+        assert_eq!(writes.len(), 1 + SUBMIT_CR_DELAYS_MS.len());
+        assert!(writes[0].contains("] m1\n\n") && writes[0].ends_with("] m10\x1b[201~"));
+        assert!(
+            state.outbox.take_all(&to).is_empty(),
+            "cap flush emptied the stack"
+        );
+    }
+
+    /// A target that is not live at flush time gets `queued` rows, no PTY
+    /// write, and no event — the same outcome an offline target had before.
+    #[tokio::test]
+    async fn flush_against_not_live_target_marks_rows_queued() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await; // never registered → NotLive
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "hi" }),
+        )
+        .await
+        .unwrap();
+        let items = state.outbox.take_all(&to);
+        assert_eq!(flush_stack(&state, &to, items).await, "queued");
+        let rows = repo::inter_agent_message::list_for_instance(&state.db, &to, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "queued");
     }
 
     /// A chat backend has no terminal: the paste envelope is a PTY-only
@@ -900,6 +1061,7 @@ mod tests {
         )
         .await
         .expect("inject should deliver to a live target");
+        flush_stack(&state, &to, state.outbox.take_all(&to)).await;
 
         let first = rx.try_recv().expect("tagged body write");
         assert!(
