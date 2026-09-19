@@ -253,7 +253,10 @@ export interface Commands {
     res: Message;
   };
   "message.inject": {
-    req: { fromInstanceId: string; toInstanceId: string; text: string };
+    /** `immediate: true` = the HUMAN's routed send from the composer: delivered
+     *  now as a single-item flush, bypassing (and not flushing) the target's
+     *  outbox stack. Agents' `tell` and system notifications never set it. */
+    req: { fromInstanceId: string; toInstanceId: string; text: string; immediate?: boolean };
     res: InterAgentMessage;
   };
   "message.list": {
