@@ -251,6 +251,9 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
                               {m.status === "queued" && (
                                 <span className="text-[9px] text-warning">queued</span>
                               )}
+                              {m.status === "held" && (
+                                <span className="text-[9px] text-text-tertiary">held</span>
+                              )}
                               {m.autoSubmitted && (
                                 <span className="text-[9px] text-text-tertiary">injected</span>
                               )}
@@ -315,6 +318,7 @@ export function ChatHub({ workspaceId, onClose }: ChatHubProps) {
                         </div>
                         <div className="flex items-center gap-1.5 text-[9px] text-text-tertiary">
                           {m.status === "queued" && <span className="text-warning">queued</span>}
+                          {m.status === "held" && <span>held</span>}
                           {m.autoSubmitted && <span>injected</span>}
                           <span className="text-[10px] font-mono tabular-nums">
                             {clockLabel(m.createdAt)}
