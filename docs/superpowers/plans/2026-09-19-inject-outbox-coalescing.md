@@ -1022,7 +1022,7 @@ Problem: `flush_stack` does a DB round-trip (`require_delivery_eligible`) before
     /// Per-target delivery serializer. `flush_stack` awaits this FIRST — before
     /// any DB read or lifecycle guard — so two flushes for one target (sweeper
     /// `take_due` vs a cap/immediate flush inside `inject`) deliver in the
-    /// order they were taken; tokio's Mutex is FIFO-fair. Never held by
+    /// lock-acquisition order (tokio Mutex is FIFO-fair; take→lock is a few instructions apart with no await between). Never held by
     /// `inject` while it holds lifecycle guards, so no lock-order inversion.
     pub fn flush_lock(&self, to: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.flush_locks.lock().unwrap_or_else(|e| e.into_inner());
@@ -1030,7 +1030,14 @@ Problem: `flush_stack` does a DB round-trip (`require_delivery_eligible`) before
     }
 ```
 
-with the field `flush_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>` added to the struct (`#[derive(Default)]` still covers it). Test:
+with the field `flush_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>` added to the struct (`#[derive(Default)]` still covers it).
+
+Behavioural guards (challenge b7eb2c8e, Dew — the first test I asked for, "two concurrent flushes do not interleave", does NOT discriminate: the agent lifecycle mutex, held across the paste + CR loop, already forbids interleaving; the flush lock buys ORDER). Land both in `commands/message.rs` tests:
+
+- `concurrent_flushes_for_one_target_do_not_interleave` — `tokio::join!` two `flush_stack` calls for one target against a test PTY; assert `2 * (1 + SUBMIT_CR_DELAYS_MS.len())` writes with the two paste envelopes at index `0` and `1 + len` and bare `\r` elsewhere. Documents the invariant the agent mutex carries.
+- `flush_stack_waits_for_the_targets_flush_lock` — hold `state.outbox.flush_lock(&to).lock().await` from the test, `tokio::spawn` a `flush_stack`, `tokio::task::yield_now()` ×50 plus a 50 ms sleep, assert `rx.try_recv().is_err()` ("nothing may reach the PTY while the target's flush lock is held"); drop the guard, await the spawned flush, assert the paste landed and the result is `"delivered"`. This one FAILS with the two `flush_lock` lines removed — verify that before restoring them.
+
+Identity test:
 
 ```rust
     #[test]
