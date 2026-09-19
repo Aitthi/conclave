@@ -37,6 +37,7 @@ receiver handles them in a single turn. Human input is never held.
 | 2 | Maximum hold time? | **None.** Bounded by item count instead. |
 | 3 | Item cap | **10 items.** Reaching 10 flushes immediately; the 11th starts a new stack. |
 | 4 | Timer rule | See *Timer* below. Same constants for system and agent sources. |
+| 5 (amendment, Detoro ruling on challenge d157aa7e by Dew, confirmed by Mellow, 2026-09-19) | The human's **routed send** (composer → "send to agent X" in `StdinBar.tsx` / `ChatView.tsx`) does not use `message.send`; it calls `message.inject` with the human's own agent as sender. Ruling 1 says human input is never held, so `message.inject` gains an `immediate: bool` flag (default `false`). The two UI routed-send call sites pass `immediate: true`; the engine then delivers that one message now, as a single-item flush, and **leaves the target's pending stack untouched**. CLI `tell` and every system caller never set it. |
 
 ## Timer
 
@@ -95,14 +96,19 @@ Worst-case added latency beyond the deadline is one tick.
 
 ### `commands::message`
 
-- `inject` keeps its validation, lifecycle-lock ordering and eligibility
-  re-check exactly as today, then:
+- `inject` accepts an optional `immediate: bool` (serde default `false`) and
+  keeps its validation, lifecycle-lock ordering and eligibility re-check
+  exactly as today, then:
   1. persists the row with status **`"held"`** (new status value);
-  2. builds a `HeldItem` and calls `outbox.push`;
-  3. on `Push::Flush(items)` calls `flush_stack(state, &to, items).await`
-     before returning;
-  4. returns the row (status `held`, or `delivered`/`queued` if the cap
-     flushed it synchronously — re-read the row after the flush).
+  2. builds a `HeldItem`; if `immediate` is `true`, releases its guards and
+     calls `flush_stack(state, &to, vec![item])` directly — the target's
+     pending stack is neither flushed nor touched (ruling 5); otherwise calls
+     `outbox.push`;
+  3. on `Push::Flush(items)` releases its guards and calls
+     `flush_stack(state, &to, items).await` before returning;
+  4. returns the row (status `held`, or `delivered`/`queued` when a cap flush
+     or an immediate delivery settled it synchronously — `flush_stack`
+     returns the final status).
 - New `flush_stack(state, to, items)`:
   1. take the target's agent lifecycle lock (owned guard, same helper
      `inject` uses);
@@ -135,14 +141,24 @@ Unchanged call sites — `notify_watchers`, `notify_expected_ruler`
 calling `message::inject` with the same payload. They observe a `held` ack
 instead of `delivered`; none of them read the status.
 
-`message.send` (StdinBar / Terminal pane) is **not touched** (ruling 1).
+`message.send` (StdinBar / Terminal pane, own agent) is **not touched**
+(ruling 1). The human's routed send (StdinBar / ChatView → another agent)
+uses `message.inject` and passes `immediate: true` (ruling 5).
 
 ### UI / TS
 
 - `src/ipc/types.ts`: `status: "queued" | "delivered" | "held"`.
-- `ChatRail.tsx`, `ChatHub.tsx` currently show a `queued` badge; show a
-  `held` badge the same way (text `held`, muted color). `ChatView.tsx` checks
-  `=== "delivered"` and needs no change.
+- `src/ipc/commands.ts` `message.inject` req: `immediate?: boolean`.
+- `ChatRail.tsx`, `ChatHub.tsx` (two sites) currently show a `queued` badge;
+  show a `held` badge the same way (text `held`, muted color).
+- `ChatView.tsx` and `StdinBar.tsx` each declare their OWN narrowed
+  `"queued" | "delivered"` union and render `delivered ? "· auto-submit" :
+  "· target agent isn't running — queued"`. Widen both unions to include
+  `"held"` and add a third, muted branch: `· held — delivering in the next
+  batch`. Their routed-send calls pass `immediate: true`, so on the happy
+  path they still see `delivered`; the `held` branch is the honest rendering
+  if the ack ever is `held` (amended from "needs no change" — challenge
+  d157aa7e, Dew; verified by Mellow).
 - Fixture scenarios: add one `held` message so `pnpm uishot chat` exercises
   the badge.
 
