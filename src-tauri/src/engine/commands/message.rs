@@ -284,7 +284,10 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
 /// Returns the final row status: `"delivered"` (PTY accepted; one
 /// `message:injected` event per item) or `"queued"` (target not live, backend
 /// channel closed, or no longer delivery-eligible; no PTY write, no event).
-/// Never errors — a flush has no caller to hand an error to.
+/// Never errors — a flush has no caller to hand an error to. A `Closed`
+/// channel or a lost eligibility race degrades the rows (and a synchronous
+/// caller's ack) to `queued` rather than erroring; `inject`'s cap/immediate
+/// path shares that contract.
 pub async fn flush_stack(
     state: &AppState,
     to_instance_id: &str,
@@ -294,6 +297,12 @@ pub async fn flush_stack(
         return "delivered";
     }
     let ids: Vec<String> = items.iter().map(|i| i.row_id.clone()).collect();
+
+    // Serialize deliveries per target BEFORE the eligibility round-trip (see
+    // Outbox::flush_lock): otherwise a cap/immediate flush can overtake a
+    // stack the sweeper already took and land the newer batch first.
+    let flush_lock = state.outbox.flush_lock(to_instance_id);
+    let _flush_guard = flush_lock.lock().await;
 
     // Same guard order as `inject`: workspace READ, then the agent mutex, then
     // re-check eligibility under the guards so a Stop that raced us wins.

@@ -2015,6 +2015,15 @@ mod tests {
             indexes,
             vec!["idx_inter_agent_msg_from", "idx_inter_agent_msg_to"]
         );
+
+        let fk_violations: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(
+            fk_violations.is_empty(),
+            "rebuild left FK violations: {fk_violations:?}"
+        );
     }
 
     /// 0032 is purely additive: a populated schema-31 event survives with

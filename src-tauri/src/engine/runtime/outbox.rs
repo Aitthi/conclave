@@ -48,6 +48,7 @@ struct Stack {
 #[derive(Default)]
 pub struct Outbox {
     stacks: Mutex<HashMap<String, Stack>>,
+    flush_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Outbox {
@@ -110,6 +111,16 @@ impl Outbox {
     pub fn deadline(&self, to: &str) -> Option<Instant> {
         let stacks = self.stacks.lock().unwrap_or_else(|e| e.into_inner());
         stacks.get(to).map(|s| s.deadline)
+    }
+
+    /// Per-target delivery serializer. `flush_stack` awaits this FIRST — before
+    /// any DB read or lifecycle guard — so two flushes for one target (sweeper
+    /// `take_due` vs a cap/immediate flush inside `inject`) deliver in the
+    /// order they were taken; tokio's Mutex is FIFO-fair. Never held by
+    /// `inject` while it holds lifecycle guards, so no lock-order inversion.
+    pub fn flush_lock(&self, to: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.flush_locks.lock().unwrap_or_else(|e| e.into_inner());
+        std::sync::Arc::clone(locks.entry(to.to_owned()).or_default())
     }
 
     /// The stdin line for one item — byte-identical to the tag `inject`
@@ -272,6 +283,19 @@ mod tests {
         assert_eq!(ob.take_all("A").len(), 1);
         assert_eq!(ob.take_all("B").len(), 1);
         assert!(ob.take_all("A").is_empty());
+    }
+
+    #[test]
+    fn flush_lock_is_one_mutex_per_target() {
+        let ob = Outbox::new();
+        assert!(std::sync::Arc::ptr_eq(
+            &ob.flush_lock("A"),
+            &ob.flush_lock("A")
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &ob.flush_lock("A"),
+            &ob.flush_lock("B")
+        ));
     }
 
     #[test]
