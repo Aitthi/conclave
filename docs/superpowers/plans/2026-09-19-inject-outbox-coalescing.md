@@ -159,7 +159,95 @@ Directly after the `if version < 32 { … }` block (`src-tauri/src/engine/db.rs:
     }
 ```
 
-Check the file for any test that asserts the final `user_version` (grep `user_version = 32` / `assert_eq!(version, 32`) and bump it to 33.
+Check the file for any test that asserts the final `user_version` (`migrate_0031_0032_preserves_events_and_initializes_evidence_to_null` at ~`db.rs:1897` asserts `version, 32`) and bump it to 33.
+
+- [ ] **Step 4b: Upgrade-path test — migrate a populated v32 database, don't just insert on a fresh schema** (asked by Mellow, review of challenge 20ec4f31)
+
+Add to the `db.rs` test module, next to `connect_at_v31_with_event` (~line 1855), mirroring its shape:
+
+```rust
+    /// Schema 32 with one delivered inter-agent message in place, so 0033's
+    /// table rebuild is exercised on REAL rows — not on an empty table.
+    async fn connect_at_v32_with_message() -> SqlitePool {
+        let pool = connect_at_v31_with_event().await;
+        let mut tx = pool.begin().await.expect("begin v32 setup");
+        sqlx::raw_sql(include_str!("migrations/0032_model_usage_reconciliation.sql"))
+            .execute(&mut *tx)
+            .await
+            .expect("apply 0032");
+        sqlx::raw_sql("PRAGMA user_version = 32;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 32");
+        // FK targets: copy the workspace / agent_definition / workspace_agent
+        // INSERT statements VERBATIM from the retained-tables test earlier in
+        // this module (the one that inserts 'wa-root' and 'wa-child', ~line 520-556).
+        // <paste them here>
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,auto_submitted,created_at) \
+             VALUES ('im-legacy','wa-root','wa-child','legacy hello','delivered',1,'2026-09-01T00:00:00Z')",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert legacy message");
+        tx.commit().await.expect("commit v32 setup");
+        pool
+    }
+
+    /// 0033 rebuilds inter_agent_message to admit 'held': the legacy row
+    /// survives byte-for-byte, 'held' becomes insertable, and BOTH indexes
+    /// from 0001_init.sql:188-189 exist again (challenge 20ec4f31, Dew).
+    #[tokio::test]
+    async fn migrate_0032_0033_preserves_messages_admits_held_and_keeps_both_indexes() {
+        let pool = connect_at_v32_with_message().await;
+
+        migrate(&pool).await.expect("migrate to head");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(version, 33, "user_version must reach 33");
+
+        let legacy: (String, String, String, String, i64, String) = sqlx::query_as(
+            "SELECT from_instance_id,to_instance_id,text,status,auto_submitted,created_at \
+             FROM inter_agent_message WHERE id='im-legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy row survives the rebuild");
+        assert_eq!(
+            legacy,
+            ("wa-root".into(), "wa-child".into(), "legacy hello".into(), "delivered".into(), 1, "2026-09-01T00:00:00Z".into())
+        );
+
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,auto_submitted,created_at) \
+             VALUES ('im-held','wa-root','wa-child','held hello','held',1,'2026-09-19T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("'held' is admitted by the rebuilt CHECK");
+
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,auto_submitted,created_at) \
+             VALUES ('im-bad','wa-root','wa-child','x','bogus',1,'2026-09-19T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("the CHECK still rejects unknown statuses");
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='inter_agent_message' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, vec!["idx_inter_agent_msg_from", "idx_inter_agent_msg_to"]);
+    }
+```
+
+Add `src-tauri/src/engine/db.rs` tests to the Step 6 run: `cargo test --manifest-path src-tauri/Cargo.toml migrate_0032_0033`.
 
 - [ ] **Step 5: Add the repo functions**
 
