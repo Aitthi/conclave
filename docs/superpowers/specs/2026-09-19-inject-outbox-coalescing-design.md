@@ -193,7 +193,7 @@ Repo:
 - `requeue_held` flips only `held` rows.
 
 Gates (recorded via `conclave task gate`): `cargo test`, `cargo clippy
---all-targets -- -D warnings`, `cargo fmt --check`, `pnpm typecheck`,
+--all-targets -- -D warnings`, `cargo fmt --check`, `pnpm exec tsc --noEmit`,
 `pnpm uishot chat` (pixel gate: open the PNG).
 
 ## Out of scope
