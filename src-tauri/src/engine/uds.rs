@@ -384,7 +384,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let state = Arc::new(AppState::for_tests().await);
-        let path = std::env::temp_dir().join("conclave-uds-test-round-trip.sock");
+        let path = std::env::temp_dir().join(format!(
+            "conclave-uds-test-round-trip-{}.sock",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
 
         let server = tokio::spawn(serve(Arc::clone(&state), path.clone()));
@@ -478,7 +481,10 @@ mod tests {
                 .expect("instantiate member failed")
                 .id;
 
-        let path = std::env::temp_dir().join("conclave-uds-test-task-verbs.sock");
+        let path = std::env::temp_dir().join(format!(
+            "conclave-uds-test-task-verbs-{}.sock",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let server = tokio::spawn(serve(Arc::clone(&state), path.clone()));
 
