@@ -31,6 +31,7 @@ pub mod design_host;
 #[allow(dead_code)]
 pub mod embedder;
 pub mod launch_common;
+pub mod outbox;
 pub mod provider;
 pub mod pty;
 pub mod sandbox_config;
