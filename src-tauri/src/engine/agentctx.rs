@@ -385,15 +385,29 @@ pub fn ensure_conclave_shim() -> Option<PathBuf> {
 /// `ensure_conclave_shim`'s `bin` dir.
 #[cfg(unix)]
 pub fn write_skill_sidecar(instance_id: &str, body: &str) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-
     let dir = skills_dir().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no user data directory")
     })?;
+    write_skill_sidecar_in(&dir, instance_id, body)
+}
+
+/// Pure-FS core of [`write_skill_sidecar`], taking `dir` explicitly — the same
+/// split [`sweep_orphan_skill_sidecars`] uses. The real
+/// `<data_dir>/Conclave/skills` is shared with the RUNNING app and with every
+/// concurrent `cargo test` process on this machine, so the unit test drives
+/// this inner fn against a private per-process temp dir instead.
+#[cfg(unix)]
+fn write_skill_sidecar_in(
+    dir: &std::path::Path,
+    instance_id: &str,
+    body: &str,
+) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&dir)?;
+        .create(dir)?;
 
     let path = dir.join(format!("{instance_id}.md"));
     std::fs::write(&path, body)?;
@@ -1236,14 +1250,18 @@ text>`. After it confirms, stop and wait for the restart."
         assert!(!combined.contains('='), "no '=': {combined}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_skill_sidecar_writes_and_returns_path() {
+        // Drives the `_in` core against a private per-process dir: the real
+        // skills dir is shared with the running app and with concurrent
+        // `cargo test` processes, which raced this file's write/read-back.
+        let tmp = TmpDir::new("write-sidecar");
         let body = "## Skill: Test\n\nkey=value works fine in a real FILE";
-        let path = super::write_skill_sidecar("test-instance-xyz", body)
-            .expect("write_skill_sidecar failed");
+        let path = super::write_skill_sidecar_in(tmp.path(), "test-instance-xyz", body)
+            .expect("write_skill_sidecar_in failed");
         let contents = std::fs::read_to_string(&path).expect("read back failed");
         assert_eq!(contents, body);
-        let _ = std::fs::remove_file(&path); // test cleanup
     }
 
     /// A private temp dir, cleaned on drop, for the sweep/remove FS tests so

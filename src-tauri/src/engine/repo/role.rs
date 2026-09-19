@@ -328,9 +328,14 @@ pub mod test_support {
     /// Create a two-role fixture and point this thread's builtin resolution at
     /// it: `fix-lead` (name "Fixture Lead", skills `alpha, beta`) and
     /// `fix-bare` (name "Fixture Bare", no skills). `tag` must be unique per
-    /// test — it names the temp dir.
+    /// test — it names the temp dir, which is also suffixed with
+    /// `std::process::id()` so two concurrent `cargo test` runs on one machine
+    /// cannot `remove_dir_all` each other's fixture mid-test.
     pub fn fixture_roles_dir(tag: &str) -> FixtureRolesDir {
-        let dir = std::env::temp_dir().join(format!("conclave-role-fixture-{tag}"));
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-role-fixture-{tag}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         write_role(
             &dir,
@@ -404,7 +409,10 @@ mod tests {
 
     #[test]
     fn read_builtin_roles_from_parses_one_role_per_subdir_skips_bad_ones() {
-        let dir = std::env::temp_dir().join("conclave-role-test-read-builtin-roles");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-role-test-read-builtin-roles-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("good")).expect("mkdir failed");
         std::fs::write(
@@ -439,7 +447,10 @@ mod tests {
 
     #[test]
     fn read_builtin_roles_from_missing_dir_returns_empty() {
-        let dir = std::env::temp_dir().join("conclave-role-test-does-not-exist-xyz");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-role-test-does-not-exist-xyz-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(super::read_builtin_roles_from(&dir).is_empty());
     }
