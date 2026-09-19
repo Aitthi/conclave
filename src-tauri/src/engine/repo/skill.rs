@@ -455,9 +455,15 @@ pub mod test_support {
     /// resolution at it: `fix-mandatory` (name "Fixture Mandatory", mandatory
     /// by omission) and `fix-optional` (name "Fixture Optional",
     /// `mandatory: false`). `tag` must be unique per test — it names the temp
-    /// dir, and tests run concurrently under one shared temp root.
+    /// dir, and tests run concurrently under one shared temp root. The dir is
+    /// also suffixed with `std::process::id()`: two concurrent `cargo test`
+    /// runs on one machine would otherwise `remove_dir_all` each other's
+    /// fixture mid-test.
     pub fn fixture_skills_dir(tag: &str) -> FixtureSkillsDir {
-        let dir = std::env::temp_dir().join(format!("conclave-skill-fixture-{tag}"));
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-fixture-{tag}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         write_skill(
             &dir,
@@ -484,7 +490,10 @@ pub mod test_support {
     /// sidecar body). The real shipped `skills/` dir can never produce this
     /// case: it always carries mandatory builtins (e.g. `collaboration`).
     pub fn empty_skills_dir(tag: &str) -> FixtureSkillsDir {
-        let dir = std::env::temp_dir().join(format!("conclave-skill-fixture-{tag}"));
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-fixture-{tag}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("empty fixture mkdir failed");
         OVERRIDE.with(|c| *c.borrow_mut() = Some(dir.clone()));
@@ -972,7 +981,10 @@ mod tests {
     /// path under `std::env::temp_dir()` and cleaning up manually).
     #[test]
     fn read_builtin_skills_from_parses_one_skill_per_subdir_skips_bad_ones() {
-        let dir = std::env::temp_dir().join("conclave-skill-test-read-builtin-skills");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-test-read-builtin-skills-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("good")).expect("mkdir failed");
         std::fs::write(
@@ -1007,7 +1019,10 @@ mod tests {
 
     #[test]
     fn read_builtin_skills_from_missing_dir_returns_empty() {
-        let dir = std::env::temp_dir().join("conclave-skill-test-does-not-exist-xyz");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-test-does-not-exist-xyz-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(super::read_builtin_skills_from(&dir).is_empty());
     }
@@ -1217,7 +1232,10 @@ mod tests {
 
     #[test]
     fn write_draft_then_read_draft_round_trips() {
-        let dir = std::env::temp_dir().join("conclave-skill-test-draft-roundtrip");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-test-draft-roundtrip-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         super::write_draft(&dir, "My Draft", Some("A test draft"), "Body text here.")
@@ -1234,7 +1252,10 @@ mod tests {
 
     #[test]
     fn write_draft_with_no_description_round_trips() {
-        let dir = std::env::temp_dir().join("conclave-skill-test-draft-no-desc");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-test-draft-no-desc-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
         super::write_draft(&dir, "Bare", None, "Content.").expect("write_draft failed");
@@ -1249,7 +1270,10 @@ mod tests {
 
     #[test]
     fn read_draft_missing_file_returns_none() {
-        let dir = std::env::temp_dir().join("conclave-skill-test-draft-missing-xyz");
+        let dir = std::env::temp_dir().join(format!(
+            "conclave-skill-test-draft-missing-xyz-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir failed");
 
