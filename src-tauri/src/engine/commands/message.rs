@@ -127,6 +127,12 @@ struct InjectReq {
     from_instance_id: String,
     to_instance_id: String,
     text: String,
+    /// `true` = deliver NOW as a single-item flush, bypassing the target's
+    /// outbox stack and leaving it untouched. Set ONLY by the human's routed
+    /// send in the UI (ChatView / StdinBar) — spec ruling 5. CLI `tell` and
+    /// system notifications never set it.
+    #[serde(default)]
+    immediate: bool,
 }
 
 /// Inject a line of text into a TARGET instance's live input, auto-submit it,
@@ -139,7 +145,9 @@ struct InjectReq {
 /// outbox stack (`runtime::outbox`). Delivery happens in [`flush_stack`] —
 /// from the sweeper when the stack's deadline passes, or synchronously here
 /// when the push hits `MAX_ITEMS` (the ack then already reads
-/// `"delivered"`/`"queued"`). Human input (`send`) never touches the outbox.
+/// `"delivered"`/`"queued"`). Human input (`send`) never touches the outbox,
+/// and a human ROUTED send passes `immediate: true` to be delivered on its own
+/// right away, leaving the target's pending stack untouched (spec ruling 5).
 ///
 /// **Origin tag:** the origin is carried as `from_instance_id` on the persisted
 /// row AND on the `message:injected` event. We deliberately inject the RAW
@@ -155,6 +163,7 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
         from_instance_id,
         to_instance_id,
         text,
+        immediate,
     } = serde_json::from_value(payload).map_err(|e| AppError::Invalid(e.to_string()))?;
 
     // Resolve both endpoints before locking so cross-workspace injection can
@@ -230,9 +239,16 @@ pub async fn inject(state: &AppState, payload: Value) -> Result<Value, AppError>
         sender_name: sender,
         text,
     };
-    let push = state.outbox.push(&to_instance_id, item, Instant::now());
+    // `immediate` (human routed send from the composer — spec ruling 5) skips
+    // the stack entirely: deliver THIS message now and leave whatever is
+    // pending for the target untouched. Everything else joins the stack.
+    let push = if immediate {
+        Push::Flush(vec![item])
+    } else {
+        state.outbox.push(&to_instance_id, item, Instant::now())
+    };
 
-    // Release BOTH lifecycle guards before a synchronous cap-flush:
+    // Release BOTH lifecycle guards before a synchronous flush:
     // `flush_stack` takes the target's guards itself and the agent mutex is
     // not re-entrant — holding them here would deadlock.
     drop(_agent_guards);
@@ -1015,6 +1031,55 @@ mod tests {
             state.outbox.take_all(&to).is_empty(),
             "cap flush emptied the stack"
         );
+    }
+
+    /// A human routed send (`immediate: true`) is delivered on its own, right
+    /// now — and the target's pending stack stays exactly as it was.
+    #[tokio::test]
+    async fn immediate_inject_delivers_now_and_leaves_the_stack_alone() {
+        let state = AppState::for_tests().await;
+        let from = fixture_instance_id(&state, "Sender").await;
+        let to = fixture_instance_id(&state, "Target").await;
+        let session_id = session::get_by_instance(&state.db, &to)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let (handle, mut rx) = LiveHandle::for_test_pty(&session_id);
+        assert!(state.runtime.register(&to, handle).is_some());
+
+        inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "pending" }),
+        )
+        .await
+        .unwrap();
+        let ack = inject(
+            &state,
+            json!({ "fromInstanceId": from, "toInstanceId": to, "text": "from the human", "immediate": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack["status"], "delivered");
+
+        let mut writes = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            writes.push(w);
+        }
+        assert_eq!(
+            writes.len(),
+            1 + SUBMIT_CR_DELAYS_MS.len(),
+            "one paste for the immediate message only"
+        );
+        assert!(writes[0].ends_with("] from the human\x1b[201~"));
+        assert!(
+            !writes[0].contains("pending"),
+            "the held message was NOT flushed along"
+        );
+
+        let still_held = state.outbox.take_all(&to);
+        assert_eq!(still_held.len(), 1);
+        assert_eq!(still_held[0].text, "pending");
     }
 
     /// A target that is not live at flush time gets `queued` rows, no PTY
