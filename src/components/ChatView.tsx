@@ -43,7 +43,13 @@ type ChatPart =
   // Inbox: an injection THIS agent received (origin-tagged incoming bubble).
   | { kind: "inbox"; fromName: string; tint: string; autoSubmitted: boolean; text: string }
   // Outbox: a routed send confirmation (this agent → another agent).
-  | { kind: "outbox"; toName: string; tint: string; status: "queued" | "delivered"; text: string };
+  | {
+      kind: "outbox";
+      toName: string;
+      tint: string;
+      status: "queued" | "delivered" | "held";
+      text: string;
+    };
 
 interface ChatMsg {
   id: string;
@@ -410,9 +416,11 @@ function MessageRow({ msg, isLast, avatarLetter, avatarColor }: MessageRowProps)
                 <div className="max-w-[90%] rounded-full bg-fill-soft px-3 py-1.5 text-[11.5px] text-text-secondary flex items-center gap-1.5">
                   <CornerUpRight className="w-3 h-3 shrink-0" style={{ color: part.tint }} />
                   <span className="font-medium text-text-primary">→ sent to {part.toName}</span>
-                  {part.status === "delivered" ? (
-                    <span>· auto-submit</span>
-                  ) : (
+                  {part.status === "delivered" && <span>· auto-submit</span>}
+                  {/* `held` is the normal in-flight state: the inject outbox
+                      coalesces messages to one target into a single paste. */}
+                  {part.status === "held" && <span>· held — delivering in the next batch</span>}
+                  {part.status === "queued" && (
                     <span className="text-warning">· target agent isn't running — queued</span>
                   )}
                 </div>

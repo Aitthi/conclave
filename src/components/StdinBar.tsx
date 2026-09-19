@@ -16,7 +16,7 @@ interface StdinBarProps {
 // A transient outbox confirmation for a routed send (this agent → another).
 interface OutboxNote {
   toName: string;
-  status: "queued" | "delivered";
+  status: "queued" | "delivered" | "held";
 }
 
 /**
@@ -325,9 +325,11 @@ export function StdinBar({ sessionId, instanceId, roster }: StdinBarProps) {
         >
           <CornerUpRight className="w-3 h-3 shrink-0 text-text-tertiary" />
           <span className="font-medium text-text-primary">→ sent to {outbox.toName}</span>
-          {outbox.status === "delivered" ? (
-            <span>· auto-submit</span>
-          ) : (
+          {outbox.status === "delivered" && <span>· auto-submit</span>}
+          {/* `held` is the normal in-flight state: the inject outbox coalesces
+              messages to one target into a single paste. */}
+          {outbox.status === "held" && <span>· held — delivering in the next batch</span>}
+          {outbox.status === "queued" && (
             <span className="text-warning">· target agent isn't running — queued</span>
           )}
         </div>
