@@ -167,7 +167,8 @@ uses `message.inject` and passes `immediate: true` (ruling 5).
 | Case | Behaviour |
 |------|-----------|
 | Target stopped between `held` and flush | rows → `queued`, no PTY write, no event |
-| Backend channel closed at flush | rows → `queued`, `tracing::warn!` |
+| Backend channel closed at flush | rows → `queued`, `eprintln!("[outbox] …")` (the crate has no `tracing`); a cap/immediate flush inside `inject` therefore acks `queued` instead of erroring |
+| Two flushes for one target overlap (sweeper `take_due` vs a cap/immediate flush inside `inject`) | `flush_stack` first awaits the target's **flush lock** — a per-target `tokio::sync::Mutex<()>` owned by `Outbox` (`Outbox::flush_lock(to)`), FIFO-fair — before any DB read or lifecycle guard, so flushes for one target deliver in the order they were taken. Lock order: flush lock → workspace READ → agent mutex; `inject` never holds the flush lock while holding lifecycle guards (review finding 1, Mellow) |
 | Engine restart with held rows | `requeue_held` at start → `queued` |
 | Sender/target invalid | `inject` still errors before persisting (unchanged) |
 | Self-injection (from == to) | goes through the stack like any other message |

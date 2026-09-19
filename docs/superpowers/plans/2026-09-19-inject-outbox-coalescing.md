@@ -1012,6 +1012,63 @@ Right after the task-timer spawn (`src-tauri/src/lib.rs:129`) add:
             tauri::async_runtime::spawn(engine::runtime::outbox::run(outbox_state));
 ```
 
+- [ ] **Step 5c: Per-target flush lock — flushes for one target deliver in take order** (review pass 1 finding 1, Mellow; Detoro ruling: fix before merge, option b)
+
+Problem: `flush_stack` does a DB round-trip (`require_delivery_eligible`) before it takes the target's guards. In that window a cap/immediate flush for the same target can win the agent mutex first and deliver a NEWER batch before the older one the sweeper already took.
+
+`src-tauri/src/engine/runtime/outbox.rs` — add to `Outbox`:
+
+```rust
+    /// Per-target delivery serializer. `flush_stack` awaits this FIRST — before
+    /// any DB read or lifecycle guard — so two flushes for one target (sweeper
+    /// `take_due` vs a cap/immediate flush inside `inject`) deliver in the
+    /// order they were taken; tokio's Mutex is FIFO-fair. Never held by
+    /// `inject` while it holds lifecycle guards, so no lock-order inversion.
+    pub fn flush_lock(&self, to: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.flush_locks.lock().unwrap_or_else(|e| e.into_inner());
+        std::sync::Arc::clone(locks.entry(to.to_owned()).or_default())
+    }
+```
+
+with the field `flush_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>` added to the struct (`#[derive(Default)]` still covers it). Test:
+
+```rust
+    #[test]
+    fn flush_lock_is_one_mutex_per_target() {
+        let ob = Outbox::new();
+        assert!(std::sync::Arc::ptr_eq(&ob.flush_lock("A"), &ob.flush_lock("A")));
+        assert!(!std::sync::Arc::ptr_eq(&ob.flush_lock("A"), &ob.flush_lock("B")));
+    }
+```
+
+`src-tauri/src/engine/commands/message.rs` `flush_stack` — make this the first statement after the `ids` binding:
+
+```rust
+    // Serialize deliveries per target BEFORE the eligibility round-trip (see
+    // Outbox::flush_lock): otherwise a cap/immediate flush can overtake a
+    // stack the sweeper already took and land the newer batch first.
+    let flush_lock = state.outbox.flush_lock(to_instance_id);
+    let _flush_guard = flush_lock.lock().await;
+```
+
+Also in `flush_stack`'s doc comment add: "A `Closed` channel or a lost eligibility race degrades the rows (and a synchronous caller's ack) to `queued` rather than erroring — a flush has no caller to hand an error to, and `inject`'s cap/immediate path shares that contract." (nit b).
+
+`src-tauri/src/engine/db.rs` `migrate_0032_0033_*` — add after the index assertion (nit a):
+
+```rust
+        let fk_violations: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(fk_violations.is_empty(), "rebuild left FK violations: {fk_violations:?}");
+```
+
+(If `PRAGMA foreign_key_check` rows do not map to a 1-tuple, fetch them as `Vec<sqlx::sqlite::SqliteRow>` and assert `.is_empty()`.)
+
+`src/components/ChatView.tsx` / `src/components/StdinBar.tsx` — reword the comment on the `held` branch (Mellow heads-up): these two are the HUMAN path and pass `immediate: true`, so the branch is a fallback for a non-immediate ack, not the expected state. Suggested: `{/* Fallback only: routed sends pass immediate:true, so a 'held' ack here means a non-immediate caller. */}`.
+
+Skipped on purpose (Detoro): nit c (empty-items `debug_assert`) — unreachable today, YAGNI. ChatView.tsx outbox copy pixel check — the centre pane is a PTY in fixture mode and not reachable by uishot; tsc + code read accepted for that one site.
+
 - [ ] **Step 6: Run the tests and the full gate set**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml commands::message outbox inter_agent_message`
