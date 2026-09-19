@@ -1899,6 +1899,126 @@ mod tests {
         pool
     }
 
+    /// Schema 32 with one delivered inter-agent message in place, so 0033's
+    /// table rebuild is exercised on REAL rows — not on an empty table.
+    async fn connect_at_v32_with_message() -> SqlitePool {
+        let pool = connect_at_v31_with_event().await;
+        let mut tx = pool.begin().await.expect("begin v32 setup");
+        sqlx::raw_sql(include_str!(
+            "migrations/0032_model_usage_reconciliation.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("apply 0032");
+        sqlx::raw_sql("PRAGMA user_version = 32;")
+            .execute(&mut *tx)
+            .await
+            .expect("set user_version = 32");
+        // FK chain, same shape as migrate_0027_preserves_populated_lifecycle_relations.
+        sqlx::query(
+            "INSERT INTO workspace (id,name,folder_path,hidden,created_at) \
+             VALUES ('ws','WS','/tmp/ws',0,'2020-01-01')",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert workspace");
+        for id in ["root", "child"] {
+            sqlx::query(
+                "INSERT INTO agent_definition (id,name,type,harness_mode,created_at) \
+                 VALUES (?1,?1,'orchestrator','own','2020-01-01')",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .expect("insert agent_definition");
+        }
+        sqlx::query(
+            "INSERT INTO workspace_agent \
+             (id,workspace_id,agent_def_id,status,added_at,supervisor_agent_id) VALUES \
+             ('wa-root','ws','root','running','2020-01-01',NULL), \
+             ('wa-child','ws','child','waiting','2020-01-02','wa-root')",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert workspace_agent");
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,auto_submitted,created_at) \
+             VALUES ('im-legacy','wa-root','wa-child','legacy hello','delivered',1,'2026-09-01T00:00:00Z')",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("insert legacy message");
+        tx.commit().await.expect("commit v32 setup");
+        pool
+    }
+
+    /// 0033 rebuilds inter_agent_message to admit 'held': the legacy row
+    /// survives byte-for-byte, 'held' becomes insertable, and BOTH indexes
+    /// from 0001_init.sql:188-189 exist again (challenge 20ec4f31, Dew).
+    #[tokio::test]
+    async fn migrate_0032_0033_preserves_messages_admits_held_and_keeps_both_indexes() {
+        let pool = connect_at_v32_with_message().await;
+
+        migrate(&pool).await.expect("migrate to head");
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 33, "user_version must reach 33");
+
+        type LegacyRow = (String, String, String, String, i64, String);
+        let legacy: LegacyRow = sqlx::query_as(
+            "SELECT from_instance_id,to_instance_id,text,status,auto_submitted,created_at \
+             FROM inter_agent_message WHERE id='im-legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy row survives the rebuild");
+        assert_eq!(
+            legacy,
+            (
+                "wa-root".into(),
+                "wa-child".into(),
+                "legacy hello".into(),
+                "delivered".into(),
+                1,
+                "2026-09-01T00:00:00Z".into()
+            )
+        );
+
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,auto_submitted,created_at) \
+             VALUES ('im-held','wa-root','wa-child','held hello','held',1,'2026-09-19T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("'held' is admitted by the rebuilt CHECK");
+
+        sqlx::query(
+            "INSERT INTO inter_agent_message \
+             (id,from_instance_id,to_instance_id,text,status,auto_submitted,created_at) \
+             VALUES ('im-bad','wa-root','wa-child','x','bogus',1,'2026-09-19T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("the CHECK still rejects unknown statuses");
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='inter_agent_message' \
+             AND sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            indexes,
+            vec!["idx_inter_agent_msg_from", "idx_inter_agent_msg_to"]
+        );
+    }
+
     /// 0032 is purely additive: a populated schema-31 event survives with
     /// every counter intact, and the new reconciliation evidence starts NULL —
     /// a legacy row is never relabelled as carrying a stop reason it did not

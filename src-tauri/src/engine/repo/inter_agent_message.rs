@@ -523,4 +523,27 @@ mod tests {
         assert_eq!(status_of(&delivered.id), "delivered");
         assert_eq!(status_of(&queued.id), "queued");
     }
+
+    /// Guard: 0033's table rebuild must recreate BOTH 0001_init indexes —
+    /// DROP TABLE drops every index, and an omission is invisible until a
+    /// query goes quadratic (challenge 20ec4f31, UPHELD 2026-09-19).
+    ///
+    /// `sql IS NOT NULL` filters out SQLite's implicit
+    /// `sqlite_autoindex_inter_agent_message_1` (the TEXT PRIMARY KEY), which
+    /// is not ours to assert on.
+    #[tokio::test]
+    async fn migration_0033_keeps_both_inter_agent_message_indexes() {
+        let pool = connect_in_memory().await;
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='inter_agent_message' \
+             AND sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            names,
+            vec!["idx_inter_agent_msg_from", "idx_inter_agent_msg_to"]
+        );
+    }
 }
