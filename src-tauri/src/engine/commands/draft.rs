@@ -29,10 +29,12 @@ use crate::engine::{AppError, AppState};
 
 /// Human request 2026-09-04: add the Claude 5 family (Fable 5.1, Opus 5,
 /// Sonnet 5, Haiku 4.5) shown in Claude Code's picker; keep opus-4-8 so
-/// existing rows stay valid. Mirrored by `CLAUDE_MODELS` in
-/// `src/lib/modelCatalogue.ts` (Lane C).
+/// existing rows stay valid. Human request 2026-09-23: add Opus 5.5
+/// (`claude-opus-5-5`), newest-first after Fable 5.1. Mirrored by
+/// `CLAUDE_MODELS` in `src/lib/modelCatalogue.ts` (Lane C).
 pub const CLAUDE_MODELS: &[&str] = &[
     "claude-fable-5-1",
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-haiku-4-5",
@@ -963,6 +965,29 @@ pub(crate) mod tests {
         assert!(validate_draft(&resp(vec![a], vec![]), DraftMode::Agent, &c)
             .unwrap_err()
             .contains("defaultLevel"));
+    }
+
+    #[test]
+    fn claude_catalogue_matches_typescript_order_and_accepts_opus_5_5() {
+        let typescript = include_str!("../../../../src/lib/modelCatalogue.ts");
+        let block = typescript
+            .split("export const CLAUDE_MODELS = [")
+            .nth(1)
+            .and_then(|tail| tail.split("];").next())
+            .expect("TypeScript CLAUDE_MODELS block");
+        let typescript_models: Vec<&str> = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('"'))
+            .map(|line| line.trim_end_matches(',').trim_matches('"'))
+            .collect();
+        assert_eq!(typescript_models, CLAUDE_MODELS);
+        assert!(CLAUDE_MODELS.contains(&"claude-opus-5-5"));
+
+        let mut opus = agent("opus");
+        opus.model = Some("claude-opus-5-5".into());
+        validate_draft(&resp(vec![opus], vec![]), DraftMode::Agent, &cat())
+            .expect("claude-opus-5-5 must pass draft validation");
     }
 
     #[test]

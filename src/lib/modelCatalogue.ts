@@ -11,6 +11,7 @@
 /** Quick-fill model presets (the user can still type any value). */
 export const CLAUDE_MODELS = [
   "claude-fable-5-1",
+  "claude-opus-5-5",
   "claude-opus-5",
   "claude-sonnet-5",
   "claude-haiku-4-5",
