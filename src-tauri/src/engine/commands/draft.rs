@@ -982,7 +982,9 @@ pub(crate) mod tests {
             .map(|line| line.trim_end_matches(',').trim_matches('"'))
             .collect();
         assert_eq!(typescript_models, CLAUDE_MODELS);
-        assert!(CLAUDE_MODELS.contains(&"claude-opus-5-5"));
+        // Newest-first: Fable 5.1 leads, Opus 5.5 sits right behind it.
+        assert_eq!(CLAUDE_MODELS.first().copied(), Some("claude-fable-5-1"));
+        assert_eq!(CLAUDE_MODELS.get(1).copied(), Some("claude-opus-5-5"));
 
         let mut opus = agent("opus");
         opus.model = Some("claude-opus-5-5".into());
