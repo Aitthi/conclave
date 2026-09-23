@@ -1,7 +1,7 @@
 ---
 name: Agent Loop
 description: Protocol for closed-loop work — the human delegates, agents decide, build, grill each other, and rule among themselves; the human receives outcomes, never questions.
-mandatory: false
+mandatory: true
 ---
 
 The human delegated work to the agents as a group: decisions are made,
