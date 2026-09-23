@@ -20,7 +20,10 @@ pub fn codex_model_context_window(model: &str) -> Option<i64> {
         // Codex-effective window reported by codex-cli 0.153.2 (`codex debug
         // models`) on 2026-09-05. This intentionally differs from any API
         // headline window: launch/compaction safety follows the runtime cap.
-        "gpt-6-astra" => Some(272_000),
+        // gpt-6-sol / gpt-6-luna added 2026-09-23 (human request): codex-cli
+        // 0.155.1's `~/.codex/models_cache.json` lists all three GPT-6
+        // siblings with the same context_window=272000 / max=872000.
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => Some(272_000),
 
         // GPT-5.6 family: OpenAI's frontier-models page documents a 1.05M
         // API context window, but Codex enforces a SERVER-side ceiling well
@@ -349,6 +352,8 @@ mod tests {
     #[test]
     fn known_models_resolve_documented_max() {
         assert_eq!(codex_model_context_window("gpt-6-astra"), Some(272_000));
+        assert_eq!(codex_model_context_window("gpt-6-sol"), Some(272_000));
+        assert_eq!(codex_model_context_window("gpt-6-luna"), Some(272_000));
         assert_eq!(codex_model_context_window("gpt-5.4"), Some(1_050_000));
         assert_eq!(codex_model_context_window("gpt-5.5"), Some(400_000));
         assert_eq!(codex_model_context_window("gpt-5.4-mini"), Some(400_000));

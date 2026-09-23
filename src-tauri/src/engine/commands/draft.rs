@@ -43,9 +43,14 @@ pub const CLAUDE_MODELS: &[&str] = &[
 
 /// Codex presets, verbatim from `src/components/Builder.tsx`. The context
 /// window is NOT drafted — the backend derives it per model
-/// (`codex_models::codex_model_context_window`).
+/// (`codex_models::codex_model_context_window`). Human request 2026-09-23:
+/// add the GPT-6 siblings (`gpt-6-sol`, `gpt-6-luna`) in the order codex-cli
+/// 0.155.1's `models_cache.json` lists them (astra, sol, luna). Mirrored by
+/// `CODEX_MODELS` in `src/lib/modelCatalogue.ts`.
 pub const CODEX_MODELS: &[&str] = &[
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -1008,12 +1013,21 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(typescript_models, CODEX_MODELS);
         assert_eq!(CODEX_MODELS.first().copied(), Some("gpt-6-astra"));
+        assert_eq!(CODEX_MODELS.get(1).copied(), Some("gpt-6-sol"));
+        assert_eq!(CODEX_MODELS.get(2).copied(), Some("gpt-6-luna"));
 
         let mut astra = agent("astra");
         astra.cli_kind = Some("codex".into());
         astra.model = Some("gpt-6-astra".into());
         validate_draft(&resp(vec![astra], vec![]), DraftMode::Agent, &cat())
             .expect("the highest-priority Codex preset must pass draft validation");
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            let mut sibling = agent(id);
+            sibling.cli_kind = Some("codex".into());
+            sibling.model = Some(id.into());
+            validate_draft(&resp(vec![sibling], vec![]), DraftMode::Agent, &cat())
+                .unwrap_or_else(|e| panic!("{id} must pass draft validation: {e:?}"));
+        }
     }
 
     #[test]
