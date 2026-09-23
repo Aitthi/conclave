@@ -20,19 +20,19 @@ pub fn codex_model_context_window(model: &str) -> Option<i64> {
         // GPT-6 family: human direction 2026-09-23 "1M". OpenAI's API window
         // is 1.05M; codex clamps any request to the codex-cli 0.155.1
         // catalogue max_context_window 872_000, so the table carries that
-        // Codex-effective max. Live-verified on 0.155.1: codex reports
-        // 828,400 usable (872_000 x 95 %), the same runtime as the Builder's
-        // 1M choice.
+        // Codex-effective max. Live-verified on 0.155.1: codex reports 828,400
+        // usable (Conclave's meter shows 816,400 after the 12K baseline), the
+        // same runtime as the Builder's 1M choice.
         "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => Some(872_000),
 
         // GPT-5.6 family: codex-cli 0.155.1 `codex debug models` (2026-09-23)
         // reports context_window=272000 (default) / max_context_window=872000.
-        // The ~372K server-side cap measured 2026-07-11 on 0.144.1 (challenge
-        // 89599d2e, github.com/openai/codex#31860) is refuted by served turns
-        // above it: rollout 01a08882 (gpt-5.6-luna, 0.153.4) peaks at 616_384
-        // input tokens and 01a0ad8a (gpt-5.6-sol, 0.154.0) at 526_265, both
-        // error-free. 372_000 is kept as the conservative Auto value.
-        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(372_000),
+        // The July ~372K server-side cap is refuted by local sessions serving
+        // 526K-616K input with no errors (gpt-5.6-sol 526,265 on 0.154.0,
+        // 2026-09-17; gpt-5.6-luna 616,384 on 0.153.4, 2026-09-10; challenge
+        // 5f6cca31). History: 372_000 was the cap measured 2026-07-11 on
+        // 0.144.1 (challenge 89599d2e).
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(872_000),
 
         // gpt-5.5: codex-cli 0.155.1 `codex debug models` (2026-09-23)
         // reports context_window=272000 / max 272000; the API window is 1.05M.
@@ -377,9 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_family_keeps_unverified_server_cap() {
+    fn gpt_5_6_family_resolves_catalogue_max() {
         for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
-            assert_eq!(codex_model_context_window(id), Some(372_000), "{id}");
+            assert_eq!(codex_model_context_window(id), Some(872_000), "{id}");
         }
     }
 
