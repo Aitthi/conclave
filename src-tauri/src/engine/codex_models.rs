@@ -17,35 +17,33 @@
 /// (`Option<String>`), which callers pass through as `Option<&str>`.
 pub fn codex_model_context_window(model: &str) -> Option<i64> {
     match model.trim() {
-        // Codex-effective window reported by codex-cli 0.153.2 (`codex debug
-        // models`) on 2026-09-05. This intentionally differs from any API
-        // headline window: launch/compaction safety follows the runtime cap.
-        // gpt-6-sol / gpt-6-luna added 2026-09-23 (human request): codex-cli
-        // 0.155.1's `~/.codex/models_cache.json` lists all three GPT-6
-        // siblings with the same context_window=272000 / max=872000.
-        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => Some(272_000),
+        // GPT-6 family: human direction 2026-09-23 "1M". OpenAI's API window
+        // is 1.05M; codex clamps any request to the codex-cli 0.155.1
+        // catalogue max_context_window 872_000, so the table carries that
+        // Codex-effective max. Live-verified on 0.155.1: codex reports 828,400
+        // usable (Conclave's meter shows 816,400 after the 12K baseline), the
+        // same runtime as the Builder's 1M choice.
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => Some(872_000),
 
-        // GPT-5.6 family: OpenAI's frontier-models page documents a 1.05M
-        // API context window, but Codex enforces a SERVER-side ceiling well
-        // below that — live-verified 2026-07-11 (`codex debug models` on
-        // codex-cli 0.144.1 reports context_window=372000 for all three),
-        // corroborated by github.com/openai/codex issue #31860 (open bug:
-        // a 1.05M client-side override does not lift the ~372-380K
-        // server-enforced cap). Ruling: task codex-models-auto-ctx challenge
-        // 89599d2e, upheld by Detoro 2026-07-11 (plan R3 amended, commit
-        // 217437a) — using 1_050_000 here would set the 95% auto-compact
-        // limit (~997K) so high it would never fire before the real cap,
-        // which is actively harmful, not just wrong. UNSTABLE value — gpt-5.6
-        // shipped only 2 days before this was measured and the bug report is
-        // active/upvoted; re-check at the next Codex CLI version bump.
-        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(372_000),
+        // GPT-5.6 family: codex-cli 0.155.1 `codex debug models` (2026-09-23)
+        // reports context_window=272000 (default) / max_context_window=872000.
+        // The July ~372K server-side cap is refuted by local sessions serving
+        // 526K-616K input with no errors (gpt-5.6-sol 526,265 on 0.154.0,
+        // 2026-09-17; gpt-5.6-luna 616,384 on 0.153.4, 2026-09-10; challenge
+        // 5f6cca31). History: 372_000 was the cap measured 2026-07-11 on
+        // 0.144.1 (challenge 89599d2e).
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(872_000),
 
+        // gpt-5.5: codex-cli 0.155.1 `codex debug models` (2026-09-23)
+        // reports context_window=272000 / max 272000; the API window is 1.05M.
+        // History: 400_000 was the Codex cap verified 2026-07-09.
+        "gpt-5.5" => Some(272_000),
+
+        // gpt-5.4, gpt-5.4-mini, gpt-5-codex, gpt-5.3-codex and
+        // gpt-5.3-codex-spark are absent from the codex-cli 0.155.1 catalogue
+        // (2026-09-23), so these values are unchanged for lack of evidence.
         // gpt-5.4 serves its full 1.05M API window in Codex.
         "gpt-5.4" => Some(1_050_000),
-
-        // gpt-5.5's API window is 1.05M, but Codex caps it at 400K — verified
-        // 2026-07-09, Codex-effective max is below the API max here.
-        "gpt-5.5" => Some(400_000),
 
         "gpt-5.4-mini" => Some(400_000),
         "gpt-5-codex" => Some(400_000),
@@ -248,6 +246,8 @@ mod tests {
 
     /// Shape copied from a live `~/.codex/models_cache.json` (codex-cli
     /// 0.153.4): the last entry deliberately omits `max_context_window`.
+    /// The gpt-5.4 entry is synthetic (absent from the live catalogue since
+    /// 0.155.1): its cap sits below the table value so the clamp stays tested.
     fn sample_catalog() -> std::path::PathBuf {
         write_catalog(
             r#"{
@@ -258,6 +258,9 @@ mod tests {
                   "effective_context_window_percent": 95 },
                 { "slug": "gpt-5.5", "context_window": 272000,
                   "max_context_window": 272000,
+                  "effective_context_window_percent": 95 },
+                { "slug": "gpt-5.4", "context_window": 272000,
+                  "max_context_window": 500000,
                   "effective_context_window_percent": 95 },
                 { "slug": "gpt-5.3-codex-spark", "context_window": 128000,
                   "max_context_window": 128000,
@@ -326,15 +329,23 @@ mod tests {
             codex_usable_context_window("gpt-6-astra", Some("1m"), &catalog),
             Some(816_400)
         );
-        // Auto on gpt-6-astra: table 272_000 (under the cap) x 95 % - 12_000.
+        // Auto on gpt-6-astra: table 872_000 equals the catalog cap, so
+        // 872_000 x 95 % - 12_000 = 816_400 — the same usable window as "1m"
+        // above, because codex clamps the 1M request to that same cap.
         assert_eq!(
             codex_usable_context_window("gpt-6-astra", None, &catalog),
-            Some(246_400)
+            Some(816_400)
         );
-        // Auto on gpt-5.5: table 400_000 clamped to the catalog cap 272_000.
+        // Auto on gpt-5.5: table 272_000 equals the catalog cap, so no clamp.
         assert_eq!(
             codex_usable_context_window("gpt-5.5", None, &catalog),
             Some(246_400)
+        );
+        // Auto on gpt-5.4: table 1_050_000 clamped to the fixture cap
+        // 500_000, x 95 % = 475_000, minus the 12_000 baseline.
+        assert_eq!(
+            codex_usable_context_window("gpt-5.4", None, &catalog),
+            Some(463_000)
         );
         // Unknown model, empty catalog: no cap, default 95 %.
         assert_eq!(
@@ -351,11 +362,11 @@ mod tests {
 
     #[test]
     fn known_models_resolve_documented_max() {
-        assert_eq!(codex_model_context_window("gpt-6-astra"), Some(272_000));
-        assert_eq!(codex_model_context_window("gpt-6-sol"), Some(272_000));
-        assert_eq!(codex_model_context_window("gpt-6-luna"), Some(272_000));
+        assert_eq!(codex_model_context_window("gpt-6-astra"), Some(872_000));
+        assert_eq!(codex_model_context_window("gpt-6-sol"), Some(872_000));
+        assert_eq!(codex_model_context_window("gpt-6-luna"), Some(872_000));
         assert_eq!(codex_model_context_window("gpt-5.4"), Some(1_050_000));
-        assert_eq!(codex_model_context_window("gpt-5.5"), Some(400_000));
+        assert_eq!(codex_model_context_window("gpt-5.5"), Some(272_000));
         assert_eq!(codex_model_context_window("gpt-5.4-mini"), Some(400_000));
         assert_eq!(codex_model_context_window("gpt-5-codex"), Some(400_000));
         assert_eq!(codex_model_context_window("gpt-5.3-codex"), Some(400_000));
@@ -366,9 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_family_resolves_codex_enforced_ceiling() {
+    fn gpt_5_6_family_resolves_catalogue_max() {
         for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
-            assert_eq!(codex_model_context_window(id), Some(372_000), "{id}");
+            assert_eq!(codex_model_context_window(id), Some(872_000), "{id}");
         }
     }
 
@@ -415,6 +426,6 @@ mod tests {
     #[test]
     fn whitespace_is_trimmed_before_matching() {
         assert_eq!(codex_model_context_window("  gpt-5.4  "), Some(1_050_000));
-        assert_eq!(codex_model_context_window("\tgpt-5.5\n"), Some(400_000));
+        assert_eq!(codex_model_context_window("\tgpt-5.5\n"), Some(272_000));
     }
 }

@@ -2375,11 +2375,28 @@ mod tests {
         append_codex_context_window_config(&mut launch, Some("gpt-6-astra"), None);
 
         assert!(
-            launch.contains(" -c 'model_context_window=272000'"),
+            launch.contains(" -c 'model_context_window=872000'"),
             "{launch}"
         );
         assert!(
-            launch.contains(" -c 'model_auto_compact_token_limit=258400'"),
+            launch.contains(" -c 'model_auto_compact_token_limit=828400'"),
+            "{launch}"
+        );
+    }
+
+    #[test]
+    fn codex_gpt_6_sol_auto_launch_uses_catalogue_max_context_window() {
+        // Auto on the GPT-6 family launches the codex-cli 0.155.1 catalogue
+        // max 872_000 (human "1M", clamped by codex): 872_000 x 95 % = 828_400.
+        let mut launch = String::from("codex --model 'gpt-6-sol'");
+        append_codex_context_window_config(&mut launch, Some("gpt-6-sol"), None);
+
+        assert!(
+            launch.contains(" -c 'model_context_window=872000'"),
+            "{launch}"
+        );
+        assert!(
+            launch.contains(" -c 'model_auto_compact_token_limit=828400'"),
             "{launch}"
         );
     }
