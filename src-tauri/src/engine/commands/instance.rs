@@ -2385,6 +2385,23 @@ mod tests {
     }
 
     #[test]
+    fn codex_gpt_5_6_launch_uses_0_155_1_served_context_window() {
+        // codex-cli 0.155.1 serves 272_000 on gpt-5.6; the launch args must
+        // not exceed it or auto-compact can only fire after the real cap.
+        let mut launch = String::from("codex --model 'gpt-5.6-sol'");
+        append_codex_context_window_config(&mut launch, Some("gpt-5.6-sol"), None);
+
+        assert!(
+            launch.contains(" -c 'model_context_window=272000'"),
+            "{launch}"
+        );
+        assert!(
+            launch.contains(" -c 'model_auto_compact_token_limit=258400'"),
+            "{launch}"
+        );
+    }
+
+    #[test]
     fn codex_context_window_config_emits_nothing_for_unknown_model() {
         for model in [Some("some-future-model"), Some(""), None] {
             let mut launch = String::from("codex");
