@@ -34,3 +34,20 @@ No UI change, so no uishot gate.
 
 ## Done means
 Commit(s) on the lane with the table + tests + comments, gates recorded, task note READY with the live `codex debug models` excerpt (slug / context_window / max) you verified yourself — do not reuse Detoro's or Mellow's reading. Mellow reviews; Detoro merges to main.
+
+## Amendment 1 (Detoro, 2026-09-23, after a44a01f was approved) — SUPERSEDES the Ruling section above where they conflict
+Trigger: human direction "Context window 1M" with a screenshot of OpenAI's models page showing GPT-6 Astra / Sol / Luna each at a 1.05M context window. Plus two facts the original ruling got wrong:
+
+- Codex clamps `-c model_context_window=N` to the catalogue `max_context_window` ITSELF (codex source `models-manager/src/model_info.rs`, tag rust-v0.153.4). The "launch path passes the table value unclamped, so auto-compact fires after the real cap" claim in §Why now is therefore wrong for gpt-5.5 (400K request → codex clamps to 272K, compact at min(380K, 0.9×272K)) and unproven for gpt-5.6 (372K is under its 872K catalogue max). `context_window` in `codex debug models` is the DEFAULT window, `max_context_window` is the cap. Do not cite §Why now's harm sentence anywhere.
+- Live evidence, 2026-09-23 `ps`: every running Codex agent (gpt-6-astra ×3, gpt-5.6-sol, gpt-5.6-terra) launches with the Builder's 1M pair and Conclave shows 816,400 usable for all five = codex reporting 872,000 × 95 % − 12,000. So codex serves the 872K catalogue max for both families today, and the human runs everything at 1M.
+
+Amended values for `codex_model_context_window`:
+1. `gpt-6-astra | gpt-6-sol | gpt-6-luna` → `Some(872_000)`. This is the Codex-effective max for the human's "1M": the 1.05M API headline is clamped to the 0.155.1 catalogue `max_context_window` 872_000, so Auto now launches `model_context_window=872000 / model_auto_compact_token_limit=828400` and codex reports 828,400 usable — byte-identical runtime to choosing 1M in the Builder (codex takes min(cfg, 0.9 × 872K) = 784,800 for compaction either way). Comment must say: human direction 2026-09-23 "1M"; API 1.05M; codex catalogue max 872_000; live-verified 828,400 reported on 0.155.1.
+2. `gpt-5.5` → `Some(272_000)` — keep a44a01f's change (catalogue max IS 272_000).
+3. `gpt-5.6-sol | gpt-5.6-terra | gpt-5.6-luna` → RESTORE `Some(372_000)` (revert a44a01f's 272_000). Catalogue default 272K / max 872K; the July server-side ~372K cap is neither confirmed nor refuted by 0.155.1, and the human's agents run on the 1M pair anyway. Lowering to the default has no evidence behind it; raising to 872K is a separate decision needing a >372K live run. Update the arm comment: 0.155.1 catalogue numbers, "server cap still unverified", drop the issue-#31860 paragraph to one sentence.
+4. gpt-5.4 family: unchanged, as ruled.
+5. Mellow's readability nit on a44a01f: apply (gpt-5.5 arm above the absent-from-catalogue comment).
+
+Tests: `known_models_resolve_documented_max` (astra/sol/luna 872_000, 5.5 272_000), `gpt_5_6_family_*` back to 372_000, the Auto-on-astra usable test near codex_models.rs:326 becomes 872_000 × 95 % − 12_000 = 816_400 (same as the 1m case — assert both and say why), keep a clamp-exercising case with a fixture max below the table, and the new `append_codex_context_window_config` test pins gpt-6-sol Auto → `model_context_window=872000` / `model_auto_compact_token_limit=828400`. Also update the Builder hint text in `src/components/builder/RuntimeSection.tsx` ONLY if it still says "GPT-5.6 ≈ 372K" in a way that becomes false — it does not (372K stays), so leave it.
+
+Process: Dew continues on lane/codex-window-table-0155 with new commits on top of a44a01f (do not restart from main); re-run all gates; Mellow re-reviews the lane tip; Detoro merges.
