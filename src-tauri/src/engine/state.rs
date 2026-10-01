@@ -16,6 +16,16 @@ use tauri::AppHandle;
 /// arm that later hijacks an unrelated manual `snapshot save` into a restart.
 const RESTART_PENDING_TTL: Duration = Duration::from_secs(300);
 
+/// Which tail an armed restart fires once the handoff save lands (ADR 0009).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartMode {
+    /// Human-triggered Restart · resume: kill → respawn → resume.
+    Respawn,
+    /// Self-triggered `conclave restart`: type the harness's clear command
+    /// into the live terminal, then inject the resume prompt. No kill.
+    ClearInPlace,
+}
+
 pub struct AppState {
     /// Live, migration-applied SQLite connection pool.
     ///
@@ -64,10 +74,11 @@ pub struct AppState {
     pub outbox: crate::engine::runtime::outbox::Outbox,
 
     /// Instances with a restart ARMED: the agent's next `conclave snapshot save`
-    /// triggers kill → respawn → resume (see `commands::instance::restart`).
-    /// Keyed by instance id → arm time, with consume-once + TTL discipline so
-    /// a stale arm cannot hijack a later unrelated save.
-    restart_pending: Mutex<HashMap<String, Instant>>,
+    /// triggers the armed tail — kill → respawn → resume, or an in-place
+    /// `/clear` → resume (see `commands::instance::restart`, ADR 0009).
+    /// Keyed by instance id → (arm time, mode), with consume-once + TTL
+    /// discipline so a stale arm cannot hijack a later unrelated save.
+    restart_pending: Mutex<HashMap<String, (Instant, RestartMode)>>,
 
     /// Keyed async lifecycle locks. Workspace operations take WRITE; an
     /// operation targeting one agent takes the workspace READ guard and then
@@ -148,22 +159,25 @@ impl AppState {
     }
 
     /// Arm a restart for `instance_id`: the agent's next handoff save triggers
-    /// kill → respawn → resume (see `commands::instance::restart`). Overwrites
-    /// any prior arm.
-    pub fn mark_restart_pending(&self, instance_id: &str) {
+    /// the `mode` tail (see `commands::instance::restart`). Overwrites any
+    /// prior arm, mode included.
+    pub fn mark_restart_pending(&self, instance_id: &str, mode: RestartMode) {
         if let Ok(mut m) = self.restart_pending.lock() {
-            m.insert(instance_id.to_owned(), Instant::now());
+            m.insert(instance_id.to_owned(), (Instant::now(), mode));
         }
     }
 
     /// Consume a pending restart for `instance_id` (consume-once, TTL-guarded).
-    pub fn take_restart_pending(&self, instance_id: &str) -> bool {
+    /// Returns the armed mode, or `None` when nothing (unexpired) was armed.
+    pub fn take_restart_pending(&self, instance_id: &str) -> Option<RestartMode> {
         if let Ok(mut m) = self.restart_pending.lock() {
-            if let Some(armed) = m.remove(instance_id) {
-                return armed.elapsed() < RESTART_PENDING_TTL;
+            if let Some((armed, mode)) = m.remove(instance_id) {
+                if armed.elapsed() < RESTART_PENDING_TTL {
+                    return Some(mode);
+                }
             }
         }
-        false
+        None
     }
 
     /// Disarm a pending restart without consuming it as a trigger.

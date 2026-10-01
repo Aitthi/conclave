@@ -15,6 +15,15 @@ Usage (claude):
       --cwd /tmp/some-scratch-dir --size 2206 --mode bracketed --extra "--model haiku"
   → prints RESULT: INTACT / TRUNCATED with the received byte count.
 
+Context-reset probes (task restart-inplace-clear, ADR 0009) mirror
+src-tauri/src/engine/commands/snapshot.rs::submit_line instead: ONE paste,
+then a single "\r" at +40ms.
+  idle probe:  --body "/clear"                       (inject once the TUI is idle)
+  busy probe:  --busy-prompt "count from 1 to 400, one number per line" \
+               --inject "+2:/clear" --inject "+5:RESUME-MARKER say OK"
+  → prints every transcript session file written during the run, in order, with
+    its user messages, plus RESULT lines for each injected non-slash body.
+
 Caveats: drives claude's first-run trust dialog for you; it does NOT drive
 codex's dialogs (a codex self-update prompt will be answered by the harness's
 readiness keystrokes — run codex once by hand in the scratch dir first). Each
@@ -25,15 +34,36 @@ import argparse, fcntl, glob, json, os, pty, re, select, signal, struct, sys, te
 ap = argparse.ArgumentParser()
 ap.add_argument("--bin", required=True)
 ap.add_argument("--cwd", required=True)
-ap.add_argument("--size", type=int, required=True, help="total body bytes (incl. [from …] tag)")
+ap.add_argument("--size", type=int, help="total body bytes (incl. [from …] tag); required unless --body/--inject")
+ap.add_argument("--body", help="literal body to inject (overrides the generated --size body; submit_line pattern)")
+ap.add_argument("--busy-prompt", help="submit this prompt first, then run --inject steps while it generates")
+ap.add_argument("--inject", action="append", default=[], metavar="+SECS:BODY",
+                help="inject BODY at +SECS after the busy prompt (or after ready); repeatable; submit_line pattern")
 ap.add_argument("--mode", choices=["plain", "bracketed"], default="plain")
 ap.add_argument("--cli", choices=["claude", "codex"], default="claude")
 ap.add_argument("--settle", type=float, default=10.0, help="seconds to wait after the CRs")
 ap.add_argument("--extra", default="", help="extra CLI args (space separated)")
 ap.add_argument("--dump", action="store_true", help="print stripped terminal output at the end")
+ap.add_argument("--dump-chars", type=int, default=3000, help="how much of the stripped terminal tail --dump prints")
 args = ap.parse_args()
 
+def parse_inject(spec):
+    m = re.match(r"^\+?([0-9.]+):(.*)$", spec, re.S)
+    if not m:
+        ap.error(f"--inject wants '+SECS:BODY', got {spec!r}")
+    return float(m.group(1)), m.group(2)
+
+injects = [parse_inject(x) for x in args.inject]
+if args.body is not None:
+    injects.insert(0, (0.0, args.body))
+if not injects and args.size is None:
+    ap.error("--size is required unless --body or --inject is given")
+if injects and args.size is not None:
+    ap.error("--size cannot be combined with --body/--inject")
+
 os.makedirs(args.cwd, exist_ok=True)
+# claude keys its project dir on the RESOLVED cwd (macOS /tmp → /private/tmp)
+args.cwd = os.path.realpath(args.cwd)
 t0 = time.time()
 
 pid, fd = pty.fork()
@@ -121,6 +151,98 @@ else:
 
 time.sleep(1.0)
 
+def dump_term(label):
+    plain_out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=>]", "", text())
+    plain_out = re.sub(r"\n\s*\n+", "\n", plain_out)
+    print(f"---- terminal {label} (stripped, tail) ----")
+    print(plain_out[-args.dump_chars:])
+    print("---- end terminal ----")
+
+def submit_line(body: str):
+    # snapshot.rs::submit_line — one bracketed paste (ESC bytes neutralised the
+    # same way Runtime::send_stdin_paste does), then ONE "\r" at +40ms.
+    payload = body.replace("\x1b", "\u241b").encode()
+    if args.mode == "bracketed":
+        payload = b"\x1b[200~" + payload + b"\x1b[201~"
+    write_all(payload)
+    time.sleep(0.04)
+    write_all(b"\r")
+
+def project_files():
+    if args.cli == "claude":
+        mangled = re.sub(r"[^A-Za-z0-9]", "-", args.cwd)
+        return glob.glob(os.path.join(os.path.expanduser(f"~/.claude/projects/{mangled}"), "*.jsonl"))
+    return glob.glob(os.path.join(os.path.expanduser("~/.codex/sessions"), "**", "*.jsonl"), recursive=True)
+
+if injects:
+    before = set(project_files())
+    print(f"session files before inject: {len(before)}")
+    if args.busy_prompt:
+        submit_line(args.busy_prompt)
+        print(f"[+0.00] busy prompt submitted: {args.busy_prompt!r}")
+    t_base = time.time()
+    for at, body in sorted(injects, key=lambda x: x[0]):
+        wait = t_base + at - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        print(f"[+{time.time() - t_base:.2f}] inject {body!r} (rx quiet {time.time() - last_rx[0]:.2f}s)")
+        try:
+            submit_line(body)
+        except OSError as e:
+            print("WRITE FAILED:", e)
+            dump_term("at write failure")
+            sys.exit(3)
+    time.sleep(args.settle)
+    try:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    alive[0] = False
+    if args.dump:
+        dump_term("at end")
+    after = set(project_files())
+    print(f"session files after inject: {len(after)} (new: {len(after - before)})")
+
+    def user_msgs(path):
+        msgs = []
+        for line in open(path, encoding="utf-8"):
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if args.cli == "claude":
+                if o.get("type") != "user" or o.get("isMeta"):
+                    continue
+                c = o.get("message", {}).get("content")
+                if isinstance(c, list):
+                    tx = "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+                else:
+                    tx = str(c)
+                if tx:
+                    msgs.append((o.get("timestamp", ""), tx))
+            else:
+                pl = o.get("payload", {}) if isinstance(o, dict) else {}
+                if pl.get("type") == "user_message" and isinstance(pl.get("message"), str):
+                    msgs.append((o.get("timestamp", ""), pl["message"]))
+        return msgs
+
+    touched = sorted((f for f in after if os.path.getmtime(f) >= t0 - 1), key=os.path.getctime)
+    for f in touched:
+        print(f"== session {os.path.basename(f)} ({'NEW' if f not in before else 'pre-existing'}) ==")
+        for ts, m in user_msgs(f):
+            print(f"   user {ts} {m[:100]!r}")
+    ok = True
+    for _, body in injects:
+        if body.startswith("/"):
+            continue
+        hits = [(os.path.basename(f), i, m) for f in touched for i, (_, m) in enumerate(user_msgs(f)) if body in m]
+        own = [h for h in hits if h[2].strip() == body.strip()]
+        print(f"RESULT: body {body[:40]!r} recorded={bool(hits)} as_own_message={bool(own)} where={[(h[0], h[1]) for h in hits]}")
+        ok = ok and bool(own)
+    sys.exit(0 if ok else 1)
+
 # ---- build the body: exact byte size, unmistakable head/tail markers, no newlines ----
 sender_id = str(uuid.uuid4())
 head = f"[from Harness · {sender_id}] HEAD-MARKER size={args.size} mode={args.mode} :: "
@@ -145,12 +267,6 @@ with lock:
     out_len_before = len(out)
 
 ts_write = time.time()
-def dump_term(label):
-    plain_out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=>]", "", text())
-    plain_out = re.sub(r"\n\s*\n+", "\n", plain_out)
-    print(f"---- terminal {label} (stripped, tail) ----")
-    print(plain_out[-3000:])
-    print("---- end terminal ----")
 try:
     write_all(payload)
     for delay_ms in (40, 120, 300):

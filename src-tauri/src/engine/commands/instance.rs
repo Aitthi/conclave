@@ -2,6 +2,7 @@ use crate::engine::runtime::launch_common::{
     agent_env_overrides, append_cli_effort_override, build_antigravity_launch,
     effective_claude_model, prefix_conclave_path_with, shell_quote,
 };
+use crate::engine::state::RestartMode;
 use crate::engine::{bus, repo, runtime, AppError, AppState};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -48,6 +49,42 @@ const RESTART_SETTLE_MS: u64 = 2_000;
 /// typing before the TUI reads stdin risks the prompt landing garbled. Generous
 /// on purpose; a restart is a rare, human-triggered operation.
 const RESTART_BOOT_SETTLE_MS: u64 = 8_000;
+
+/// In-place reset (ADR 0009): floor between typing the harness's clear command
+/// and typing the resume prompt — a guess at Claude Code's `/clear` +
+/// SessionStart hook latency, after which the tail still waits for PTY quiet.
+/// Bump it here — deliberately not configurable.
+const CLEAR_SETTLE_MS: u64 = 3_000;
+
+/// In-place reset: how long the agent's PTY must be silent before we type into
+/// it. A generating Claude Code / Codex TUI repaints its spinner continuously;
+/// an idle one is silent (plan Amendment 1, R5').
+const CLEAR_QUIET_MS: u64 = 1_500;
+
+/// Cap on waiting for the agent's turn to end before typing the clear command.
+/// On cap the tail proceeds anyway — the agent was told to stop typing.
+const CLEAR_IDLE_CAP_MS: u64 = 60_000;
+
+/// Cap on waiting for the post-clear welcome repaint to settle before typing
+/// the resume prompt.
+const CLEAR_BANNER_CAP_MS: u64 = 20_000;
+
+/// Poll period of [`wait_quiet`].
+const QUIET_POLL_MS: u64 = 250;
+
+/// The slash command that resets a CLI harness's context in place, by
+/// `cli_kind` (ADR 0009 R4). `None` = no known in-place reset: the caller
+/// falls back to the kill → respawn → resume tail.
+///
+/// Codex is deliberately `None`: on codex-cli 0.159.3 `/new` in a git checkout
+/// opens a "Where should the new conversation run?" picker that would eat the
+/// resume prompt (challenge 32c4ae63) — codex keeps the respawn tail.
+fn clear_command_for(cli_kind: &str) -> Option<&'static str> {
+    match cli_kind {
+        "claude-code" => Some("/clear"),
+        _ => None,
+    }
+}
 
 const ANTIGRAVITY_INSTALL_URL: &str = "https://antigravity.google/docs/cli/install/";
 
@@ -2091,17 +2128,23 @@ pub async fn resume(state: &AppState, payload: Value) -> Result<Value, AppError>
     Ok(session)
 }
 
-/// Restart a CLI agent's process and resume it from a saved handoff.
+/// Restart a CLI agent and resume it from a saved handoff.
 ///
-/// Maps to `instance.restart` on the IPC bus. Two paths:
+/// Maps to `instance.restart` on the IPC bus. Three paths:
 ///
-/// - **Live agent** (the normal case): arm a restart
-///   ([`AppState::mark_restart_pending`]) and inject the "save your handoff"
-///   prompt. The kill → respawn → resume tail fires from the `snapshot.save`
-///   handler once the agent has actually persisted its handoff — the same
-///   save-gated ordering as the compact loop, so a restart can never destroy
-///   uncaptured context. An agent that ignores the prompt is simply never
-///   restarted (the arm expires via TTL).
+/// - **Live agent, human-triggered** (the Restart · resume button): arm a
+///   [`RestartMode::Respawn`] restart ([`AppState::mark_restart_pending`]) and
+///   inject the "save your handoff" prompt. The kill → respawn → resume tail
+///   fires from the `snapshot.save` handler once the agent has actually
+///   persisted its handoff — the same save-gated ordering as the compact loop,
+///   so a restart can never destroy uncaptured context. An agent that ignores
+///   the prompt is simply never restarted (the arm expires via TTL).
+/// - **Live agent, self-triggered** (`conclave restart`, ADR 0006 + 0009): arm
+///   and return the instruction as command output instead of injecting. For a
+///   kind with an in-place clear command (claude-code) the arm is
+///   [`RestartMode::ClearInPlace`]: once the save lands, the tail types `/clear`
+///   into the live terminal and then the resume prompt — the process is NOT
+///   killed. Every other kind (codex included) arms [`RestartMode::Respawn`].
 /// - **Not live**: nothing to save — respawn immediately and, if the session
 ///   has a handoff snapshot, inject the resume prompt once the CLI has booted.
 ///
@@ -2147,7 +2190,17 @@ async fn restart_locked(
     if state.runtime.is_live(&id) {
         // Save-gated: arm FIRST, then inject — a fast agent that saves the
         // instant it reads the prompt must find the arm set (mirrors compact).
-        state.mark_restart_pending(&id);
+        // Mode is decided HERE (ADR 0009 Amendment 2): only a self-triggered
+        // restart on a kind with a known in-place clear command resets in
+        // place; the returned instruction must describe the tail that fires.
+        let in_place =
+            self_triggered && clear_command_for(def.cli_kind.as_deref().unwrap_or("")).is_some();
+        let mode = if in_place {
+            RestartMode::ClearInPlace
+        } else {
+            RestartMode::Respawn
+        };
+        state.mark_restart_pending(&id, mode);
 
         if self_triggered {
             // ADR 0006: the caller IS the agent, mid-turn — it already knows
@@ -2155,14 +2208,15 @@ async fn restart_locked(
             // prompt into its own TUI would interleave with its own output.
             // Return the instruction as plain command output instead; the
             // save-gated tail (snapshot.rs::save → take_restart_pending →
-            // run_respawn_resume) is unchanged and fires exactly as before
-            // once the agent's `conclave snapshot save` lands.
+            // run_clear_resume, ADR 0009) fires once the agent's
+            // `conclave snapshot save` lands.
             return Ok(serde_json::json!({
                 "status": "restarting",
                 "phase": "saving",
                 "instanceId": id,
                 "instruction": crate::engine::agentctx::self_restart_instruction(
-                    state.restart_pending_ttl()
+                    state.restart_pending_ttl(),
+                    in_place,
                 ),
             }));
         }
@@ -2285,6 +2339,152 @@ pub(super) async fn run_respawn_resume_state(
         &crate::engine::agentctx::resume_restore_prompt(),
     )
     .await;
+}
+
+/// The self-triggered restart tail (ADR 0009): reset the agent's context IN
+/// PLACE — type the harness's clear command into its live terminal, wait, then
+/// inject the resume prompt. Spawned by the `snapshot.save` handler once a
+/// [`RestartMode::ClearInPlace`]-armed agent has persisted its handoff.
+pub(crate) async fn run_clear_resume(app: tauri::AppHandle, instance_id: String) {
+    use tauri::Manager;
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    run_clear_resume_state(state, instance_id).await;
+}
+
+/// Each typed step is gated on a fixed floor AND on the PTY going quiet
+/// (bounded): the save fires while the agent's turn is still running.
+///
+/// No kill, no status flip, no SESSION_STATUS: the process and its shell,
+/// browser and MCP state survive. A `cli_kind` with no known clear command
+/// falls back to the kill → respawn → resume tail.
+pub(super) async fn run_clear_resume_state(state: Arc<AppState>, instance_id: String) {
+    let cli_kind = match resolve_cli_kind(&state, &instance_id).await {
+        Ok(Some(kind)) => kind,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("restart: cli_kind lookup failed for instance {instance_id}: {e}");
+            return;
+        }
+    };
+    let Some(clear_command) = clear_command_for(&cli_kind) else {
+        eprintln!(
+            "restart: no in-place clear command for cli_kind {cli_kind:?} \
+             (instance {instance_id}) — falling back to kill → respawn → resume"
+        );
+        run_respawn_resume_state(state, instance_id, true).await;
+        return;
+    };
+
+    // Floor: let the agent render its "saved" confirmation. The save fired
+    // from inside the agent's own tool call, so it is still MID-TURN — the
+    // quiet wait below is the actual turn-end signal (Amendment 1, R5').
+    tokio::time::sleep(std::time::Duration::from_millis(RESTART_SETTLE_MS)).await;
+    wait_quiet_or_log(&state.runtime, &instance_id, CLEAR_IDLE_CAP_MS, "clear").await;
+
+    // Eligibility under the lifecycle guards, released BEFORE the sleeps and
+    // submits: holding the agent mutex across seconds of sleep would block
+    // `tell` delivery and stop/restart for this agent.
+    {
+        let eligibility =
+            match repo::workspace_agent::runtime_eligibility(&state.db, &instance_id).await {
+                Ok(Some(value)) => value,
+                Ok(None) => return,
+                Err(e) => {
+                    eprintln!("restart: eligibility lookup failed for instance {instance_id}: {e}");
+                    return;
+                }
+            };
+        let workspace_lock = state.workspace_lifecycle_lock(&eligibility.workspace_id);
+        let _workspace_guard = workspace_lock.read().await;
+        let agent_lock = state.agent_lifecycle_lock(&instance_id);
+        let _agent_guard = agent_lock.lock().await;
+        if let Err(e) = require_launch_eligible(&state, &instance_id, LaunchMode::Normal).await {
+            eprintln!("restart: instance {instance_id} is no longer eligible: {e}");
+            return;
+        }
+    }
+
+    if !state.runtime.is_live(&instance_id) {
+        return; // died (or was stopped) after saving — nothing to reset.
+    }
+    super::snapshot::submit_line(&state.runtime, &instance_id, clear_command).await;
+    // The agent loses its browser context exactly as on respawn: re-arm the
+    // browser first-commit gate the same way.
+    runtime::browser::mark_resumed(&instance_id);
+
+    tokio::time::sleep(std::time::Duration::from_millis(CLEAR_SETTLE_MS)).await;
+    wait_quiet_or_log(&state.runtime, &instance_id, CLEAR_BANNER_CAP_MS, "resume").await;
+    if !state.runtime.is_live(&instance_id) {
+        return;
+    }
+    super::snapshot::submit_line(
+        &state.runtime,
+        &instance_id,
+        &crate::engine::agentctx::resume_restore_prompt(),
+    )
+    .await;
+}
+
+async fn wait_quiet_or_log(runtime: &runtime::Runtime, instance_id: &str, cap_ms: u64, step: &str) {
+    let quiet = std::time::Duration::from_millis(CLEAR_QUIET_MS);
+    let cap = std::time::Duration::from_millis(cap_ms);
+    if !wait_quiet(runtime, instance_id, quiet, cap).await {
+        eprintln!(
+            "restart: instance {instance_id} still producing output after {cap_ms} ms — \
+             typing the {step} step anyway"
+        );
+    }
+}
+
+/// Wait until `instance_id`'s PTY has been silent for `quiet` (per
+/// [`runtime::Runtime::last_activity`], which already ignores the echo of our
+/// own input). `true` on quiet, `false` when `cap` elapsed first.
+async fn wait_quiet(
+    runtime: &runtime::Runtime,
+    instance_id: &str,
+    quiet: std::time::Duration,
+    cap: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + cap;
+    loop {
+        if is_quiet(
+            runtime.last_activity(instance_id),
+            std::time::SystemTime::now(),
+            quiet,
+        ) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(QUIET_POLL_MS)).await;
+    }
+}
+
+/// `true` when the last output stamp is absent or at least `quiet` old. A stamp
+/// in the future (clock jump) reads as fresh — the cap bounds the wait.
+fn is_quiet(
+    last: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+    quiet: std::time::Duration,
+) -> bool {
+    match last {
+        None => true,
+        Some(at) => now.duration_since(at).is_ok_and(|age| age >= quiet),
+    }
+}
+
+/// The instance's agent-definition `cli_kind` (`""` when unset), resolved the
+/// same way `restart_locked` does. `Ok(None)` = the instance or its
+/// definition is gone.
+async fn resolve_cli_kind(state: &AppState, instance_id: &str) -> Result<Option<String>, AppError> {
+    let Some(instance) = repo::workspace_agent::get(&state.db, instance_id).await? else {
+        return Ok(None);
+    };
+    let Some(def) = repo::agent_definition::get(&state.db, &instance.agent_def_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(def.cli_kind.as_deref().unwrap_or("").to_owned()))
 }
 
 /// Payload for `session.resize` — the frontend terminal's current size.
@@ -4850,9 +5050,10 @@ mod tests {
             .await
             .expect("restart failed");
         assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
-        assert!(
+        assert_eq!(
             state.take_restart_pending(&id),
-            "restart must be armed for the next save"
+            Some(RestartMode::Respawn),
+            "a human-triggered restart must arm the respawn tail for the next save"
         );
         assert!(
             state.runtime.is_live(&id),
@@ -4884,9 +5085,10 @@ mod tests {
             .expect("restart failed");
 
         assert_eq!(out.get("phase").and_then(Value::as_str), Some("saving"));
-        assert!(
+        assert_eq!(
             state.take_restart_pending(&id),
-            "self-triggered restart must still arm"
+            Some(RestartMode::Respawn),
+            "self-triggered restart must still arm (codex: the respawn tail)"
         );
         let instruction = out
             .get("instruction")
@@ -4952,9 +5154,10 @@ mod tests {
             .expect("second restart must not error");
 
         assert_eq!(first.get("instruction"), second.get("instruction"));
-        assert!(
+        assert_eq!(
             state.take_restart_pending(&id),
-            "must still be armed after the double trigger"
+            Some(RestartMode::Respawn),
+            "must still be armed after the double trigger (codex: respawn)"
         );
     }
 
@@ -5292,7 +5495,7 @@ mod tests {
         spawn(&state, json!({ "workspaceAgentId": id }))
             .await
             .unwrap();
-        state.mark_restart_pending(&id);
+        state.mark_restart_pending(&id, RestartMode::Respawn);
 
         stop(&state, json!({ "workspaceAgentId": id }))
             .await
@@ -5304,7 +5507,10 @@ mod tests {
         assert_eq!(retained.availability, "stopped");
         assert_eq!(retained.status, "idle");
         assert!(!state.runtime.is_live(&id));
-        assert!(!state.take_restart_pending(&id), "stop must disarm restart");
+        assert!(
+            state.take_restart_pending(&id).is_none(),
+            "stop must disarm restart"
+        );
         assert_eq!(tab_ended(&id), Some(true));
 
         let resumed = resume(&state, json!({ "workspaceAgentId": id }))
@@ -5440,6 +5646,312 @@ mod tests {
             "stopped"
         );
         assert!(!state.runtime.is_live(&id));
+    }
+
+    /// ADR 0009 R4: the in-place clear command per `cli_kind`; anything
+    /// without one (antigravity, planned opencode/muse, unset) → `None` →
+    /// respawn fallback.
+    #[test]
+    fn clear_command_for_maps_known_cli_kinds_only() {
+        assert_eq!(clear_command_for("claude-code"), Some("/clear"));
+        // codex `/new` opens a checkout picker that eats the resume prompt
+        // (challenge 32c4ae63, codex-cli 0.159.3) — respawn instead.
+        assert_eq!(clear_command_for("codex"), None);
+        assert_eq!(clear_command_for("chat"), None);
+        assert_eq!(clear_command_for("opencode"), None);
+        assert_eq!(clear_command_for("antigravity"), None);
+        assert_eq!(clear_command_for("custom"), None);
+        assert_eq!(clear_command_for(""), None);
+    }
+
+    /// Amendment 1 R5': no stamp → quiet; a fresh stamp → not; an aged one →
+    /// quiet; a future stamp (clock jump) → not quiet (the cap bounds it).
+    #[test]
+    fn is_quiet_reads_the_activity_stamp_age() {
+        let now = std::time::SystemTime::now();
+        let quiet = std::time::Duration::from_millis(1_500);
+        assert!(is_quiet(None, now, quiet));
+        assert!(!is_quiet(
+            Some(now - std::time::Duration::from_millis(200)),
+            now,
+            quiet
+        ));
+        assert!(is_quiet(
+            Some(now - std::time::Duration::from_millis(1_500)),
+            now,
+            quiet
+        ));
+        assert!(is_quiet(
+            Some(now - std::time::Duration::from_secs(60)),
+            now,
+            quiet
+        ));
+        assert!(!is_quiet(
+            Some(now + std::time::Duration::from_secs(5)),
+            now,
+            quiet
+        ));
+    }
+
+    /// `wait_quiet` returns `true` once output stops for `quiet`, and `false`
+    /// at the cap while output keeps coming.
+    #[tokio::test]
+    async fn wait_quiet_waits_for_silence_and_honours_the_cap() {
+        let rt = Arc::new(runtime::Runtime::new());
+        let id = format!("wait-quiet-{}", Uuid::new_v4());
+
+        // Silent from the start → immediate true.
+        let t0 = std::time::Instant::now();
+        assert!(
+            wait_quiet(
+                &rt,
+                &id,
+                std::time::Duration::from_millis(300),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+        );
+        assert!(t0.elapsed() < std::time::Duration::from_millis(200));
+
+        // Output for ~800 ms, then silence → true, but only after it stopped.
+        let stamper = {
+            let (rt, id) = (Arc::clone(&rt), id.clone());
+            tokio::spawn(async move {
+                for _ in 0..8 {
+                    rt.mark_activity(&id);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let t1 = std::time::Instant::now();
+        assert!(
+            wait_quiet(
+                &rt,
+                &id,
+                std::time::Duration::from_millis(300),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+        );
+        assert!(
+            t1.elapsed() >= std::time::Duration::from_millis(900),
+            "returned while output was still flowing: {:?}",
+            t1.elapsed()
+        );
+        stamper.await.unwrap();
+
+        // Output never stops → false at the cap.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stamper = {
+            let (rt, id, stop) = (Arc::clone(&rt), id.clone(), Arc::clone(&stop));
+            tokio::spawn(async move {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    rt.mark_activity(&id);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let t2 = std::time::Instant::now();
+        assert!(
+            !wait_quiet(
+                &rt,
+                &id,
+                std::time::Duration::from_millis(300),
+                std::time::Duration::from_millis(600)
+            )
+            .await
+        );
+        assert!(t2.elapsed() >= std::time::Duration::from_millis(600));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        stamper.await.unwrap();
+    }
+
+    /// Live claude-code fixture on a PTY-shaped observing handle, status
+    /// "running". Returns (instance id, stdin receiver).
+    async fn live_cli_fixture(
+        state: &AppState,
+        cli_kind: &str,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let id = fixture_instance_typed(state, "cli", Some(cli_kind)).await;
+        let session = repo::session::get_by_instance(&state.db, &id)
+            .await
+            .unwrap()
+            .expect("session exists");
+        let (handle, rx) = runtime::LiveHandle::for_test_pty(&session.id);
+        assert!(state.runtime.register(&id, handle).is_some());
+        workspace_agent::set_status(&state.db, &id, "running")
+            .await
+            .unwrap();
+        (id, rx)
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(w) = rx.try_recv() {
+            out.push(w);
+        }
+        out
+    }
+
+    fn paste(body: &str) -> String {
+        format!(
+            "{}{body}{}",
+            runtime::BRACKETED_PASTE_START,
+            runtime::BRACKETED_PASTE_END
+        )
+    }
+
+    /// ADR 0009 R1/R3: self-triggered `conclave restart` arms the in-place
+    /// clear tail; the human button arms the respawn tail.
+    #[tokio::test]
+    async fn self_triggered_restart_arms_clear_in_place() {
+        let state = AppState::for_tests().await;
+        let (id, _rx) = live_cli_fixture(&state, "claude-code").await;
+
+        let out = restart(&state, json!({ "workspaceAgentId": id, "self": true }))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.take_restart_pending(&id),
+            Some(RestartMode::ClearInPlace)
+        );
+        let instruction = out["instruction"].as_str().unwrap();
+        assert!(instruction.contains("/clear"), "{instruction}");
+        assert!(instruction.contains("NOT killed"), "{instruction}");
+
+        restart(&state, json!({ "workspaceAgentId": id }))
+            .await
+            .unwrap();
+        assert_eq!(state.take_restart_pending(&id), Some(RestartMode::Respawn));
+    }
+
+    /// ADR 0009 R5/R6: the clear tail keeps the process (no unregister, no
+    /// status flip) and types exactly clear-command then resume prompt, each
+    /// as one bracketed paste + CR, in order. Quiet PTY → no quiet-wait delay.
+    #[tokio::test]
+    async fn clear_tail_never_unregisters_runtime() {
+        let state = Arc::new(AppState::for_tests().await);
+        let (id, mut rx) = live_cli_fixture(&state, "claude-code").await;
+
+        run_clear_resume_state(Arc::clone(&state), id.clone()).await;
+
+        assert!(
+            state.runtime.is_live(&id),
+            "clear tail must not kill the process"
+        );
+        let row = workspace_agent::get(&state.db, &id).await.unwrap().unwrap();
+        assert_eq!(row.status, "running", "clear tail must not flip status");
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                paste("/clear"),
+                "\r".to_owned(),
+                paste(&crate::engine::agentctx::resume_restore_prompt()),
+                "\r".to_owned(),
+            ]
+        );
+    }
+
+    /// Amendment 2 R4'/R7': a self-triggered restart of a codex agent arms
+    /// the RESPAWN tail and returns the kill → respawn → resume wording, not
+    /// the in-place one.
+    #[tokio::test]
+    async fn self_triggered_codex_restart_arms_respawn_with_matching_wording() {
+        let state = AppState::for_tests().await;
+        let (id, _rx) = live_cli_fixture(&state, "codex").await;
+
+        let out = restart(&state, json!({ "workspaceAgentId": id, "self": true }))
+            .await
+            .unwrap();
+        assert_eq!(state.take_restart_pending(&id), Some(RestartMode::Respawn));
+        let instruction = out["instruction"].as_str().unwrap();
+        assert!(
+            instruction.contains("kill, respawn, resume"),
+            "{instruction}"
+        );
+        assert!(!instruction.contains("/clear"), "{instruction}");
+    }
+
+    /// Amendment 1 R5': while the agent is still generating (activity kept
+    /// FRESH by a stamper — real constants, no test-shortened quiet/cap), the
+    /// clear command must NOT be typed; it goes out only after output stops
+    /// and the PTY has been quiet for CLEAR_QUIET_MS.
+    #[tokio::test]
+    async fn clear_tail_waits_for_the_agent_turn_to_go_quiet() {
+        let state = Arc::new(AppState::for_tests().await);
+        let (id, mut rx) = live_cli_fixture(&state, "claude-code").await;
+
+        // Busy for floor + 1.5 s, then silent.
+        let busy_for = std::time::Duration::from_millis(RESTART_SETTLE_MS + 1_500);
+        let stamper = {
+            let (state, id) = (Arc::clone(&state), id.clone());
+            tokio::spawn(async move {
+                let until = std::time::Instant::now() + busy_for;
+                while std::time::Instant::now() < until {
+                    state.runtime.mark_activity(&id);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+        };
+        let t0 = std::time::Instant::now();
+        let tail = tokio::spawn(run_clear_resume_state(Arc::clone(&state), id.clone()));
+
+        // Past the fixed floor but still busy: nothing typed yet.
+        tokio::time::sleep(std::time::Duration::from_millis(RESTART_SETTLE_MS + 1_000)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "the clear command must wait for the agent's output to stop"
+        );
+
+        stamper.await.unwrap();
+        tail.await.unwrap();
+        let writes = drain(&mut rx);
+        assert_eq!(writes.first(), Some(&paste("/clear")));
+        assert_eq!(writes.len(), 4);
+        assert!(
+            t0.elapsed()
+                >= busy_for + std::time::Duration::from_millis(CLEAR_QUIET_MS + CLEAR_SETTLE_MS),
+            "elapsed {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// ADR 0009 R4: a `cli_kind` with no in-place clear command falls back to
+    /// kill → respawn → resume — the handle IS unregistered.
+    #[tokio::test]
+    async fn clear_tail_unknown_cli_kind_falls_back_to_respawn() {
+        let state = Arc::new(AppState::for_tests().await);
+        // "custom" is the shipped kind with no known clear command (the
+        // agent_definition CHECK rejects unshipped kinds like "opencode").
+        let (id, mut rx) = live_cli_fixture(&state, "custom").await;
+
+        run_clear_resume_state(Arc::clone(&state), id.clone()).await;
+
+        assert!(
+            !state.runtime.is_live(&id),
+            "fallback must kill the old process"
+        );
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|w| w.contains("/clear") || w.contains("/new")),
+            "fallback must not type a clear command"
+        );
+    }
+
+    /// A stop that lands during the floor disarms the tail: nothing is typed.
+    #[tokio::test]
+    async fn clear_tail_types_nothing_into_a_stopped_agent() {
+        let state = Arc::new(AppState::for_tests().await);
+        let (id, mut rx) = live_cli_fixture(&state, "claude-code").await;
+        let (_, stopped) = tokio::join!(
+            run_clear_resume_state(Arc::clone(&state), id.clone()),
+            stop(&state, json!({ "workspaceAgentId": id })),
+        );
+        stopped.unwrap();
+        assert!(drain(&mut rx).is_empty());
     }
 
     /// Production path for review ab722021: the char-based estimate flush must

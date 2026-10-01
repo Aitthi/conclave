@@ -20,6 +20,7 @@
 //!   out of scope.
 
 use crate::engine::runtime::Runtime;
+use crate::engine::state::RestartMode;
 use crate::engine::{agentctx, bus, repo, AppError, AppState};
 use repo::snapshot::{NewSnapshot, SnapshotRow};
 use serde::Deserialize;
@@ -348,15 +349,26 @@ pub async fn save(state: &AppState, payload: Value) -> Result<Value, AppError> {
     .await?;
 
     // If a restart is armed for this agent, THIS save is the trigger: now that
-    // the handoff is durably persisted, fire the kill → respawn → resume tail.
-    // Detached so the agent's `snapshot save` returns promptly.
-    if state.take_restart_pending(&req.instance_id) {
+    // the handoff is durably persisted, fire the armed tail — kill → respawn →
+    // resume (human button) or in-place clear → resume (`conclave restart`,
+    // ADR 0009). Detached so the agent's `snapshot save` returns promptly.
+    if let Some(mode) = state.take_restart_pending(&req.instance_id) {
         if let Some(app) = state.app().cloned() {
-            tauri::async_runtime::spawn(super::instance::run_respawn_resume(
-                app,
-                req.instance_id.clone(),
-                true, // kill the live process first — the handoff is saved.
-            ));
+            match mode {
+                RestartMode::ClearInPlace => {
+                    tauri::async_runtime::spawn(super::instance::run_clear_resume(
+                        app,
+                        req.instance_id.clone(),
+                    ));
+                }
+                RestartMode::Respawn => {
+                    tauri::async_runtime::spawn(super::instance::run_respawn_resume(
+                        app,
+                        req.instance_id.clone(),
+                        true, // kill the live process first — the handoff is saved.
+                    ));
+                }
+            }
         }
     }
 
@@ -773,13 +785,22 @@ mod tests {
     #[tokio::test]
     async fn restart_pending_arm_is_consumed_once() {
         let state = AppState::for_tests().await;
-        assert!(!state.take_restart_pending("i1"), "nothing armed yet");
-        state.mark_restart_pending("i1");
-        assert!(state.take_restart_pending("i1"), "armed → first take true");
-        assert!(
-            !state.take_restart_pending("i1"),
+        assert_eq!(state.take_restart_pending("i1"), None, "nothing armed yet");
+        state.mark_restart_pending("i1", RestartMode::ClearInPlace);
+        assert_eq!(
+            state.take_restart_pending("i1"),
+            Some(RestartMode::ClearInPlace),
+            "armed → first take returns the armed mode"
+        );
+        assert_eq!(
+            state.take_restart_pending("i1"),
+            None,
             "second take is empty — arm consumed"
         );
+        // A re-arm overwrites the mode.
+        state.mark_restart_pending("i1", RestartMode::ClearInPlace);
+        state.mark_restart_pending("i1", RestartMode::Respawn);
+        assert_eq!(state.take_restart_pending("i1"), Some(RestartMode::Respawn));
     }
 
     /// resume on a non-running agent → NotFound (no terminal to type into).

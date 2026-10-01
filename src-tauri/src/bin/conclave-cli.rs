@@ -87,7 +87,7 @@ Subcommands:
   snapshot create <sessionId> <type> [label]
   snapshot save <text...>           (agent self-handoff; inside a spawned agent)
   snapshot last                     (read your latest handoff; inside a spawned agent)
-  restart                           (self-triggered restart; inside a spawned agent)
+  restart                           (self-triggered context reset: handoff → /clear → resume; inside a spawned agent)
   memory remember <workspaceId> <text...>
   memory search   <workspaceId> <query...> [--limit N]
   memory delete   <workspaceId> <chunkId>
