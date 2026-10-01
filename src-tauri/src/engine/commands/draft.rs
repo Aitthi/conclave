@@ -48,8 +48,8 @@ pub const CLAUDE_MODELS: &[&str] = &[
 /// (`codex_models::codex_model_context_window`). Human request 2026-09-23:
 /// add the GPT-6 siblings (`gpt-6-sol`, `gpt-6-luna`) in the order codex-cli
 /// 0.155.1's `models_cache.json` lists them (astra, sol, luna). Human request
-/// 2026-10-01: add `gpt-6.1-sol` first (newest family; not yet in the
-/// codex-cli 0.158.0 catalogue). Mirrored by `CODEX_MODELS` in
+/// 2026-10-01: add `gpt-6.1-sol` first (newest family; first listed in
+/// codex-cli 0.159.3). Mirrored by `CODEX_MODELS` in
 /// `src/lib/modelCatalogue.ts`.
 pub const CODEX_MODELS: &[&str] = &[
     "gpt-6.1-sol",
