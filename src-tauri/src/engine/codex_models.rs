@@ -8,6 +8,9 @@
 //! always the raw API window — see `gpt-5.5` below), per Aoki's 2026-07-09
 //! precedent (`docs/plans/2026-07-09-codex-context-window-actual-max.md`)
 //! and the human's clarification "คือเอา max ของ model ที่ทำได้จริงๆ".
+//!
+//! Last checked against `codex debug models` on codex-cli 0.158.0
+//! (2026-10-01); re-check at the next Codex CLI bump.
 
 /// Look up the documented Codex-effective context window for a model id.
 ///
@@ -17,6 +20,13 @@
 /// (`Option<String>`), which callers pass through as `Option<&str>`.
 pub fn codex_model_context_window(model: &str) -> Option<i64> {
     match model.trim() {
+        // gpt-6.1-sol: human request 2026-10-01. NOT in the codex-cli 0.158.0
+        // catalogue as of 2026-10-01, so there is no measured max; 872_000 is
+        // the GPT-6 family cap, and codex clamps any over-request to its own
+        // `max_context_window` (model_info.rs), so a too-high seed is
+        // harmless. Re-derive at the first codex release that lists it.
+        "gpt-6.1-sol" => Some(872_000),
+
         // GPT-6 family: human direction 2026-09-23 "1M". OpenAI's API window
         // is 1.05M; codex clamps any request to the codex-cli 0.155.1
         // catalogue max_context_window 872_000, so the table carries that
@@ -362,6 +372,7 @@ mod tests {
 
     #[test]
     fn known_models_resolve_documented_max() {
+        assert_eq!(codex_model_context_window("gpt-6.1-sol"), Some(872_000));
         assert_eq!(codex_model_context_window("gpt-6-astra"), Some(872_000));
         assert_eq!(codex_model_context_window("gpt-6-sol"), Some(872_000));
         assert_eq!(codex_model_context_window("gpt-6-luna"), Some(872_000));
