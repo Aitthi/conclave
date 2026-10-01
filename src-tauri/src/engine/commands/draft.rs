@@ -30,11 +30,13 @@ use crate::engine::{AppError, AppState};
 /// Human request 2026-09-04: add the Claude 5 family (Fable 5.1, Opus 5,
 /// Sonnet 5, Haiku 4.5) shown in Claude Code's picker; keep opus-4-8 so
 /// existing rows stay valid. Human request 2026-09-23: add Opus 5.5
-/// (`claude-opus-5-5`), newest-first after Fable 5.1. Mirrored by
-/// `CLAUDE_MODELS` in `src/lib/modelCatalogue.ts` (Lane C).
+/// (`claude-opus-5-5`), newest-first after Fable 5.1. Human request
+/// 2026-10-01: add Sonnet 5.5 (`claude-sonnet-5-5`) after Opus 5.5. Mirrored
+/// by `CLAUDE_MODELS` in `src/lib/modelCatalogue.ts` (Lane C).
 pub const CLAUDE_MODELS: &[&str] = &[
     "claude-fable-5-1",
     "claude-opus-5-5",
+    "claude-sonnet-5-5",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-haiku-4-5",
@@ -45,9 +47,12 @@ pub const CLAUDE_MODELS: &[&str] = &[
 /// window is NOT drafted — the backend derives it per model
 /// (`codex_models::codex_model_context_window`). Human request 2026-09-23:
 /// add the GPT-6 siblings (`gpt-6-sol`, `gpt-6-luna`) in the order codex-cli
-/// 0.155.1's `models_cache.json` lists them (astra, sol, luna). Mirrored by
-/// `CODEX_MODELS` in `src/lib/modelCatalogue.ts`.
+/// 0.155.1's `models_cache.json` lists them (astra, sol, luna). Human request
+/// 2026-10-01: add `gpt-6.1-sol` first (newest family; first listed in
+/// codex-cli 0.159.3). Mirrored by `CODEX_MODELS` in
+/// `src/lib/modelCatalogue.ts`.
 pub const CODEX_MODELS: &[&str] = &[
+    "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
@@ -987,14 +992,20 @@ pub(crate) mod tests {
             .map(|line| line.trim_end_matches(',').trim_matches('"'))
             .collect();
         assert_eq!(typescript_models, CLAUDE_MODELS);
-        // Newest-first: Fable 5.1 leads, Opus 5.5 sits right behind it.
+        // Newest-first: Fable 5.1 leads, Opus 5.5 then Sonnet 5.5 behind it.
         assert_eq!(CLAUDE_MODELS.first().copied(), Some("claude-fable-5-1"));
         assert_eq!(CLAUDE_MODELS.get(1).copied(), Some("claude-opus-5-5"));
+        assert_eq!(CLAUDE_MODELS.get(2).copied(), Some("claude-sonnet-5-5"));
 
         let mut opus = agent("opus");
         opus.model = Some("claude-opus-5-5".into());
         validate_draft(&resp(vec![opus], vec![]), DraftMode::Agent, &cat())
             .expect("claude-opus-5-5 must pass draft validation");
+
+        let mut sonnet = agent("sonnet");
+        sonnet.model = Some("claude-sonnet-5-5".into());
+        validate_draft(&resp(vec![sonnet], vec![]), DraftMode::Agent, &cat())
+            .expect("claude-sonnet-5-5 must pass draft validation");
     }
 
     #[test]
@@ -1012,16 +1023,17 @@ pub(crate) mod tests {
             .map(|line| line.trim_end_matches(',').trim_matches('"'))
             .collect();
         assert_eq!(typescript_models, CODEX_MODELS);
-        assert_eq!(CODEX_MODELS.first().copied(), Some("gpt-6-astra"));
-        assert_eq!(CODEX_MODELS.get(1).copied(), Some("gpt-6-sol"));
-        assert_eq!(CODEX_MODELS.get(2).copied(), Some("gpt-6-luna"));
+        assert_eq!(CODEX_MODELS.first().copied(), Some("gpt-6.1-sol"));
+        assert_eq!(CODEX_MODELS.get(1).copied(), Some("gpt-6-astra"));
+        assert_eq!(CODEX_MODELS.get(2).copied(), Some("gpt-6-sol"));
+        assert_eq!(CODEX_MODELS.get(3).copied(), Some("gpt-6-luna"));
 
         let mut astra = agent("astra");
         astra.cli_kind = Some("codex".into());
         astra.model = Some("gpt-6-astra".into());
         validate_draft(&resp(vec![astra], vec![]), DraftMode::Agent, &cat())
             .expect("the highest-priority Codex preset must pass draft validation");
-        for id in ["gpt-6-sol", "gpt-6-luna"] {
+        for id in ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
             let mut sibling = agent(id);
             sibling.cli_kind = Some("codex".into());
             sibling.model = Some(id.into());
