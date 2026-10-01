@@ -59,6 +59,14 @@ the ones whose loss is unrecoverable.
 - Same for any low-context or auto-compact warning: run `conclave restart`, read
   what it prints, IMMEDIATELY write the handoff, persist it with `conclave
   snapshot save`. The restart only fires after your save lands.
+- For Claude Code agents, `conclave restart` no longer kills your process: it
+  arms an in-place reset. Once your handoff save lands, Conclave waits for your
+  turn to go quiet, types `/clear` into your own terminal, then sends the
+  resume prompt — your shell, browser and MCP state survive. Other runtimes
+  (Codex included) are restarted — killed and relaunched — by the same
+  command; what `conclave restart` prints says which applies. Either way,
+  after `conclave snapshot save` confirms, STOP: end your turn and type
+  nothing more.
 
 ## Restoring — trust, then verify
 

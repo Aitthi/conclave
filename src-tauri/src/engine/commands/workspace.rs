@@ -971,7 +971,7 @@ mod tests {
         start(&state, json!({ "workspaceId": workspace_id }))
             .await
             .unwrap();
-        state.mark_restart_pending(agent_id);
+        state.mark_restart_pending(agent_id, crate::engine::state::RestartMode::Respawn);
 
         let first = stop(&state, json!({ "workspaceId": workspace_id }))
             .await
@@ -984,7 +984,7 @@ mod tests {
             .unwrap();
         assert_eq!(retained.availability, "active");
         assert_eq!(retained.status, "idle");
-        assert!(!state.take_restart_pending(agent_id));
+        assert!(state.take_restart_pending(agent_id).is_none());
 
         let second = stop(&state, json!({ "workspaceId": workspace_id }))
             .await

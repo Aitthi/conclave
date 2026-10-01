@@ -172,7 +172,8 @@ fn humanize_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// The self-triggered restart instruction (ADR 0006): returned by
+/// The self-triggered restart instruction (ADR 0006, in-place reset per ADR
+/// 0009): returned by
 /// `commands::instance::restart`'s `self: true` path as the `instruction`
 /// field, and printed VERBATIM by `conclave-cli`'s `restart` subcommand as
 /// plain command output — never injected as a chat turn, since the caller IS
@@ -183,26 +184,34 @@ fn humanize_duration(d: std::time::Duration) -> String {
 /// covers the late-save recovery path (integration review item G2): a save
 /// that lands after the arm expires must not leave the agent hanging.
 #[must_use]
-pub fn self_restart_instruction(arm_ttl: std::time::Duration) -> String {
+pub fn self_restart_instruction(arm_ttl: std::time::Duration, in_place: bool) -> String {
     let window = humanize_duration(arm_ttl);
+    let tail = if in_place {
+        "Once your save lands the context reset fires automatically: Conclave sends /clear into \
+your own terminal, waits a few seconds, then sends you the resume prompt — your process is NOT \
+killed. After the save confirms, stop and wait; do not type anything."
+    } else {
+        "The restart (kill, respawn, resume) fires automatically once your save lands — after it \
+confirms, stop and wait."
+    };
     format!(
         "Your restart is now ARMED: save your handoff within {window}, or this arm expires and \
-no restart happens. {HANDOFF_SAVE_INSTRUCTIONS} The restart (kill, respawn, resume) fires \
-automatically once your save lands — after it confirms, stop and wait. If your save lands AFTER \
-the arm has already expired, nothing will fire: run `conclave restart` again to re-arm (it \
-returns this same instruction; your handoff is already saved, so re-arming costs nothing)."
+no restart happens. {HANDOFF_SAVE_INSTRUCTIONS} {tail} If your save lands AFTER the arm has \
+already expired, nothing will fire: run `conclave restart` again to re-arm (it returns this same \
+instruction; your handoff is already saved, so re-arming costs nothing)."
     )
 }
 
 /// The resume prompt — injected into a freshly (re)launched agent so it reloads
 /// the last handoff saved for its session and continues instead of starting
-/// over. Used by the restart loop's respawn tail AND by the standalone
+/// over. Used by the restart loop's respawn and in-place clear tails AND by the standalone
 /// `snapshot.resume` command (e.g. after the whole app was relaunched and the
 /// agent came back with an empty context). Single line, same rationale as
 /// [`compact_save_prompt`].
 #[must_use]
 pub fn resume_restore_prompt() -> String {
-    "[conclave resume] Your process was restarted and this is a fresh context. FIRST: if your \
+    "[conclave resume] Your context was reset (in-place /clear or a process restart) and this is \
+a fresh context. FIRST: if your \
 system prompt names a standing-instructions file, re-read that file now — a fresh context has \
 none of its content, and your skills live in it. Then restore your working state: run \
 `conclave snapshot last` to read the last handoff saved for you, then VERIFY it against reality \
@@ -970,9 +979,32 @@ mod tests {
     /// `conclave restart`'s command output (never injected as a chat turn).
     #[test]
     fn self_restart_instruction_is_single_line_and_names_the_command() {
-        let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        let s = super::self_restart_instruction(std::time::Duration::from_secs(300), true);
         assert!(!s.contains('\n'), "must be one line: {s}");
         assert!(s.contains("conclave snapshot save"), "{s}");
+    }
+
+    /// ADR 0009 (Amendment 2, R7'): two wordings. In place (claude-code):
+    /// the clear command is typed and the process is NOT killed, so the agent
+    /// stops typing instead of expecting a relaunch. Otherwise (codex and
+    /// every other kind): the original kill → respawn → resume wording. Both
+    /// stay single-line and carry the save command and the TTL.
+    #[test]
+    fn self_restart_instruction_wording_matches_the_armed_tail() {
+        let ttl = std::time::Duration::from_secs(300);
+        let in_place = super::self_restart_instruction(ttl, true);
+        let respawn = super::self_restart_instruction(ttl, false);
+        for s in [&in_place, &respawn] {
+            assert!(!s.contains('\n'), "must be one line: {s}");
+            assert!(s.contains("conclave snapshot save"), "{s}");
+            assert!(s.contains("5 minutes"), "{s}");
+        }
+        assert!(in_place.contains("/clear"), "{in_place}");
+        assert!(in_place.contains("NOT killed"), "{in_place}");
+        assert!(in_place.contains("do not type anything"), "{in_place}");
+        assert!(!in_place.contains("kill, respawn"), "{in_place}");
+        assert!(respawn.contains("kill, respawn, resume"), "{respawn}");
+        assert!(!respawn.contains("/clear"), "{respawn}");
     }
 
     /// The arm's TTL must be surfaced honestly so a dawdling agent knows its
@@ -980,13 +1012,13 @@ mod tests {
     /// passed in, never a hand-copied literal.
     #[test]
     fn self_restart_instruction_surfaces_the_given_ttl_in_minutes() {
-        let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        let s = super::self_restart_instruction(std::time::Duration::from_secs(300), true);
         assert!(
             s.contains("5 minutes"),
             "must surface the 5-minute TTL: {s}"
         );
 
-        let s10 = super::self_restart_instruction(std::time::Duration::from_secs(600));
+        let s10 = super::self_restart_instruction(std::time::Duration::from_secs(600), true);
         assert!(
             s10.contains("10 minutes"),
             "must surface a DIFFERENT TTL: {s10}"
@@ -998,24 +1030,24 @@ mod tests {
     /// non-round one. Must render both sanely.
     #[test]
     fn self_restart_instruction_renders_sub_minute_and_non_round_ttls_sanely() {
-        let sub_minute = super::self_restart_instruction(std::time::Duration::from_secs(30));
+        let sub_minute = super::self_restart_instruction(std::time::Duration::from_secs(30), true);
         assert!(
             !sub_minute.contains("0 minutes"),
             "a sub-minute TTL must not render as '0 minutes': {sub_minute}"
         );
         assert!(sub_minute.contains("30 seconds"), "{sub_minute}");
 
-        let non_round = super::self_restart_instruction(std::time::Duration::from_secs(90));
+        let non_round = super::self_restart_instruction(std::time::Duration::from_secs(90), true);
         assert!(
             non_round.contains("1 minute") && non_round.contains("30 seconds"),
             "a non-round TTL must render both parts, not drop the remainder: {non_round}"
         );
 
         // Singular forms, not "1 minutes" / "1 seconds".
-        let one_minute = super::self_restart_instruction(std::time::Duration::from_secs(60));
+        let one_minute = super::self_restart_instruction(std::time::Duration::from_secs(60), true);
         assert!(one_minute.contains("1 minute"), "{one_minute}");
         assert!(!one_minute.contains("1 minutes"), "{one_minute}");
-        let one_second = super::self_restart_instruction(std::time::Duration::from_secs(1));
+        let one_second = super::self_restart_instruction(std::time::Duration::from_secs(1), true);
         assert!(one_second.contains("1 second"), "{one_second}");
         assert!(!one_second.contains("1 seconds"), "{one_second}");
     }
@@ -1026,7 +1058,7 @@ mod tests {
     /// just re-arms) rather than unconditionally promising the restart fires.
     #[test]
     fn self_restart_instruction_covers_the_late_save_recovery_path() {
-        let s = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        let s = super::self_restart_instruction(std::time::Duration::from_secs(300), true);
         assert!(
             s.contains("expired") && s.contains("conclave restart"),
             "must name the recovery path for a save that lands after expiry: {s}"
@@ -1040,7 +1072,8 @@ mod tests {
     #[test]
     fn restart_save_prompt_and_self_restart_instruction_share_handoff_instructions() {
         let save = super::restart_save_prompt();
-        let instruction = super::self_restart_instruction(std::time::Duration::from_secs(300));
+        let instruction =
+            super::self_restart_instruction(std::time::Duration::from_secs(300), true);
         // A distinctive, unlikely-to-coincidentally-match substring from the
         // shared handoff-writing instructions.
         let marker = "HARD CAP of 10k tokens";

@@ -2,6 +2,8 @@
 status: accepted
 ---
 
+> Superseded in part by ADR 0009: the self-triggered path now resets context in place (`/clear`) instead of killing the process.
+
 # Self-triggered restart: the agent wakes itself when its context nears full
 
 Conclave already has a human-triggered Restart · resume (kill → respawn → resume-from-handoff)
