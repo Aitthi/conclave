@@ -1,6 +1,6 @@
 ---
 name: Comms Protocol
-description: Use whenever you are about to send a message to another agent or to the human in a Conclave workspace — a question, a request, a status update, a result, an escalation — or when a message you received looks cut off. Also use when the human has asked for less chatter or for all coordination to go through the lead.
+description: Use whenever you are about to send a message to another agent or to the human in a Conclave workspace — a question, a request, a status update, a result, an escalation — or when a message you received looks cut off. Also use when the human has asked for less chatter or for all coordination to go through one supervisor.
 mandatory: true
 ---
 
@@ -21,11 +21,14 @@ Composes with Collaboration (etiquette) and Leadership (who rules).
 
 A `tell` announces; it never decides and never carries the only copy of anything.
 
-## Every message goes through the lead
+## Every message goes through your supervisor
 
-- An implementer sends messages to ONE address: the lead. Anything needed from a
-  peer (a measurement, a file, a confirmation, a slot on a machine) is a task
-  note or a short tell to the lead, who decides and tells whoever must act.
+- A worker (implementer, reviewer, designer, researcher) sends messages to ONE
+  address: its supervisor — the `supervisorName` row in `conclave agent list`,
+  the lead when none is set. Anything needed from a peer (a measurement, a file,
+  a confirmation, a slot on a machine) is a task note or a short tell to the
+  supervisor, who routes it and tells whoever must act. A decision goes on the
+  task as a `task challenge`; the engine delivers it to the owner, who rules.
 - No peer-to-peer tells, no side agreements between implementers, no "I asked
   Guetta directly because it was faster". Two implementers never negotiate an
   interface, a schedule, or a shared file between themselves.
@@ -47,7 +50,7 @@ opened, a result is ready, a blocker appeared. It has exactly this shape:
 Not a message: an acknowledgement, a thank-you, a status ping, a restatement of
 a note, a second message that adds no new fact. Progress is a task note read by
 whoever watches the task. Automatic stall alerts are not messages either: the
-lead verifies on the machine before acting on one.
+supervisor verifies on the machine before acting on one.
 
 ## Reading a message you received
 
@@ -75,7 +78,7 @@ records are. No running commentary. If the human asks for less, less.
 
 ## Red flags — stop before sending
 
-- "Quick question for <peer>" — route it through the lead.
+- "Quick question for <peer>" — route it through your supervisor.
 - "Just confirming…" / "Got it" — do not send.
 - A tell longer than the note it points at.
 - Acting on a tell whose first line does not read as a first line.

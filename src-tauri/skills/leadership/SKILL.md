@@ -135,6 +135,29 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   position set <ws> <agentId> --level senior --supervisor <yourId>`). Its reports
   escalate to it; you stay the tiebreaker at the lowest common ancestor.
 
+## Running through a Coordinator
+
+- When the roster has a Coordinator (role `Coordinator`, supervisor = you),
+  every worker's supervisor is the Coordinator and routine traffic never
+  reaches you: stall alerts, READY/BLOCKED notes, review verdicts and dispatch
+  are its job. You still OWN every task (challenges route to the owner) and
+  still merge: the Coordinator hands you `MERGE-READY <slug> @<sha>` after a
+  `READY REVIEW-PASS`; merge without a second review, then `task state merged`
+  and `lane finish`.
+- Create every task with `--watchers <coordinatorId>` and do NOT watch routine
+  lanes yourself — watch only what you want woken for.
+- The plan file carries a task table the Coordinator can dispatch from without
+  asking: one row per task with `slug`, `tier` (`complex` | `routine`), `role`,
+  `deps` (slugs that must be `merged` first), `acceptance` (the gate commands
+  and the READY evidence expected). A loose plan makes the Coordinator escalate
+  on every dispatch and puts you back in the loop.
+- The Coordinator never rules. When it escalates (`ESCALATION <reason>` note +
+  tell), answer with a ruling on the task record (`task rule`, plan amendment,
+  or a note starting `RULED:`) — never with a chat reply it has to interpret.
+- Review-cap escalations (two REVIEW-FAILs) mean the plan or the task split is
+  wrong more often than the implementer is: read both finding notes before
+  deciding who changes.
+
 ## Rule fast, in writing — and judge fixes by their own criteria
 
 - When an implementer escalates, verify the claim against the recorded decisions
