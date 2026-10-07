@@ -255,3 +255,6 @@ Over the engine socket (`agentDef.save`, `agentDef.addToWorkspace`, `instance.sp
 
 ## Amendment 1 (Detoro, 2026-10-07, challenge 5be960d1 by Mellow — UPHELD)
 R6's keep-list wrongly kept two escalation verbs: implementer/SKILL.md L45-46 ("GAP to escalate to the lead" — a plan gap is Coordinator escalation condition 1/4) and L80-81 ("propose the change to the lead" — a disagreement with a recorded decision is a `task challenge`, owner rules). Both now replaced per R6 above; Step 4's expected remainder is L3, L7, L49, L88, L126, L129. Credit Mellow.
+
+## Amendment 2 (Detoro, 2026-10-07, post-merge, Mellow REVIEW-PASS follow-up)
+Coordinator SKILL escalation condition 1 said "or a challenge that names a recorded decision", which contradicts the Route section (challenges reach the owner via the engine, never relayed). Reworded to "(a BLOCKED note that names a recorded decision; a `task challenge` already reaches the owner — do not relay it)". Applied by Detoro directly on main after merge 81a14c9: one-line wording fix, handoff cost > work. Credit Mellow.

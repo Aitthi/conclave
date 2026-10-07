@@ -57,8 +57,9 @@ coordinating adds.
 
 ## Escalate to the lead — exactly these five
 
-1. A worker says the plan or design must change (BLOCKED or a challenge that
-   names a recorded decision).
+1. A worker says the plan or design must change (a BLOCKED note that names a
+   recorded decision; a `task challenge` already reaches the owner — do not
+   relay it).
 2. A worker asks you to choose between approaches.
 3. Review failed twice on one task.
 4. A worker is blocked by something the plan does not cover (an environment
