@@ -1299,7 +1299,8 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         }
 
         // `task create <ws> <slug> <title...> [--boundary p1,p2] [--canon txt]
-        //  [--owner id] [--plan text]` — `conclave-cli` resolves `--plan-file`
+        //  [--owner id] [--plan text] [--watchers id,id] [--no-self-watch]` —
+        // `conclave-cli` resolves `--plan-file`
         // to `--plan <contents>` and defaults `--owner` to the caller's own
         // instance id before this ever runs (owner is optional enrichment,
         // same "-" sentinel philosophy as `memory remember`, except here a
@@ -1307,12 +1308,12 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
         Some("create") => {
             let workspace_id = argv.get(2).ok_or_else(|| {
                 AppError::Invalid(
-                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id]".into(),
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id] [--no-self-watch]".into(),
                 )
             })?;
             let slug = argv.get(3).ok_or_else(|| {
                 AppError::Invalid(
-                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id]".into(),
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id] [--no-self-watch]".into(),
                 )
             })?;
             let rest = argv.get(4..).unwrap_or(&[]).to_vec();
@@ -1321,9 +1322,10 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
             let (owner, rest) = take_flag(&rest, "--owner");
             let (plan, rest) = take_flag(&rest, "--plan");
             let (watchers, rest) = take_flag(&rest, "--watchers");
+            let (no_self_watch, rest) = take_switch(&rest, "--no-self-watch");
             if rest.is_empty() {
                 return Err(AppError::Invalid(
-                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id]".into(),
+                    "cli: task create <workspaceId> <slug> <title...> [--boundary p1,p2] [--canon txt] [--owner id] [--plan text] [--watchers id,id] [--no-self-watch]".into(),
                 ));
             }
             let title = rest.join(" ");
@@ -1346,6 +1348,11 @@ fn map_task_argv(argv: &[String]) -> Result<(&'static str, Value), AppError> {
                 // engine caps and deduplicates before touching `task_watch`.
                 let ids: Vec<&str> = watchers.split(',').filter(|s| !s.is_empty()).collect();
                 params["watcherAgentIds"] = json!(ids);
+            }
+            if no_self_watch {
+                // Emitted only when present so the flag-less create stays
+                // byte-for-byte; the engine defaults `selfWatch` to true.
+                params["selfWatch"] = json!(false);
             }
             Ok(("task.create", params))
         }
@@ -2495,6 +2502,25 @@ mod tests {
     }
 
     #[test]
+    fn task_create_no_self_watch_maps_to_self_watch_false() {
+        // Switch anywhere in the tail; the title stays intact.
+        let params = ok_params(&[
+            "task",
+            "create",
+            "ws1",
+            "t1",
+            "My",
+            "--no-self-watch",
+            "Title",
+            "--watchers",
+            "a",
+        ]);
+        assert_eq!(params["selfWatch"], json!(false));
+        assert_eq!(params["title"], json!("My Title"));
+        assert_eq!(params["watcherAgentIds"], json!(["a"]));
+    }
+
+    #[test]
     fn task_create_without_watchers_omits_the_field() {
         // Byte-for-byte: the flag-less create must not carry watcherAgentIds.
         let params = ok_params(&["task", "create", "ws1", "t1", "My", "Title"]);
@@ -2503,6 +2529,7 @@ mod tests {
             json!({ "workspaceId": "ws1", "slug": "t1", "title": "My Title" })
         );
         assert!(params.get("watcherAgentIds").is_none());
+        assert!(params.get("selfWatch").is_none());
     }
 
     #[test]

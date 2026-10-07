@@ -144,8 +144,10 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   still merge: the Coordinator hands you `MERGE-READY <slug> @<sha>` after a
   `READY REVIEW-PASS`; merge without a second review, then `task state merged`
   and `lane finish`.
-- Create every task with `--watchers <coordinatorId>` and do NOT watch routine
-  lanes yourself — watch only what you want woken for.
+- Create every task with `--watchers <coordinatorId> --no-self-watch`; plain
+  `--watchers` subscribes you too (council chair semantics), and the owner is
+  still pinged once on the `review` transition by design. Watch only what you
+  want woken for.
 - The plan file carries a task table the Coordinator can dispatch from without
   asking: one row per task with `slug`, `tier` (`complex` | `routine`), `role`,
   `deps` (slugs that must be `merged` first), `acceptance` (the gate commands
