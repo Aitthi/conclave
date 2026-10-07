@@ -535,6 +535,17 @@ struct CreateReq {
     /// unchanged and no subscriptions are written.
     #[serde(default)]
     watcher_agent_ids: Vec<String>,
+    /// `--no-self-watch`: when `watcherAgentIds` is non-empty, do NOT add the
+    /// owner to the subscription set (ADR 0010 Amendment 1 — a Lead subscribes
+    /// the Coordinator without subscribing itself). Default `true` keeps the
+    /// council chair semantics byte-for-byte; ignored when no watchers are
+    /// supplied (the flag-less create still writes no rows).
+    #[serde(default = "default_true")]
+    self_watch: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Create a task. `ownerAgentId`, when supplied, must belong to `workspaceId`.
@@ -560,12 +571,15 @@ pub async fn create(state: &AppState, payload: Value) -> Result<Value, AppError>
                 req.watcher_agent_ids.len()
             )));
         }
-        // Owner first, then the supplied agents, deduplicated in order. Each
-        // watcher must belong to this workspace (rejects both unknown ids and
-        // cross-workspace ids, mirroring the owner check).
+        // Owner first (unless `--no-self-watch`), then the supplied agents,
+        // deduplicated in order. Each watcher must belong to this workspace
+        // (rejects both unknown ids and cross-workspace ids, mirroring the
+        // owner check).
         let mut ids: Vec<String> = Vec::with_capacity(req.watcher_agent_ids.len() + 1);
-        if let Some(owner) = &req.owner_agent_id {
-            ids.push(owner.clone());
+        if req.self_watch {
+            if let Some(owner) = &req.owner_agent_id {
+                ids.push(owner.clone());
+            }
         }
         for watcher in &req.watcher_agent_ids {
             enforce_scope(state, &req.workspace_id, watcher, "watcher").await?;
@@ -1909,6 +1923,51 @@ mod tests {
         let task_id = created["id"].as_str().unwrap();
         let watchers = repo::task::watchers(&state.db, task_id).await.unwrap();
         assert_eq!(watchers.len(), 2, "duplicates collapse to distinct rows");
+    }
+
+    #[tokio::test]
+    async fn create_with_watchers_and_no_self_watch_omits_owner() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+        let w1 = fixture_instance(&state, &ws, "Coordinator").await;
+
+        let created = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "watcherAgentIds": [w1], "selfWatch": false
+            }),
+        )
+        .await
+        .expect("create failed");
+
+        assert_eq!(created["watcherAgentIds"], json!([w1]));
+        let task_id = created["id"].as_str().unwrap();
+        let watchers = repo::task::watchers(&state.db, task_id).await.unwrap();
+        assert_eq!(watchers, vec![w1.clone()], "owner is left out");
+    }
+
+    #[tokio::test]
+    async fn create_no_self_watch_without_watchers_is_the_flagless_create() {
+        let state = AppState::for_tests().await;
+        let ws = fixture_workspace(&state).await;
+        let owner = fixture_instance(&state, &ws, "Lead").await;
+
+        let created = create(
+            &state,
+            json!({
+                "workspaceId": ws, "slug": "t1", "title": "T1",
+                "ownerAgentId": owner, "selfWatch": false
+            }),
+        )
+        .await
+        .expect("create failed");
+
+        assert!(created.get("watcherAgentIds").is_none());
+        let task_id = created["id"].as_str().unwrap();
+        let watchers = repo::task::watchers(&state.db, task_id).await.unwrap();
+        assert!(watchers.is_empty(), "no watchers requested, no rows");
     }
 
     #[tokio::test]
