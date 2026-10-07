@@ -103,3 +103,32 @@ Engine facts that constrain the fix (verified 2026-10-07 against main 97814e2):
 - Blackboard: `protocol:coordinator-flow`, `coord:board`
 - Related: ADR 0005 (role system), ADR 0008 (task system),
   `docs/2026-07-05-spec-position-system.md` (routing by supervisor)
+
+## Amendment 1 (Detoro, 2026-10-07, post-rollout — human observation in OmniChat)
+
+The human saw workers in the OmniChat workspace "reporting to two leads". The
+lines were engine watcher notifications (`[task <slug>] <actor>: note/state/gate
+— …`), not worker behaviour: `task create --watchers <id>` subscribes the
+**owner plus** the listed agents (`engine/commands/task.rs:563-567`, council-v1
+chair semantics, spec `2026-07-10-lead-council-v1-design.md` "Command Changes"),
+so every task the Lead created per decision 2 carried both the Lead and the
+Coordinator in `task_watch`, and every wake fanned out to both. The Context
+bullet "the owner is not auto-subscribed" is true only for the flag-less create.
+
+Corrections:
+
+- Context bullet 1 reads: fan-out goes to watchers only; a flag-less create
+  subscribes nobody; `--watchers` subscribes the owner too (chair semantics).
+  Additionally, the `review` transition pings the owner even when not watching
+  when the owner has a supervisor link (`notify_expected_ruler`, spec §3.4) —
+  one line per task, deduped against the watch list, kept.
+- Decision 2 reads: the Lead creates tasks with
+  `--watchers <coordinatorId> --no-self-watch` (new switch, task
+  `task-create-no-self-watch`, plan `docs/plans/2026-10-07-task-create-no-self-watch.md`).
+  Interim rule until that build is installed: `conclave task unwatch <ws> <slug>`
+  right after the create.
+- Decision 7 as rolled out by the human (their call, not the plan's names): the
+  Coordinator is **Aitthi** (`claude-sonnet-5-5`, senior) in codeup
+  (`7d560bae-09dc-4535-befb-feed5a95aa05`) and OmniChat (`bf2fdd0f-…`); Tiësto is
+  Implementer (Routine) on `claude-sonnet-5-5`; Zedd is Implementer (Routine)
+  junior; Dew is Implementer (Complex) on Opus. No agent named Alesso exists.

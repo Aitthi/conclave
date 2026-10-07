@@ -258,3 +258,6 @@ R6's keep-list wrongly kept two escalation verbs: implementer/SKILL.md L45-46 ("
 
 ## Amendment 2 (Detoro, 2026-10-07, post-merge, Mellow REVIEW-PASS follow-up)
 Coordinator SKILL escalation condition 1 said "or a challenge that names a recorded decision", which contradicts the Route section (challenges reach the owner via the engine, never relayed). Reworded to "(a BLOCKED note that names a recorded decision; a `task challenge` already reaches the owner — do not relay it)". Applied by Detoro directly on main after merge 81a14c9: one-line wording fix, handoff cost > work. Credit Mellow.
+
+## Amendment 3 (Detoro, 2026-10-07, post-rollout, human observation in OmniChat)
+"Running through a Coordinator" bullet 3 ("Create every task with `--watchers <coordinatorId>` and do NOT watch routine lanes yourself") is unsatisfiable on the shipped engine: `--watchers` subscribes the owner too (`commands/task.rs:563-567`), so the Lead was a watcher on every routine lane and every wake fanned out to both leads (the "two leads" the human saw in OmniChat). Fix is a new switch, task `task-create-no-self-watch` (plan `docs/plans/2026-10-07-task-create-no-self-watch.md`), which also rewrites that bullet in `leadership/SKILL.md`. ADR 0010 Amendment 1 carries the corrected engine facts and the roster the human actually rolled out (Coordinator = Aitthi, not Alesso).
