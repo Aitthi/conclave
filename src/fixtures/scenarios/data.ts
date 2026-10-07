@@ -885,6 +885,27 @@ export const roles: Role[] = [
     kind: "builtin",
   },
   {
+    id: "coordinator",
+    name: "Coordinator",
+    description: "Routes work between the lead and the workers; never rules.",
+    skillIds: ["coordinator", "collaboration"],
+    kind: "builtin",
+  },
+  {
+    id: "implementer-complex",
+    name: "Implementer (Complex)",
+    description: "Multi-file logic, refactors, migrations.",
+    skillIds: ["implementer", "collaboration"],
+    kind: "builtin",
+  },
+  {
+    id: "implementer-routine",
+    name: "Implementer (Routine)",
+    description: "Well-specified single-purpose changes.",
+    skillIds: ["implementer", "collaboration"],
+    kind: "builtin",
+  },
+  {
     id: "designer",
     name: "Designer",
     description: "Owns the design canon and the design-acceptance gate.",

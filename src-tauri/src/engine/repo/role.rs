@@ -483,7 +483,16 @@ mod tests {
         );
 
         let ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
-        for expected in ["lead", "implementer", "reviewer", "researcher", "designer"] {
+        for expected in [
+            "lead",
+            "implementer",
+            "implementer-complex",
+            "implementer-routine",
+            "coordinator",
+            "reviewer",
+            "researcher",
+            "designer",
+        ] {
             assert!(
                 ids.contains(&expected),
                 "builtin role '{expected}' must ship"
@@ -502,6 +511,26 @@ mod tests {
             "lead must bundle the leadership skill"
         );
         assert!(lead.skill_ids.contains(&"agent-loop".to_string()));
+
+        let coordinator = roles
+            .iter()
+            .find(|r| r.id == "coordinator")
+            .expect("coordinator ships");
+        assert_eq!(coordinator.name, "Coordinator");
+        assert!(
+            coordinator.skill_ids.contains(&"coordinator".to_string()),
+            "coordinator must bundle the coordinator skill"
+        );
+        for tiered in ["implementer-complex", "implementer-routine"] {
+            let role = roles
+                .iter()
+                .find(|r| r.id == tiered)
+                .unwrap_or_else(|| panic!("{tiered} ships"));
+            assert!(
+                role.skill_ids.contains(&"implementer".to_string()),
+                "{tiered} must bundle the implementer skill"
+            );
+        }
     }
 
     #[test]

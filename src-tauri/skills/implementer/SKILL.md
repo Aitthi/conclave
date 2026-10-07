@@ -42,8 +42,8 @@ falls short.)
   <screen>.tsx` plus `.arta/snapshots/<screen>.png`. The proto `.tsx` is canon
   (tokens, spacing, copy, states, icons) — read the file itself, not just the
   screenshot.
-- A plan for visual work that names no design canon is a GAP to escalate to the
-  lead, never permission to style it yourself — "I made it look reasonable" is
+- A plan for visual work that names no design canon is a GAP to escalate to your
+  supervisor, never permission to style it yourself — "I made it look reasonable" is
   how the app drifts.
 - Deviating from the canon is a design change: escalate to the designer named in
   the plan (the lead rules ties) before building the deviation. Expect a
@@ -54,19 +54,23 @@ falls short.)
 
 - Your escalation target is named in the handoff and on the task (owner id, plan
   pointers). Read `task brief` before asking anyone anything.
-- Escalate to the LEAD, not the human — `conclave tell <ownerId> <message>`;
-  text in your own terminal reaches nobody. The human delegated the loop; going
-  around the lead re-opens closed decisions.
+- Escalate up your chain, never to the human. A decision (design or spec
+  conflict) goes on the task as a `task challenge` — the engine delivers it to
+  the owner, who rules. Everything else (a blocker, a result, a question the
+  plan answers) goes to your supervisor: `conclave tell <supervisorId>
+  <message>`, the `supervisorName` row in `conclave agent list` (the task owner
+  when none is set). Text in your own terminal reaches nobody. The human
+  delegated the loop; going around your chain re-opens closed decisions.
 - Keep escalations compact: cite task slugs, event ids, gate ids, file paths,
   line references. Do not paste full task lists, raw transcript text, or long
   logs; put durable evidence in files or task gates and point at it.
 - Subagents you dispatch report to YOU — you are their escalation target the way
-  the lead is yours. Don't forward their questions upward unless they genuinely
-  conflict with a recorded decision.
+  your supervisor is yours. Don't forward their questions upward unless they
+  genuinely conflict with a recorded decision.
 - With other implementers in parallel lanes: stay inside your lane's declared
-  boundary, and take any dispute over a SHARED interface or boundary file to the
-  lead — never settle it privately, because the record won't know what you
-  agreed.
+  boundary, and take any dispute over a SHARED interface or boundary file to
+  your supervisor — never settle it privately, because the record won't know
+  what you agreed.
 
 ## Follow the plan — but don't follow it off a cliff
 
@@ -77,8 +81,9 @@ falls short.)
 - First classify: is this a typo (the plan contradicts ITSELF or already-
   approved code) or a design choice you happen to dislike? Verify against the
   recorded decisions and the code before deciding which. Disagreeing with a
-  recorded decision is never grounds to deviate — propose the change to the
-  lead; until the record changes, build what it says.
+  recorded decision is never grounds to deviate — propose the change as a
+  task challenge (the task owner rules); until the record changes, build what
+  it says.
 
 ## Escalate with evidence and a default
 
@@ -88,8 +93,8 @@ falls short.)
   do?" with none of those is homework you assigned the lead; a good escalation
   can be approved with one word. File it on the task — `conclave task challenge
   <ws> <slug> --claim <t> --evidence <t> --proposal <t> --default <t>
-  [--deadline-min N]` — so the lead rules on the record (`task rule`) and an
-  expired deadline fires your stated default instead of leaving you blocked.
+  [--deadline-min N]` — so the task owner rules on the record (`task rule`) and
+  an expired deadline fires your stated default instead of leaving you blocked.
 - Escalate design/spec conflicts only. Implementation judgment within the plan's
   intent — naming, decomposition, test shape — is yours: decide, log it with
   `conclave task note <ws> <slug> <text>`, move on.
@@ -157,14 +162,18 @@ falls short.)
 
 - Post a task note (`conclave task note <ws> <slug> <text>`) when a task or phase
   lands: what finished, the commit SHA, what's next, anything you decided.
-  Routine notes are ledger-only and do not wake the lead, so you don't interrupt
-  them to stay visible.
-- Prefix a note that needs the lead NOW with `READY`, `BLOCKED`, or `ESCALATION`
-  (exact word, start of the note). Only marked notes, a failing gate
+  Routine notes are ledger-only and do not wake your supervisor, so you don't
+  interrupt them to stay visible.
+- Prefix a note that needs your supervisor NOW with `READY`, `BLOCKED`, or
+  `ESCALATION` (exact word, start of the note). Only marked notes, a failing gate
   (`exit != 0`), a challenge or its ruling, and a `review`/`abandoned`/`merged`
   transition wake watchers; everything else records silently. If you go quiet ≥10
-  minutes holding a claim, the stall engine pages the lead, so an
-  important-but-unmarked note is never lost, only delayed.
+  minutes holding a claim, the stall engine pages your supervisor, so an
+  important-but-unmarked note is never lost, only delayed. A READY or BLOCKED
+  note has a fixed shape — the wake word, then `task: <slug>` / `status:
+  done|blocked|needs_decision` / `files: <paths>` / `note: <one line>`; a
+  reviewer's verdict is exactly `READY REVIEW-PASS @<sha>` or `BLOCKED
+  REVIEW-FAIL @<sha>` with findings in the same note.
 - Commit per task with messages in the repo's own style. Small, reviewable,
   revertable.
 - Move YOUR work to `review` (`conclave task state <ws> <slug> review`);
