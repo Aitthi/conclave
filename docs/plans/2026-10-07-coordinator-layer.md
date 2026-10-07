@@ -168,7 +168,9 @@ R6. `src-tauri/skills/implementer/SKILL.md` edits (current line numbers):
 - L162: `Prefix a note that needs the lead NOW` → `needs your supervisor NOW`.
 - L166: `the stall engine pages the lead` → `the stall engine pages your supervisor`.
 - Append to the "report at boundaries" bullet that contains L162 (same bullet, after "only delayed."): ` A READY or BLOCKED note has a fixed shape — the wake word, then `task: <slug>` / `status: done|blocked|needs_decision` / `files: <paths>` / `note: <one line>`; a reviewer's verdict is exactly `READY REVIEW-PASS @<sha>` or `BLOCKED REVIEW-FAIL @<sha>` with findings in the same note.`
-- L3, L7, L46, L49, L81, L88, L126, L129 keep "lead" (plan author / trust sense).
+- L45-46: `a GAP to escalate to the lead` → `a GAP to escalate to your supervisor` (Amendment 1).
+- L80-81: `propose the change to the lead; until the record changes` → `propose the change as a task challenge (the task owner rules); until the record changes` (Amendment 1).
+- L3, L7, L49, L88, L126, L129 keep "lead" (plan author / trust / ruling sense).
 
 R7. `src-tauri/skills/leadership/SKILL.md`: insert a new section after "## Running multiple implementers" (i.e. before L138 `## Rule fast, in writing`):
 ```
@@ -231,7 +233,7 @@ Nothing else.
    - `cargo clippy --manifest-path src-tauri/Cargo.toml --quiet --all-targets -- -D warnings`
    - `pnpm tsc --noEmit`
    - UI Pixel Gate (CLAUDE.md): `pnpm uishot builder --viewport 1440x1900`, READ the PNG, confirm the role picker shows Coordinator, Implementer (Complex), Implementer (Routine); attach the shot path in the READY note. Kill any foreign vite server on :1420 first (`lsof -nP -iTCP:1420 -sTCP:LISTEN`).
-4. Sanity-read the composed text once as a worker would: `cat src-tauri/skills/comms-protocol/SKILL.md src-tauri/skills/implementer/SKILL.md | grep -n -i "the lead"` — every remaining hit must be a plan-author/human-channel sense, not a routing target. List the remaining line numbers in the READY note.
+4. Sanity-read the composed text once as a worker would: `cat src-tauri/skills/comms-protocol/SKILL.md src-tauri/skills/implementer/SKILL.md | grep -n -i "the lead"` — every remaining hit must be a plan-author/human-channel/ruling sense, not a routing target (expected after Amendment 1: L3, L7, L49, L88, L126, L129 of implementer/SKILL.md). List the remaining line numbers in the READY note.
 
 ## Risk ledger
 - Line numbers above are from main 97814e2; if an edit shifts them, anchor on the quoted text, not the number.
@@ -250,3 +252,6 @@ Over the engine socket (`agentDef.save`, `agentDef.addToWorkspace`, `instance.sp
 4. `conclave position set <ws> <Alesso> --supervisor 30fa04f4-e047-4241-a9ed-f452529952be`; for Dew, Tiësto, Zedd, Arta, Mellow, Guetta: `--supervisor <Alesso>`.
 5. `conclave bb set <ws> protocol:coordinator-flow "STANDING RULE 2026-10-07 (ADR 0010): workers message Alesso (Coordinator); Lead owns tasks + merges on MERGE-READY; create tasks with --watchers <AlessoId>."`
 6. Restart the running claude-code workers so the new sidecars and preambles load (their supervisors changed).
+
+## Amendment 1 (Detoro, 2026-10-07, challenge 5be960d1 by Mellow — UPHELD)
+R6's keep-list wrongly kept two escalation verbs: implementer/SKILL.md L45-46 ("GAP to escalate to the lead" — a plan gap is Coordinator escalation condition 1/4) and L80-81 ("propose the change to the lead" — a disagreement with a recorded decision is a `task challenge`, owner rules). Both now replaced per R6 above; Step 4's expected remainder is L3, L7, L49, L88, L126, L129. Credit Mellow.
