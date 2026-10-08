@@ -31,12 +31,14 @@ use crate::engine::{AppError, AppState};
 /// Sonnet 5, Haiku 4.5) shown in Claude Code's picker; keep opus-4-8 so
 /// existing rows stay valid. Human request 2026-09-23: add Opus 5.5
 /// (`claude-opus-5-5`), newest-first after Fable 5.1. Human request
-/// 2026-10-01: add Sonnet 5.5 (`claude-sonnet-5-5`) after Opus 5.5. Mirrored
-/// by `CLAUDE_MODELS` in `src/lib/modelCatalogue.ts` (Lane C).
+/// 2026-10-01: add Sonnet 5.5 (`claude-sonnet-5-5`) after Opus 5.5. Human
+/// request 2026-10-08: add Haiku 5.5 (`claude-haiku-5-5`) after Sonnet 5.5.
+/// Mirrored by `CLAUDE_MODELS` in `src/lib/modelCatalogue.ts` (Lane C).
 pub const CLAUDE_MODELS: &[&str] = &[
     "claude-fable-5-1",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
+    "claude-haiku-5-5",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-haiku-4-5",
@@ -996,6 +998,7 @@ pub(crate) mod tests {
         assert_eq!(CLAUDE_MODELS.first().copied(), Some("claude-fable-5-1"));
         assert_eq!(CLAUDE_MODELS.get(1).copied(), Some("claude-opus-5-5"));
         assert_eq!(CLAUDE_MODELS.get(2).copied(), Some("claude-sonnet-5-5"));
+        assert_eq!(CLAUDE_MODELS.get(3).copied(), Some("claude-haiku-5-5"));
 
         let mut opus = agent("opus");
         opus.model = Some("claude-opus-5-5".into());
@@ -1006,6 +1009,11 @@ pub(crate) mod tests {
         sonnet.model = Some("claude-sonnet-5-5".into());
         validate_draft(&resp(vec![sonnet], vec![]), DraftMode::Agent, &cat())
             .expect("claude-sonnet-5-5 must pass draft validation");
+
+        let mut haiku = agent("haiku");
+        haiku.model = Some("claude-haiku-5-5".into());
+        validate_draft(&resp(vec![haiku], vec![]), DraftMode::Agent, &cat())
+            .expect("claude-haiku-5-5 must pass draft validation");
     }
 
     #[test]
