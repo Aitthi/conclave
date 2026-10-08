@@ -20,6 +20,10 @@ Human spec 2026-10-08, saved verbatim at `docs/superpowers/specs/2026-10-08-team
 - D9. Standard `needs_decision`: an Implementer (Standard) that must touch a shared interface posts `BLOCKED` with `status: needs_decision` naming the interface and the consumers; the Coordinator escalates (condition 1); the lead re-tiers the task to `complex` by plan amendment and the Coordinator re-dispatches. The implementer does not widen the task and does not pick a workaround.
 - D10. Milestone-end spot-check: on `ESCALATION milestone-done` the Coordinator lists which merged slugs were Standard-reviewed; the lead dispatches a spot-check of at least one to Reviewer (Complex) (`task note SPOT-CHECK <slug> @<sha>` → verdict in the same shape). A category that slips twice is marked `review: complex` in future plans. Skills name ROLES, never agents.
 
+## Amendment (Detoro, 2026-10-08, after Mellow's review of lane c1cf903)
+- R11: the READY/BLOCKED shape applies only to a task the Runner claimed; a gate re-run reports only the `GATES-OK` / `GATES-RED` line, and a sha mismatch is `GATES-SKIPPED <slug> @<sha> head is <actual>`, never a BLOCKED on the implementer's task.
+- R9: the Coordinator handles that Runner `GATES-SKIPPED … head is <actual>` by asking the implementer to re-post READY at the current sha; it never routes it to review. Landed on main by task `runner-rerun-wording` (owner solo, credit Mellow).
+
 ## Global constraints (every lane inherits)
 - Record each gate with `conclave task gate 11ecf99b-53f4-4c24-b538-b19e5933a9e3 <slug> -- <cmd>` (words after `--` unquoted). A gate narrated in a note does not count.
 - Line numbers are from main d15c1bf; anchor on the quoted text if they shift.

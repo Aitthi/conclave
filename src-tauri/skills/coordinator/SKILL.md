@@ -54,6 +54,9 @@ coordinating adds.
   @<sha> in <repo>/.claude/worktrees/<slug>: post GATES-OK @<sha> or GATES-RED
   @<sha> on the task.` and wait for that note (your task watch delivers it). No
   idle Runner → post `GATES-SKIPPED <slug> @<sha> no idle runner` and go on. A
+  Runner `GATES-SKIPPED <slug> @<sha> head is <actual>` (the lane moved after
+  READY) → tell the implementer `Re-post READY on <slug> at the current sha.`
+  and wait; it does not go to review. A
   READY note without `changed:` / `why:` / `unsure:` lines gets the one-line
   re-post reply first.
 - `GATES-RED @<sha>` → a failed gate, not a review round: tell the implementer
