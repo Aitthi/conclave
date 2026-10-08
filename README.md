@@ -54,6 +54,69 @@ pnpm tauri build   # produces the .app bundle
 - Design specs and plans: `docs/superpowers/`
 - Brand assets: `docs/brand/README.md`
 
+## Example team setup
+
+A suggested way to organise a team in Conclave. Nothing here is enforced by the app:
+roles, tiers and routing come from the role and skill definitions, so you can change them.
+Model names are examples; any supported agent CLI can fill a role.
+
+```
+                         ┌─────────────┐
+                         │    Human    │   final decision-maker
+                         └──────┬──────┘
+                                ▼
+                  ┌───────────────────────────┐
+                  │     Lead (Fable 5.1)      │   architecture · planning
+                  │                           │   tags every task
+                  └─────────────┬──┬──────────┘
+                                │  ▲
+             plan (shared file) │  │ escalate
+                                ▼  │
+                  ┌─────────────┴──┴──────────┐
+             ┌───►│   Coordinator (Sonnet)    │
+             │    │ dispatch by tag + deps    │
+             │    └─────────────┬─────────────┘
+             │                  │
+             │   ┌─────────┬────┴────┬─────────┬─────────┐
+             │   ▼         ▼         ▼         ▼         ▼
+             │Research  Routine   Standard  Complex   Design
+             │(Sonnet)  (Sonnet)  (Sonnet)  (Opus)    (Opus)
+             │   │         │         │         │         │
+             ├───┘         └─────────┼─────────┘         │
+             │                       ▼                   │
+             │             ┌───────────────────┐         │
+             │             │  Runner (Haiku)   │         │
+             │             │ lint · typecheck  │         │
+             │             │ build · test      │         │
+             │             └─────────┬─────────┘         │
+             │◄─── fail ─────────────┤                   │
+             │                       │ pass              │
+             │             ┌─────────┴─────────┐         │
+             │             ▼                   ▼         │
+             │     ┌───────────────┐   ┌───────────────┐ │
+             │     │ Reviewer      │   │ Reviewer      │◄┘
+             │     │ (Standard)    │   │ (Complex)     │
+             │     │ Sonnet        │   │ Opus          │
+             │     └───────┬───────┘   └───────┬───────┘
+             │             └─────────┬─────────┘
+             └───── pass / fail ─────┘
+```
+
+Routine, Standard and Complex are the three Implementer tiers. The Lead tags each task with a tier in the plan, and the Coordinator dispatches by that tag.
+
+**Routing rules**
+
+- **Reviewer (Standard)** reviews Routine and Standard tasks.
+- **Reviewer (Complex)** reviews Complex tasks, changes to shared interfaces, security-related work, and all design output. Design output skips the Runner.
+- **Results and handoffs go through the Coordinator**, which updates status and dispatches the next task or the required fix. Agents do not hand work to each other directly. Challenges still go straight to the task owner.
+
+**Escalate to Lead when**
+
+- A task requires changing the design or the plan.
+- A decision between multiple approaches is needed.
+- A task fails review more than 2 times.
+- A milestone is complete.
+
 ## License
 
 [MIT](LICENSE)
