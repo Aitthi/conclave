@@ -42,6 +42,7 @@ import {
   rootMembers,
 } from "../lib/positions";
 import { PositionLine } from "./Position";
+import { shortModel } from "../lib/providerLabel";
 import { mockTaskGet, mockTaskList } from "./laneBoardMock";
 
 /* Lane board + workspace telemetry strip (ADR 0008 · Lane D).
@@ -802,6 +803,29 @@ function GuideColumns({
   );
 }
 
+/** Level · role line plus the model name on the same row; the model truncates, never wraps. */
+function PositionWithModel({ agent }: { agent?: WorkspaceAgent | null }) {
+  const model = shortModel(agent?.model);
+  return (
+    <div className="mt-0.5 flex items-center gap-1 min-w-0">
+      <PositionLine
+        levelId={agent?.level}
+        track={agent ? trackLabelOf(agent) : "Agent"}
+        compact
+      />
+      {model && (
+        <span
+          className="font-mono truncate"
+          title={agent?.model ?? undefined}
+          style={{ fontSize: "0.62rem", color: FAINT }}
+        >
+          · {model}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function OrgNodeRow({
   agent,
   ident,
@@ -823,12 +847,7 @@ function OrgNodeRow({
             <LoaderCircle size={11} className="shrink-0 animate-spin" style={{ color: WORKING }} />
           )}
         </div>
-        <PositionLine
-          levelId={agent.level}
-          track={trackLabelOf(agent)}
-          compact
-          className="mt-0.5"
-        />
+        <PositionWithModel agent={agent} />
       </div>
       <div className="flex flex-col items-end gap-0.5 shrink-0">
         {reportCount > 0 && (
@@ -1100,12 +1119,7 @@ function EscalationStep({
           {human ? (
             <div className="text-[0.66rem] text-text-secondary">Top of the chain · final tiebreaker</div>
           ) : (
-            <PositionLine
-              levelId={agent?.level}
-              track={agent ? trackLabelOf(agent) : "Agent"}
-              compact
-              className="mt-0.5"
-            />
+            <PositionWithModel agent={agent} />
           )}
         </div>
         <span
