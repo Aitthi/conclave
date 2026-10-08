@@ -150,3 +150,20 @@ summaries, gate checks) should stop spending Opus/Sonnet tokens.
   on role `runner` with `model: claude-haiku-5-5` after the rebuild.
 - Plan: `docs/plans/2026-10-08-haiku-runner-orgchart-model.md` (task
   `role-runner`).
+
+## Amendment 3 (2026-10-08) — Standard tier, tiering skill, reviewer split, Runner gate re-run
+
+Spec: `docs/superpowers/specs/2026-10-08-team-structure-v2-human.md`. Plan: `docs/plans/2026-10-08-team-tiers-v2.md` (task `team-tiers-v2`).
+
+- D1. Tiers `trivial` | `routine` | `standard` | `complex`, by scope of decision; when two fit, the higher wins.
+- D2. New builtin roles `implementer-standard`, `reviewer-standard`, `reviewer-complex`; existing ids are not renamed.
+- D3. New skill `reviewer` (diff-only, comment-only) replaces `implementer` on every reviewer role.
+- D4. New skill `tiering` (`mandatory: false`) bundled by `lead` and `coordinator`.
+- D5. The Coordinator derives a tier only for a row without one (`TIER <tier> derived <reason>`); it never re-tiers.
+- D6. Review routing by tier with upward fallback; `REVIEW-REROUTE <slug> @<sha> complex` is not a round.
+- D7. Before review the Coordinator has an idle Runner re-run the gates without claiming (`GATES-OK` / `GATES-RED`); no idle Runner → `GATES-SKIPPED`.
+- D8. An implementer READY adds `changed:` / `why:` / `unsure:`; the reviewer starts from `unsure:`.
+- D9. A Standard implementer that must touch a shared interface posts `status: needs_decision`; the lead re-tiers to `complex`.
+- D10. On `milestone-done` the lead has Reviewer (Complex) spot-check at least one Standard-reviewed slug; a category that slips twice becomes `review: complex`.
+
+Rollout: roles and skills reach agents only after rebuild + relaunch. knock2 → `implementer-standard`, Mellow → `reviewer-complex`, and a new Reviewer (Standard) agent on `claude-sonnet-5-5` are agent-definition changes made in the Builder afterwards; until that agent exists, the D6 fallback sends routine/standard reviews to Reviewer (Complex).
