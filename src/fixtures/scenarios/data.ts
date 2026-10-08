@@ -906,6 +906,13 @@ export const roles: Role[] = [
     kind: "builtin",
   },
   {
+    id: "runner",
+    name: "Runner",
+    description: "Lint, format, test runs and log summaries on a Haiku-class model.",
+    skillIds: ["runner", "collaboration"],
+    kind: "builtin",
+  },
+  {
     id: "designer",
     name: "Designer",
     description: "Owns the design canon and the design-acceptance gate.",

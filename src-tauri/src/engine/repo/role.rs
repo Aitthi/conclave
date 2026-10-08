@@ -489,6 +489,7 @@ mod tests {
             "implementer-complex",
             "implementer-routine",
             "coordinator",
+            "runner",
             "reviewer",
             "researcher",
             "designer",
@@ -520,6 +521,15 @@ mod tests {
         assert!(
             coordinator.skill_ids.contains(&"coordinator".to_string()),
             "coordinator must bundle the coordinator skill"
+        );
+        let runner = roles
+            .iter()
+            .find(|r| r.id == "runner")
+            .expect("runner ships");
+        assert_eq!(runner.name, "Runner");
+        assert!(
+            runner.skill_ids.contains(&"runner".to_string()),
+            "runner must bundle the runner skill"
         );
         for tiered in ["implementer-complex", "implementer-routine"] {
             let role = roles

@@ -132,3 +132,21 @@ Corrections:
   (`7d560bae-09dc-4535-befb-feed5a95aa05`) and OmniChat (`bf2fdd0f-…`); Tiësto is
   Implementer (Routine) on `claude-sonnet-5-5`; Zedd is Implementer (Routine)
   junior; Dew is Implementer (Complex) on Opus. No agent named Alesso exists.
+
+## Amendment 2 (2026-10-08) — trivial tier and the Runner role
+
+Human request 2026-10-08: the small chores (lint/format, test runs, log
+summaries, gate checks) should stop spending Opus/Sonnet tokens.
+
+- Third dispatch tier `trivial` below `routine` → builtin role `runner`
+  (bundled skill `runner`, compact; not the 183-line `implementer` skill).
+- A Runner takes: lint, format, test/build runs, gate re-runs, log and
+  transcript summaries. It reports exit code + log path + a five-line summary.
+- A Runner never: edits logic, picks between designs, widens a task, or takes a
+  routine/complex task. A defect found is a task note with evidence.
+- Dispatch (Coordinator skill): a trivial task goes to an idle Runner; a Routine
+  implementer may take it when no Runner is idle; never the reverse.
+- The model lives on the agent definition, not the role: create the definition
+  on role `runner` with `model: claude-haiku-5-5` after the rebuild.
+- Plan: `docs/plans/2026-10-08-haiku-runner-orgchart-model.md` (task
+  `role-runner`).

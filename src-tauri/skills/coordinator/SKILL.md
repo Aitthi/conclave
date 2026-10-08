@@ -28,7 +28,7 @@ coordinating adds.
 - The lead creates each task with you as a watcher. On your first turn and
   after every restore, `conclave orient <ws>` then `conclave task list <ws>`
   and `conclave task watch <ws> <slug>` for any live task you are not watching.
-- Every plan carries a task table: slug, tier (`complex` | `routine`), role,
+- Every plan carries a task table: slug, tier (`complex` | `routine` | `trivial`), role,
   deps, acceptance. A task is claimable when its state is `planned` and every
   dep is `merged`. Dispatch it to an IDLE agent of the matching role
   (`conclave agent list <ws>` — `working` false, matching `roleName`,
@@ -36,6 +36,8 @@ coordinating adds.
   start <ws> <slug>; read task brief first; report READY/BLOCKED on the task.`
   Tier is a hint: a Complex implementer may take a routine task when no Routine
   implementer is idle; never the reverse.
+  A trivial task goes to an idle Runner; a Routine implementer may take it when
+  no Runner is idle; a Runner never takes a routine or complex task.
 - One task per agent at a time. Record every dispatch as a task note:
   `conclave task note <ws> <slug> DISPATCH <agentName> <agentId>`.
 
