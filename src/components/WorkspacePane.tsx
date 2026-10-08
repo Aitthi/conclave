@@ -26,6 +26,7 @@ import { ArtifactsView } from "./ArtifactsView";
 import { ContextTopBar, ContextBottomBar } from "./ContextBars";
 import { useSessionSnapshots } from "../lib/useSessionSnapshots";
 import { getTermTabMode } from "../lib/termMode";
+import { blockedByStartBatch } from "../lib/startBatchGate";
 import type { RoutingTarget } from "./RoutingPicker";
 
 // Terminal tab mode, read once — it cannot change within a page lifetime
@@ -481,27 +482,20 @@ export function WorkspacePane({
   // stayed offline and messages to it merely queued. Idempotent via the ref guard.
   useEffect(() => {
     if (workspaceRunState !== "started" || workspaceLifecyclePhase !== "idle") return;
-    const readyIds = workspaceStartBatch
-      ? new Set(workspaceStartBatch.readyAgentIds)
-      : null;
     for (const tab of tabs) {
       if (tab.availability !== "active") continue;
-      if (readyIds && !readyIds.has(tab.instanceId)) continue;
+      if (blockedByStartBatch(workspaceStartBatch, tab.instanceId)) continue;
       void spawnInstance(tab.instanceId).catch(() => {});
     }
   }, [tabs, spawnInstance, workspaceLifecyclePhase, workspaceRunState, workspaceStartBatch]);
 
-  // Fallback: also spawn whatever becomes active (e.g. a tab added after load).
+  // Fallback: also spawn whatever becomes active — the path a tab added after
+  // Start takes (the Start batch never saw it, so the gate lets it through).
   useEffect(() => {
     if (workspaceRunState !== "started" || workspaceLifecyclePhase !== "idle") return;
     const activeTab = tabs.find((tab) => tab.instanceId === activeInstanceId);
     if (!activeTab || activeTab.availability !== "active") return;
-    if (
-      workspaceStartBatch &&
-      !workspaceStartBatch.readyAgentIds.includes(activeTab.instanceId)
-    ) {
-      return;
-    }
+    if (blockedByStartBatch(workspaceStartBatch, activeTab.instanceId)) return;
     void spawnInstance(activeTab.instanceId).catch(() => {});
   }, [activeInstanceId, spawnInstance, tabs, workspaceLifecyclePhase, workspaceRunState, workspaceStartBatch]);
 
