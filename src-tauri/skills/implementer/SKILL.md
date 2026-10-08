@@ -171,9 +171,14 @@ falls short.)
   minutes holding a claim, the stall engine pages your supervisor, so an
   important-but-unmarked note is never lost, only delayed. A READY or BLOCKED
   note has a fixed shape — the wake word, then `task: <slug>` / `status:
-  done|blocked|needs_decision` / `files: <paths>` / `note: <one line>`; a
-  reviewer's verdict is exactly `READY REVIEW-PASS @<sha>` or `BLOCKED
-  REVIEW-FAIL @<sha>` with findings in the same note.
+  done|blocked|needs_decision` / `files: <paths>` / `note: <one line>`, and a
+  READY adds `changed: <what>` / `why: <why>` / `unsure: <where you want the
+  reviewer's eyes, or none>` — one line each; a reviewer's verdict is exactly
+  `READY REVIEW-PASS @<sha>` or `BLOCKED REVIEW-FAIL @<sha>` with findings in
+  the same note.
+- `status: needs_decision` is for a shared interface, type, or schema the task
+  would have to change: name it and its consumers, stop, do not work around
+  it — the owner re-tiers the task.
 - Commit per task with messages in the repo's own style. Small, reviewable,
   revertable.
 - Move YOUR work to `review` (`conclave task state <ws> <slug> review`);

@@ -149,10 +149,20 @@ final. Composes with Collaboration. Walk these per TASK, not once per session.
   still pinged once on the `review` transition by design. Watch only what you
   want woken for.
 - The plan file carries a task table the Coordinator can dispatch from without
-  asking: one row per task with `slug`, `tier` (`complex` | `routine`), `role`,
-  `deps` (slugs that must be `merged` first), `acceptance` (the gate commands
-  and the READY evidence expected). A loose plan makes the Coordinator escalate
-  on every dispatch and puts you back in the loop.
+  asking: one row per task with `slug`, `tier` (`complex` | `standard` |
+  `routine` | `trivial`), `role`, `deps` (slugs that must be `merged` first),
+  `acceptance` (the gate commands and the READY evidence expected); an optional
+  `review: complex` marks a row whose diff touches a shared interface or
+  security so the Coordinator routes it to Reviewer (Complex) regardless of
+  tier. A loose plan makes the Coordinator escalate on every dispatch and puts
+  you back in the loop.
+- The `tiering` skill carries the rubric; a row you leave without a tier makes
+  the Coordinator derive one and note it. Tier by scope of decision, not code
+  difficulty, and keep a standard task inside one module.
+- On `ESCALATION milestone-done`, dispatch a spot-check of at least one
+  Standard-reviewed merged slug to Reviewer (Complex) (`task note SPOT-CHECK
+  <slug> @<sha>`); a finding category that slips twice becomes
+  `review: complex` in your next plans.
 - The Coordinator never rules. When it escalates (`ESCALATION <reason>` note +
   tell), answer with a ruling on the task record (`task rule`, plan amendment,
   or a note starting `RULED:`) — never with a chat reply it has to interpret.

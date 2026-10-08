@@ -488,9 +488,12 @@ mod tests {
             "implementer",
             "implementer-complex",
             "implementer-routine",
+            "implementer-standard",
             "coordinator",
             "runner",
             "reviewer",
+            "reviewer-standard",
+            "reviewer-complex",
             "researcher",
             "designer",
         ] {
@@ -512,6 +515,10 @@ mod tests {
             "lead must bundle the leadership skill"
         );
         assert!(lead.skill_ids.contains(&"agent-loop".to_string()));
+        assert!(
+            lead.skill_ids.contains(&"tiering".to_string()),
+            "lead must bundle the tiering skill"
+        );
 
         let coordinator = roles
             .iter()
@@ -522,6 +529,10 @@ mod tests {
             coordinator.skill_ids.contains(&"coordinator".to_string()),
             "coordinator must bundle the coordinator skill"
         );
+        assert!(
+            coordinator.skill_ids.contains(&"tiering".to_string()),
+            "coordinator must bundle the tiering skill"
+        );
         let runner = roles
             .iter()
             .find(|r| r.id == "runner")
@@ -531,7 +542,11 @@ mod tests {
             runner.skill_ids.contains(&"runner".to_string()),
             "runner must bundle the runner skill"
         );
-        for tiered in ["implementer-complex", "implementer-routine"] {
+        for tiered in [
+            "implementer-complex",
+            "implementer-standard",
+            "implementer-routine",
+        ] {
             let role = roles
                 .iter()
                 .find(|r| r.id == tiered)
@@ -539,6 +554,16 @@ mod tests {
             assert!(
                 role.skill_ids.contains(&"implementer".to_string()),
                 "{tiered} must bundle the implementer skill"
+            );
+        }
+        for reviewer in ["reviewer", "reviewer-standard", "reviewer-complex"] {
+            let role = roles
+                .iter()
+                .find(|r| r.id == reviewer)
+                .unwrap_or_else(|| panic!("{reviewer} ships"));
+            assert!(
+                role.skill_ids.contains(&"reviewer".to_string()),
+                "{reviewer} must bundle the reviewer skill"
             );
         }
     }
