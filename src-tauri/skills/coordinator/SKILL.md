@@ -52,7 +52,11 @@ coordinating adds.
 - A `READY` note or a `review` transition from the implementer means: FIRST
   tell an idle Runner (`roleName` Runner, `working` false) `Re-run gates <slug>
   @<sha> in <repo>/.claude/worktrees/<slug>: post GATES-OK @<sha> or GATES-RED
-  @<sha> on the task.` and wait for that note (your task watch delivers it). No
+  @<sha> on the task.` and wait for that note (your task watch delivers any note that starts with
+  `GATES-`). Ten minutes with no note → `conclave task brief <ws> <slug>` ONCE:
+  a `GATES-` note already on the ledger is acted on as if it had just arrived;
+  none → tell the Runner once more, then `GATES-SKIPPED <slug> @<sha> runner
+  silent` and go on. No
   idle Runner → post `GATES-SKIPPED <slug> @<sha> no idle runner` and go on. A
   Runner `GATES-SKIPPED <slug> @<sha> head is <actual>` (the lane moved after
   READY) → tell the implementer `Re-post READY on <slug> at the current sha.`

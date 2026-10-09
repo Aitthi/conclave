@@ -167,3 +167,16 @@ Spec: `docs/superpowers/specs/2026-10-08-team-structure-v2-human.md`. Plan: `doc
 - D10. On `milestone-done` the lead has Reviewer (Complex) spot-check at least one Standard-reviewed slug; a category that slips twice becomes `review: complex`.
 
 Rollout: roles and skills reach agents only after rebuild + relaunch. knock2 → `implementer-standard`, Mellow → `reviewer-complex`, and a new Reviewer (Standard) agent on `claude-sonnet-5-5` are agent-definition changes made in the Builder afterwards; until that agent exists, the D6 fallback sends routine/standard reviews to Reviewer (Complex).
+
+## Amendment 4 (2026-10-09) — Gate-note wake
+
+Plan: `docs/plans/2026-10-09-gate-note-wake.md` (task `gate-note-wake`). Supersedes the engine fact "only READY/BLOCKED/ESCALATION notes wake" above; the historical lines stay.
+
+- Root cause: `GATES-*` / `REVIEW-REROUTE` were ledger-only under `note_wakes_watchers`, so Amendment 3 D7's "wait for the note" never fired (brust, OmniChat 2026-10-08/09).
+- D1. `note_wakes_watchers` also wakes on `GATES-OK`, `GATES-RED`, `GATES-SKIPPED`, `REVIEW-REROUTE` (exact prefix, case-sensitive, position 0); pinned in `wakes_watchers_encodes_exactly_the_decision_1_list`. No double `tell`, no wake-on-every-note.
+- D2. Runner skill: `GATES-` is the first character of the note; the Runner does not also tell.
+- D3. Coordinator skill: ten minutes with no `GATES-` note → read `task brief` once, then tell the Runner once more, then `GATES-SKIPPED … runner silent`. No polling.
+- D4. Guard: any plan or skill introducing a phrase a watcher WAITS FOR adds it to `note_wakes_watchers` in the same lane, and the plan names the pinning test.
+- D5. Role skill bundles are copied into a definition at create (ADR 0005), so the `tiering` skill reaches Detoro and Aitthi only via a Builder edit; that is the rollout rule for future role-bundle changes.
+
+Rollout: engine + skills reach agents after rebuild + relaunch; `tiering` for Detoro and Aitthi via a Builder edit.

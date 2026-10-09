@@ -45,7 +45,9 @@ You do not implement, design, or fix. Your context is for facts, not judgment.
   line (`conclave task brief <ws> <slug>`) from `<path>`, each as
   `conclave task gate <ws> <slug> -- <cmd>`, then post `GATES-OK @<sha>` or
   `GATES-RED @<sha>` listing each gate id and exit code. That one line is the
-  whole report for a re-run.
+  whole report for a re-run. It reaches your supervisor through task watch ONLY
+  when `GATES-` is the first character of the note — no date, name or preamble
+  before it. Do not also tell: the note is the delivery.
 
 ## What you never do
 
