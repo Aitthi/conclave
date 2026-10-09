@@ -1577,11 +1577,21 @@ fn wakes_watchers(kind: &str, payload: &Value) -> bool {
 
 /// A note wakes watchers only when its text opens with a decision marker —
 /// exact prefix, case-sensitive, at position 0 (decision 1). `"ready …"`
-/// (lowercase) and `" READY …"` (leading space) do NOT match.
+/// (lowercase) and `" READY …"` (leading space) do NOT match. Plus the ADR 0010
+/// Amendment 4 protocol phrases — the Runner's gate re-run verdicts and the
+/// reviewer's re-route.
 fn note_wakes_watchers(text: &str) -> bool {
-    ["READY", "BLOCKED", "ESCALATION"]
-        .iter()
-        .any(|marker| text.starts_with(marker))
+    [
+        "READY",
+        "BLOCKED",
+        "ESCALATION",
+        "GATES-OK",
+        "GATES-RED",
+        "GATES-SKIPPED",
+        "REVIEW-REROUTE",
+    ]
+    .iter()
+    .any(|marker| text.starts_with(marker))
 }
 
 /// Notify every OTHER watcher of a task mutation (ADR 0008 Lane B), one line
@@ -4272,6 +4282,10 @@ mod tests {
             "ESCALATION: y",
             "READY",
             "BLOCKED",
+            "GATES-OK @abc1234",
+            "GATES-RED @abc1234 · 1 gate exit 1",
+            "GATES-SKIPPED slug @abc head is def",
+            "REVIEW-REROUTE slug @abc complex reason",
         ] {
             assert!(
                 wakes_watchers("note", &json!({ "text": wake })),
@@ -4284,6 +4298,11 @@ mod tests {
             "escalation",
             "just progress",
             "note READY mid",
+            "gates-ok @abc",
+            " GATES-OK @abc",
+            "Gates OK",
+            "RUN-DONE slug @abc",
+            "(Illenium) GATES-OK @abc",
         ] {
             assert!(
                 !wakes_watchers("note", &json!({ "text": quiet })),
